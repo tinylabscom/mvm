@@ -849,6 +849,7 @@ pub struct MemoryLimitExceeded {
 pub struct ScopeProbe {
     cgroup_root: PathBuf,
     systemctl: PathBuf,
+    query_timeout: Duration,
 }
 
 impl Default for ScopeProbe {
@@ -856,18 +857,25 @@ impl Default for ScopeProbe {
         Self {
             cgroup_root: PathBuf::from(CGROUP_ROOT),
             systemctl: PathBuf::from(SYSTEMCTL),
+            query_timeout: SCOPE_QUERY_TIMEOUT,
         }
     }
 }
 
 impl ScopeProbe {
     /// A probe pointed at a scratch hierarchy and a stand-in `systemctl`.
+    ///
+    /// The stand-in answers at once, so the query deadline is widened: on a
+    /// test host saturated by a parallel suite, a shell script can take longer
+    /// to start than a real manager takes to answer, and a stand-in that is
+    /// merely slow must not read back as a manager that hung.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_root_and_systemctl(cgroup_root: PathBuf, systemctl: PathBuf) -> Self {
         Self {
             cgroup_root,
             systemctl,
+            query_timeout: Duration::from_secs(60),
         }
     }
 
@@ -938,7 +946,7 @@ impl ScopeProbe {
         for property in properties {
             cmd.args(["-p", property]);
         }
-        run_bounded(cmd, SCOPE_QUERY_TIMEOUT)
+        run_bounded(cmd, self.query_timeout)
     }
 
     /// A control file inside a cgroup, resolved against the hierarchy root.

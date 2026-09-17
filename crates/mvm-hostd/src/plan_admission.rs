@@ -3430,6 +3430,35 @@ mod tests {
         .expect("a 500 millicore share is enforceable on HVF");
     }
 
+    /// The spawn-time memory and task ceilings are host protection nobody
+    /// requested, so a host that cannot attach them is no reason to refuse a
+    /// sealed run: without a CPU share there is no mechanism gap to report,
+    /// whichever half of the mechanism is missing.
+    #[test]
+    fn a_missing_scope_mechanism_refuses_nothing_that_did_not_ask_for_cpu() {
+        use mvm_core::spawn_scope::MechanismGap;
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Qemu,
+            BackendKind::Libkrun,
+        ] {
+            for gap in [
+                MechanismGap::SystemdRunMissing,
+                MechanismGap::NoUserSessionBus,
+            ] {
+                assert_eq!(
+                    host_cpu_mechanism_gap(
+                        &mvm_contract::grants::Grants::default(),
+                        kind,
+                        Some(gap)
+                    ),
+                    None,
+                    "{kind:?} with {gap:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
@@ -5312,6 +5341,17 @@ mod tests {
         assert!(
             chain.contains("grants_cpu_tier"),
             "the CPU dimension must be named: {chain}"
+        );
+        // The spawn ceilings are written beside the CPU tier even when nothing
+        // held them: the mock backend has no scope, so both say `declared` and
+        // neither carries a number that could be read as a bound.
+        assert!(
+            chain.contains("grants_memory_tier") && chain.contains("grants_tasks_tier"),
+            "the memory and task dimensions must be named: {chain}"
+        );
+        assert!(
+            !chain.contains("grants_memory_max_bytes") && !chain.contains("grants_tasks_max"),
+            "a declared ceiling must not carry a value: {chain}"
         );
     }
 
