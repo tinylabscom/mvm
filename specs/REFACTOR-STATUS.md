@@ -67,7 +67,9 @@ Last updated: 2026-09-16
       terminates a CONNECT flow to a host carrying a bound secret (#3283
       T0-T4), and the per-VM CA that turns it on is in review. Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
-      transport (#3261), MCP (#3262), and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
+      transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
+      by a checked-in contract fixture, so the new tools land as reviewed
+      contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv

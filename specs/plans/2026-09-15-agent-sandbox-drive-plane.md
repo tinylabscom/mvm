@@ -292,6 +292,18 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 
 Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
 
+- [x] Pin the existing tool surface before growing it. Each tool is one row in
+      `crates/mvm-mcp/src/lib.rs` carrying its name, description, input schema,
+      and the client operation that gates it, so a tool can no longer be
+      specified and silently never offered. The advertised surface is pinned in
+      `crates/mvm-mcp/tests/fixtures/tool-contract.json` (sorted by name, keys
+      sorted, with the gating operation per tool);
+      `tool_surface_matches_the_pinned_contract` fails on any difference, and
+      `every_specified_tool_is_offered_by_a_real_gate` and
+      `every_specified_tool_has_a_handler` hold the table's rows to a real gate
+      and a real dispatch arm. Re-bless an intended change with
+      `MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol tool_surface_matches_the_pinned_contract`
+      and review the fixture diff as a contract change.
 - [ ] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
       `mvm.drive.files.{read,write,list}` over the same ABI.
 - [ ] Gate advertisement on the grant: a tool the plan does not grant is not
