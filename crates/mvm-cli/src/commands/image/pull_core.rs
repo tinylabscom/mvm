@@ -146,8 +146,13 @@ pub(super) fn resolve_or_pull_run_image_with(
         // seal `image pull` performs — network-free, from the cached layers —
         // rather than failing the run. Only when the unpacked tree is gone too
         // is this a genuine cache loss the user must re-pull.
-        match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
-            Some(unpacked_root) => {
+        // A tree unpacked before owners were recorded counts as gone: rebuilding
+        // from it would boot every file owned by root.
+        let recorded = unpacked_dir_if_present(cache_root, &image.resolved_digest).zip(
+            super::cache::read_layer_owners(cache_root, &image.resolved_digest)?,
+        );
+        match recorded {
+            Some((unpacked_root, owners)) => {
                 sweep_before_builder_vm();
                 let signer;
                 let evidence = if prod {
@@ -177,6 +182,7 @@ pub(super) fn resolve_or_pull_run_image_with(
                         cache_root,
                         &image.resolved_digest,
                     )?,
+                    owners,
                     evidence,
                 })
                 .with_context(|| {
@@ -341,6 +347,7 @@ fn pull_image_ref(
     let mut cached_layers = Vec::with_capacity(layers.len());
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     for layer in &layers {
         let report = fetch_or_unpack_layer(
             cache_root,
@@ -352,6 +359,7 @@ fn pull_image_ref(
             &prior_layer_paths,
         )
         .with_context(|| format!("layer {}", layer.digest))?;
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
         cached_layers.push(CachedOciLayer {
@@ -365,6 +373,7 @@ fn pull_image_ref(
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &manifest.digest, &owners)?;
     // The config blob written above is the image's own declaration of `Env`,
     // `WorkingDir` and `Entrypoint`/`Cmd`. Materializing without it discards
     // all three: the guest then falls back to `workload_env::DEFAULT_PATH`, so
@@ -380,6 +389,7 @@ fn pull_image_ref(
         entrypoint: entrypoint.as_ref(),
         sealed: false,
         deferred_nodes,
+        owners,
         evidence: None,
     })?;
 
@@ -617,6 +627,12 @@ mod tests {
             .join(sha256_hex(digest).unwrap());
         fs::create_dir_all(&unpacked).expect("create unpacked root");
         fs::write(unpacked.join("layer-file"), b"from-layer").expect("write unpacked file");
+        crate::commands::image::cache::write_layer_owners(
+            cache_root,
+            digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
         unpacked
     }
 
@@ -661,6 +677,10 @@ mod tests {
         fs::write(
             parent.join("deferred-seen.json"),
             serde_json::to_vec(&call.deferred_nodes)?,
+        )?;
+        fs::write(
+            parent.join("owners-seen.json"),
+            serde_json::to_vec(&call.owners)?,
         )?;
         Ok(())
     }
@@ -960,6 +980,111 @@ mod tests {
     }
 
     #[test]
+    fn self_heal_restores_the_layer_owners_the_pull_recorded() {
+        // The unpacked tree is owned by whoever ran the pull, so the owners
+        // the layers declared exist only in the sidecar. A rebuild that
+        // skipped it would boot a service's data directory owned by root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine-owners/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        let unpacked = create_unpacked_root(tmp.path(), digest);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("var/lib/svc/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o750);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(999);
+        header.set_gid(999);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            &unpacked,
+            &UnpackOptions::default(),
+        )
+        .expect("unpack");
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+        crate::commands::image::cache::write_layer_owners(tmp.path(), digest, &owners)
+            .expect("record layer owners");
+
+        let resolved = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+        )
+        .expect("repair from unpacked layers");
+
+        let seen: mvm_fs::ownership::OwnerTable = serde_json::from_slice(
+            &fs::read(
+                resolved
+                    .rootfs_path
+                    .parent()
+                    .expect("rootfs has parent")
+                    .join("owners-seen.json"),
+            )
+            .expect("materializer recorded what it was handed"),
+        )
+        .expect("parse recorded owners");
+        assert_eq!(seen, owners);
+        assert_eq!(
+            seen.owner_of("/var/lib/svc"),
+            mvm_fs::ext4::Owner::new(999, 999)
+        );
+    }
+
+    #[test]
+    fn a_missing_rootfs_over_a_tree_with_no_recorded_owners_asks_for_repull() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:8888888888888888888888888888888888888888888888888888888888888888";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine-unowned/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        fs::remove_file(
+            tmp.path()
+                .join("unpacked")
+                .join(format!("{}.owners.json", sha256_hex(digest).unwrap())),
+        )
+        .expect("drop the owner sidecar");
+
+        let err = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+        )
+        .expect_err("a tree with no recorded owners must not rebuild the image");
+        assert!(
+            format!("{err:#}").contains("mvmctl image pull"),
+            "error should tell the user to re-pull: {err:#}"
+        );
+    }
+
+    #[test]
     fn resolve_run_image_missing_rootfs_without_unpacked_layers_asks_for_repull() {
         // The index records a materialized rootfs whose ext4 has vanished AND
         // whose unpacked layer tree is also gone — genuine cache loss. The run
@@ -1023,6 +1148,12 @@ mod tests {
             .join(sha256_hex(digest).expect("hex digest key"));
         std::fs::create_dir_all(unpacked.join("etc")).expect("create unpacked tree");
         std::fs::write(unpacked.join("etc/hostname"), b"box\n").expect("write unpacked file");
+        crate::commands::image::cache::write_layer_owners(
+            tmp.path(),
+            digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)

@@ -193,6 +193,14 @@ use tracing::instrument;
 use whiteout::{WhiteoutKind, classify_whiteout};
 use xattr::{XattrWarningReason, collect_entry_xattrs};
 
+/// Version of what an unpack hands the image writer beyond the host tree.
+///
+/// Bump it when the same layers start producing a different rootfs image, so a
+/// cache that keys an image on it rebuilds instead of serving an image built
+/// under the old semantics. `2` is the version that records file owners; an
+/// image cached before it has every file owned by root.
+pub const UNPACK_SEMANTICS_VERSION: &str = "2";
+
 /// How [`unpack_layer`] handles xattrs carried in pax headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XattrPolicy {

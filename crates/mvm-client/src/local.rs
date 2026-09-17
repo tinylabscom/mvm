@@ -537,11 +537,11 @@ pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Re
         RootfsPlan::Materialized(path) => Ok(path),
         // An already-unpacked tree carries no unpack report, so there is
         // nothing the host filesystem deferred to merge back in.
-        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, Vec::new()),
+        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
         RootfsPlan::Pull(image_ref) => {
             let staging = tempfile::tempdir().map_err(backend_err)?;
-            let deferred_nodes = pull_image_to_dir(&image_ref, staging.path()).await?;
-            materialize_from_dir(staging.path(), name, deferred_nodes)
+            let layers = pull_image_to_dir(&image_ref, staging.path()).await?;
+            materialize_from_dir(staging.path(), name, layers)
         }
     }
 }
@@ -558,13 +558,17 @@ fn run_rootfs_output(name: &str) -> PathBuf {
         .join("rootfs.ext4")
 }
 
+/// What unpacking an image's layers produced beyond the host tree: the nodes
+/// the host filesystem could not hold, and the owners it could not apply.
+#[derive(Default)]
+struct UnpackedLayers {
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
+}
+
 /// Inject the mvm runtime into an unpacked tree and materialize it into the
 /// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
-fn materialize_from_dir(
-    dir: &Path,
-    name: &str,
-    deferred_nodes: Vec<mvm_fs::ext4::Node>,
-) -> Result<PathBuf> {
+fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no guest binaries; remaining legacy injection needs
@@ -572,7 +576,8 @@ fn materialize_from_dir(
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
             .sealed(false)
-            .deferred_nodes(deferred_nodes)
+            .deferred_nodes(layers.deferred_nodes)
+            .owners(layers.owners)
             .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
@@ -582,10 +587,7 @@ fn materialize_from_dir(
 /// Pull a public OCI registry reference and unpack every layer into `dest`,
 /// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
 /// crate boundary, keeping mvm-oci decompressor-free by design).
-async fn pull_image_to_dir(
-    image_ref: &ImageReference,
-    dest: &Path,
-) -> Result<Vec<mvm_fs::ext4::Node>> {
+async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<UnpackedLayers> {
     let reference = image_ref.canonical();
     let manifest_fetcher = OciManifestFetcher::new();
     let manifest = manifest_fetcher
@@ -601,7 +603,7 @@ async fn pull_image_to_dir(
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
     let mut prior_layer_paths = std::collections::HashSet::new();
-    let mut deferred_nodes = Vec::new();
+    let mut unpacked = UnpackedLayers::default();
     for layer in &layers {
         let mut bytes = Vec::new();
         layer_fetcher
@@ -609,10 +611,11 @@ async fn pull_image_to_dir(
             .await
             .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
         let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
+        unpacked.owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
-        deferred_nodes.extend(report.deferred_nodes);
+        unpacked.deferred_nodes.extend(report.deferred_nodes);
     }
-    Ok(deferred_nodes)
+    Ok(unpacked)
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.

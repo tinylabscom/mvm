@@ -16,8 +16,8 @@ use super::RefusalReason;
 /// malformed rather than being truncated into someone else's id.
 pub(super) fn entry_owner<R: Read>(entry: &mut tar::Entry<R>) -> Result<Owner, RefusalReason> {
     let header = entry.header();
-    let mut uid = header.uid().map_err(|_| RefusalReason::MalformedHeader)?;
-    let mut gid = header.gid().map_err(|_| RefusalReason::MalformedHeader)?;
+    let mut uid = header_id(&header.as_old().uid, header.uid())?;
+    let mut gid = header_id(&header.as_old().gid, header.gid())?;
 
     if let Some(extensions) = entry
         .pax_extensions()
@@ -34,6 +34,16 @@ pub(super) fn entry_owner<R: Read>(entry: &mut tar::Entry<R>) -> Result<Owner, R
     }
 
     Ok(Owner::new(narrow_id(uid)?, narrow_id(gid)?))
+}
+
+/// A header id field left blank — all NUL or space, as producers that never
+/// set an owner emit it — means 0, the owner an extraction of that archive
+/// gives the entry. Anything else must parse.
+fn header_id(raw: &[u8; 8], parsed: std::io::Result<u64>) -> Result<u64, RefusalReason> {
+    if raw.iter().all(|byte| *byte == 0 || *byte == b' ') {
+        return Ok(0);
+    }
+    parsed.map_err(|_| RefusalReason::MalformedHeader)
 }
 
 fn parse_pax_id(value: &[u8]) -> Result<u64, RefusalReason> {
@@ -156,6 +166,50 @@ mod tests {
             Owner::ROOT,
             "a parent the stream only implied stays root-owned"
         );
+    }
+
+    #[test]
+    fn a_blank_header_owner_is_root() {
+        let root = TempDir::new().unwrap();
+        let report = unpack(
+            build_tar(|b| {
+                let mut header = tar::Header::new_gnu();
+                header.set_path("blank").unwrap();
+                header.set_size(0);
+                header.set_mode(0o644);
+                header.set_entry_type(tar::EntryType::Regular);
+                header.as_old_mut().uid = [0; 8];
+                header.as_old_mut().gid = [b' '; 8];
+                header.set_cksum();
+                b.append(&header, std::io::empty()).unwrap();
+            }),
+            &root,
+        );
+        let mut table = OwnerTable::new();
+        table.absorb(&report.ownership);
+        assert_eq!(table.owner_of("/blank"), Owner::ROOT);
+    }
+
+    #[test]
+    fn a_garbled_header_owner_refuses_the_entry() {
+        let root = TempDir::new().unwrap();
+        let report = unpack_layer(
+            Cursor::new(build_tar(|b| {
+                let mut header = tar::Header::new_gnu();
+                header.set_path("garbled").unwrap();
+                header.set_size(0);
+                header.set_mode(0o644);
+                header.set_entry_type(tar::EntryType::Regular);
+                header.as_old_mut().uid = *b"12x4\0\0\0\0";
+                header.set_cksum();
+                b.append(&header, std::io::empty()).unwrap();
+            })),
+            root.path(),
+            &UnpackOptions::default(),
+        )
+        .expect("unpack");
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.refused[0].reason, RefusalReason::MalformedHeader);
     }
 
     #[test]
