@@ -122,10 +122,18 @@ pub fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
     }
     match atomic_write_new(&path, &bytes) {
         Ok(()) => Ok(()),
-        Err(err) if is_already_exists(&err) => Err(err).context(format!(
-            "machine {:?} already exists; pass --force to overwrite",
-            spec.name
-        )),
+        // Every caller of this arm already believed nothing was there —
+        // some checked, some are `mvmctl machine create`'s own first write —
+        // so "pass --force" alone would mislead a caller who raced another
+        // `create` and already had it set. Say both honestly: force fixes a
+        // spec that was genuinely already there; a retry fixes a lost race.
+        Err(err) if is_already_exists(&err) => Err(err).with_context(|| {
+            format!(
+                "machine {:?} already exists (it may have just been created \
+                 concurrently by another caller); pass --force to overwrite, or retry",
+                spec.name
+            )
+        }),
         Err(err) => Err(err).with_context(|| format!("writing machine spec {}", path.display())),
     }
 }

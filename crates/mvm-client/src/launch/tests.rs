@@ -532,19 +532,30 @@ fn concurrent_persistent_creates_of_one_name_produce_exactly_one_success() {
     // that: each builds its own client and request (the request/backend
     // carry no shared state), then all attempt `create_from_request` at
     // once.
+    //
+    // Each thread's config differs (distinct `cpus`) on purpose. With an
+    // identical config, a thread that observes the winner's spec after
+    // losing the race takes the `Reuse` branch and returns `Ok` too — a
+    // second, harmless success that would make `successes == 1` flaky
+    // under real scheduling rather than proving exclusivity. A different
+    // config forces every loser through the "different config" refusal
+    // instead (still `Conflict`), whichever step it loses at.
     let home = Isolated::new();
     let rootfs = home.rootfs();
     const CREATORS: usize = 16;
     let barrier = Arc::new(std::sync::Barrier::new(CREATORS));
     let (sender, receiver) = std::sync::mpsc::channel();
     let threads: Vec<_> = (0..CREATORS)
-        .map(|_| {
+        .map(|i| {
             let barrier = Arc::clone(&barrier);
             let sender = sender.clone();
             let rootfs = rootfs.clone();
             std::thread::spawn(move || {
                 let client = mock_client();
-                let request = persistent_request(&rootfs, "p-race").build().unwrap();
+                let request = persistent_request(&rootfs, "p-race")
+                    .cpus(i as u32 + 1)
+                    .build()
+                    .unwrap();
                 barrier.wait();
                 let result = client.create_from_request(&request);
                 sender.send(result).expect("receiver stays alive");

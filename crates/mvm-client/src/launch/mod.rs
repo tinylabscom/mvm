@@ -542,13 +542,14 @@ impl LocalBackend {
             })?;
         match reconcile {
             mp::SpecReconcile::Create => {
-                // No pre-check here: the exists() above only informed the
-                // reconcile decision, and another creator can win the race
-                // between that check and this write. `save_machine_spec`'s
-                // write is itself exclusive, so a lost race surfaces here as
-                // an `already exists` failure rather than a clobber — map it
-                // to the same conflict a caller gets from a pre-existing
-                // spec, instead of a generic backend error.
+                // The exists() above only informed the reconcile decision;
+                // it is not relied on for exclusivity. Another creator can
+                // still win the race between that check and this write, but
+                // `save_machine_spec`'s write is itself exclusive below, so
+                // a lost race surfaces here as an `already exists` failure
+                // rather than a clobber — map it to the same conflict a
+                // caller gets from a pre-existing spec, instead of a
+                // generic backend error.
                 mp::save_machine_spec(&desired, false).map_err(|err| {
                     if mvm_core::atomic_io::is_already_exists(&err) {
                         MvmError::Conflict {
