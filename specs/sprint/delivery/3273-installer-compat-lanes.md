@@ -38,7 +38,9 @@ Issue #3273, plan
   `ci.yml` already uses. Every executable in the archive goes through `ldd -v`
   before install, so the job summary carries host glibc, the highest glibc each
   release requires, and any `GLIBC_x.y not found` per binary, even when the
-  install then fails. A loader error fails the job.
+  install then fails. A loader error fails the job, except for the exact
+  immutable pre-static tags named by the workflow and forwarded into the
+  container; the focused suite asserts that forwarding boundary.
 - **docs-smoke** extracts the One-liner, Pin a version and Verify blocks
   from `public/src/content/docs/install/linux.md` and runs them unchanged
   except, on a pull request, the installer URL, which points at the checkout's

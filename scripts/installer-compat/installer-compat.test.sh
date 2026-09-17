@@ -509,6 +509,12 @@ else
   bad "lib: compatibility baselines match only exact release tags"
 fi
 
+if grep -Fq -- '-e TOLERATED_LOADER_RELEASES' .github/workflows/installer-compat.yml; then
+  ok "workflow: the historical loader baseline reaches the distro container"
+else
+  bad "workflow: the historical loader baseline reaches the distro container"
+fi
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures installer-compat test(s) failed"

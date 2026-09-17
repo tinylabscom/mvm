@@ -108,7 +108,8 @@ Last updated: 2026-09-17
         in `installer-compat.yml` (#3273); Linux release payloads are now
         static-musl while retaining compatible asset names (#3371), and the
         installer accepts legacy entitlement profiles under `resources/`
-        (#3370)
+        (#3370); the immutable Rocky loader baseline is forwarded explicitly
+        into the distro container and pinned by the focused suite
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`

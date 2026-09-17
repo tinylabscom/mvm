@@ -136,7 +136,9 @@ Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
       `v0.17.0` and `v0.18.0-rc.1` require `GLIBC_2.39`, so Rocky 9 (2.34)
       cannot run them. Those immutable pre-static artifacts remain reported as
       a narrow historical baseline; every later release fails the lane on a
-      loader error.
+      loader error. The workflow passes the exact-tag baseline through the
+      `docker run` boundary, with a static regression assertion in the focused
+      compat suite.
 - [x] A cold first-run smoke on Linux that executes the exact commands from
       `public/src/content/docs/install/linux.md`, triggered by edits to that
       page or to `install.sh`. The macOS equivalent can only cover install plus
