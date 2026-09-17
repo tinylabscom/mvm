@@ -18,25 +18,26 @@ use crate::config::DEFAULT_SAMPLE_INTERVAL_SECS;
 /// breaks when it flips.
 pub(crate) static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Process-resident VMGenID reseeder. Seeded with the all-zero baseline so the
-/// first non-zero token delivered on a `PostRestore` resume counts as a
-/// clone-divergence and reseeds the CSPRNG. The reseeder's state rides the VM
-/// memory snapshot, so two clones restored from one snapshot both diverge from
-/// the captured value when the host hands each a distinct fresh token.
+/// Process-resident generation-token reseeder. Seeded with the all-zero
+/// baseline so the first non-zero token delivered on a `PostRestore` resume
+/// counts as a clone and reseeds the kernel generator. The reseeder's state
+/// rides the VM memory snapshot, so two clones restored from one snapshot both
+/// diverge from the captured value when the host hands each a distinct token.
 pub(crate) static GENID_RESEEDER: Mutex<mvm_agentd::genid::GenIdReseeder> = Mutex::new(
     mvm_agentd::genid::GenIdReseeder::new([0u8; mvm_core::crypto::vmgenid::GENID_BYTES]),
 );
 
-/// Dispatch a token delivered on `PostRestore` to the resident reseeder. A
-/// poisoned lock degrades to "no rotation" rather than panicking the handler —
-/// the remount/restart work still needs to run.
+/// Dispatch a token delivered on `PostRestore` to the resident reseeder, which
+/// reseeds through this guest's CRNG reseed helper. The reseeder only records a
+/// token after a reseed succeeds, so a lock poisoned mid-call holds a state
+/// that is still safe to use.
 pub(crate) fn reseed_on_post_restore(
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> mvm_agentd::genid::GenIdAction {
-    match GENID_RESEEDER.lock() {
-        Ok(mut r) => r.on_post_restore_token(token),
-        Err(_) => mvm_agentd::genid::GenIdAction::Unchanged,
-    }
+    GENID_RESEEDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .on_post_restore_token(token, mvm_agentd::crng_reseed::reseed_via_helper)
 }
 
 /// Counts shutdown signals delivered. ≥2 means the operator has

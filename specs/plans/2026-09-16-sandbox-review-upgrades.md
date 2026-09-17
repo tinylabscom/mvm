@@ -69,17 +69,24 @@ can run in parallel with it. Among the upgrades:
   generator behind `getrandom`, so sibling clones can produce identical output
   until the kernel's scheduled reseed.
 
-- [ ] W1.1 Make `on_genid` return whether the reseed happened, and report
+- [x] W1.1 Make `on_genid` return whether the reseed happened, and report
       `reseeded` only on success.
 - [ ] W1.2 Force an immediate reseed. Decide between:
   - [ ] a generation-ID device node from each backend, with `VMGENID` confirmed
         in the built guest kernel (`nix/images/kernel/base.nix`), or
-  - [ ] a privileged helper that calls `RNDADDENTROPY` and then
+  - [x] a privileged helper that calls `RNDADDENTROPY` and then
         `RNDRESEEDCRNG`. The agent runs as uid 901 and cannot make those calls
         itself.
-- [ ] W1.3 Correct the module comment that says the write alone makes clones
+        Decided: a helper holding only `CAP_SYS_ADMIN` under its own uid (988),
+        seccomp-confined and non-dumpable, started by whatever is still root
+        (PID 1 before its privilege drop, or the shell init). It credits the
+        token with `RNDADDENTROPY`, then calls `RNDRESEEDCRNG`. The
+        generation-ID device was rejected: the built workload kernel has
+        `CONFIG_VIRT_DRIVERS` off, and the prebuilt container kernel's config
+        is not ours. W1.2 stays open until W1.5 witnesses the reseed live.
+- [x] W1.3 Correct the module comment that says the write alone makes clones
       diverge.
-- [ ] W1.4 Unit test: a failed reseed reports `reseeded: false`, and the host
+- [x] W1.4 Unit test: a failed reseed reports `reseeded: false`, and the host
       gate refuses the child.
 - [ ] W1.5 Live test: two clones of one snapshot return different `getrandom`
       output immediately after restore.

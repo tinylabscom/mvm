@@ -158,6 +158,10 @@ pub(crate) fn apply_activation(
         .map_err(|_| {
             guest_mount::MountError::InvalidConfig("extensions already activated".into())
         })?;
+    // The reseed helper needs the privilege this drop removes, so it starts
+    // first. Without it the guest still boots, and its restores are refused.
+    #[cfg(target_os = "linux")]
+    mvm_agentd::crng_reseed::start_helper();
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

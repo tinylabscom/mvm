@@ -12,6 +12,19 @@ fn is_false(value: &bool) -> bool {
 use mvm_core::security::AgentProfile;
 use serde::{Deserialize, Serialize};
 
+/// Why a restored guest did not reseed its kernel generator when asked to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ReseedShortfall {
+    /// The guest has no reseed helper: its init predates restore reseeding,
+    /// or the helper could not be started at boot. Rebuilding the image is
+    /// the fix; retrying is not.
+    HelperMissing,
+    /// A helper exists but the reseed did not complete.
+    Failed,
+}
+
 /// State of a single guest subsystem during boot.
 ///
 /// `Disabled` is distinct from `Ready` — a missing optional subsystem
@@ -244,8 +257,9 @@ pub enum GuestResponse {
         success: bool,
         detail: Option<String>,
         /// `true` iff the delivered generation token changed and the guest
-        /// reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero
-        /// token (a plain wake or no-rotation restore). Defaults to `false`
+        /// rekeyed its kernel generator from it (a fresh clone). `false` for an
+        /// unchanged/zero token (a plain wake or no-rotation restore) and for a
+        /// reseed that failed. Defaults to `false`
         /// on the wire for forward-compat with a pre-rotation ack.
         #[serde(default)]
         reseeded: bool,
@@ -253,6 +267,11 @@ pub enum GuestResponse {
         /// signaling init. Defaults to `false` for older agents.
         #[serde(default, skip_serializing_if = "is_false")]
         clock_resynced: bool,
+        /// Why a requested rotation did not happen, so the host can tell an
+        /// image that cannot reseed from a reseed that failed. `None` when the
+        /// guest reseeded or no rotation was requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reseed_shortfall: Option<ReseedShortfall>,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -902,6 +921,7 @@ mod tests {
             detail: None,
             reseeded: true,
             clock_resynced: true,
+            reseed_shortfall: None,
         };
         let json = serde_json::to_string(&ack).unwrap();
         match serde_json::from_str::<GuestResponse>(&json).unwrap() {
@@ -917,12 +937,38 @@ mod tests {
             GuestResponse::PostRestoreAck {
                 reseeded,
                 clock_resynced,
+                reseed_shortfall,
                 ..
             } => {
                 assert!(!reseeded);
                 assert!(!clock_resynced);
+                assert_eq!(reseed_shortfall, None);
             }
             other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reseed_shortfall_round_trips_by_its_wire_name() {
+        for (shortfall, wire) in [
+            (ReseedShortfall::HelperMissing, "helper_missing"),
+            (ReseedShortfall::Failed, "failed"),
+        ] {
+            let ack = GuestResponse::PostRestoreAck {
+                success: true,
+                detail: None,
+                reseeded: false,
+                clock_resynced: true,
+                reseed_shortfall: Some(shortfall),
+            };
+            let json = serde_json::to_string(&ack).unwrap();
+            assert!(json.contains(wire), "{json}");
+            match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+                GuestResponse::PostRestoreAck {
+                    reseed_shortfall, ..
+                } => assert_eq!(reseed_shortfall, Some(shortfall)),
+                other => panic!("expected PostRestoreAck, got {other:?}"),
+            }
         }
     }
 
@@ -1029,6 +1075,7 @@ mod tests {
                 detail: Some("post-restore signal sent to init".to_string()),
                 reseeded: false,
                 clock_resynced: false,
+                reseed_shortfall: Some(ReseedShortfall::HelperMissing),
             },
             GuestResponse::FsDiffResult {
                 changes: vec![

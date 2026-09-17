@@ -10,6 +10,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+/// Re-exported so callers that judge a restore by its outcome describe a missing
+/// reseed the same way, without depending on the guest-agent crate themselves.
+pub use mvm_agentd::vsock::{ReseedShortfall, describe_missing_reseed};
+
 /// Outcome of waiting for a workload's "primed" ready signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimedOutcome {
@@ -122,13 +126,39 @@ pub struct PostRestoreOutcome {
     /// Free-form detail from the agent's ack (e.g. "post-restore signal
     /// sent to init"), surfaced to the operator.
     pub detail: Option<String>,
-    /// `true` iff the guest reseeded its CSPRNG because the delivered
-    /// generation token changed (a fresh clone of the snapshot). `false` for a
-    /// plain wake or a no-rotation (zero-token) restore.
+    /// `true` iff the delivered generation token changed (a fresh clone of the
+    /// snapshot) and the guest rekeyed its kernel generator from it. `false`
+    /// for a plain wake, a no-rotation (zero-token) restore, or a reseed that
+    /// failed.
     pub reseeded: bool,
     /// `true` iff the guest applied the host wall-clock epoch before
     /// acknowledging the restore.
     pub clock_resynced: bool,
+    /// Why a requested rotation did not happen, when it did not. Kept apart
+    /// from `acknowledged`: a guest that could not reseed still remounted its
+    /// drives and restarted its services.
+    pub reseed_shortfall: Option<mvm_agentd::vsock::ReseedShortfall>,
+}
+
+/// Turn the guest's answer into an outcome. Split out so the mapping — which
+/// fields survive to the host — is tested without a live guest.
+fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<PostRestoreOutcome> {
+    match response {
+        mvm_agentd::vsock::GuestResponse::PostRestoreAck {
+            success,
+            detail,
+            reseeded,
+            clock_resynced,
+            reseed_shortfall,
+        } => Ok(PostRestoreOutcome {
+            acknowledged: success,
+            detail,
+            reseeded,
+            clock_resynced,
+            reseed_shortfall,
+        }),
+        other => bail!("unexpected response to PostRestore: {other:?}"),
+    }
 }
 
 /// Sends the `PostRestore` signal to a resumed guest so it finishes coming
@@ -282,7 +312,7 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
     }
 
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestResponse, call_unary};
+        use mvm_agentd::vsock::{GUEST_AGENT_PORT, call_unary};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport
@@ -295,20 +325,7 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
             .duration_since(std::time::UNIX_EPOCH)
             .context("reading host wall clock for post-restore")?
             .as_secs();
-        match call_unary(&mut stream, &self.request(host_epoch_secs))? {
-            GuestResponse::PostRestoreAck {
-                success,
-                detail,
-                reseeded,
-                clock_resynced,
-            } => Ok(PostRestoreOutcome {
-                acknowledged: success,
-                detail,
-                reseeded,
-                clock_resynced,
-            }),
-            other => bail!("unexpected response to PostRestore: {other:?}"),
-        }
+        outcome_from_response(call_unary(&mut stream, &self.request(host_epoch_secs))?)
     }
 }
 
@@ -406,6 +423,7 @@ mod tests {
                 detail: None,
                 reseeded: true,
                 clock_resynced: true,
+                reseed_shortfall: None,
             }),
         };
         let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
@@ -415,6 +433,47 @@ mod tests {
             *signal.calls.borrow() > 2,
             "probe_ready must have been polled at least three times"
         );
+    }
+
+    /// A guest that remounted and resynced but could not reseed is a completed
+    /// resume, not an unacknowledged one: `signal_post_restore` must hand the
+    /// reseed result and the guest's reason to the caller, rather than bail
+    /// with advice about unmounted drives.
+    #[test]
+    fn signal_post_restore_carries_a_missing_reseed_to_the_caller() {
+        let response = mvm_agentd::vsock::GuestResponse::PostRestoreAck {
+            success: true,
+            detail: Some(
+                "post-restore signal sent to init; restore reseed unavailable: no helper".into(),
+            ),
+            reseeded: false,
+            clock_resynced: true,
+            reseed_shortfall: Some(mvm_agentd::vsock::ReseedShortfall::HelperMissing),
+        };
+        let signal = MockSignalCount {
+            calls: std::cell::RefCell::new(0),
+            ready_after: 0,
+            outcome: outcome_from_response(response),
+        };
+        let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
+            .expect("a resume whose only shortfall is the reseed completes");
+        assert!(outcome.acknowledged && !outcome.reseeded);
+        assert_eq!(
+            outcome.reseed_shortfall,
+            Some(mvm_agentd::vsock::ReseedShortfall::HelperMissing)
+        );
+        assert!(
+            outcome
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("no helper")),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_off_contract_answer_is_not_an_outcome() {
+        assert!(outcome_from_response(mvm_agentd::vsock::GuestResponse::Pong).is_err());
     }
 
     #[test]
@@ -427,6 +486,7 @@ mod tests {
                 detail: None,
                 reseeded: true,
                 clock_resynced: true,
+                reseed_shortfall: None,
             }),
         };
         let err = signal_post_restore("vm-1", &signal, Duration::from_millis(30)).unwrap_err();

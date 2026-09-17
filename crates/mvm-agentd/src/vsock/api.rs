@@ -186,7 +186,7 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
 /// `reseeded` is the load-bearing field for the warm-start verb's honesty —
 /// `acknowledged` only says the guest answered, `reseeded` says it rotated,
 /// and `clock_resynced` says the restore clock was applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostRestoreReply {
     /// The guest acknowledged the post-restore signal with success.
     pub acknowledged: bool,
@@ -194,6 +194,11 @@ pub struct PostRestoreReply {
     pub reseeded: bool,
     /// The guest applied the host-provided wall-clock epoch.
     pub clock_resynced: bool,
+    /// The guest's own account of the restore, including why a reseed did not
+    /// happen.
+    pub detail: Option<String>,
+    /// Why a requested rotation did not happen, when it did not.
+    pub reseed_shortfall: Option<ReseedShortfall>,
 }
 
 /// Interpret a guest's response to `PostRestore` into the host-facing reply.
@@ -202,18 +207,43 @@ fn interpret_post_restore(resp: GuestResponse) -> Result<PostRestoreReply> {
     match resp {
         GuestResponse::PostRestoreAck {
             success,
+            detail,
             reseeded,
             clock_resynced,
-            ..
+            reseed_shortfall,
         } => Ok(PostRestoreReply {
             acknowledged: success,
             reseeded,
             clock_resynced,
+            detail,
+            reseed_shortfall,
         }),
         GuestResponse::Error { message } => {
             bail!("Guest post-restore error: {}", message);
         }
         _ => bail!("Unexpected response to PostRestore"),
+    }
+}
+
+/// Say why a restored guest did not reseed, in terms an operator can act on.
+///
+/// The three cases need different responses: an image with no reseed helper
+/// has to be rebuilt, and retrying it will never help; a helper that failed may
+/// succeed on a retry; and a guest that says neither is an older agent.
+pub fn describe_missing_reseed(shortfall: Option<ReseedShortfall>, detail: Option<&str>) -> String {
+    let reported = detail
+        .map(|detail| format!(" (guest reported: {detail})"))
+        .unwrap_or_default();
+    match shortfall {
+        Some(ReseedShortfall::HelperMissing) => format!(
+            "its image has no CRNG reseed helper, so it cannot leave its parent's random state \
+             behind{reported}; rebuild the image with this mvm release and boot a fresh parent \
+             from it"
+        ),
+        Some(ReseedShortfall::Failed) => {
+            format!("its CRNG reseed failed{reported}; retry the restore")
+        }
+        None => format!("it did not rotate its generation identity{reported}"),
     }
 }
 
@@ -640,24 +670,33 @@ mod tests {
             detail: None,
             reseeded: true,
             clock_resynced: true,
+            reseed_shortfall: None,
         })
         .unwrap();
         assert!(r.acknowledged && r.reseeded && r.clock_resynced);
         // Acknowledged but the guest did not rotate (e.g. a zero/no-op token).
         let r = interpret_post_restore(GuestResponse::PostRestoreAck {
             success: true,
-            detail: None,
+            detail: Some("restore reseed failed: helper gone".into()),
             reseeded: false,
             clock_resynced: false,
+            reseed_shortfall: Some(ReseedShortfall::Failed),
         })
         .unwrap();
         assert!(r.acknowledged && !r.reseeded);
+        assert_eq!(r.reseed_shortfall, Some(ReseedShortfall::Failed));
+        assert_eq!(
+            r.detail.as_deref(),
+            Some("restore reseed failed: helper gone"),
+            "the guest's reason must reach the host"
+        );
         // A guest-reported failure ack is surfaced as acknowledged=false.
         let r = interpret_post_restore(GuestResponse::PostRestoreAck {
             success: false,
             detail: Some("kill failed".into()),
             reseeded: false,
             clock_resynced: false,
+            reseed_shortfall: None,
         })
         .unwrap();
         assert!(!r.acknowledged && !r.reseeded);
@@ -668,6 +707,30 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_missing_reseed_is_described_by_what_the_operator_should_do() {
+        let missing =
+            describe_missing_reseed(Some(ReseedShortfall::HelperMissing), Some("no helper"));
+        assert!(
+            missing.contains("rebuild the image") && missing.contains("no helper"),
+            "{missing}"
+        );
+        assert!(
+            !missing.contains("retry"),
+            "retrying cannot help: {missing}"
+        );
+
+        let failed = describe_missing_reseed(Some(ReseedShortfall::Failed), Some("EPERM"));
+        assert!(
+            failed.contains("retry") && failed.contains("EPERM"),
+            "{failed}"
+        );
+        assert!(!failed.contains("rebuild"), "{failed}");
+
+        let unexplained = describe_missing_reseed(None, None);
+        assert!(unexplained.contains("did not rotate"), "{unexplained}");
     }
 
     #[test]
