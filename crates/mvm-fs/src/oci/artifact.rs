@@ -215,7 +215,9 @@ impl OciArtifactClient {
                 .max_size(descriptor.size)
                 .build(),
         );
-        let mut layer = Vec::with_capacity(descriptor.size as usize);
+        // Grown as bytes arrive rather than reserved from the descriptor, so a
+        // manifest cannot make the host commit memory the registry never sends.
+        let mut layer = Vec::new();
         let received = fetcher
             .fetch_layer(reference, &descriptor, &mut layer)
             .await?;
@@ -496,6 +498,154 @@ mod tests {
             .count();
         assert_eq!(token_fetches, 1, "one challenge, then the token is reused");
         assert!(registry.blob(&pushed.layer_digest).is_some());
+    }
+
+    fn authorizations(registry: &MemoryRegistry) -> Vec<String> {
+        registry
+            .requests()
+            .into_iter()
+            .filter_map(|r| r.authorization)
+            .collect()
+    }
+
+    #[test]
+    fn a_configured_token_for_one_registry_is_never_sent_to_another() {
+        let a = MemoryRegistry::start();
+        let b = MemoryRegistry::start();
+        a.require_token("token-a");
+        let rt = runtime();
+        let client = OciArtifactClient::new(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::bearer("token-a"),
+        );
+
+        rt.block_on(client.push(&reference(&a, ":v1"), KIND, b"on a"))
+            .expect("push to the registry the token is for");
+        rt.block_on(client.push(&reference(&b, ":v1"), KIND, b"on b"))
+            .expect("push to a second, open registry");
+
+        assert!(authorizations(&a).iter().all(|h| h == "Bearer token-a"));
+        assert!(!authorizations(&a).is_empty());
+        assert!(
+            authorizations(&b).is_empty(),
+            "registry B saw credentials: {:?}",
+            authorizations(&b)
+        );
+    }
+
+    #[test]
+    fn a_token_issued_by_one_registry_is_never_sent_to_another() {
+        let a = MemoryRegistry::start();
+        let b = MemoryRegistry::start();
+        a.require_token("issued-by-a");
+        let rt = runtime();
+        let client = client();
+
+        rt.block_on(client.push(&reference(&a, ":v1"), KIND, b"on a"))
+            .expect("push through a's challenge");
+        rt.block_on(client.push(&reference(&b, ":v1"), KIND, b"on b"))
+            .expect("push to b");
+
+        assert!(authorizations(&a).contains(&"Bearer issued-by-a".to_string()));
+        assert!(authorizations(&b).is_empty(), "{:?}", authorizations(&b));
+    }
+
+    #[test]
+    fn a_refused_configured_token_is_reported_not_exchanged() {
+        let registry = MemoryRegistry::start();
+        registry.require_token("the-right-token");
+        let client = OciArtifactClient::new(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::bearer("a-wrong-token"),
+        );
+
+        let err = runtime()
+            .block_on(client.push(&reference(&registry, ":v1"), KIND, b"x"))
+            .expect_err("a refused token must fail the push");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("refused the configured bearer token"),
+            "{message}"
+        );
+        assert!(
+            !registry.requests().iter().any(|r| r.path == "/token"),
+            "no anonymous token exchange"
+        );
+    }
+
+    #[test]
+    fn a_blob_redirect_to_another_origin_is_followed_without_credentials() {
+        let registry = MemoryRegistry::start();
+        let storage = MemoryRegistry::start();
+        registry.require_token("pull-token");
+        let rt = runtime();
+        let client = OciArtifactClient::new(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::bearer("pull-token"),
+        );
+        let pushed = rt
+            .block_on(client.push(&reference(&registry, ":v1"), KIND, b"stored elsewhere"))
+            .expect("push");
+        let digest = storage.insert_blob(b"stored elsewhere");
+        registry.redirect_blob(
+            &digest,
+            &format!("http://{}/v2/team/thing/blobs/{digest}", storage.host()),
+        );
+
+        let pulled = rt
+            .block_on(client.pull(&pushed.reference, KIND))
+            .expect("pull follows the redirect");
+
+        assert_eq!(pulled.layer, b"stored elsewhere");
+        let hops: Vec<_> = storage.requests();
+        assert_eq!(hops.len(), 1, "{hops:?}");
+        assert_eq!(
+            hops[0].authorization, None,
+            "no credentials on the redirected hop"
+        );
+    }
+
+    #[test]
+    fn blob_redirects_stop_at_the_cap() {
+        let registry = MemoryRegistry::start();
+        let rt = runtime();
+        let pushed = rt
+            .block_on(client().push(&reference(&registry, ":v1"), KIND, b"loop"))
+            .expect("push");
+        let digest = pushed.layer_digest.clone();
+        registry.redirect_blob(
+            &digest,
+            &format!("http://{}/v2/team/thing/blobs/{digest}", registry.host()),
+        );
+
+        let err = rt
+            .block_on(client().pull(&pushed.reference, KIND))
+            .expect_err("an endless redirect must stop");
+
+        assert!(err.to_string().contains("5-redirect"), "{err}");
+    }
+
+    #[test]
+    fn a_layer_over_the_streaming_threshold_round_trips() {
+        let registry = MemoryRegistry::start();
+        let rt = runtime();
+        let layer: Vec<u8> = (0..3 * 1024 * 1024 + 17).map(|i| (i % 251) as u8).collect();
+
+        let pushed = rt
+            .block_on(client().push(&reference(&registry, ":big"), KIND, &layer))
+            .expect("streamed push");
+        let pulled = rt
+            .block_on(client().pull(&pushed.reference, KIND))
+            .expect("pull");
+
+        assert_eq!(pulled.layer, layer);
     }
 
     #[test]

@@ -7,9 +7,8 @@
 //! serve bytes that do not match what was stored, which is how the client's
 //! own re-hashing is exercised.
 //!
-//! The server runs on its own thread with its own runtime, so synchronous
-//! callers (the CLI's blocking entry points) and async tests use it the same
-//! way. Test-only: compiled for this crate's tests and behind `test-support`.
+//! The server runs on its own threads, so synchronous callers (the CLI's
+//! blocking entry points) and async tests use it the same way. Test-only: compiled for this crate's tests and behind `test-support`.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -28,6 +27,8 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 pub struct RecordedRequest {
     pub method: String,
     pub path: String,
+    /// The `Authorization` header, verbatim.
+    pub authorization: Option<String>,
 }
 
 #[derive(Default)]
@@ -41,6 +42,7 @@ struct State {
     omit_digest_header: bool,
     upload_location_origin: Option<String>,
     required_token: Option<String>,
+    blob_redirects: HashMap<String, String>,
     requests: Vec<RecordedRequest>,
 }
 
@@ -157,6 +159,14 @@ impl MemoryRegistry {
         self.lock().upload_location_origin = Some(origin.to_string());
     }
 
+    /// Answer `GET` for `digest` with a `307` to `location`, whether or not
+    /// the blob is stored here.
+    pub fn redirect_blob(&self, digest: &str, location: &str) {
+        self.lock()
+            .blob_redirects
+            .insert(digest.to_string(), location.to_string());
+    }
+
     /// Refuse every `/v2/` request that lacks `Bearer <token>`, answering
     /// with a challenge whose token endpoint issues exactly that token.
     pub fn require_token(&self, token: &str) {
@@ -242,6 +252,7 @@ fn route(
     state.requests.push(RecordedRequest {
         method: request.method.clone(),
         path: path.to_string(),
+        authorization: request.authorization.clone(),
     });
 
     if path == "/token" {
@@ -279,6 +290,11 @@ fn route(
 }
 
 fn blob(state: &State, request: &Request, digest: &str) -> Response {
+    if request.method == "GET" {
+        if let Some(location) = state.blob_redirects.get(digest) {
+            return Response::new(307).header("Location", location.clone());
+        }
+    }
     let Some(stored) = state.blobs.get(digest) else {
         return Response::new(404);
     };
