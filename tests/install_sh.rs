@@ -139,12 +139,48 @@ fn stub_mvmctl(version: &str) -> String {
     )
 }
 
+/// Where a fake release places its entitlement profiles. Real releases through
+/// v0.17.0 shipped `Resources`; install.sh has always written `Assets` itself.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntitlementsLayout {
+    Assets,
+    Resources,
+    /// Distinct content in each location, so a test can tell which one won.
+    Both,
+    Missing,
+    /// mvmctl has its normal assets/ profile; mvm-supervisor.entitlements is
+    /// at neither location, isolating the supervisor's already-entitled /
+    /// builtin-fallback path from mvmctl's own signing.
+    SupervisorMissing,
+}
+
+const MVMCTL_ENTITLEMENTS: &[u8] = b"<plist><key>com.apple.security.virtualization</key></plist>\n";
+const SUPERVISOR_ENTITLEMENTS: &[u8] = b"<plist><key>com.apple.security.hypervisor</key></plist>\n";
+// Only ever written under resources/ in a release that also carries the real
+// profile under assets/, so a test can assert assets/ won without inspecting
+// the fake codesign log.
+const MVMCTL_ENTITLEMENTS_RESOURCES_DECOY: &[u8] =
+    b"<plist><key>decoy-should-not-be-installed-mvmctl</key></plist>\n";
+const SUPERVISOR_ENTITLEMENTS_RESOURCES_DECOY: &[u8] =
+    b"<plist><key>decoy-should-not-be-installed-supervisor</key></plist>\n";
+// A well-formed plist, unlike MVMCTL_ENTITLEMENTS above: the already-entitled
+// tests drive real codesign end to end (fake_codesign only logs args and
+// never parses them), and real codesign refuses to sign with an entitlements
+// file it cannot parse as a plist.
+const VALID_MVMCTL_ENTITLEMENTS_PLIST: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+    <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+    <plist version=\"1.0\"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>\n";
+
 /// A release-shaped archive: `mvmctl`, host binaries and entitlement assets.
 struct Release {
     version: String,
     mvmctl: String,
     hostbins: Vec<String>,
-    entitlements: bool,
+    entitlements: EntitlementsLayout,
+    /// Raw bytes for a named hostbin, overriding the auto-generated shell
+    /// script stub — so a test can ship a real, already-signed Mach-O.
+    hostbin_bytes: Vec<(String, Vec<u8>)>,
 }
 
 impl Release {
@@ -156,14 +192,50 @@ impl Release {
                 "mvm-hvf-supervisor".to_owned(),
                 "mvm-libkrun-supervisor".to_owned(),
             ],
-            entitlements: true,
+            entitlements: EntitlementsLayout::Assets,
+            hostbin_bytes: Vec::new(),
         }
     }
 
     /// Only signing reads the profiles, and only macOS signs.
     #[cfg(target_os = "macos")]
     fn without_entitlements(mut self) -> Self {
-        self.entitlements = false;
+        self.entitlements = EntitlementsLayout::Missing;
+        self
+    }
+
+    /// `mvmctl` carries its normal `assets/mvmctl.entitlements`, but the
+    /// release ships mvm-supervisor.entitlements at neither location — the
+    /// v0.17.0 shape, isolated to just the supervisor so a test can drive its
+    /// already-signed / builtin-fallback path without mvmctl's own signing
+    /// getting in the way.
+    #[cfg(target_os = "macos")]
+    fn supervisor_entitlements_missing(mut self) -> Self {
+        self.entitlements = EntitlementsLayout::SupervisorMissing;
+        self
+    }
+
+    /// Ship `name` with `bytes` verbatim instead of the auto-generated shell
+    /// script stub — a real, possibly already-signed Mach-O.
+    #[cfg(target_os = "macos")]
+    fn with_hostbin_bytes(mut self, name: &str, bytes: Vec<u8>) -> Self {
+        self.hostbin_bytes.push((name.to_owned(), bytes));
+        self
+    }
+
+    /// The layout every published release through v0.17.0 used: no `assets/`
+    /// at all, both profiles under `resources/`.
+    #[cfg(target_os = "macos")]
+    fn entitlements_under_resources(mut self) -> Self {
+        self.entitlements = EntitlementsLayout::Resources;
+        self
+    }
+
+    /// Both locations carry a profile, with different content, so a test can
+    /// tell which one the installer preferred.
+    #[cfg(target_os = "macos")]
+    fn entitlements_under_both(mut self) -> Self {
+        self.entitlements = EntitlementsLayout::Both;
         self
     }
 
@@ -194,22 +266,74 @@ impl Release {
             tar.append_data(&mut header, path, bytes).unwrap();
         };
         append(format!("{dir}/mvmctl"), self.mvmctl.as_bytes(), 0o755);
-        if self.entitlements {
-            append(
-                format!("{dir}/assets/mvmctl.entitlements"),
-                b"<plist><key>com.apple.security.virtualization</key></plist>\n",
-                0o644,
-            );
-            append(
-                format!("{dir}/assets/mvm-supervisor.entitlements"),
-                b"<plist><key>com.apple.security.hypervisor</key></plist>\n",
-                0o644,
-            );
-        } else {
-            append(format!("{dir}/assets/NOTICE"), b"no profiles\n", 0o644);
+        match self.entitlements {
+            EntitlementsLayout::Assets => {
+                append(
+                    format!("{dir}/assets/mvmctl.entitlements"),
+                    MVMCTL_ENTITLEMENTS,
+                    0o644,
+                );
+                append(
+                    format!("{dir}/assets/mvm-supervisor.entitlements"),
+                    SUPERVISOR_ENTITLEMENTS,
+                    0o644,
+                );
+            }
+            EntitlementsLayout::Resources => {
+                append(
+                    format!("{dir}/resources/mvmctl.entitlements"),
+                    MVMCTL_ENTITLEMENTS,
+                    0o644,
+                );
+                append(
+                    format!("{dir}/resources/mvm-supervisor.entitlements"),
+                    SUPERVISOR_ENTITLEMENTS,
+                    0o644,
+                );
+            }
+            EntitlementsLayout::Both => {
+                append(
+                    format!("{dir}/assets/mvmctl.entitlements"),
+                    MVMCTL_ENTITLEMENTS,
+                    0o644,
+                );
+                append(
+                    format!("{dir}/assets/mvm-supervisor.entitlements"),
+                    SUPERVISOR_ENTITLEMENTS,
+                    0o644,
+                );
+                append(
+                    format!("{dir}/resources/mvmctl.entitlements"),
+                    MVMCTL_ENTITLEMENTS_RESOURCES_DECOY,
+                    0o644,
+                );
+                append(
+                    format!("{dir}/resources/mvm-supervisor.entitlements"),
+                    SUPERVISOR_ENTITLEMENTS_RESOURCES_DECOY,
+                    0o644,
+                );
+            }
+            EntitlementsLayout::Missing => {
+                append(format!("{dir}/assets/NOTICE"), b"no profiles\n", 0o644);
+            }
+            EntitlementsLayout::SupervisorMissing => {
+                // Well-formed, unlike MVMCTL_ENTITLEMENTS above: these tests
+                // drive real codesign (to exercise already_entitled against a
+                // real signature), and real codesign actually parses this
+                // file rather than treating it as an opaque logged argument.
+                append(
+                    format!("{dir}/assets/mvmctl.entitlements"),
+                    VALID_MVMCTL_ENTITLEMENTS_PLIST,
+                    0o644,
+                );
+            }
         }
         append(format!("{dir}/README.md"), b"# mvmctl\n", 0o644);
         for hostbin in &self.hostbins {
+            if let Some((_, bytes)) = self.hostbin_bytes.iter().find(|(name, _)| name == hostbin) {
+                append(format!("{dir}/{hostbin}"), bytes, 0o755);
+                continue;
+            }
             let body = format!("#!/bin/sh\necho '{hostbin} {}'\n", self.version);
             append(format!("{dir}/{hostbin}"), body.as_bytes(), 0o755);
         }
@@ -1172,6 +1296,280 @@ fn install_sh_keeps_the_previous_release_when_a_required_profile_is_missing() {
     );
     assert_eq!(host.mvmctl_version(), "mvmctl v1.0.0");
     assert_eq!(host.snapshot(), before);
+}
+
+/// Every published release through v0.17.0 shipped its entitlement profiles
+/// under `resources/`, not `assets/`. install.sh must find them there too,
+/// sign with them, and leave the release directory carrying them under
+/// `assets/` — the one path codesign (and any later re-sign) reads.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_signs_from_resources_when_assets_has_no_profiles() {
+    let release = Release::new("v9.9.9").entitlements_under_resources();
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let output = install_with_codesign(&host, &base, "v9.9.9", false);
+    assert!(
+        output.status.success(),
+        "a release shipping entitlement profiles only under resources/ must still install: {}",
+        stderr(&output)
+    );
+
+    assert_eq!(
+        std::fs::read(host.current_target().join("assets/mvmctl.entitlements")).unwrap(),
+        MVMCTL_ENTITLEMENTS,
+        "the profile found under resources/ must be installed into assets/"
+    );
+    assert_eq!(
+        std::fs::read(
+            host.current_target()
+                .join("assets/mvm-supervisor.entitlements")
+        )
+        .unwrap(),
+        SUPERVISOR_ENTITLEMENTS,
+    );
+    assert!(
+        host.bin().join("assets/mvmctl.entitlements").is_file(),
+        "the assets/ PATH entry must include the profile backfilled from resources/"
+    );
+}
+
+/// A release that ships a profile at both locations must be signed with the
+/// one under `assets/`, never the one under `resources/`.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_prefers_assets_when_both_locations_carry_a_profile() {
+    let release = Release::new("v9.9.9").entitlements_under_both();
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let output = install_with_codesign(&host, &base, "v9.9.9", false);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    assert_eq!(
+        std::fs::read(host.current_target().join("assets/mvmctl.entitlements")).unwrap(),
+        MVMCTL_ENTITLEMENTS,
+        "assets/ must win over resources/ when a release ships a profile at both"
+    );
+    assert_eq!(
+        std::fs::read(
+            host.current_target()
+                .join("assets/mvm-supervisor.entitlements")
+        )
+        .unwrap(),
+        SUPERVISOR_ENTITLEMENTS,
+    );
+}
+
+/// A real Mach-O this test can ad-hoc sign with an arbitrary entitlement.
+/// `codesign --sign - --entitlements ...` reports success against a plain
+/// shell-script stub too, but embeds no entitlements at all in that case —
+/// entitlements only ever land in a signature over the Mach-O format — so the
+/// shell-script `mvmctl`/hostbin stubs used everywhere else in this file
+/// cannot stand in for an already-entitled binary.
+#[cfg(target_os = "macos")]
+fn stand_in_macho() -> Vec<u8> {
+    std::fs::read("/bin/echo").expect("a stand-in Mach-O to sign for the test")
+}
+
+/// Ad-hoc sign `binary` (in place) with a one-key entitlements plist, using
+/// the real system `codesign` — never the `fake_codesign` stub, which cannot
+/// produce a signature `already_entitled`'s own `codesign` calls would parse
+/// as carrying a real key. Panics on failure.
+#[cfg(target_os = "macos")]
+fn sign_with_real_codesign(binary: &Path, entitlement_key: &str) {
+    let dir = binary.parent().unwrap();
+    let profile = dir.join("probe.entitlements");
+    std::fs::write(
+        &profile,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\"><dict><key>{entitlement_key}</key><true/></dict></plist>\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("codesign")
+        .args(["--sign", "-", "--force", "--entitlements"])
+        .arg(&profile)
+        .arg(binary)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "test setup: codesign failed to sign the stand-in binary: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Whether the real system `codesign` reports `binary` as carrying
+/// `entitlement_key` in a strictly valid signature — the same two checks
+/// `already_entitled` in install.sh performs, used here to confirm the
+/// installed result independently of install.sh's own logic.
+#[cfg(target_os = "macos")]
+fn signed_with_key(binary: &Path, entitlement_key: &str) -> bool {
+    let verified = Command::new("codesign")
+        .args(["--verify", "--strict"])
+        .arg(binary)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !verified {
+        return false;
+    }
+    let entitlements = Command::new("codesign")
+        .args(["-d", "--entitlements", "-", "--xml"])
+        .arg(binary)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&entitlements.stdout).contains(&format!("<key>{entitlement_key}</key>"))
+}
+
+/// A release whose `mvm-hvf-supervisor` ships with neither
+/// `assets/mvm-supervisor.entitlements` nor `resources/mvm-supervisor.entitlements`,
+/// but is already signed — by some build step earlier than install.sh, in
+/// this test's stand-in for that — with the `com.apple.security.hypervisor`
+/// key it needs. install.sh must recognise the existing signature as
+/// sufficient and leave the binary alone rather than dying for want of a
+/// profile it does not need.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_keeps_a_supervisor_already_signed_with_the_required_key() {
+    let setup_dir = tempfile::tempdir().unwrap();
+    let signed_path = setup_dir.path().join("mvm-hvf-supervisor");
+    std::fs::write(&signed_path, stand_in_macho()).unwrap();
+    sign_with_real_codesign(&signed_path, "com.apple.security.hypervisor");
+    assert!(
+        signed_with_key(&signed_path, "com.apple.security.hypervisor"),
+        "test setup: the stand-in must already carry the key before install.sh ever runs"
+    );
+    let supervisor = std::fs::read(&signed_path).unwrap();
+
+    let release = Release::new("v9.9.9")
+        .supervisor_entitlements_missing()
+        .with_hostbin_bytes("mvm-hvf-supervisor", supervisor.clone())
+        .with_hostbins(vec!["mvm-hvf-supervisor".to_owned()]);
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    // Real codesign, not the fake_codesign stub: already_entitled's own
+    // codesign calls must see a signature they can genuinely parse.
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env_remove("MVM_SKIP_CODESIGN")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a supervisor already signed with the required key must install: {}",
+        stderr(&output)
+    );
+
+    let installed = host.current_target().join("mvm-hvf-supervisor");
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        supervisor,
+        "install.sh must leave an already-sufficiently-entitled binary's signature untouched, \
+         not re-sign it"
+    );
+    assert!(
+        !host
+            .current_target()
+            .join("assets/mvm-supervisor.entitlements")
+            .exists(),
+        "no profile should be synthesized when the shipped signature already suffices"
+    );
+}
+
+/// The same shape, but the supervisor's existing signature carries a
+/// different entitlement key, not the one it needs. install.sh must not
+/// mistake "is signed" for "is signed with the right key": it falls back to
+/// its own builtin copy of mvm-supervisor.entitlements and re-signs, so the
+/// installed binary ends up carrying the required key.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_re_signs_a_supervisor_whose_existing_signature_lacks_the_required_key() {
+    let setup_dir = tempfile::tempdir().unwrap();
+    let signed_path = setup_dir.path().join("mvm-hvf-supervisor");
+    std::fs::write(&signed_path, stand_in_macho()).unwrap();
+    sign_with_real_codesign(&signed_path, "com.apple.security.cs.allow-jit");
+    assert!(
+        !signed_with_key(&signed_path, "com.apple.security.hypervisor"),
+        "test setup: the stand-in must not already carry the required key"
+    );
+    let supervisor = std::fs::read(&signed_path).unwrap();
+
+    let release = Release::new("v9.9.9")
+        .supervisor_entitlements_missing()
+        .with_hostbin_bytes("mvm-hvf-supervisor", supervisor.clone())
+        .with_hostbins(vec!["mvm-hvf-supervisor".to_owned()]);
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env_remove("MVM_SKIP_CODESIGN")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a release shipping neither location for mvm-supervisor.entitlements must still \
+         install via install.sh's builtin fallback: {}",
+        stderr(&output)
+    );
+
+    let installed = host.current_target().join("mvm-hvf-supervisor");
+    assert_ne!(
+        std::fs::read(&installed).unwrap(),
+        supervisor,
+        "a signature lacking the required key must not be accepted as-is"
+    );
+    assert!(
+        signed_with_key(&installed, "com.apple.security.hypervisor"),
+        "the re-signed binary must carry the required key"
+    );
+    assert_eq!(
+        std::fs::read(
+            host.current_target()
+                .join("assets/mvm-supervisor.entitlements")
+        )
+        .unwrap(),
+        std::fs::read(repo_root().join("assets/mvm-supervisor.entitlements")).unwrap(),
+        "the release directory must carry install.sh's own builtin profile, byte-identical to \
+         the checked-in one — install_sh_builtin_entitlement_matches_the_checked_in_profile \
+         guards that install.sh's copy cannot drift from this file"
+    );
+}
+
+/// install.sh's `builtin_entitlement_profile` embeds its own copy of
+/// mvm-supervisor.entitlements rather than reading the checked-in file at
+/// assets/ (it has to: install.sh ships standalone, with no repo checkout
+/// beside it). Extract the function verbatim and run it for real, so an edit
+/// to either copy that drifts from the other fails here instead of shipping
+/// a mismatched fallback.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_builtin_entitlement_matches_the_checked_in_profile() {
+    let script = std::fs::read_to_string(repo_root().join("install.sh")).unwrap();
+    let start = script
+        .find("builtin_entitlement_profile() {")
+        .expect("install.sh lost builtin_entitlement_profile");
+    let end = start + script[start..].find("\n}\n").expect("function end") + 2;
+    let function_body = &script[start..end];
+
+    let probe = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        probe.path(),
+        format!("#!/bin/sh\nset -eu\n{function_body}\nbuiltin_entitlement_profile mvm-supervisor.entitlements\n"),
+    )
+    .unwrap();
+    let output = Command::new("sh").arg(probe.path()).output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        output.stdout,
+        std::fs::read(repo_root().join("assets/mvm-supervisor.entitlements")).unwrap(),
+        "install.sh's builtin fallback content has drifted from the checked-in profile"
+    );
 }
 
 // ---- uninstall.sh ----
