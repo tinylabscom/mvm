@@ -502,10 +502,17 @@ each asserted, and where it holds now:
 - *DNS names*: `EgressGate::dns_verdict` answers only pinned names under an
   allow-list, and strips private, loopback, link-local, and unique-local
   answers from a live lookup under an unrestricted policy. That gates questions
-  asked through the host resolver. A raw UDP datagram to port 53 is decided by
-  the L4 rules alone, and a bare `NetworkPolicy` allow-list projects a UDP/53
-  carve-out to any address outside the mandatory-deny ranges, so no qname check
-  applies to such a datagram.
+  asked through the host resolver, which is the only way a guest under an
+  allow-list resolves a name. A bare `NetworkPolicy` allow-list projects TCP
+  rules for its pinned hosts and no UDP rule at all, port 53 included, so it
+  cannot be used to reach a resolver of the guest's choosing, public or on the
+  host's own network. The endpoint refuses a UDP association outright when the
+  admitted policy admits no datagram, and records the refusal as a chain-signed
+  `host.flow.denied` entry with `class=udp` and `reason=policy_denied`. Where a
+  signed policy does grant UDP by explicit L4 rule, a datagram outside those
+  rules is refused and audited once per destination per association; raw
+  datagrams admitted by such a rule, or by an unrestricted policy, carry no
+  qname check.
 - *A placeholder outside the substituted headers*: no equivalent. The typed
   HTTP path substitutes and checks headers only, so a placeholder in a URL or
   body is forwarded as-is (#3297). The placeholder is not the secret, so this

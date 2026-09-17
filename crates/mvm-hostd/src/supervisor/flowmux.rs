@@ -701,15 +701,16 @@ impl FlowMuxSession {
     fn handle_open_udp(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         if !self.check_connection_rate(registry::FlowClass::Udp) {
             self.send_refused(stream_id, "rate limited")?;
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "udp".to_string()),
-                    ("reason".to_string(), "rate_limited".to_string()),
-                ]),
-            );
+            self.deny_udp_association(stream_id, "rate_limited");
+            return Ok(());
+        }
+
+        // A policy that admits no datagram anywhere refuses the association
+        // itself, so the refusal is answered and audited once, at open, rather
+        // than per send on an association that could never deliver anything.
+        if !self.gate.admits_udp() {
+            self.send_refused(stream_id, "network policy admits no UDP")?;
+            self.deny_udp_association(stream_id, "policy_denied");
             return Ok(());
         }
 
@@ -718,15 +719,7 @@ impl FlowMuxSession {
             .err();
         if let Some(e) = open_err {
             self.send_refused(stream_id, &e.to_string())?;
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "udp".to_string()),
-                    ("reason".to_string(), "resource_exhausted".to_string()),
-                ]),
-            );
+            self.deny_udp_association(stream_id, "resource_exhausted");
             return Ok(());
         }
 
@@ -762,11 +755,7 @@ impl FlowMuxSession {
 
         lock_udp_associations(&self.udp_associations).insert(
             stream_id,
-            UdpAssociationHandle {
-                tx,
-                waker,
-                peer_admission: UdpPeerAdmission::GuestMayIntroduce,
-            },
+            UdpAssociationHandle::new(tx, waker, UdpPeerAdmission::GuestMayIntroduce),
         );
         self.send_udp_opened(stream_id)?;
         self.emit_audit(
@@ -812,16 +801,7 @@ impl FlowMuxSession {
                 .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
             {
                 warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
-                self.emit_audit(
-                    EventCategory::Host,
-                    "host.flow.denied",
-                    BTreeMap::from([
-                        ("stream_id".to_string(), stream_id.to_string()),
-                        ("class".to_string(), "udp".to_string()),
-                        ("target".to_string(), target),
-                        ("reason".to_string(), "typed_transform_required".to_string()),
-                    ]),
-                );
+                self.deny_udp_datagram(stream_id, ip, port, "typed_transform_required");
                 return Ok(());
             }
 
@@ -829,6 +809,7 @@ impl FlowMuxSession {
                 EgressVerdict::Allow { .. } => {}
                 EgressVerdict::Deny(reason) => {
                     warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+                    self.deny_udp_datagram(stream_id, ip, port, "policy_denied");
                     return Ok(());
                 }
                 EgressVerdict::Malformed => {
@@ -850,6 +831,41 @@ impl FlowMuxSession {
         }
         relay.1.wake().map_err(FlowMuxError::Transport)?;
         Ok(())
+    }
+
+    /// Audit a refused UDP association. No destination is named: an
+    /// association is refused before the guest has sent anywhere.
+    fn deny_udp_association(&self, stream_id: u32, reason: &str) {
+        self.emit_audit(
+            EventCategory::Host,
+            "host.flow.denied",
+            BTreeMap::from([
+                ("stream_id".to_string(), stream_id.to_string()),
+                ("class".to_string(), "udp".to_string()),
+                ("reason".to_string(), reason.to_string()),
+            ]),
+        );
+    }
+
+    /// Audit a refused datagram, once per destination per association.
+    ///
+    /// The refusal itself is unconditional and already taken by the caller;
+    /// this decides only whether it is recorded. Recording signs and syncs on
+    /// this thread, so a guest resending to a refused destination must not be
+    /// able to make every datagram a stall of its own session.
+    fn deny_udp_datagram(&self, stream_id: u32, ip: IpAddr, port: u16, reason: &str) {
+        let target = SocketAddr::new(ip, port);
+        let first = lock_udp_associations(&self.udp_associations)
+            .get_mut(&stream_id)
+            .is_some_and(|handle| handle.first_denial_of(target));
+        if first {
+            self.deny_unrouted_flow(
+                stream_id,
+                registry::FlowClass::Udp,
+                &target.to_string(),
+                reason,
+            );
+        }
     }
 
     fn remove_udp_association(&mut self, stream_id: u32) {
@@ -1836,7 +1852,7 @@ mod tests {
 
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
-        let gate = EgressGate::default_deny();
+        let gate = gate_allowing_addr(local_test_ip(), 0, Some(9));
         let host_handle = thread::spawn(move || {
             let mut session = FlowMuxSession::accept(
                 host_stream,
@@ -2102,6 +2118,102 @@ mod tests {
         (guest_stream, guest_session, host_handle)
     }
 
+    /// A gate that pins `name` to `ip` and admits it on `port`, so a test can
+    /// use a name without needing DNS.
+    pub(super) fn gate_pinning_name(name: &str, ip: IpAddr, port: u16) -> EgressGate {
+        use chrono::{Duration as ChronoDuration, Utc};
+        use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_contract::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let now = Utc::now();
+        let later = now + ChronoDuration::hours(1);
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            name,
+            vec![ip],
+            now.to_rfc3339(),
+            later.to_rfc3339(),
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new(name, port)]);
+        EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
+    }
+
+    /// A chain-signed recorder writing to `path`, plus the key that verifies it.
+    pub(super) fn recorder_at(
+        path: &std::path::Path,
+    ) -> (Arc<Recorder>, ed25519_dalek::VerifyingKey) {
+        use crate::supervisor::audit_file::FileAuditSigner;
+        use mvm_core::plan::TenantId;
+
+        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let signer = FileAuditSigner::open_file(signing_key, path).expect("open audit signer");
+        (
+            Arc::new(Recorder::new(
+                Arc::new(signer),
+                TenantId("flowmux-tenant".to_string()),
+            )),
+            verifying_key,
+        )
+    }
+
+    /// Run a session the way the endpoint does — inside a Tokio runtime, with
+    /// `serve` on a blocking task — so `Handle::try_current` finds a runtime
+    /// and a terminated flow can be driven.
+    ///
+    /// The plain `run_session_*` helpers run on a bare thread, where there is
+    /// no runtime and termination correctly refuses.
+    pub(super) fn run_session_on_runtime(
+        build: impl FnOnce(&str, SigningKey, VerifyingKey, RegistryLimits) -> FlowMuxAccept
+        + Send
+        + 'static,
+    ) -> (
+        UnixStream,
+        Session,
+        thread::JoinHandle<Result<(), FlowMuxError>>,
+    ) {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        let host_handle = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build session runtime");
+            runtime.block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut session = FlowMuxSession::accept_with(
+                        host_stream,
+                        build(
+                            "test-session",
+                            host_key,
+                            guest_verify,
+                            RegistryLimits::default(),
+                        ),
+                    )
+                    .unwrap();
+                    session.serve()
+                })
+                .await
+                .expect("session task")
+            })
+        });
+        let (mut guest_session, _session_id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(opcode, Opcode::HelloAck);
+        (guest_stream, guest_session, host_handle)
+    }
+
     pub(super) fn write_frame(
         stream: &mut UnixStream,
         session: &mut Session,
@@ -2347,6 +2459,155 @@ mod tests {
         let (source_ip, source_port, body) = decode_udp_addr(&recv).unwrap();
         assert_eq!(SocketAddr::new(source_ip, source_port), addr);
         assert_eq!(body, b"hello");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// Under an allow-list naming one TCP host, a UDP association is refused
+    /// at open and the refusal is audited. The datagram that follows — not a
+    /// DNS query, for port 53 on an address the policy never named — has no
+    /// association to ride, and the session survives both.
+    #[test]
+    fn a_udp_association_under_an_allow_list_is_refused_and_audited() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let gate = gate_pinning_name("api.udp.test", "198.51.100.7".parse().unwrap(), 443);
+
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate).with_recorder(Some(recorder))
+            });
+
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::Refused,
+            "{}",
+            String::from_utf8_lossy(&payload)
+        );
+        assert_eq!(stream_id, 1);
+
+        // The session is still serving: a later resolve is answered.
+        let query = build_dns_query("api.udp.test", 1, 0x0053);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 5, &query);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Resolved);
+        drop(guest);
+        host.join().unwrap().unwrap();
+
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        assert!(
+            chain.contains("host.flow.denied"),
+            "the refusal is audited: {chain}"
+        );
+        assert!(chain.contains("\"class\":\"udp\""), "{chain}");
+        assert!(chain.contains("policy_denied"), "{chain}");
+        assert!(
+            !chain.contains("host.flow.allowed"),
+            "no association was admitted: {chain}"
+        );
+    }
+
+    /// A datagram refused on an association that admits some UDP is audited,
+    /// but once per destination: repeating the send enforces the refusal
+    /// again without recording it again, and a second destination is its own
+    /// entry.
+    #[test]
+    fn a_refused_datagram_is_audited_once_per_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let admitted = udp_echo_server();
+        let gate = gate_allowing_addr(admitted.ip(), 0, Some(admitted.port()));
+
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate).with_recorder(Some(recorder))
+            });
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::UdpOpened);
+
+        let mut refused = encode_udp_addr("203.0.113.53".parse().unwrap(), 53);
+        refused.extend_from_slice(b"not a dns query");
+        for _ in 0..3 {
+            write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &refused);
+        }
+        let mut other = encode_udp_addr("203.0.113.54".parse().unwrap(), 53);
+        other.extend_from_slice(b"not a dns query");
+        write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &other);
+
+        // The association still delivers what the policy admits.
+        let mut allowed = encode_udp_addr(admitted.ip(), admitted.port());
+        allowed.extend_from_slice(b"hello");
+        write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &allowed);
+        let (opcode, _stream_id, recv) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::UdpRecv);
+        let (_ip, _port, body) = decode_udp_addr(&recv).unwrap();
+        assert_eq!(body, b"hello");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        let denials: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains("host.flow.denied"))
+            .collect();
+        assert_eq!(denials.len(), 2, "one entry per refused target: {chain}");
+        assert!(
+            denials[0].contains("203.0.113.53:53") && denials[0].contains("policy_denied"),
+            "{chain}"
+        );
+        assert!(denials[1].contains("203.0.113.54:53"), "{chain}");
+        assert!(
+            !chain.contains("not a dns query"),
+            "no payload byte reaches the chain: {chain}"
+        );
+    }
+
+    /// Refusing raw UDP does not refuse name resolution: a pinned name still
+    /// answers through `Resolve` under an allow-list that admits no datagram.
+    #[test]
+    fn resolve_of_a_pinned_name_answers_under_an_allow_list_that_admits_no_udp() {
+        let gate = gate_pinning_name("api.resolve.test", "198.51.100.7".parse().unwrap(), 443);
+        assert!(!gate.admits_udp());
+        let (mut guest, mut guest_session, host) = run_session(gate);
+
+        let query = build_dns_query("api.resolve.test", 1, 0x4242);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 1, &query);
+        let (opcode, _stream_id, response) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Resolved);
+        assert_eq!(&response[..2], &[0x42, 0x42]);
+        assert!(
+            response.windows(4).any(|w| w == [198, 51, 100, 7]),
+            "the answer carries the pinned address"
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// Under an allow-list, a name the policy never pinned is refused rather
+    /// than looked up. `localhost` resolves on any host without a network, so
+    /// a gate that looked the name up would answer rather than refuse.
+    #[test]
+    fn resolve_of_an_unpinned_name_is_refused_under_an_allow_list() {
+        let gate = gate_pinning_name("api.resolve.test", "198.51.100.7".parse().unwrap(), 443);
+        let (mut guest, mut guest_session, host) = run_session(gate);
+
+        let query = build_dns_query("localhost", 1, 0x4243);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 1, &query);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::ResolveRefused);
+        assert!(!payload.is_empty());
 
         drop(guest);
         host.join().unwrap().unwrap();

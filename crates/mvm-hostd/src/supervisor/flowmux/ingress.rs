@@ -228,11 +228,7 @@ impl FlowMuxIngressHandle {
         let (tx, rx) = std::sync::mpsc::channel();
         lock_udp_associations(&self.udp_associations).insert(
             stream_id,
-            UdpAssociationHandle {
-                tx,
-                waker: Arc::clone(&waker),
-                peer_admission: UdpPeerAdmission::ObservedOnly,
-            },
+            UdpAssociationHandle::new(tx, Arc::clone(&waker), UdpPeerAdmission::ObservedOnly),
         );
         let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);

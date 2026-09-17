@@ -442,7 +442,9 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
         secret_store_dir: None,
         binding_store_dir: None,
         tls_intermediate: None,
-        network_policy: None,
+        // The ceiling is under test, not the policy: admit UDP so the first
+        // association opens and the second meets the ceiling.
+        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::unrestricted()),
         network_limits: mvm_core::plan::NetworkLimits::builder()
             .max_udp_associations(1)
             .build()
