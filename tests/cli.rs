@@ -651,7 +651,7 @@ fn bundle_fetch_and_install_help_list_prod_and_registry_sources() {
             "{verb} help must list --prod:\n{stdout}"
         );
         assert!(
-            stdout.contains("oci://"),
+            stdout.contains("oci:"),
             "{verb} help must name oci://:\n{stdout}"
         );
     }

@@ -445,7 +445,9 @@ chrono.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
-mvm-fs.workspace = true
+# `test-support` for the in-process registry `tests/audit_emissions_live.rs`
+# pushes bundles to.
+mvm-fs = { workspace = true, features = ["test-support"] }
 mvm-vmm.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`

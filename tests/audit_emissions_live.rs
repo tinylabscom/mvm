@@ -99,6 +99,10 @@
 //!   sandbox → `Uninstall` once the install is removed; with `--dry-run`,
 //!   or when a running machine refuses it → **no** audit entry. The
 //!   removal itself is exercised in depth in `tests/install_sh.rs`.
+//! - `mvmctl bundle push <file> oci://…` (against the in-process registry
+//!   from `mvm_fs::oci::test_registry`) → `BundlePush`, and the printed
+//!   digest reference then passes `mvmctl bundle fetch --prod`, which emits
+//!   nothing
 //! - `mvmctl secret put / get / ls / rm` → secret-side audit JSONL
 //!   at `~/.mvm/audit/secrets.jsonl` carries one entry per call
 //!   with `"action":"put"` / `"get"` / `"list"` / `"delete"`. The
@@ -2680,5 +2684,111 @@ fn proc_ls_does_not_emit_mutation_audit_entry() {
     assert!(
         log.contains("verb=proc-list"),
         "vsock-RPC audit detail must name verb=proc-list. Full log:\n{log}"
+    );
+}
+
+/// Seal a one-artifact bundle under `seed`'s key and enrol that key in a
+/// trust directory. Returns (archive path, trust dir).
+fn signed_bundle_fixture(root: &Path, seed: u8) -> (PathBuf, PathBuf) {
+    use mvmctl::core::plan::bundle::{
+        ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
+        sha256_hex, write_bundle,
+    };
+    let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    let key_id = key_id_from_pubkey(&key.verifying_key());
+    let kernel = b"registry-push-kernel".to_vec();
+    let manifest = BundleManifest {
+        schema_version: BUNDLE_SCHEMA_VERSION,
+        publisher: "audit-live".to_string(),
+        key_id: key_id.clone(),
+        arch: "aarch64".to_string(),
+        kernel_version: None,
+        profile: None,
+        workload_label: None,
+        created_at: "2026-09-16T00:00:00Z".to_string(),
+        labels: Default::default(),
+        artifacts: vec![BundleArtifact {
+            name: "vmlinux".to_string(),
+            role: ArtifactRole::Kernel,
+            path: "artifacts/vmlinux".to_string(),
+            sha256: sha256_hex(&kernel),
+            size_bytes: kernel.len() as u64,
+        }],
+        verity: None,
+        resources: None,
+    };
+    let archive = write_bundle(
+        &manifest,
+        &key,
+        vec![("artifacts/vmlinux".to_string(), kernel)],
+    )
+    .expect("write bundle");
+    let archive_path = root.join("app.mvmpkg");
+    std::fs::write(&archive_path, archive).expect("write archive");
+    let trust_dir = root.join("trusted");
+    std::fs::create_dir_all(&trust_dir).expect("mkdir trust dir");
+    std::fs::write(
+        trust_dir.join(format!("{}.pub", key_id.0)),
+        key.verifying_key().to_bytes(),
+    )
+    .expect("enrol publisher");
+    (archive_path, trust_dir)
+}
+
+#[test]
+fn bundle_push_emits_bundle_push_and_the_printed_reference_fetches_under_prod() {
+    let sandbox = AuditSandbox::new();
+    let registry = mvm_fs::oci::test_registry::MemoryRegistry::start();
+    let (archive, trust_dir) = signed_bundle_fixture(sandbox.home_path(), 11);
+
+    let pushed = sandbox
+        .mvmctl()
+        .env_remove("MVM_OCI_BEARER_TOKEN")
+        .args(["bundle", "push"])
+        .arg(&archive)
+        .arg(format!("oci://{}/team/app:v1", registry.host()))
+        .arg("--trust-store")
+        .arg(&trust_dir)
+        .arg("--allow-http")
+        .output()
+        .expect("run bundle push");
+    assert!(
+        pushed.status.success(),
+        "bundle push failed: {}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&pushed.stdout);
+    let reference = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("oci://"))
+        .unwrap_or_else(|| panic!("push must print the pinned reference:\n{stdout}"))
+        .to_string();
+    assert!(reference.contains("@sha256:"), "{reference}");
+    assert_eq!(
+        count_entries_with_kind(&read_audit_log(&sandbox.audit_log_path()), "bundle_push"),
+        1
+    );
+
+    let fetched = sandbox
+        .mvmctl()
+        .env_remove("MVM_OCI_BEARER_TOKEN")
+        .args(["bundle", "fetch", &reference, "--prod", "--allow-http"])
+        .arg("--trust-store")
+        .arg(&trust_dir)
+        .output()
+        .expect("run bundle fetch");
+    assert!(
+        fetched.status.success(),
+        "bundle fetch failed: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&fetched.stdout);
+    assert!(stdout.contains("Bundle verified"), "{stdout}");
+    assert!(stdout.contains(&reference), "{stdout}");
+    assert_eq!(
+        count_entries_with_kind(&read_audit_log(&sandbox.audit_log_path()), "bundle_push"),
+        1,
+        "fetch is read-only"
     );
 }
