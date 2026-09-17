@@ -21,6 +21,18 @@
       signed bundles through image registries, and structured agent-facing
       errors.
 
+- [x] **Static Linux release payloads for older distributions — issue #3371.**
+      Keep the established `*-unknown-linux-gnu` archive names so installed
+      clients can still find updates, while building `mvmctl` and every
+      adjacent runtime helper for musl. The release workflow fails closed if
+      any Linux payload is not statically linked; both Linux architectures use
+      the actual musl build path rather than the compatibility asset name.
+      Verified all 12 x86_64/aarch64 payloads are static with the pinned release
+      toolchain; 47 release-asset tests, workspace check/clippy, gated-target
+      checks, and all 68 repository gates pass. The workspace test run's sole
+      Cargo artifact-selection failure was rerun successfully as the exact
+      `mvm-build` doctest target.
+
 - [x] **Keep pre-26 Apple Silicon Macs off the unavailable HVF builder — issue #3325.**
       Auto-detection now requires both Apple Silicon and the existing macOS
       26+ HVF-default tier before selecting HVF; older supported Macs select

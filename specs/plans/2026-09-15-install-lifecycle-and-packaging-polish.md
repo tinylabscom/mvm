@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274), [#3331](https://github.com/tinylabscom/mvm/issues/3331)
+**Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274), [#3331](https://github.com/tinylabscom/mvm/issues/3331), [#3371](https://github.com/tinylabscom/mvm/issues/3371)
 
 ## Outcome
 
@@ -122,6 +122,10 @@ Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
 
 Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
 
+- [x] Build both released Linux payload sets as static musl executables while
+      preserving the historical `*-unknown-linux-gnu` archive names requested
+      by already-installed clients. Verify `mvmctl` and every adjacent runtime
+      helper is static before upload. Issue #3371.
 - [ ] A workflow running the *current* installer against the last N *published*
       releases, on a macOS and a Linux runner.
 - [ ] A workflow running the released Linux binary in debian, ubuntu, rocky and

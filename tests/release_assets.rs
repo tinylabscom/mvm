@@ -434,19 +434,25 @@ fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
         ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
     ];
 
-    // The build matrix entries, as `- target: X` followed by `os: Y`.
+    // The build matrix entries. `target` is the stable release-asset contract;
+    // `build_target` is the Rust ABI that actually goes into that archive.
     let mut pairs = Vec::new();
     let lines: Vec<&str> = workflow.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let Some(target) = line.trim().strip_prefix("- target: ") else {
             continue;
         };
+        let build_target = lines[i + 1..]
+            .iter()
+            .take(6)
+            .find_map(|l| l.trim().strip_prefix("build_target: "))
+            .unwrap_or_else(|| panic!("matrix entry {target} names no build target"));
         let os = lines[i + 1..]
             .iter()
             .take(6)
             .find_map(|l| l.trim().strip_prefix("os: "))
             .unwrap_or_else(|| panic!("matrix entry {target} names no runner"));
-        pairs.push((target.trim().to_string(), os.trim().to_string()));
+        pairs.push((build_target.trim().to_string(), os.trim().to_string()));
     }
 
     assert!(
@@ -469,6 +475,45 @@ fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
              build fails with `can't find crate for core`"
         );
     }
+}
+
+/// Linux release payloads must be static musl binaries, while their published
+/// archive names stay on the historical `*-unknown-linux-gnu` contract so an
+/// older installed mvmctl can still discover and download its update.
+#[test]
+fn linux_release_assets_keep_their_names_but_build_musl_payloads() {
+    let workflow = release_workflow();
+
+    for (asset_target, build_target) in [
+        ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"),
+        ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"),
+    ] {
+        let entry = format!("- target: {asset_target}\n            build_target: {build_target}");
+        assert!(
+            workflow.contains(&entry),
+            "release asset {asset_target} must be built from {build_target}"
+        );
+    }
+
+    assert!(
+        workflow.contains("cargo zigbuild --profile release-min --target \"${BUILD_TARGET}\""),
+        "Linux musl release binaries must use cargo-zigbuild"
+    );
+    assert!(
+        workflow.contains("ARCHIVE_NAME=\"mvmctl-${TARGET}\""),
+        "the public archive name must remain based on the compatibility target"
+    );
+    assert!(
+        workflow.contains("target/${BUILD_TARGET}/release-min/${BIN_NAME}"),
+        "packaging must copy the binary from the musl build target"
+    );
+    assert!(
+        workflow.contains("name: Verify Linux release payloads are statically linked")
+            && workflow.contains("if: endsWith(matrix.build_target, '-unknown-linux-musl')")
+            && workflow.contains("description=\"$(file --brief \"${binary}\")\"")
+            && workflow.contains("*\"statically linked\"*"),
+        "the release must fail closed if mvmctl or an embedded Linux helper regains a glibc dependency"
+    );
 }
 
 fn ci_workflow() -> String {

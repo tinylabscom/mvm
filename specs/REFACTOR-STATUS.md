@@ -9,6 +9,12 @@ Last updated: 2026-09-16
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
       measure-first and sequenced with #3360.
 
+- [x] **Linux release payloads no longer require the runner's glibc.**
+      `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`
+      WS6, issue #3371. Preserve the updater's historical GNU-flavoured asset
+      names while cross-compiling the payloads for musl and verifying every
+      packaged Linux executable is static before upload.
+
 - [x] **macOS builder auto-detection respects the HVF OS floor.**
       `specs/plans/2026-09-15-the-big-cleanup.md` K7, issue #3325. Apple
       Silicon alone no longer selects HVF on macOS 13–25; the existing macOS
@@ -97,7 +103,9 @@ Last updated: 2026-09-16
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
         every host binary the release carries (#3270, #3342)
   - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
-  - [ ] WS5–WS6 — verification and compat (#3272–#3273)
+  - [ ] WS5–WS6 — verification and compat (#3272–#3273); Linux release
+        payloads are now static-musl while retaining compatible asset names
+        (#3371)
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`

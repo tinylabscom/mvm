@@ -139,10 +139,7 @@ impl IcmpSocket {
     }
 
     fn set_recv_timeout(&self, timeout: Duration) -> io::Result<()> {
-        let tv = libc::timeval {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-        };
+        let tv = recv_timeout_timeval(timeout);
         // SAFETY: `tv` outlives the call and its length is the size of the type
         // the option expects.
         let rc = unsafe {
@@ -191,6 +188,16 @@ impl IcmpSocket {
         }
         let datagram = &buf[..got as usize];
         Ok(is_our_echo_reply(datagram, self.v6, self.seq.get()).then_some(()))
+    }
+}
+
+fn recv_timeout_timeval(timeout: Duration) -> libc::timeval {
+    libc::timeval {
+        tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+        tv_usec: timeout
+            .subsec_micros()
+            .try_into()
+            .expect("subsecond microseconds always fit in timeval::tv_usec"),
     }
 }
 
@@ -340,6 +347,20 @@ mod tests {
         // RFC 1071 §3's example octets and their expected one's-complement sum.
         let data = [0x00u8, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
         assert_eq!(internet_checksum(&data), 0x220d);
+    }
+
+    #[test]
+    fn receive_timeout_timeval_preserves_seconds_and_microseconds() {
+        let tv = recv_timeout_timeval(Duration::new(7, 654_321_000));
+        assert_eq!(tv.tv_sec, 7);
+        assert_eq!(tv.tv_usec, 654_321);
+    }
+
+    #[test]
+    fn receive_timeout_timeval_saturates_unrepresentable_seconds() {
+        let tv = recv_timeout_timeval(Duration::new(u64::MAX, 0));
+        assert_eq!(tv.tv_sec, i64::MAX);
+        assert_eq!(tv.tv_usec, 0);
     }
 
     #[test]
