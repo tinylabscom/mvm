@@ -10,6 +10,24 @@
 
 ## In progress
 
+- [x] **Published installer and distro compatibility lanes — issue #3273.**
+      Exercise the current installer against published releases on Linux and
+      macOS, walk atomic upgrades and rollback, run release binaries across
+      four Linux distributions on both architectures, and execute the install
+      page's own commands. The PR-gated synthetic suite distinguishes legacy
+      entitlement profiles under `resources/` from profiles absent entirely,
+      so the fixed default macOS release must install while only explicitly
+      non-strict missing-profile releases may be tolerated. Immutable
+      pre-static v0.17.0/v0.18.0-rc.1 loader failures remain visible without
+      keeping Rocky 9 red; the workflow forwards that exact-tag baseline into
+      the distro container, and a static regression check pins the boundary.
+      Every later release still fails closed. Hosted
+      macOS provisions the trusted historical libkrun runtime before exercising
+      v0.16.1. The focused suite, shellcheck, and actionlint pass on the rebased
+      head. The merge-queue live BDD witness now has a 45-minute bound so a
+      cold hosted runner cannot consume the entire budget installing the
+      pinned cross toolchain before the guest lifecycle runs.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
