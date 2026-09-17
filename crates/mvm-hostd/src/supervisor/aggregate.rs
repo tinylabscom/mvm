@@ -1381,6 +1381,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             asset_identities: Vec::new(),
+            outputs: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
             extensions: Vec::new(),

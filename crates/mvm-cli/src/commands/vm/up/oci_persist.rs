@@ -205,6 +205,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let ingress = machine_port_ingress(ports)?;
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: crate::commands::machine::preflight_network(),
             tenant: "local",
             vm_name: name,

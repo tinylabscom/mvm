@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — OCI teardown flush complete; surface design remains.**
+**Status: IN PROGRESS — `--output` collection, signed grant, and `plan.outputs` landed; hardlink identity and restored-run coverage remain.**
 
 ## The gap, measured
 
@@ -106,29 +106,93 @@ into the run lifecycle and holds the guard through the flush and teardown.
 
 ## Shape to build
 
-- [ ] **Decide the surface.** An explicit output affordance on the transient
-      path, e.g. `--output <guest-dir>:<host-dir>`, materialized as an output
-      disk the guest writes and the host extracts after exit. Deliberately not
-      a mode of `--mount`: the direction is the whole point, and overloading
-      `--mount` is what made its two shapes confusing enough to need the
-      message fix that preceded this plan.
-- [ ] **Reuse `builder_disk_transport`, do not fork it.** `create_output_disk`
-      and `read_output_disk` are the host half. If they need widening beyond
-      `mvm-build`, widen them — a second raw-tar codec would drift from the
-      first.
-- [ ] **Decide what writes the tar in a workload guest.** The builder's guest
-      init does it today. A workload guest runs `mvm-guest-agent`, not
-      `mvm-host-vm-init`, so this is the real work: the agent needs an
-      equivalent collect-and-pack step, and it needs to run after the workload
-      exits but before teardown.
-- [ ] **Bound it.** The output disk is fixed-size at boot; decide the failure
-      mode when a workload produces more than fits. The builder's
-      `repack_input_disk_in_place` refuses rather than truncating, on the
-      grounds that refusing is the only way the failure is visible. Same
-      reasoning applies.
-- [ ] **Say what it is in the audit record.** A workload that can emit bytes to
-      the host is a grant. It should appear in the signed plan the way a
-      directory grant does, not arrive as an unrecorded side channel.
+- [x] **Decide the surface.** `--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]`
+      on `run` and foreground `machine run`, carried on the existing
+      disk-image path rather than on a tar written by the guest.
+
+      The choice was between an output affordance that needs a guest-side pack
+      step and the durable writable disk the flush above made safe. The disk
+      wins on every constraint that is not negotiable:
+
+      - **No guest protocol.** The guest writes files into an ordinary ext4
+        mount. The host reads the image after the VM is gone. There is no
+        request to send, no verb to add, and no step that has to run between
+        workload exit and teardown — the flush is the existing `SleepPrep`.
+        The tar design needed exactly such a step in `mvm-guest-agent`, which
+        is the part this plan had flagged as the real work.
+      - **No host parser the tree did not already trust with guest bytes.**
+        `ext4-view` is already how `mvm-client`'s volume service and the
+        overlay/sidecar validators read guest-influenced images on the host;
+        it is memory-safe, `no_std`, and designed not to panic or loop on
+        invalid input. A guest-written tar would have been a second codec fed
+        by the guest.
+      - **No new network path and no writable share.** The output disk is a
+        fresh sparse image in a private scratch directory under
+        `~/.mvm/state/outputs/`; nothing on the host is visible to the guest.
+      - **In the signed plan.** `ExecutionPlan.outputs` carries each grant —
+        guest path, resolved host destination, byte bound, entry bound — and
+        synthesis refuses a grant whose guest path is not backed by a writable
+        disk the same plan admits in `shares`.
+
+      Still deliberately not a `--mount` mode: the direction is the point, and
+      the user never names, owns, or reuses the image.
+
+- [x] **Reuse, do not fork.** `builder_disk_transport` grew nothing — the tar
+      codec is not on this path at all. The OCI unpacker's absolute-path and
+      `..` refusals were lifted into one shared `escaping_path_refusal`, which
+      the unpacker and the output rules both call; the output rules add the
+      stricter shape an output path needs (no empty or `.` component, no NUL,
+      UTF-8, depth and length bounds). The disk itself goes through
+      `materialize_disk_volume`, `VolumeImageLock`, and the writable-disk flush
+      unchanged.
+
+- [x] **What writes it in a workload guest.** Nothing new: the workload
+      writes files into a mounted directory, and the flush that already runs
+      before teardown makes them durable.
+
+- [x] **Bound it, refusing rather than truncating.**
+      `mvm_fs::output::collect_from_ext4` walks the whole image first and
+      touches nothing on the host until the tree has passed every rule and
+      both bounds; only then does it extract, through directory handles opened
+      `O_NOFOLLOW`, creating every file `O_EXCL`. Any refusal — including one
+      mid-extraction — removes what the collection created. The disk is sized
+      past the byte bound so the bound, which names itself in the refusal, is
+      what fires, not a full disk.
+
+- [x] **Say what it is in the audit record.** After collection a
+      chain-signed `plan.outputs` entry records `outcome=collected` with the
+      canonical manifest digest (domain-tagged, length-prefixed, sorted by
+      path), entry count, byte total, and the tree digest `--asset` would
+      compute for the destination — so a later run that consumes these files
+      as an asset names them by the same identity — or `outcome=refused` with
+      only the rule's tag. No guest-chosen path reaches the chain; the full
+      manifest is written beside the outputs as `HOST_DIR.manifest.json`.
+
+      Live on macOS 26 HVF with fresh Alpine OCI VMs and an isolated
+      `MVM_HOME`: a workload running as its unprivileged service user wrote
+      `status.txt` and `logs/run.txt`; the host collected three entries
+      (10 bytes), wrote the manifest beside them, and the chain recorded
+      `plan.outputs outcome=collected`, whose `tree_sha256` equals
+      `mvmctl trust audit asset id` on the collected directory. A second run
+      that planted `ln -s /etc/passwd` refused with `reason=symlink`, and a
+      third that wrote 2 MiB under a `1M` bound refused naming the
+      1048576-byte bound (`reason=byte_bound`); neither left a destination,
+      and `trust audit verify` stayed clean.
+
+- [ ] **Refuse a hard link instead of copying it twice.** `ext4-view` exposes
+      no inode number or link count, so a file linked under two names inside
+      the image is indistinguishable from two files with equal bytes. Today it
+      is collected as two independent host files, each charged against the
+      byte bound — no alias reaches the host, but the rule "hardlinks are
+      refused" does not hold. Closing it needs inode identity from the reader
+      (an upstream accessor, or a reader that exposes it); reimplementing an
+      inode-table walk beside `ext4-view` would be the second parser this plan
+      exists to avoid.
+
+- [ ] **Outputs on restored and warm-claimed runs.** A run with any disk
+      volume is not warm-claim eligible and boots cold, so `--output` cannot be
+      silently dropped by a claim today. If disk volumes ever become
+      claimable, output disks need to travel with the claim or keep refusing.
 
 ## What this does not need
 

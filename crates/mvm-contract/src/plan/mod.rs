@@ -5,6 +5,7 @@
 
 pub mod bundle;
 pub mod execution_plan;
+pub mod output_grant;
 pub mod sdk_sidecar;
 pub mod types;
 pub mod validity;
@@ -13,6 +14,7 @@ pub mod verb_grant;
 pub mod verb_trust;
 
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
+pub use output_grant::{OutputGrant, OutputGrantError, validate_output_grants};
 pub use sdk_sidecar::{
     SDK_HOST_SERVICES, SDK_SIDECAR_GUEST_PATH, SDK_SIDECAR_LIB_PATH, is_sdk_host_service,
     sdk_host_services_in, sdk_sidecar_required, sdk_sidecar_required_for,

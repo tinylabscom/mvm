@@ -1032,6 +1032,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        outputs: Vec::new(),
         network_mode: parent_network_mode(p.parent_checkpoint, p.store),
         tenant: &tenant,
         vm_name: p.child_vm_name,

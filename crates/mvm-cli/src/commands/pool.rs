@@ -398,6 +398,7 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
+        outputs: Vec::new(),
         grants: None,
         kernel_sha256: None,
         vm_name: &handle.id,

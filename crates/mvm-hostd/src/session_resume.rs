@@ -63,6 +63,7 @@ pub fn synthesis_for_resume<'a>(
     material: &'a ResumePlanMaterial,
 ) -> SynthesisInput<'a> {
     SynthesisInput {
+        outputs: Vec::new(),
         // The session, not the parent sandbox. A resumed workload that ran
         // under the previous residency's name would attribute its actions to a
         // residency that had already ended.

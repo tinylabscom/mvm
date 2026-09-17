@@ -325,6 +325,16 @@ pub(in crate::commands) struct RunArgs {
     // summary gate caps that at 64 characters too.
     #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
     pub assets: Vec<String>,
+    /// Collect a guest directory into HOST_DIR after exit (repeatable).
+    //
+    // HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]. The guest gets a fresh writable
+    // disk at /GUEST; after the workload exits the host copies regular files
+    // and directories out of it into HOST_DIR (absent or empty), refusing the
+    // whole collection past SIZE bytes (default 64M) or MAX_ENTRIES entries
+    // (default 10000). The grant is signed into the plan and the result is a
+    // chain-signed `plan.outputs` entry. Plain comment: see `--mount`.
+    #[arg(long = "output", value_name = "HOST_DIR:GUEST[:SIZE]")]
+    pub outputs: Vec<String>,
     /// Not a flag: the libc of the image this run will boot, when it is known
     /// before the rootfs exists. A catalogued `--runtime` pins its image, so
     /// the entry states the libc and detection copies it here; an arbitrary
@@ -476,6 +486,7 @@ impl Default for RunArgs {
             receipt: None,
             caller_commitment: None,
             assets: Vec::new(),
+            outputs: Vec::new(),
             json: false,
             dry_run: false,
             launch_plan: None,
@@ -634,6 +645,11 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
+    // Settled before anything is resolved or booted, so an output with nowhere
+    // to land is refused first, and before the admit closure: the grants it
+    // signs and the disks the request attaches have to name the same images.
+    let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
+    let admit_outputs = outputs.grants();
     // One policy model for every backend: resolve the grant surfaces here —
     // which settles the egress policy in the same step — and thread the result
     // down both the json/receipt and the streaming paths.
@@ -709,6 +725,7 @@ pub(in crate::commands) fn run_secure_with_source(
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",
             vm_name,
@@ -803,23 +820,17 @@ pub(in crate::commands) fn run_secure_with_source(
             prod: args.prod,
             runtime_pack: args.runtime_pack,
         };
-        let req = build_exec_request(
+        let req = outputs.attach(build_exec_request(
             args.into_exec_args(),
             "`mvmctl run`",
             selection,
             network_policy,
             source_override.clone(),
             &oci_provenance,
-        )?;
+        )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
-        super::up::record_transient_outcome(
-            admit_ctx.borrow_mut().take(),
-            &receipt_backend,
-            posture.get(),
-            &result,
-        );
-        let output = result?;
+        let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -861,6 +872,7 @@ pub(in crate::commands) fn run_secure_with_source(
             ctx: &admit_ctx,
             backend: &receipt_backend,
             oci_provenance: &oci_provenance,
+            outputs: &outputs,
         },
     )
 }
@@ -932,8 +944,8 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
     if !grants.env && !args.env.is_empty() {
         anyhow::bail!("--profile {name} does not allow --env");
     }
-    if !grants.host_shares && !args.mounts.is_empty() {
-        anyhow::bail!("--profile {name} does not allow --mount");
+    if !grants.host_shares && !(args.mounts.is_empty() && args.outputs.is_empty()) {
+        anyhow::bail!("--profile {name} does not allow --mount or --output");
     }
 
     for spec in &args.mounts {
@@ -1007,6 +1019,9 @@ struct RunAudit<'a> {
     backend: &'a str,
     /// Filled by image resolution, read by the admission that boots it.
     oci_provenance: &'a OciProvenanceSink,
+    /// Output grants whose disks the run attaches and whose collection is
+    /// recorded once it exits.
+    outputs: &'a super::outputs::PreparedOutputs,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -1039,25 +1054,21 @@ fn run_run_args(
     source_override: Option<crate::exec::ImageSource>,
     audit: RunAudit<'_>,
 ) -> Result<()> {
-    let req = build_exec_request(
+    let req = audit.outputs.attach(build_exec_request(
         args,
         "`mvmctl run`",
         selection,
         network_policy,
         source_override,
         audit.oci_provenance,
-    )?;
+    )?);
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
-    super::up::record_transient_outcome(
-        audit.ctx.borrow_mut().take(),
-        audit.backend,
-        posture.get(),
-        &result,
-    );
-    let exit_code = result?;
+    let exit_code = audit
+        .outputs
+        .close_run(audit.ctx, audit.backend, posture.get(), result)?;
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }

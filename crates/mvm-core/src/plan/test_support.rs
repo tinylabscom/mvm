@@ -226,6 +226,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             asset_identities: Vec::new(),
+            outputs: Vec::new(),
             services: self.services,
             extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),

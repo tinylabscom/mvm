@@ -1207,7 +1207,7 @@ impl AuditEmitter {
         Ok(signed)
     }
 
-    fn emit<E>(&self, plan: &ExecutionPlan, event: &str, extras: E) -> Result<()>
+    pub(crate) fn emit<E>(&self, plan: &ExecutionPlan, event: &str, extras: E) -> Result<()>
     where
         E: IntoIterator<Item = (String, String)>,
     {

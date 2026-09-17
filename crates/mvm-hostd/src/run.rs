@@ -204,6 +204,7 @@ pub fn admit_and_boot_local(
         .transpose()?;
 
     let synthesis = SynthesisInput {
+        outputs: Vec::new(),
         grants: req.grants.clone(),
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
