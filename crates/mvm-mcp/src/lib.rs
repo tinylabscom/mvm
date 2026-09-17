@@ -13,7 +13,7 @@ use mvm_client::dto::{
     ResumeOpts,
 };
 use mvm_client::{
-    BackendCapabilityReport, ClientOperationCapabilities, MvmClient, validate_vm_name,
+    BackendCapabilityReport, ClientOperationCapabilities, MvmClient, MvmError, validate_vm_name,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -215,8 +215,16 @@ impl McpServer {
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
                     Ok(value) => response_result(id, self.tool_success(value)),
-                    Err(ToolFailure::Input(message) | ToolFailure::Backend(message)) => {
-                        response_result(id, tool_error(&message))
+                    Err(ToolFailure::Input(message)) => response_result(
+                        id,
+                        tool_error_classified(&message, GENERIC_INPUT_ERROR_CODE, false),
+                    ),
+                    Err(ToolFailure::Backend(error)) => {
+                        let message = format!("MvmClient operation failed: {error}");
+                        response_result(
+                            id,
+                            tool_error_classified(&message, error.code(), error.retryable()),
+                        )
                     }
                 }
             }
@@ -541,13 +549,17 @@ fn discover_result() -> Value {
     })
 }
 
+fn server_meta_object() -> Map<String, Value> {
+    let mut meta = Map::new();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        json!({"name":"mvm", "version":env!("CARGO_PKG_VERSION")}),
+    );
+    meta
+}
+
 fn server_meta() -> Value {
-    json!({
-        "io.modelcontextprotocol/serverInfo": {
-            "name":"mvm",
-            "version":env!("CARGO_PKG_VERSION")
-        }
-    })
+    Value::Object(server_meta_object())
 }
 
 fn tools_result(operations: &ClientOperationCapabilities) -> Value {
@@ -773,6 +785,12 @@ fn response_error(id: Value, code: i64, message: &str) -> String {
     .expect("JSON-RPC error values are serializable")
 }
 
+/// The `code` a tool error carries when it did not originate from an
+/// [`MvmError`] (bad tool arguments, an unknown tool name). It is deliberately
+/// generic and non-retryable: these are properties of the request the caller
+/// sent, not of backend state, so retrying unchanged can never help.
+const GENERIC_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+
 fn tool_error(message: &str) -> Value {
     let message: String = message.chars().take(512).collect();
     json!({
@@ -780,6 +798,23 @@ fn tool_error(message: &str) -> Value {
         "content":[{"type":"text", "text":message}],
         "isError":true,
         "_meta":server_meta()
+    })
+}
+
+/// Like [`tool_error`], but with a stable machine-readable `code` and a
+/// `retryable` flag folded into `_meta` alongside the existing server keys —
+/// so an automated caller can branch on the failure instead of parsing the
+/// message text.
+fn tool_error_classified(message: &str, code: &str, retryable: bool) -> Value {
+    let message: String = message.chars().take(512).collect();
+    let mut meta = server_meta_object();
+    meta.insert("code".to_string(), json!(code));
+    meta.insert("retryable".to_string(), json!(retryable));
+    json!({
+        "resultType":"complete",
+        "content":[{"type":"text", "text":message}],
+        "isError":true,
+        "_meta":Value::Object(meta)
     })
 }
 
@@ -797,17 +832,25 @@ fn parse_arguments<T: for<'de> Deserialize<'de>>(
 
 #[derive(Debug)]
 enum ToolFailure {
+    /// Rejected before any client call — bad tool arguments, an unknown
+    /// tool, or an argument the client trait cannot express. Not an
+    /// [`MvmError`], so it carries no variant to classify.
     Input(String),
-    Backend(String),
+    /// The typed facade error, carried through rather than stringified here,
+    /// so the dispatch site can still classify it by variant when building
+    /// the tool result's `_meta`.
+    Backend(MvmError),
 }
 
 impl ToolFailure {
-    fn backend(error: impl std::fmt::Display) -> Self {
-        Self::Backend(format!("MvmClient operation failed: {error}"))
+    fn backend(error: MvmError) -> Self {
+        Self::Backend(error)
     }
 
     fn serialization(_: impl std::fmt::Display) -> Self {
-        Self::Backend("MvmClient result could not be serialized".into())
+        Self::Backend(MvmError::Backend {
+            reason: "MvmClient result could not be serialized".into(),
+        })
     }
 }
 

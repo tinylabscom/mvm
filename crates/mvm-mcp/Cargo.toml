@@ -16,6 +16,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

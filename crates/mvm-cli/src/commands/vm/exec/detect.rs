@@ -8,6 +8,7 @@
 
 use super::RunArgs;
 use anyhow::{Context, Result};
+use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
 /// Whether a verb infers a boot source it was not given.
@@ -99,6 +100,8 @@ pub(in crate::commands) fn resolve_run_source(
     cwd: &std::path::Path,
     inference: Inference,
 ) -> Result<ResolvedSource> {
+    refuse_known_flag_after_double_dash(&args.argv)?;
+
     if args.image.is_some()
         || args.manifest.is_some()
         || args.flake.is_some()
@@ -120,6 +123,7 @@ pub(in crate::commands) fn resolve_run_source(
     }
 
     if args.no_detect || inference == Inference::ExplicitOnly {
+        refuse_if_argv_looks_like_an_image_reference(&args.argv)?;
         return Ok(ResolvedSource::BundledDefault);
     }
 
@@ -140,7 +144,75 @@ pub(in crate::commands) fn resolve_run_source(
         return Ok(ResolvedSource::Runtime(detection));
     }
 
+    refuse_if_argv_looks_like_an_image_reference(&args.argv)?;
     Ok(ResolvedSource::BundledDefault)
+}
+
+/// The `--long` flags `RunArgs` declares, read from clap's own definition
+/// rather than a hand-written list so a renamed or added flag is picked up
+/// automatically instead of drifting out of sync.
+fn run_flag_long_names() -> Vec<String> {
+    <RunArgs as ClapArgs>::augment_args(clap::Command::new("run"))
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .map(|long| format!("--{long}"))
+        .collect()
+}
+
+/// A known run flag placed after `--` lands in the guest argv instead of
+/// configuring the run — silently wrong rather than refused, because
+/// `trailing_var_arg` never reinterprets anything past that point as an
+/// option. Only the token immediately after `--` is checked: a workload's
+/// own program may legitimately take a same-named flag deeper in its own
+/// argv (forwarding `--help` to itself, for instance), and only position 0
+/// is unambiguous about what the user just typed.
+fn refuse_known_flag_after_double_dash(argv: &[String]) -> Result<()> {
+    let Some(first) = argv.first() else {
+        return Ok(());
+    };
+    if run_flag_long_names().iter().any(|flag| flag == first) {
+        anyhow::bail!(
+            "`{first}` is a run flag, but it appears right after `--`, so it was passed to the \
+             guest command instead of configuring the run. Move it before `--`."
+        );
+    }
+    Ok(())
+}
+
+/// Whether `word` reads as a misplaced OCI image reference rather than a
+/// program name or a path.
+///
+/// Parsing alone cannot tell them apart: `ImageReference` accepts almost any
+/// bare lowercase word by defaulting it to `docker.io/library/<word>:latest`,
+/// so `sh` and `python3` parse just as successfully as `alpine:3.19` does.
+/// This additionally requires a marker that a literal command or path never
+/// carries — an explicit tag/digest colon, or an explicit registry host
+/// before the first `/` — and excludes anything that already reads as a
+/// path (`./app`, `/bin/echo`).
+fn looks_like_a_misplaced_image_reference(word: &str) -> bool {
+    if word.starts_with('.') || word.starts_with('/') {
+        return false;
+    }
+    let has_reference_marker = word.contains(':')
+        || word
+            .split_once('/')
+            .is_some_and(|(host, _rest)| host == "localhost" || host.contains('.'));
+    has_reference_marker && word.parse::<mvm_fs::oci::ImageReference>().is_ok()
+}
+
+/// With no image source flag given and nothing detected, refuse a first
+/// command word that reads as an image reference rather than silently
+/// running it as the guest's command.
+fn refuse_if_argv_looks_like_an_image_reference(argv: &[String]) -> Result<()> {
+    if let Some(first) = argv.first()
+        && looks_like_a_misplaced_image_reference(first)
+    {
+        anyhow::bail!(
+            "`{first}` looks like an image reference, not a command — did you mean \
+             `--image {first}`?"
+        );
+    }
+    Ok(())
 }
 
 /// Merge a catalog entry's declared host-service bindings into the run args.
@@ -380,6 +452,109 @@ mod source_resolution {
         let result = resolve_run_source(&mut args, missing, Inference::Enabled);
         assert!(args.image.is_none());
         assert!(result.is_err() || result.expect("ok") == ResolvedSource::BundledDefault);
+    }
+
+    /// The exact repro from the issue: `mvmctl machine run app:1.0 -- sh`
+    /// gives no image source, so `app:1.0` would otherwise become the guest
+    /// command silently.
+    #[test]
+    fn a_misplaced_image_reference_with_no_source_is_refused() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            argv: vec!["app:1.0".to_string(), "sh".to_string()],
+            ..Default::default()
+        };
+        let err = resolve_run_source(&mut args, dir.path(), Inference::ExplicitOnly)
+            .expect_err("a misplaced image reference must refuse");
+        assert!(err.to_string().contains("--image app:1.0"), "{err}");
+    }
+
+    /// The same refusal applies on `mvmctl run`, where inference actually
+    /// runs — it must still fire once the catalog and manifest walk-up both
+    /// find nothing, per `resolve_run_source`'s final fallback.
+    #[test]
+    fn the_refusal_also_fires_once_full_inference_finds_nothing() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            argv: vec!["registry.example.com/app:1.0".to_string()],
+            ..Default::default()
+        };
+        let err = resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+            .expect_err("a misplaced image reference must refuse even when inference runs");
+        assert!(err.to_string().contains("--image"), "{err}");
+    }
+
+    /// Ordinary commands must never trip the hint, including ones a naive
+    /// check would flag: a path (`./app`, `/bin/echo`) or a bare word that
+    /// happens to parse as a bare image reference (`sh`, `python3` both
+    /// parse successfully as `docker.io/library/<word>:latest`).
+    #[test]
+    fn ordinary_commands_never_trigger_the_image_reference_hint() {
+        let dir = sealed_dir();
+        for command in ["sh", "python3", "./app", "/bin/echo"] {
+            let mut args = RunArgs {
+                argv: vec![command.to_string()],
+                ..Default::default()
+            };
+            resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+                .unwrap_or_else(|e| panic!("{command:?} must not be refused: {e}"));
+        }
+    }
+
+    /// A colon-bearing first word still runs once an image source is given —
+    /// the hint only fires when nothing else already answered the question.
+    #[test]
+    fn an_explicit_image_source_bypasses_the_image_reference_hint() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            image: Some("alpine:3.20".to_string()),
+            argv: vec!["app:1.0".to_string()],
+            ..Default::default()
+        };
+        let resolved = resolve_run_source(&mut args, dir.path(), Inference::ExplicitOnly)
+            .expect("an explicit image source is never second-guessed");
+        assert_eq!(resolved, ResolvedSource::Explicit);
+    }
+
+    /// A run flag placed right after `--` (the position `trailing_var_arg`
+    /// makes ambiguous to the user, not to clap) is refused and named.
+    #[test]
+    fn a_known_run_flag_right_after_double_dash_is_refused() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            argv: vec!["--image".to_string(), "alpine".to_string()],
+            ..Default::default()
+        };
+        let err = resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+            .expect_err("a run flag placed after -- must refuse");
+        assert!(err.to_string().contains("--image"), "{err}");
+    }
+
+    /// The same flag name deeper in argv is the workload's own business —
+    /// only position 0 is unambiguous about what the user just typed after
+    /// `--`.
+    #[test]
+    fn the_same_flag_deeper_in_argv_is_left_to_the_workload() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            argv: vec!["sh".to_string(), "-c".to_string(), "--image".to_string()],
+            ..Default::default()
+        };
+        resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+            .expect("a flag deeper in argv is the workload's own business");
+    }
+
+    /// A flag-shaped word that is not one of `RunArgs`'s own declared flags
+    /// is not ours to refuse — it is passed through to the guest untouched.
+    #[test]
+    fn an_unrecognised_flag_shaped_word_is_never_refused() {
+        let dir = sealed_dir();
+        let mut args = RunArgs {
+            argv: vec!["--not-a-real-flag".to_string()],
+            ..Default::default()
+        };
+        resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+            .expect("an unrecognised flag-shaped word is not one of ours to refuse");
     }
 }
 

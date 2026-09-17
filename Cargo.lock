@@ -3312,6 +3312,7 @@ dependencies = [
 name = "mvm-mcp"
 version = "0.18.0-rc.2"
 dependencies = [
+ "async-trait",
  "chrono",
  "mvm-client",
  "serde",
