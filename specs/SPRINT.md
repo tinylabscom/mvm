@@ -19,6 +19,19 @@
       gates pass. The full workspace run passed all suites except two parallel
       image-lock collisions, and both exact isolated reruns passed.
 
+- [ ] **Extract the image release train into `mvm-images`.**
+      `specs/plans/2026-09-16-image-repository-extraction.md`.
+      Issues #3362–#3369 and #3373.
+      Planned in eight incremental workstreams: remove cold source-image
+      preparation from the release critical path; establish a separately
+      governed image repository; define one signed image-set manifest and lock;
+      move and reproduce the image sources; ship explicit sibling-checkout
+      development; migrate trust and consumers; dual-publish through a support
+      window; then cut over and measure. An optional ninth workstream measures
+      whether a separately approved, archived history rewrite is worthwhile.
+      Production must never auto-discover or accept unsigned local sibling
+      artifacts.
+
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
       documentation/site routes on every `check-all` run, and repair the

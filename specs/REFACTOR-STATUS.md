@@ -9,6 +9,18 @@ Last updated: 2026-09-16
       Silicon alone no longer selects HVF on macOS 13–25; the existing macOS
       26+ platform predicate gates that default without adding fallback policy.
 
+- [ ] **Image release-train repository extraction.**
+      `specs/plans/2026-09-16-image-repository-extraction.md`.
+      Issues #3362–#3369 and #3373.
+      Move the builder VM, default boot image, runtime overlay, SDK sidecars,
+      kernel/seed inputs, and their signed atomic manifest into one public
+      `mvm-images` repository. The migration starts by taking cold source image
+      preparation out of release E2E, preserves a focused nightly source-build
+      witness, supports explicit sibling-worktree development at a dev-only
+      trust tier, and keeps legacy consumers working through dual publication.
+      After cutover, separately measure and gate any history compaction rather
+      than folding a destructive rewrite into the repository move.
+
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
       repository files, same-repository GitHub links, generated Markdown
