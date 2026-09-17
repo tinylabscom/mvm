@@ -26,7 +26,8 @@ pub(in crate::commands) struct Args {
     #[arg(value_name = "FILE")]
     pub file: PathBuf,
     /// Registry reference to push to, `[oci://]<registry>/<repository>:<tag>`.
-    /// Without a tag the manifest is stored under its own digest.
+    /// No tag means `latest`; `@sha256:<digest>` instead stores the manifest
+    /// under that digest, which must be the digest of what is pushed.
     #[arg(value_name = "REFERENCE")]
     pub reference: String,
     /// Override the trust store directory used to verify the bundle

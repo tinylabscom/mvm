@@ -549,8 +549,7 @@ mod tests {
             &http_transport(),
             &stranger.trust(),
         )
-        .err()
-        .expect("an unverifiable bundle must not be published");
+        .expect_err("an unverifiable bundle must not be published");
 
         assert!(format!("{err:#}").contains("refusing to push"), "{err:#}");
         assert!(registry.requests().is_empty(), "nothing was sent");
