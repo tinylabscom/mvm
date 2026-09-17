@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-16
+Last updated: 2026-09-17
 
 ## In progress
 
@@ -31,6 +31,11 @@ Last updated: 2026-09-16
       trust tier, and keeps legacy consumers working through dual publication.
       After cutover, separately measure and gate any history compaction rather
       than folding a destructive rewrite into the repository move.
+      - [x] W1 #3363: release E2E fetches the signed builder image; cold source
+            bootstrap is the nightly `source-bootstrap-linux` witness; phase
+            timings emitted; fetch staged atomically with arch refusals.
+      - [ ] W1 #3363: two post-merge runs compared against the 2026-09-15
+            baseline.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

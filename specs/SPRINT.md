@@ -54,6 +54,13 @@
       whether a separately approved, archived history rewrite is worthwhile.
       Production must never auto-discover or accept unsigned local sibling
       artifacts.
+      W1 (#3363) implementation: the Linux release lane fetches the pinned
+      signed builder image, Firecracker builds the source-matched SDK sidecar
+      inside it, the cold source bootstrap runs as the nightly
+      `source-bootstrap-linux` witness, both harnesses emit phase timings, and
+      the fetch is staged atomically with architecture and manifest-pin
+      refusals. Open: the two post-merge timing runs against the 2026-09-15
+      baseline.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

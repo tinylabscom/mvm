@@ -20,10 +20,15 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
         );
     }
 
-    let builder_choice = mvm_build::builder_backend_select::resolve_choice();
-    if builder_choice == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf {
-        super::bootstrap::bootstrap_builder_vm_image()
-            .context("preparing the HVF builder image for the SDK sidecar build")?;
+    let boundary =
+        SidecarBuildBoundary::for_choice(mvm_build::builder_backend_select::resolve_choice());
+    if boundary != SidecarBuildBoundary::Stage0 {
+        super::bootstrap::bootstrap_builder_vm_image().with_context(|| {
+            format!(
+                "preparing the {} builder image for the SDK sidecar build",
+                boundary.name()
+            )
+        })?;
     }
 
     let fingerprint = mvm_build::guest_agent_build::sdk_cdylib_source_fingerprint(workspace_root)
@@ -51,20 +56,26 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
             .verbose(verbose)
             .build()?;
 
-    let build_result =
-        if builder_choice == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf {
-            ui::info(&format!(
-                "Building SDK sidecar for {arch} in the HVF builder from {}...",
-                workspace_root.display()
-            ));
-            build_sdk_sidecar_via_hvf(workspace_root, &staging_dir, arch, libc)
-        } else {
-            ui::info(&format!(
-                "Building SDK sidecar for {arch} via Stage 0 from {}...",
-                workspace_root.display()
-            ));
-            request.run()
+    let build_result = if boundary == SidecarBuildBoundary::Stage0 {
+        ui::info(&format!(
+            "Building SDK sidecar for {arch} via Stage 0 from {}...",
+            workspace_root.display()
+        ));
+        request.run()
+    } else {
+        ui::info(&format!(
+            "Building SDK sidecar for {arch} in the {} builder from {}...",
+            boundary.name(),
+            workspace_root.display()
+        ));
+        let job = mvm_build::libkrun_builder::BuilderShellJob {
+            work_dir: workspace_root.to_path_buf(),
+            artifact_out: staging_dir.clone(),
+            script: sdk_sidecar_builder_script(arch, libc),
+            extra_disks: Vec::new(),
         };
+        boundary.run_shell_job(&job)
+    };
     if let Err(error) = build_result {
         let _ = std::fs::remove_dir_all(&staging_dir);
         return Err(error.context("building SDK sidecar inside the builder VM"));
@@ -98,31 +109,75 @@ fn sidecar_build_attr(libc: mvm_contract::guest_libc::GuestLibc) -> &'static str
     }
 }
 
+/// Where a source-matched sidecar is built.
+///
+/// HVF and Firecracker run shell jobs in the builder image itself, so the
+/// sidecar is built inside whichever image the host already has — built from
+/// source or fetched and verified — and a host that fetched its builder image
+/// does not pay for a Stage 0 it skipped. libkrun, QEMU and WebLinux have no
+/// shell-job path here and keep building through Stage 0.
 #[cfg(feature = "builder-vm")]
-fn build_sdk_sidecar_via_hvf(
-    workspace_root: &std::path::Path,
-    staging_dir: &std::path::Path,
-    arch: mvm_core::arch::GuestArch,
-    libc: mvm_contract::guest_libc::GuestLibc,
-) -> Result<()> {
-    let (kernel, rootfs, closure_nar) =
-        crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
-            .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
-    let job = mvm_build::libkrun_builder::BuilderShellJob {
-        work_dir: workspace_root.to_path_buf(),
-        artifact_out: staging_dir.to_path_buf(),
-        script: sdk_sidecar_builder_script(arch, libc),
-        extra_disks: Vec::new(),
-    };
-    mvm_runtime::builder_runner::DriverBuilderVm::new(
-        mvm_backends::driver::hvf::HvfDriver::new(),
-        kernel,
-        rootfs,
-    )
-    .with_closure_nar(closure_nar)
-    .run_shell_script(&job)
-    .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarBuildBoundary {
+    Hvf,
+    Firecracker,
+    Stage0,
+}
+
+#[cfg(feature = "builder-vm")]
+impl SidecarBuildBoundary {
+    fn for_choice(choice: mvm_build::builder_backend_select::BuilderBackendChoice) -> Self {
+        use mvm_build::builder_backend_select::BuilderBackendChoice;
+        match choice {
+            BuilderBackendChoice::Hvf => Self::Hvf,
+            BuilderBackendChoice::Firecracker => Self::Firecracker,
+            BuilderBackendChoice::Libkrun
+            | BuilderBackendChoice::Qemu
+            | BuilderBackendChoice::WebLinux => Self::Stage0,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hvf => "HVF",
+            Self::Firecracker => "Firecracker",
+            Self::Stage0 => "Stage 0",
+        }
+    }
+
+    fn run_shell_job(self, job: &mvm_build::libkrun_builder::BuilderShellJob) -> Result<()> {
+        match self {
+            Self::Hvf => {
+                let (kernel, rootfs, closure_nar) =
+                    crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
+                        .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
+                mvm_runtime::builder_runner::DriverBuilderVm::new(
+                    mvm_backends::driver::hvf::HvfDriver::new(),
+                    kernel,
+                    rootfs,
+                )
+                .with_closure_nar(closure_nar)
+                .run_shell_script(job)
+                .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
+            }
+            Self::Firecracker => {
+                let image = crate::commands::build::fc_builder_image::resolve_fc_builder_image()
+                    .map_err(|error| {
+                        anyhow::anyhow!("resolving Firecracker builder image: {error}")
+                    })?;
+                mvm_runtime::builder_runner::DriverBuilderVm::new(
+                    mvm_backends::driver::fc::FcDriver::new(),
+                    image.kernel,
+                    image.rootfs,
+                )
+                .with_closure_nar(image.closure_nar)
+                .run_shell_script(job)
+                .map_err(|error| anyhow::anyhow!("Firecracker builder shell job: {error}"))?;
+            }
+            Self::Stage0 => anyhow::bail!("Stage 0 builds the sidecar without a builder shell job"),
+        }
+        Ok(())
+    }
 }
 
 /// Render the `cmd.sh` the builder guest runs to produce the SDK sidecar
@@ -176,6 +231,42 @@ sync
 #[cfg(all(test, feature = "builder-vm"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_builders_build_the_sidecar_in_their_image_and_the_rest_use_stage0() {
+        use mvm_build::builder_backend_select::BuilderBackendChoice;
+
+        for (choice, boundary) in [
+            (BuilderBackendChoice::Hvf, SidecarBuildBoundary::Hvf),
+            (
+                BuilderBackendChoice::Firecracker,
+                SidecarBuildBoundary::Firecracker,
+            ),
+            (BuilderBackendChoice::Libkrun, SidecarBuildBoundary::Stage0),
+            (BuilderBackendChoice::Qemu, SidecarBuildBoundary::Stage0),
+            (BuilderBackendChoice::WebLinux, SidecarBuildBoundary::Stage0),
+        ] {
+            assert_eq!(
+                SidecarBuildBoundary::for_choice(choice),
+                boundary,
+                "{choice:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage0_has_no_shell_job_to_run() {
+        let job = mvm_build::libkrun_builder::BuilderShellJob {
+            work_dir: std::path::PathBuf::from("/nonexistent"),
+            artifact_out: std::path::PathBuf::from("/nonexistent"),
+            script: String::new(),
+            extra_disks: Vec::new(),
+        };
+        let error = SidecarBuildBoundary::Stage0
+            .run_shell_job(&job)
+            .expect_err("Stage 0 must not be mistaken for a shell-job builder");
+        assert!(error.to_string().contains("Stage 0"));
+    }
 
     #[test]
     fn hvf_builder_script_copies_the_complete_sidecar_contract() {

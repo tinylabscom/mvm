@@ -1,0 +1,4 @@
+b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1  builder-vm-vmlinux-aarch64
+8b3447b451842d07dbad0ec695cfaa2e631a23a034d6a5b8dae94614af7b47bd  builder-vm-rootfs-aarch64.ext4
+5e186ff06b2c723c6cacd55497a3b053d65602314ca44dcccf3860e9a411afe5  builder-vm-aarch64.cmdline.txt
+6b4452d6496f41f73499b59b443436334a14dc43249da9c4a146136797948146  builder-vm-aarch64.manifest.json
