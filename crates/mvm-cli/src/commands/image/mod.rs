@@ -33,10 +33,12 @@ mod trust_policy;
 // `crate::commands::vm::exec`'s `super::super::image::<name>` reach-in.
 use cache::{inspect_image, list_rows, remove_image, render_inspect, render_list};
 use oci_types::CosignIdentity;
-pub(in crate::commands) use pull_core::ensure_prod_digest_pin;
 use pull_core::pull_image_with_trust;
 pub(in crate::commands) use pull_core::resolve_or_pull_run_image;
-pub(in crate::commands) use trust::registry_auth_for;
+pub(in crate::commands) use pull_core::{
+    ensure_prod_digest_pin, ensure_prod_registry_policy, require_prod_digest_pin,
+};
+pub(in crate::commands) use trust::{OciRegistryAuthDecision, registry_auth_for};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {

@@ -101,8 +101,8 @@
 //!   removal itself is exercised in depth in `tests/install_sh.rs`.
 //! - `mvmctl bundle push <file> oci://…` (against the in-process registry
 //!   from `mvm_fs::oci::test_registry`) → `BundlePush`, and the printed
-//!   digest reference then passes `mvmctl bundle fetch --prod`, which emits
-//!   nothing
+//!   digest reference then passes `mvmctl bundle fetch`, which emits
+//!   nothing. (`--prod` refuses the fixture's plain HTTP.)
 //! - `mvmctl secret put / get / ls / rm` → secret-side audit JSONL
 //!   at `~/.mvm/audit/secrets.jsonl` carries one entry per call
 //!   with `"action":"put"` / `"get"` / `"list"` / `"delete"`. The
@@ -2736,7 +2736,7 @@ fn signed_bundle_fixture(root: &Path, seed: u8) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn bundle_push_emits_bundle_push_and_the_printed_reference_fetches_under_prod() {
+fn bundle_push_emits_bundle_push_and_the_printed_reference_fetches() {
     let sandbox = AuditSandbox::new();
     let registry = mvm_fs::oci::test_registry::MemoryRegistry::start();
     let (archive, trust_dir) = signed_bundle_fixture(sandbox.home_path(), 11);
@@ -2773,7 +2773,7 @@ fn bundle_push_emits_bundle_push_and_the_printed_reference_fetches_under_prod() 
     let fetched = sandbox
         .mvmctl()
         .env_remove("MVM_OCI_BEARER_TOKEN")
-        .args(["bundle", "fetch", &reference, "--prod", "--allow-http"])
+        .args(["bundle", "fetch", &reference, "--allow-http"])
         .arg("--trust-store")
         .arg(&trust_dir)
         .output()

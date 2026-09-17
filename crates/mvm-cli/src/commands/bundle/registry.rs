@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 
+use crate::commands::image::OciRegistryAuthDecision;
 use mvm_contract::plan::bundle::{BUNDLE_ARTIFACT_TYPE, BUNDLE_LAYER_MEDIA_TYPE};
 use mvm_core::plan::bundle::{TrustStore, VerifiedBundle, read_and_verify_bundle};
 use mvm_fs::oci::{
@@ -29,6 +30,10 @@ const BUNDLE_KIND: ArtifactKind<'static> = ArtifactKind {
     layer_media_type: BUNDLE_LAYER_MEDIA_TYPE,
 };
 
+/// Environment variable that supplies a token for every registry. It is not
+/// bound to one host, so it is never sent over plain HTTP.
+const GLOBAL_TOKEN_SOURCE: &str = "env:MVM_OCI_BEARER_TOKEN";
+
 /// How to reach a registry: the protocol and the credentials.
 pub(super) struct RegistryTransport {
     config: ClientConfig,
@@ -39,15 +44,18 @@ impl RegistryTransport {
     /// Credentials come from the same environment variables `image pull`
     /// reads. Plain HTTP is used only when the caller opted in.
     pub(super) fn for_reference(reference: &ImageReference, allow_http: bool) -> Result<Self> {
-        let auth = crate::commands::image::registry_auth_for(reference)?.auth;
+        let decision = crate::commands::image::registry_auth_for(reference)?;
         if allow_http {
             crate::ui::warn(&format!(
                 "Talking to registry {} over plain HTTP. The bundle signature still applies; \
-                 credentials and traffic are visible to anyone on the wire.",
+                 traffic is visible to anyone on the wire.",
                 reference.registry
             ));
         }
-        Ok(Self::new(protocol_for(allow_http), auth))
+        Ok(Self::new(
+            protocol_for(allow_http),
+            credentials_for_protocol(decision, allow_http),
+        ))
     }
 
     pub(super) fn new(protocol: ClientProtocol, auth: RegistryAuthConfig) -> Self {
@@ -65,12 +73,56 @@ impl RegistryTransport {
     }
 }
 
+/// Drop the host-independent fallback token when the registry is reached
+/// over plain HTTP. A token named for this registry is kept: whoever set it
+/// chose this host.
+fn credentials_for_protocol(
+    decision: OciRegistryAuthDecision,
+    allow_http: bool,
+) -> RegistryAuthConfig {
+    if allow_http && decision.source == GLOBAL_TOKEN_SOURCE {
+        crate::ui::warn(
+            "Not sending MVM_OCI_BEARER_TOKEN over plain HTTP; set the registry-specific \
+             MVM_OCI_BEARER_TOKEN_<REGISTRY> to authenticate to this registry.",
+        );
+        return RegistryAuthConfig::Anonymous;
+    }
+    decision.auth
+}
+
 fn protocol_for(allow_http: bool) -> ClientProtocol {
     if allow_http {
         ClientProtocol::Http
     } else {
         ClientProtocol::Https
     }
+}
+
+/// Everything `--prod` requires of a registry source, checked from the
+/// reference and local policy before any network access: no plain HTTP, a
+/// digest rather than a tag, and a registry the OCI registry policy allows —
+/// the same policy and allowlist `image pull --prod` enforces.
+pub(super) fn admit_registry_source(
+    reference: &ImageReference,
+    prod: bool,
+    allow_http: bool,
+) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    if allow_http {
+        bail!("--prod refuses --allow-http: a production bundle is never fetched over plain HTTP");
+    }
+    crate::commands::image::require_prod_digest_pin(reference, prod, "mvmctl bundle").map_err(
+        |e| {
+            anyhow::anyhow!(
+                "{e}; use {REGISTRY_SCHEME}{}/{}@sha256:<digest>",
+                reference.registry,
+                reference.repository
+            )
+        },
+    )?;
+    crate::commands::image::ensure_prod_registry_policy(reference, prod)
 }
 
 /// Parse a registry reference, with or without the `oci://` prefix.
@@ -86,22 +138,6 @@ pub(super) fn parse_registry_reference(input: &str) -> Result<ImageReference> {
 /// The form printed back to the user, which `fetch` and `install` accept.
 pub(super) fn display_reference(reference: &ImageReference) -> String {
     format!("{REGISTRY_SCHEME}{}", reference.canonical())
-}
-
-/// Refuse a tag under `--prod`. A tag can be moved to other bytes after the
-/// fact; a digest cannot. Checked from the reference alone, before any
-/// network access.
-pub(super) fn ensure_prod_digest_pin(reference: &ImageReference, prod: bool) -> Result<()> {
-    if prod && !reference.is_digest_pinned() {
-        bail!(
-            "--prod requires a digest-pinned bundle reference; {} names a tag. \
-             Use {REGISTRY_SCHEME}{}/{}@sha256:<digest>",
-            display_reference(reference),
-            reference.registry,
-            reference.repository
-        );
-    }
-    Ok(())
 }
 
 /// Archive bytes pulled from a registry, with the digest they were pulled at.
@@ -146,4 +182,32 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .enable_all()
         .build()
         .context("building the async runtime for registry access")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decision(source: &str) -> OciRegistryAuthDecision {
+        OciRegistryAuthDecision {
+            auth: RegistryAuthConfig::bearer("secret"),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_global_token_is_never_used_over_plain_http() {
+        let over_http = credentials_for_protocol(decision(GLOBAL_TOKEN_SOURCE), true);
+        assert!(!over_http.is_authenticated());
+
+        let over_https = credentials_for_protocol(decision(GLOBAL_TOKEN_SOURCE), false);
+        assert!(over_https.is_authenticated());
+    }
+
+    #[test]
+    fn a_registry_specific_token_is_kept_over_plain_http() {
+        let auth =
+            credentials_for_protocol(decision("env:MVM_OCI_BEARER_TOKEN_127_0_0_1_5000"), true);
+        assert!(auth.is_authenticated());
+    }
 }

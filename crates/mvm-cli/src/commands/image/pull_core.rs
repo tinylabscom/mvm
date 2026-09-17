@@ -42,9 +42,24 @@ pub(in crate::commands) fn ensure_prod_digest_pin(reference: &str, prod: bool) -
     }
     if let source::ImageSource::Registry(_) = source::ImageSource::classify(reference)? {
         let image_ref: ImageReference = reference.parse()?;
-        if !image_ref.is_digest_pinned() {
-            bail!("mvmctl run --image --prod requires a digest-pinned reference");
-        }
+        require_prod_digest_pin(&image_ref, true, "mvmctl run --image")?;
+    }
+    Ok(())
+}
+
+/// The digest-pin rule every `--prod` registry fetch shares: a tag can be
+/// moved to other bytes after the fact, a digest cannot. `surface` names the
+/// command in the refusal.
+pub(in crate::commands) fn require_prod_digest_pin(
+    image_ref: &ImageReference,
+    prod: bool,
+    surface: &str,
+) -> Result<()> {
+    if prod && !image_ref.is_digest_pinned() {
+        bail!(
+            "{surface} --prod requires a digest-pinned reference; {} names a tag",
+            image_ref.canonical()
+        );
     }
     Ok(())
 }
@@ -246,9 +261,7 @@ fn pull_image_with_trust_with_prepare(
     prepare_guest_runtime: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
     let image_ref: ImageReference = reference.parse()?;
-    if prod && !image_ref.is_digest_pinned() {
-        bail!("mvmctl image pull --prod requires a digest-pinned reference");
-    }
+    require_prod_digest_pin(&image_ref, prod, "mvmctl image pull")?;
     ensure_prod_registry_policy(&image_ref, prod)?;
     prepare_guest_runtime(cache_root)?;
     pull_image_ref(cache_root, image_ref, reference, prod)
@@ -265,7 +278,12 @@ fn ensure_prod_registry_reference_policy(reference: &str, prod: bool) -> Result<
     Ok(())
 }
 
-fn ensure_prod_registry_policy(image_ref: &ImageReference, prod: bool) -> Result<()> {
+/// Under `--prod`, load the OCI registry policy and refuse a registry it does
+/// not allow. Shared by every command that fetches from a registry.
+pub(in crate::commands) fn ensure_prod_registry_policy(
+    image_ref: &ImageReference,
+    prod: bool,
+) -> Result<()> {
     if !prod {
         return Ok(());
     }

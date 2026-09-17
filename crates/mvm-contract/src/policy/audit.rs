@@ -233,8 +233,10 @@ pub enum LocalAuditKind {
     TrustRemove,
     /// `mvmctl bundle install <source>` — verified + atomically
     /// extracted a `.mvmpkg` archive into `~/.mvm/bundles/<sha>/`.
-    /// Detail: `bundle_sha256=<64hex>,key_id=<32hex>`. Emitted only
-    /// on the success arm; verify failures don't reach the emit.
+    /// Detail: `bundle_sha256=<64hex>,key_id=<32hex>,source=<source>`, where
+    /// the source is the digest-pinned `oci://` reference for a registry pull
+    /// and a credential-free URL or path otherwise. Emitted only on the success
+    /// arm; verify failures don't reach the emit.
     BundleInstall,
     /// `mvmctl bundle gc <sha>` or `mvmctl bundle gc --all` —
     /// pruned one or more installed bundles from the registry.

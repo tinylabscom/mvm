@@ -102,7 +102,7 @@ pub(super) fn load_oci_registry_policy() -> Result<OciRegistryPolicy> {
     };
     if !path.exists() {
         bail!(
-            "mvmctl image --prod requires an OCI registry policy at {} \
+            "--prod requires an OCI registry policy at {} \
              (or set MVM_OCI_POLICY to a policy file)",
             path.display()
         );

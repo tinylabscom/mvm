@@ -26,7 +26,7 @@ use mvm_fs::oci::ImageReference;
 
 use super::super::Cli;
 use super::registry::{
-    REGISTRY_SCHEME, RegistryTransport, display_reference, ensure_prod_digest_pin,
+    REGISTRY_SCHEME, RegistryTransport, admit_registry_source, display_reference,
     parse_registry_reference, pull_bundle,
 };
 
@@ -50,8 +50,11 @@ pub(in crate::commands) struct Args {
     /// (e.g. which bundle a host is pulling). Off by default.
     #[arg(long)]
     pub allow_http: bool,
-    /// Production mode: refuse a registry reference that names a tag
-    /// rather than a digest, before contacting the registry.
+    /// Production mode. Refuses `--allow-http` for every source. For an
+    /// `oci://` source, also refuses a tag instead of a digest and a registry
+    /// the OCI registry policy does not allow, before contacting it. Paths
+    /// and `https://` URLs are not restricted further; every source must
+    /// still pass the signature check.
     #[arg(long)]
     pub prod: bool,
 }
@@ -124,6 +127,11 @@ fn load_archive(
     options: LoadOptions,
     transport_for: impl FnOnce(&ImageReference) -> Result<RegistryTransport>,
 ) -> Result<LoadedBundle> {
+    if options.prod && options.allow_http {
+        anyhow::bail!(
+            "--prod refuses --allow-http: a production bundle is never fetched over plain HTTP"
+        );
+    }
     let bytes = match src {
         BundleSource::File(path) => std::fs::read(path)
             .with_context(|| format!("reading bundle archive at {}", path.display()))?,
@@ -145,7 +153,7 @@ fn load_archive(
             download_to_bytes(url)?
         }
         BundleSource::Registry(reference) => {
-            ensure_prod_digest_pin(reference, options.prod)?;
+            admit_registry_source(reference, options.prod, options.allow_http)?;
             let pulled = pull_bundle(reference, &transport_for(reference)?)?;
             return Ok(LoadedBundle {
                 bytes: pulled.bytes,
@@ -527,13 +535,10 @@ mod tests {
         let pinned = format!("@{}", pushed.manifest_digest);
         let by_digest = load_archive(
             &source(&registry, &pinned),
-            LoadOptions {
-                prod: true,
-                ..LoadOptions::default()
-            },
+            LoadOptions::default(),
             with_http,
         )
-        .expect("fetch by digest under --prod");
+        .expect("fetch by digest");
         read_and_verify_bundle(&by_digest.bytes, &publisher.trust()).expect("verifies");
     }
 
@@ -575,6 +580,110 @@ mod tests {
             registry.requests().is_empty(),
             "no request reached the registry"
         );
+    }
+
+    /// Point `MVM_OCI_POLICY` at a production policy that allows exactly
+    /// `allowed`.
+    fn prod_policy(
+        env: &mut mvm_core::util::test_env::TestEnv,
+        dir: &std::path::Path,
+        allowed: &str,
+    ) {
+        let path = dir.join("oci-policy.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "allowed_registries = [\"{allowed}\"]\n\n[[cosign]]\n\
+                 certificate_identity = \"release@example.test\"\n\
+                 certificate_oidc_issuer = \"https://issuer.example.test\"\n"
+            ),
+        )
+        .expect("write policy");
+        env.set("MVM_OCI_POLICY", &path);
+    }
+
+    #[test]
+    fn prod_refuses_allow_http_before_any_network_access() {
+        let registry = MemoryRegistry::start();
+        let pinned = format!("@sha256:{}", "a".repeat(64));
+
+        for src in [
+            source(&registry, &pinned),
+            BundleSource::File(PathBuf::from("./local.mvmpkg")),
+        ] {
+            let err = load_archive(
+                &src,
+                LoadOptions {
+                    prod: true,
+                    allow_http: true,
+                },
+                no_transport,
+            )
+            .err()
+            .expect("--prod with --allow-http must be refused");
+            assert!(
+                format!("{err:#}").contains("--prod refuses --allow-http"),
+                "{err:#}"
+            );
+        }
+        assert!(registry.requests().is_empty());
+    }
+
+    #[test]
+    fn prod_refuses_a_registry_the_oci_policy_does_not_allow_before_network() {
+        let registry = MemoryRegistry::start();
+        let dir = tempfile::tempdir().expect("policy dir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        prod_policy(&mut env, dir.path(), "registry.allowed.example");
+        let pinned = format!("@sha256:{}", "a".repeat(64));
+
+        let err = load_archive(
+            &source(&registry, &pinned),
+            LoadOptions {
+                prod: true,
+                ..LoadOptions::default()
+            },
+            no_transport,
+        )
+        .err()
+        .expect("a registry outside the policy must be refused");
+
+        assert!(
+            format!("{err:#}").contains("denied by production policy"),
+            "{err:#}"
+        );
+        assert!(registry.requests().is_empty());
+    }
+
+    #[test]
+    fn prod_refuses_a_registry_source_without_an_oci_policy() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_OCI_POLICY", dir.path().join("absent.toml"));
+        let reference: ImageReference =
+            format!("registry.example/team/app@sha256:{}", "a".repeat(64))
+                .parse()
+                .expect("reference");
+
+        let err = admit_registry_source(&reference, true, false).expect_err("no policy, no prod");
+
+        assert!(
+            format!("{err:#}").contains("requires an OCI registry policy"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn prod_admits_a_digest_pinned_reference_on_an_allowed_registry() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        prod_policy(&mut env, dir.path(), "registry.example");
+        let reference: ImageReference =
+            format!("registry.example/team/app@sha256:{}", "a".repeat(64))
+                .parse()
+                .expect("reference");
+
+        admit_registry_source(&reference, true, false).expect("admitted");
     }
 
     #[test]

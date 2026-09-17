@@ -44,8 +44,11 @@ pub(in crate::commands) struct Args {
     /// by default.
     #[arg(long)]
     pub allow_http: bool,
-    /// Production mode: refuse a registry reference that names a tag
-    /// rather than a digest, before contacting the registry.
+    /// Production mode. Refuses `--allow-http` for every source. For an
+    /// `oci://` source, also refuses a tag instead of a digest and a registry
+    /// the OCI registry policy does not allow, before contacting it. Paths
+    /// and `https://` URLs are not restricted further; every source must
+    /// still pass the signature check.
     #[arg(long)]
     pub prod: bool,
     /// Overwrite an existing install with the same bundle_sha256
@@ -82,11 +85,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         .install(&bytes, &trust, args.force)
         .with_context(|| format!("installing bundle from {}", args.source))?;
 
+    let source = audit_source(&args.source, loaded.resolved.as_ref());
     mvm_core::audit_emit!(
         BundleInstall,
-        "bundle_sha256={},key_id={}",
+        "bundle_sha256={},key_id={},source={}",
         installed.sha256,
         installed.manifest.key_id.0,
+        source,
     );
 
     println!(
@@ -104,4 +109,49 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         installed.sha256
     );
     Ok(())
+}
+
+/// The source as the audit entry records it: the digest-pinned reference for
+/// a registry pull, and a URL without userinfo, query or fragment, which is
+/// where a signed download link would carry its credentials.
+fn audit_source(source: &str, resolved: Option<&mvm_fs::oci::ImageReference>) -> String {
+    if let Some(resolved) = resolved {
+        return display_reference(resolved);
+    }
+    match mvm_http::Url::parse(source) {
+        Ok(mut url) if matches!(url.scheme(), "http" | "https") => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        _ => source.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_source_records_the_resolved_digest_for_a_registry_pull() {
+        let resolved: mvm_fs::oci::ImageReference =
+            format!("registry.example/team/app@sha256:{}", "a".repeat(64))
+                .parse()
+                .expect("reference");
+        assert_eq!(
+            audit_source("oci://registry.example/team/app:v1", Some(&resolved)),
+            format!("oci://registry.example/team/app@sha256:{}", "a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn audit_source_strips_credentials_from_a_url() {
+        assert_eq!(
+            audit_source("https://user:pw@cdn.example/app.mvmpkg?sig=secret#x", None),
+            "https://cdn.example/app.mvmpkg"
+        );
+        assert_eq!(audit_source("./app.mvmpkg", None), "./app.mvmpkg");
+    }
 }

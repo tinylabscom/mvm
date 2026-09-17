@@ -1283,14 +1283,38 @@ and `oci://<registry>/<repository>@sha256:<digest>`. Only the `oci://` prefix
 selects a registry; any other string that is not an `https://` or `http://` URL
 is a local path, even one shaped like `host/name:tag`. The manifest is held to
 the pinned digest and to the digest the registry advertises, the layer to its
-descriptor digest and size, and both to size caps. The registry is only a
-transport: the bundle is accepted or refused by the same signature check as a
-local file. `--prod` refuses a tag reference before contacting the registry, and
-a pull by tag reports the digest it resolved to.
+descriptor digest and size, and both to size caps. A blob redirect is followed
+to any origin, without credentials, at most five times, and never from HTTPS to
+HTTP. The registry is only a transport: the bundle is accepted or refused by the
+same signature check as a local file. A pull by tag reports the digest it
+resolved to, and `bundle install` records the resolved reference in its audit
+entry.
 
-Credentials are read from `MVM_OCI_BEARER_TOKEN_<REGISTRY>` or
-`MVM_OCI_BEARER_TOKEN`, as for `mvmctl image pull`; a registry's bearer challenge
-is redeemed once and the token reused. Plain HTTP needs `--allow-http`.
+`--prod` on `fetch` and `install`:
+
+- refuses `--allow-http`, for every source;
+- for an `oci://` source, refuses a tag instead of a digest, and refuses a
+  registry the OCI registry policy (`MVM_OCI_POLICY`, the same policy
+  `mvmctl image pull --prod` enforces) does not allow. Both checks run before
+  the registry is contacted;
+- does not restrict a local path or an `https://` URL further. Those carry no
+  mutable name to pin; what is installed is identified by its sha256 and must
+  pass the signature check like any other source.
+
+Registry authentication:
+
+| Mode                       | How it is configured                                           | Behaviour                                                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anonymous with token realm | No token variable set                                          | On a `401` bearer challenge, fetches a token from the challenge realm without credentials and reuses it for that registry and repository only               |
+| Static bearer token        | `MVM_OCI_BEARER_TOKEN_<REGISTRY>`, else `MVM_OCI_BEARER_TOKEN` | Sent as `Authorization: Bearer`. If the registry refuses it, the command fails and names the token realm; the token is never exchanged for an anonymous one |
+
+`<REGISTRY>` is the registry host upper-cased with `.`, `-` and `:` replaced by
+`_`. Credentials and issued tokens are only sent to the registry they were
+configured or issued for, never to a redirect target. A token realm must be
+HTTPS, or the registry's own origin when the registry is reached over plain
+HTTP. `MVM_OCI_BEARER_TOKEN` is not host-specific, so it is not sent over plain
+HTTP; `--allow-http` uses only the registry-specific variable. Username and
+password credentials are not configurable from the CLI.
 
 ## Security
 

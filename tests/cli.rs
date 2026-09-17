@@ -671,6 +671,30 @@ fn bundle_push_requires_both_positionals() {
     );
 }
 
+#[test]
+fn bundle_fetch_prod_refuses_allow_http() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "bundle",
+            "install",
+            "--prod",
+            "--allow-http",
+            "oci://registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ])
+        .output()
+        .expect("run mvmctl bundle install --prod --allow-http");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--prod refuses --allow-http"),
+        "stderr: {stderr}"
+    );
+}
+
 /// `--prod` with a tag must be refused from the reference alone. The
 /// registry host here does not exist, so reaching the network would fail
 /// with a different message.
