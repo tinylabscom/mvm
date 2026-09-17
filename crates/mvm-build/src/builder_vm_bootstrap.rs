@@ -79,23 +79,11 @@ pub(crate) fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, B
     };
 
     let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap")
-        .env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        // Source-checkout auto-bootstrap on Linux should follow the Linux
-        // builder path, not the libkrun-default host path. The runtime-overlay
-        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
-        // aligned so a cold builder-image cache does not fall into a libkrun
-        // networking prerequisite that the Linux builder path itself does not
-        // require.
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
+    let mut cmd = builder_vm_helper_command(
+        &bootstrap_bin,
+        &workspace_root,
+        BuilderVmHelperCommand::Bootstrap,
+    );
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn builder VM bootstrap helper {}: {e}",
@@ -151,18 +139,7 @@ fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<boo
         return Ok(false);
     }
 
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root).args(command.args());
-    if command == BuilderVmHelperCommand::Bootstrap {
-        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
-    }
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
+    let mut cmd = builder_vm_helper_command(&bootstrap_bin, &workspace_root, command);
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn embedded builder VM helper {}: {e}",
@@ -177,6 +154,19 @@ fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<boo
         )));
     }
     Ok(true)
+}
+
+fn builder_vm_helper_command(
+    bootstrap_bin: &Path,
+    workspace_root: &Path,
+    command: BuilderVmHelperCommand,
+) -> Command {
+    let mut cmd = Command::new(bootstrap_bin);
+    cmd.current_dir(workspace_root).args(command.args());
+    if command == BuilderVmHelperCommand::Bootstrap {
+        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
+    }
+    cmd
 }
 
 fn current_exe_matches(path: &Path) -> bool {
@@ -574,6 +564,62 @@ mod tests {
         // handed, not about it succeeding.
         assert!(auto_bootstrap_builder_vm_image(&arch_dir).is_err());
         assert_eq!(std::fs::read_to_string(&observed).unwrap(), "1");
+    }
+
+    fn backend_observer_script(scratch: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let observed = scratch.join("builder-backend");
+        let script = scratch.join("observe-builder-backend.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{{}:-unset}}\" > builder-backend\n",
+                crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (script, observed)
+    }
+
+    #[test]
+    fn bootstrap_helper_does_not_inject_a_backend_when_the_caller_set_none() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV);
+        let scratch = TempDir::new().unwrap();
+        let (script, observed) = backend_observer_script(scratch.path());
+
+        let status =
+            builder_vm_helper_command(&script, scratch.path(), BuilderVmHelperCommand::Bootstrap)
+                .status()
+                .expect("run backend observer");
+
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(observed).unwrap(), "unset");
+    }
+
+    #[test]
+    fn bootstrap_helper_inherits_an_explicit_backend_unchanged() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.set(
+            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
+            "firecracker",
+        );
+        let scratch = TempDir::new().unwrap();
+        let (script, observed) = backend_observer_script(scratch.path());
+
+        let status =
+            builder_vm_helper_command(&script, scratch.path(), BuilderVmHelperCommand::Bootstrap)
+                .status()
+                .expect("run backend observer");
+
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(observed).unwrap(), "firecracker");
     }
 
     #[test]
