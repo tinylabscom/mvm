@@ -14,6 +14,11 @@ const RESPONSE_TTL_SECONDS: u32 = 120;
 /// Largest DNS message this codec will parse or emit.
 pub const MAX_DNS_MESSAGE: usize = 4096;
 
+/// Smallest possible DNS message: the fixed 12-byte header with an empty
+/// question/answer/authority/additional section. Anything shorter cannot
+/// carry a transaction id and is not a DNS message at all.
+pub const MIN_DNS_MESSAGE: usize = DNS_HEADER_LEN;
+
 /// DNS record families supported by the resolver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsRecordType {
