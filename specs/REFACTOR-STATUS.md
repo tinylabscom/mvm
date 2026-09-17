@@ -4,6 +4,11 @@ Last updated: 2026-09-17
 
 ## In progress
 
+- [x] **Kept-alive entrypoint machines retain their requested names.**
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
+      Persistent entrypoint sessions preserve `--name` and report both the
+      machine and session identities when they remain alive.
+
 - [x] **Bootstrap helpers inherit the selected builder backend.**
       `specs/plans/2026-09-15-vmm-agnostic-stage0.md` W8, issue #3390.
       Linux helper subprocesses no longer replace shared Firecracker

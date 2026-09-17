@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
+      Persistent entrypoint runs now use the requested `--name` as the machine
+      identity instead of replacing it with an internal invocation name. The
+      kept-alive notice reports the machine name alongside the session ID, and
+      still identifies the live machine if session-record persistence fails.
+      Focused regressions, the serialized workspace suite excluding the known
+      macOS-only `mvm-build` environment probes, zero-warning clippy, workspace
+      check, and Linux plus feature-gated checks pass.
+
 - [x] **Published installer and distro compatibility lanes — issue #3273.**
       Exercise the current installer against published releases on Linux and
       macOS, walk atomic upgrades and rollback, run release binaries across

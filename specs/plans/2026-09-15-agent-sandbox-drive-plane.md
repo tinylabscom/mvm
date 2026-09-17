@@ -36,7 +36,7 @@ invariant. This plan closes both halves.
 | G12 | `guides/agent-tool-contract.mdx` presents an unshipped surface under a heading a skimming reader takes as shipped | `public/src/content/docs/guides/agent-tool-contract.mdx:93-160` | WS0 |
 | G13 | **An off-the-shelf HTTPS client cannot use substitution.** The substituting guest proxy refuses `CONNECT`; the TLS terminator and per-VM egress CA exist but the workload runner never enables them. No shipped agent CLI can reach its model API with the key substituted | `crates/mvm-agentd/src/forward_proxy.rs:62-66,135`; `crates/mvm-runtime/src/workload_runner/runner/spawner.rs:107-110` | WS-S |
 | G14 | Secrets reach a workload only through `machine run --entrypoint --from-workload-ir`; transient, persistent and session paths hardcode an empty list, and PID 1 never gets a placeholder | `crates/mvm-cli/src/exec.rs:724`, `commands/vm/up/oci_persist.rs:223`, `exec/session.rs:1036` | WS-S |
-| G15 | A kept-alive entrypoint machine ignores `--name` (`invoke-<nanos>`), so no named machine can carry secrets | `crates/mvm-cli/src/exec/session.rs:103`, `commands/vm/invoke.rs:512` | WS-S |
+| G15 | Resolved: a kept-alive entrypoint machine preserves the requested `--name`, and its completion notice identifies both the machine and session | `crates/mvm-cli/src/commands/machine/runtime.rs`, `commands/vm/invoke.rs`, `exec/session.rs` | WS-S |
 | G16 | `secret.substituted` is written only when the upstream response completes; a forward that fails after the credential was sent leaves no substitution entry | `crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs:1944-1963,2524-2540` | WS-S |
 | G17 | The `agent` network preset and the AI token budget cannot be turned on from any dispatched flag | `crates/mvm-cli/src/commands/shared/resolve.rs:192-202`; `network_policy.rs:376-420` (`ai: None`) | WS-S |
 | G18 | Two guest egress entry points with different capabilities: a `CONNECT`/SOCKS relay on 1080 that cannot substitute, and a forward proxy on 18080 that cannot `CONNECT` | `crates/mvm-agentd/src/forward_proxy.rs`; `commands/vm/invoke.rs:1339-1350` | WS-S |
@@ -193,7 +193,7 @@ retires the second guest proxy (#3288).
       outcome recorded separately (#3286).
 - [ ] T10. One secret-resolution step shared by every admission path (#3284),
       and decide PID 1: wire the boot-time token or delete its guest parser.
-- [ ] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
+- [x] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
 - [ ] T12. Expose the agent preset and the token budget, or delete them, and
       delete the unreachable network fields on the undispatched verb (#3287).
 - [ ] T13. Witnesses in `crates/mvm-hostd/tests/connect_substitution_witness.rs`,
