@@ -96,6 +96,25 @@ pub(super) fn cosign_verification_reference(
 }
 
 pub(super) fn load_oci_registry_policy() -> Result<OciRegistryPolicy> {
+    let (path, text) = read_oci_registry_policy()?;
+    parse_oci_registry_policy(&text)
+        .with_context(|| format!("parsing OCI registry policy {}", path.display()))
+}
+
+/// Load the policy for its registry allowlist alone, without requiring the
+/// signature section: a caller whose artifacts carry their own signatures
+/// (signed bundles) has no use for cosign identities, but is bound by the same
+/// list of registries.
+pub(super) fn load_oci_registry_allowlist() -> Result<OciRegistryPolicy> {
+    let (path, text) = read_oci_registry_policy()?;
+    let policy: OciRegistryPolicy = toml::from_str(&text)
+        .with_context(|| format!("parsing OCI registry policy {}", path.display()))?;
+    validate_oci_registry_policy_entries(&policy)
+        .with_context(|| format!("parsing OCI registry policy {}", path.display()))?;
+    Ok(policy)
+}
+
+fn read_oci_registry_policy() -> Result<(PathBuf, String)> {
     let path = match std::env::var_os("MVM_OCI_POLICY") {
         Some(path) => PathBuf::from(path),
         None => mvm_core::config::oci_policy_path(),
@@ -109,8 +128,7 @@ pub(super) fn load_oci_registry_policy() -> Result<OciRegistryPolicy> {
     }
     let text = fs::read_to_string(&path)
         .with_context(|| format!("reading OCI registry policy {}", path.display()))?;
-    parse_oci_registry_policy(&text)
-        .with_context(|| format!("parsing OCI registry policy {}", path.display()))
+    Ok((path, text))
 }
 
 pub(super) fn parse_oci_registry_policy(text: &str) -> Result<OciRegistryPolicy> {
@@ -121,6 +139,12 @@ pub(super) fn parse_oci_registry_policy(text: &str) -> Result<OciRegistryPolicy>
 
 pub(super) fn validate_oci_registry_policy(policy: &OciRegistryPolicy) -> Result<()> {
     ensure_signature_policy_is_configured(policy)?;
+    validate_oci_registry_policy_entries(policy)
+}
+
+/// Shape checks on the entries a policy lists, independent of whether the
+/// signature section is required.
+fn validate_oci_registry_policy_entries(policy: &OciRegistryPolicy) -> Result<()> {
     for registry in &policy.allowed_registries {
         if registry.is_empty()
             || registry.contains("://")

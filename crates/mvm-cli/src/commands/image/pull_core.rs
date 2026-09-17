@@ -278,12 +278,23 @@ fn ensure_prod_registry_reference_policy(reference: &str, prod: bool) -> Result<
     Ok(())
 }
 
-/// Under `--prod`, load the OCI registry policy and refuse a registry it does
-/// not allow. Shared by every command that fetches from a registry.
-pub(in crate::commands) fn ensure_prod_registry_policy(
+/// Under `--prod`, refuse a registry the OCI registry policy does not allow.
+/// Needs only the policy's allowlist, so it applies to callers whose content
+/// is signed some other way.
+pub(in crate::commands) fn ensure_prod_registry_allowed(
     image_ref: &ImageReference,
     prod: bool,
 ) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    let policy = super::trust_policy::load_oci_registry_allowlist()?;
+    enforce_registry_allowlist(image_ref, &policy)
+}
+
+/// Under `--prod`, load the OCI registry policy, refuse a registry it does not
+/// allow, and require the cosign signature section an image pull verifies.
+fn ensure_prod_registry_policy(image_ref: &ImageReference, prod: bool) -> Result<()> {
     if !prod {
         return Ok(());
     }

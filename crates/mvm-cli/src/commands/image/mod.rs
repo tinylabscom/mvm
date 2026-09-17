@@ -36,8 +36,10 @@ use oci_types::CosignIdentity;
 use pull_core::pull_image_with_trust;
 pub(in crate::commands) use pull_core::resolve_or_pull_run_image;
 pub(in crate::commands) use pull_core::{
-    ensure_prod_digest_pin, ensure_prod_registry_policy, require_prod_digest_pin,
+    ensure_prod_digest_pin, ensure_prod_registry_allowed, require_prod_digest_pin,
 };
+#[cfg(test)]
+pub(in crate::commands) use trust::registry_auth_from_lookup;
 pub(in crate::commands) use trust::{OciRegistryAuthDecision, registry_auth_for};
 
 #[derive(ClapArgs, Debug, Clone)]

@@ -582,23 +582,17 @@ mod tests {
         );
     }
 
-    /// Point `MVM_OCI_POLICY` at a production policy that allows exactly
-    /// `allowed`.
+    /// Point `MVM_OCI_POLICY` at a policy that allows exactly `allowed` and
+    /// has no cosign section: a bundle carries its own signature, so the
+    /// allowlist is all `bundle --prod` may require of the policy.
     fn prod_policy(
         env: &mut mvm_core::util::test_env::TestEnv,
         dir: &std::path::Path,
         allowed: &str,
     ) {
         let path = dir.join("oci-policy.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "allowed_registries = [\"{allowed}\"]\n\n[[cosign]]\n\
-                 certificate_identity = \"release@example.test\"\n\
-                 certificate_oidc_issuer = \"https://issuer.example.test\"\n"
-            ),
-        )
-        .expect("write policy");
+        std::fs::write(&path, format!("allowed_registries = [\"{allowed}\"]\n"))
+            .expect("write policy");
         env.set("MVM_OCI_POLICY", &path);
     }
 
@@ -684,6 +678,49 @@ mod tests {
                 .expect("reference");
 
         admit_registry_source(&reference, true, false).expect("admitted");
+    }
+
+    #[test]
+    fn a_global_token_the_registry_refuses_still_pulls_anonymously() {
+        // `MVM_OCI_BEARER_TOKEN` is offered to every registry. One that only
+        // serves anonymous tokens refuses it, and the pull must still work.
+        let registry = MemoryRegistry::start();
+        let publisher = Publisher::trusted(7);
+        let archive = publisher.bundle(b"kernel bytes");
+        let (_, pushed) = publish_bundle(
+            &archive,
+            &reference(&registry, ":v1"),
+            &http_transport(),
+            &publisher.trust(),
+        )
+        .expect("publish");
+        registry.require_token("anonymous-only");
+        let decision =
+            crate::commands::image::registry_auth_from_lookup(&pushed.reference, |name| {
+                (name == "MVM_OCI_BEARER_TOKEN").then(|| "global-token".to_string())
+            })
+            .expect("auth");
+
+        let loaded = load_archive(
+            &source(&registry, &format!("@{}", pushed.manifest_digest)),
+            LoadOptions::default(),
+            |_| {
+                Ok(RegistryTransport::new(
+                    ClientProtocol::Http,
+                    decision.auth.clone(),
+                ))
+            },
+        )
+        .expect("the pull falls back to the anonymous exchange");
+
+        assert_eq!(loaded.bytes, archive);
+        assert!(
+            registry
+                .requests()
+                .iter()
+                .any(|r| r.authorization.as_deref() == Some("Bearer global-token")),
+            "the global token was offered first"
+        );
     }
 
     #[test]

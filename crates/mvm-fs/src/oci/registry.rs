@@ -1,5 +1,6 @@
 use crate::oci::OciError;
 use crate::oci::reference::ImageReference;
+use mvm_contract::policy::dns_guard::dns_answer_forbidden;
 use mvm_http::Method;
 use mvm_http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
@@ -28,26 +29,58 @@ pub struct ClientConfig {
     pub protocol: ClientProtocol,
 }
 
+/// Credentials for one registry.
+///
+/// Every credential names the registry it is for (the reference's registry
+/// part, e.g. `ghcr.io` or `127.0.0.1:5000`) and is only ever attached to
+/// requests for that registry, however the client is used.
 #[derive(Clone, Default)]
 pub enum RegistryAuthConfig {
     #[default]
     Anonymous,
     Bearer {
+        registry: String,
         token: SecretString,
+        refusal: BearerRefusal,
     },
     Basic {
+        registry: String,
         username: String,
         password: SecretString,
     },
+}
+
+/// What to do when a registry refuses a configured bearer token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BearerRefusal {
+    /// Fail and say so. For a token configured for this registry, a refusal
+    /// is a misconfiguration worth reporting, not something to paper over
+    /// with a weaker anonymous token.
+    #[default]
+    Fail,
+    /// Fall back to the challenge's anonymous token exchange. For a token not
+    /// configured for any particular registry, which a registry it was never
+    /// meant for will refuse.
+    AnonymousExchange,
 }
 
 impl std::fmt::Debug for RegistryAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Anonymous => f.write_str("RegistryAuthConfig::Anonymous"),
-            Self::Bearer { .. } => f.write_str("RegistryAuthConfig::Bearer { token: REDACTED }"),
-            Self::Basic { username, .. } => f
+            Self::Bearer {
+                registry, refusal, ..
+            } => f
+                .debug_struct("RegistryAuthConfig::Bearer")
+                .field("registry", registry)
+                .field("token", &"REDACTED")
+                .field("refusal", refusal)
+                .finish(),
+            Self::Basic {
+                registry, username, ..
+            } => f
                 .debug_struct("RegistryAuthConfig::Basic")
+                .field("registry", registry)
                 .field("username", username)
                 .field("password", &"REDACTED")
                 .finish(),
@@ -56,17 +89,36 @@ impl std::fmt::Debug for RegistryAuthConfig {
 }
 
 impl RegistryAuthConfig {
-    pub fn bearer(token: impl Into<String>) -> Self {
+    /// A bearer token for `registry`. A refusal fails the request.
+    pub fn bearer(registry: impl Into<String>, token: impl Into<String>) -> Self {
         Self::Bearer {
+            registry: normalize_registry(registry.into()),
             token: SecretString::from(token.into()),
+            refusal: BearerRefusal::Fail,
         }
     }
 
-    pub fn basic(username: impl Into<String>, password: impl Into<String>) -> Self {
+    /// Basic credentials for `registry`, offered to its token realm.
+    pub fn basic(
+        registry: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         Self::Basic {
+            registry: normalize_registry(registry.into()),
             username: username.into(),
             password: SecretString::from(password.into()),
         }
+    }
+
+    /// Fall back to an anonymous token exchange if the registry refuses the
+    /// bearer token. No effect on other credential kinds.
+    #[must_use]
+    pub fn with_anonymous_fallback(mut self) -> Self {
+        if let Self::Bearer { refusal, .. } = &mut self {
+            *refusal = BearerRefusal::AnonymousExchange;
+        }
+        self
     }
 
     pub fn kind(&self) -> &'static str {
@@ -80,6 +132,26 @@ impl RegistryAuthConfig {
     pub fn is_authenticated(&self) -> bool {
         !matches!(self, Self::Anonymous)
     }
+
+    /// The registry the credentials are for, if any.
+    pub fn registry(&self) -> Option<&str> {
+        match self {
+            Self::Anonymous => None,
+            Self::Bearer { registry, .. } | Self::Basic { registry, .. } => Some(registry),
+        }
+    }
+
+    /// What a refused bearer token leads to.
+    pub fn bearer_refusal(&self) -> Option<BearerRefusal> {
+        match self {
+            Self::Bearer { refusal, .. } => Some(*refusal),
+            _ => None,
+        }
+    }
+}
+
+fn normalize_registry(registry: String) -> String {
+    registry.to_ascii_lowercase()
 }
 
 /// Scheme, host and port: the unit a credential is issued for.
@@ -112,11 +184,6 @@ pub struct RegistryClient {
     http: mvm_http::Client,
     config: ClientConfig,
     auth: RegistryAuthConfig,
-    // The registry the configured credentials belong to: the first origin this
-    // client sends a request to. They are never attached to any other origin,
-    // so a client handed references on two registries cannot leak one
-    // registry's credentials to the other.
-    credential_origin: Arc<Mutex<Option<Origin>>>,
     // Tokens redeemed from challenges, reused so a push's several requests are
     // not each refused and replayed — including the upload carrying the blob.
     issued_tokens: Arc<Mutex<HashMap<TokenKey, SecretString>>>,
@@ -161,7 +228,6 @@ impl RegistryClient {
             http,
             config,
             auth,
-            credential_origin: Arc::new(Mutex::new(None)),
             issued_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -308,7 +374,7 @@ impl RegistryClient {
             origin: Origin::of(&parsed),
             repository: reference.repository.clone(),
         };
-        let credentials_apply = self.credentials_apply_to(&key.origin);
+        let credentials_apply = self.credentials_apply_to(reference, &parsed);
         let (authorization, sent) = match self.issued_token(&key) {
             Some(token) => (Authorization::Bearer(token), SentAuthorization::Issued),
             None if credentials_apply && self.auth.is_authenticated() => {
@@ -325,9 +391,9 @@ impl RegistryClient {
         }
 
         let challenge = bearer_challenge(&response, url)?;
-        if matches!(sent, SentAuthorization::Configured)
-            && matches!(self.auth, RegistryAuthConfig::Bearer { .. })
-        {
+        let refused_configured_bearer = matches!(sent, SentAuthorization::Configured)
+            && matches!(self.auth, RegistryAuthConfig::Bearer { .. });
+        if refused_configured_bearer && self.auth.bearer_refusal() == Some(BearerRefusal::Fail) {
             return Err(OciError::Registry(format!(
                 "{method} {url} refused the configured bearer token (HTTP 401). The registry \
                  offered a token from {}, but a configured bearer token is not exchanged for \
@@ -340,13 +406,11 @@ impl RegistryClient {
         // Basic credentials go to the realm even when it is on another host,
         // as a token service conventionally is. They are still only ever
         // offered for requests to the registry they were configured for.
-        let basic = if credentials_apply {
-            match &self.auth {
-                RegistryAuthConfig::Basic { username, password } => Some((username, password)),
-                _ => None,
-            }
-        } else {
-            None
+        let basic = match &self.auth {
+            RegistryAuthConfig::Basic {
+                username, password, ..
+            } if credentials_apply => Some((username, password)),
+            _ => None,
         };
         let token = self.fetch_bearer_token(url, &challenge, basic).await?;
         let token_for_retry = token.clone();
@@ -361,13 +425,22 @@ impl RegistryClient {
         .map_err(|e| OciError::Registry(format!("{method} {url} after auth: {e}")))
     }
 
-    /// Whether configured credentials may accompany a request to `origin`.
-    /// The first origin asked about claims them.
-    fn credentials_apply_to(&self, origin: &Origin) -> bool {
-        match self.credential_origin.lock() {
-            Ok(mut slot) => slot.get_or_insert_with(|| origin.clone()) == origin,
-            Err(_) => false,
+    /// Whether the configured credentials may accompany a request to `url`
+    /// for `reference`: only when both name the registry the credentials were
+    /// configured for. Independent of the order the client is used in.
+    fn credentials_apply_to(&self, reference: &ImageReference, url: &mvm_http::Url) -> bool {
+        let Some(registry) = self.auth.registry() else {
+            return false;
+        };
+        if normalize_registry(reference.registry.clone()) != registry {
+            return false;
         }
+        mvm_http::Url::parse(&format!(
+            "{}://{}",
+            url.scheme(),
+            registry_api_host(registry)
+        ))
+        .is_ok_and(|bound| same_origin(&bound, url))
     }
 
     fn issued_token(&self, key: &TokenKey) -> Option<String> {
@@ -405,12 +478,15 @@ impl RegistryClient {
             (Authorization::Bearer(token), _) => {
                 request.header(AUTHORIZATION, format!("Bearer {token}"))
             }
-            (Authorization::Configured, RegistryAuthConfig::Bearer { token }) => {
+            (Authorization::Configured, RegistryAuthConfig::Bearer { token, .. }) => {
                 request.bearer_auth(token.expose_secret())
             }
-            (Authorization::Configured, RegistryAuthConfig::Basic { username, password }) => {
-                request.basic_auth(username, Some(password.expose_secret()))
-            }
+            (
+                Authorization::Configured,
+                RegistryAuthConfig::Basic {
+                    username, password, ..
+                },
+            ) => request.basic_auth(username, Some(password.expose_secret())),
         };
         match parts.body {
             None => request.send().await,
@@ -442,6 +518,7 @@ impl RegistryClient {
         let mut current_url = mvm_http::Url::parse(&url).map_err(|e| {
             OciError::Registry(format!("registry endpoint is not a valid URL: {e}"))
         })?;
+        let registry_url = current_url.clone();
         let mut response = response;
         let mut redirect_count = 0;
 
@@ -462,15 +539,24 @@ impl RegistryClient {
                 ))
             })?;
             let next_url = validate_blob_redirect(&current_url, location)?;
+            let addrs =
+                permitted_redirect_addrs(&registry_url, &next_url, &mvm_http::SystemResolver)
+                    .await?;
             // No credentials on a redirected hop: the target is often object
             // storage on another origin, and the blob is digest-verified
-            // whoever serves it.
-            response = self.http.get(next_url.as_str()).send().await.map_err(|e| {
-                OciError::Registry(format!(
-                    "GET redirected OCI blob from {}: {e}",
-                    display_url(&next_url)
-                ))
-            })?;
+            // whoever serves it. The hop dials only the addresses just
+            // checked, so a second lookup cannot rebind it somewhere internal.
+            let hop_client = pinned_client(&next_url, addrs)?;
+            response = hop_client
+                .get(next_url.as_str())
+                .send()
+                .await
+                .map_err(|e| {
+                    OciError::Registry(format!(
+                        "GET redirected OCI blob from {}: {e}",
+                        display_url(&next_url)
+                    ))
+                })?;
             current_url = next_url;
             redirect_count += 1;
         }
@@ -605,6 +691,74 @@ fn validate_blob_redirect(
     Ok(next)
 }
 
+/// The addresses a redirect hop may dial.
+///
+/// A registry reached at a public address may not redirect the host into
+/// loopback, link-local, private or unique-local space, whether the target is
+/// a literal address or a name that resolves there: an uncredentialed GET is
+/// still a request an internal service might act on. A registry that is
+/// itself in that space — a local or in-cluster one — may redirect within it.
+async fn permitted_redirect_addrs(
+    registry: &mvm_http::Url,
+    next: &mvm_http::Url,
+    resolver: &dyn mvm_http::Resolve,
+) -> Result<Vec<std::net::SocketAddr>, OciError> {
+    let target = resolve_url(next, resolver).await.map_err(|e| {
+        OciError::Registry(format!(
+            "resolve OCI blob redirect target {}: {e}",
+            display_url(next)
+        ))
+    })?;
+    if target.is_empty() {
+        return Err(OciError::Registry(format!(
+            "OCI blob redirect target {} resolved to no address",
+            display_url(next)
+        )));
+    }
+    let internal_target = target.iter().any(|addr| dns_answer_forbidden(addr.ip()));
+    if internal_target {
+        let registry_internal = resolve_url(registry, resolver)
+            .await
+            .is_ok_and(|addrs| addrs.iter().any(|addr| dns_answer_forbidden(addr.ip())));
+        if !registry_internal {
+            return Err(OciError::Registry(format!(
+                "OCI blob redirect from {} to {} was refused: the target is a loopback, \
+                 link-local or private address",
+                display_url(registry),
+                display_url(next)
+            )));
+        }
+    }
+    Ok(target)
+}
+
+async fn resolve_url(
+    url: &mvm_http::Url,
+    resolver: &dyn mvm_http::Resolve,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    let port = url.port_or_known_default().unwrap_or(443);
+    let Some(host) = url.host_str() else {
+        return Err(std::io::Error::other("URL has no host"));
+    };
+    let host = host.trim_matches(['[', ']']);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => Ok(vec![std::net::SocketAddr::new(ip, port)]),
+        Err(_) => resolver.resolve(host.to_string(), port).await,
+    }
+}
+
+/// A client that dials `url`'s host only at `addrs`.
+fn pinned_client(
+    url: &mvm_http::Url,
+    addrs: Vec<std::net::SocketAddr>,
+) -> Result<mvm_http::Client, OciError> {
+    let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+    mvm_http::Client::builder()
+        .resolver(Arc::new(mvm_http::PinnedResolver::new().with(host, addrs)))
+        .build()
+        .map_err(|e| OciError::Registry(format!("build redirect client: {e}")))
+}
+
 fn same_origin(left: &mvm_http::Url, right: &mvm_http::Url) -> bool {
     Origin::of(left) == Origin::of(right)
 }
@@ -679,24 +833,32 @@ fn upload_session_url(
     Ok(next)
 }
 
-/// Describe a response the caller did not expect, including a bounded prefix
-/// of its body: registries explain refusals there, and an unbounded read would
-/// let one choose how much we buffer to print an error.
+/// Describe a response the caller did not expect: the status and a short
+/// prefix of the body with anything unprintable replaced. Registries explain
+/// refusals there, but the body is whatever the server — possibly a redirect
+/// target nobody chose — decided to send, so it is neither trusted to be text
+/// nor echoed at length.
 async fn unexpected_status(method: &str, url: &str, mut response: mvm_http::Response) -> OciError {
-    const MAX_ERROR_BODY: usize = 4096;
+    const MAX_ERROR_SNIPPET: usize = 256;
     let status = response.status();
     let mut body = Vec::new();
-    while body.len() < MAX_ERROR_BODY {
+    while body.len() < MAX_ERROR_SNIPPET {
         match response.chunk().await {
             Ok(Some(chunk)) => body.extend_from_slice(&chunk),
             _ => break,
         }
     }
-    body.truncate(MAX_ERROR_BODY);
-    OciError::Registry(format!(
-        "{method} {url} failed with {status}: {}",
-        String::from_utf8_lossy(&body)
-    ))
+    body.truncate(MAX_ERROR_SNIPPET);
+    let snippet: String = String::from_utf8_lossy(&body)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        OciError::Registry(format!("{method} {url} failed with {status}"))
+    } else {
+        OciError::Registry(format!("{method} {url} failed with {status}: {snippet}"))
+    }
 }
 
 pub struct RegistryResponse {
@@ -993,6 +1155,80 @@ mod tests {
                 "{realm} must be refused for {registry}"
             );
         }
+    }
+
+    fn socket(value: &str) -> std::net::SocketAddr {
+        value.parse().expect("socket address")
+    }
+
+    fn resolver() -> mvm_http::PinnedResolver {
+        mvm_http::PinnedResolver::new()
+            .with("registry.example", vec![socket("93.184.216.34:0")])
+            .with("storage.example", vec![socket("93.184.216.35:0")])
+            .with("internal.example", vec![socket("10.0.0.7:0")])
+            .with("local-registry.example", vec![socket("192.168.1.10:0")])
+    }
+
+    fn url(value: &str) -> mvm_http::Url {
+        mvm_http::Url::parse(value).expect("url")
+    }
+
+    #[tokio::test]
+    async fn a_public_registry_may_redirect_to_public_storage() {
+        let addrs = permitted_redirect_addrs(
+            &url("https://registry.example/v2/a/blobs/sha256:0"),
+            &url("https://storage.example/blob"),
+            &resolver(),
+        )
+        .await
+        .expect("public target");
+        assert_eq!(addrs, vec![socket("93.184.216.35:443")]);
+    }
+
+    #[tokio::test]
+    async fn a_public_registry_may_not_redirect_into_internal_address_space() {
+        for target in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://127.0.0.1:8080/",
+            "https://[fd00::1]/",
+            "https://[::ffff:10.0.0.1]/",
+            "https://internal.example/blob",
+        ] {
+            let err = permitted_redirect_addrs(
+                &url("https://registry.example/v2/a/blobs/sha256:0"),
+                &url(target),
+                &resolver(),
+            )
+            .await
+            .expect_err("internal target must be refused");
+            assert!(
+                err.to_string().contains("private address"),
+                "{target}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_internal_registry_may_redirect_within_internal_space() {
+        permitted_redirect_addrs(
+            &url("https://local-registry.example/v2/a/blobs/sha256:0"),
+            &url("https://internal.example/blob"),
+            &resolver(),
+        )
+        .await
+        .expect("an internal registry's own storage");
+    }
+
+    #[test]
+    fn credentials_name_their_registry() {
+        let auth = RegistryAuthConfig::bearer("Registry.Example:5000", "t");
+        assert_eq!(auth.registry(), Some("registry.example:5000"));
+        assert_eq!(auth.bearer_refusal(), Some(BearerRefusal::Fail));
+        assert_eq!(
+            auth.with_anonymous_fallback().bearer_refusal(),
+            Some(BearerRefusal::AnonymousExchange)
+        );
+        assert!(!format!("{:?}", RegistryAuthConfig::bearer("r", "secret")).contains("secret"));
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub(in crate::commands) fn registry_auth_for(
     registry_auth_from_lookup(image_ref, |name| std::env::var(name).ok())
 }
 
-pub(super) fn registry_auth_from_lookup(
+pub(in crate::commands) fn registry_auth_from_lookup(
     image_ref: &ImageReference,
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Result<OciRegistryAuthDecision> {
@@ -91,13 +91,16 @@ pub(super) fn registry_auth_from_lookup(
     let registry_var = format!("MVM_OCI_BEARER_TOKEN_{registry_key}");
     if let Some(token) = nonempty_lookup(&registry_var, &mut lookup) {
         return Ok(OciRegistryAuthDecision {
-            auth: RegistryAuthConfig::bearer(token),
+            auth: RegistryAuthConfig::bearer(&image_ref.registry, token),
             source: format!("env:{registry_var}"),
         });
     }
+    // The global token is offered to whatever registry a reference names,
+    // including public ones it was never meant for. A refusal there falls
+    // back to the anonymous exchange rather than failing a public pull.
     if let Some(token) = nonempty_lookup("MVM_OCI_BEARER_TOKEN", &mut lookup) {
         return Ok(OciRegistryAuthDecision {
-            auth: RegistryAuthConfig::bearer(token),
+            auth: RegistryAuthConfig::bearer(&image_ref.registry, token).with_anonymous_fallback(),
             source: "env:MVM_OCI_BEARER_TOKEN".to_string(),
         });
     }
@@ -154,6 +157,12 @@ mod tests {
         assert_eq!(auth.source, "env:MVM_OCI_BEARER_TOKEN_GHCR_IO");
         assert!(auth.auth.is_authenticated());
         assert_eq!(auth.auth.kind(), "bearer");
+        assert_eq!(auth.auth.registry(), Some("ghcr.io"));
+        // A token set for this registry is reported when refused.
+        assert_eq!(
+            auth.auth.bearer_refusal(),
+            Some(mvm_fs::oci::BearerRefusal::Fail)
+        );
     }
 
     #[test]
@@ -167,6 +176,13 @@ mod tests {
 
         assert_eq!(auth.source, "env:MVM_OCI_BEARER_TOKEN");
         assert_eq!(auth.auth.kind(), "bearer");
+        assert_eq!(auth.auth.registry(), Some("ghcr.io"));
+        // The global token reaches registries it was not meant for, so a
+        // refusal falls back to the anonymous exchange.
+        assert_eq!(
+            auth.auth.bearer_refusal(),
+            Some(mvm_fs::oci::BearerRefusal::AnonymousExchange)
+        );
     }
 
     #[test]

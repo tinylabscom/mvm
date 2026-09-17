@@ -518,13 +518,17 @@ mod tests {
             ClientConfig {
                 protocol: ClientProtocol::Http,
             },
-            RegistryAuthConfig::bearer("token-a"),
+            RegistryAuthConfig::bearer(a.host(), "token-a"),
         );
 
-        rt.block_on(client.push(&reference(&a, ":v1"), KIND, b"on a"))
-            .expect("push to the registry the token is for");
+        // Registry B first: which registry the token is for must not depend
+        // on which one the client happens to reach first.
         rt.block_on(client.push(&reference(&b, ":v1"), KIND, b"on b"))
             .expect("push to a second, open registry");
+        rt.block_on(client.push(&reference(&a, ":v1"), KIND, b"on a"))
+            .expect("push to the registry the token is for");
+        rt.block_on(client.push(&reference(&b, ":v2"), KIND, b"on b again"))
+            .expect("push to b after a");
 
         assert!(authorizations(&a).iter().all(|h| h == "Bearer token-a"));
         assert!(!authorizations(&a).is_empty());
@@ -560,7 +564,7 @@ mod tests {
             ClientConfig {
                 protocol: ClientProtocol::Http,
             },
-            RegistryAuthConfig::bearer("a-wrong-token"),
+            RegistryAuthConfig::bearer(registry.host(), "a-wrong-token"),
         );
 
         let err = runtime()
@@ -579,6 +583,52 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_fallback_token_falls_back_to_the_anonymous_exchange() {
+        // A token set for every registry reaches registries it was never
+        // meant for. Their refusal must not break a pull they would serve
+        // anonymously.
+        let registry = MemoryRegistry::start();
+        registry.require_token("anonymous-token");
+        let rt = runtime();
+        let seeded = rt
+            .block_on(client().push(&reference(&registry, ":v1"), KIND, b"public"))
+            .expect("seed through the anonymous exchange");
+        let client = OciArtifactClient::new(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::bearer(registry.host(), "meant-for-another-registry")
+                .with_anonymous_fallback(),
+        );
+
+        let pulled = rt
+            .block_on(client.pull(&seeded.reference, KIND))
+            .expect("the pull succeeds anonymously");
+
+        assert_eq!(pulled.layer, b"public");
+    }
+
+    #[test]
+    fn a_streamed_upload_behind_a_challenge_is_sent_once() {
+        let registry = MemoryRegistry::start();
+        registry.require_token("push-token");
+        let layer = vec![9u8; 2 * 1024 * 1024];
+
+        runtime()
+            .block_on(client().push(&reference(&registry, ":v1"), KIND, &layer))
+            .expect("push");
+
+        let puts = registry
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "PUT" && r.path.contains("/blobs/uploads/"))
+            .collect::<Vec<_>>();
+        // One for the empty config blob, one for the layer; neither refused.
+        assert_eq!(puts.len(), 2, "{puts:?}");
+        assert!(puts.iter().all(|r| r.authorization.is_some()));
+    }
+
+    #[test]
     fn a_blob_redirect_to_another_origin_is_followed_without_credentials() {
         let registry = MemoryRegistry::start();
         let storage = MemoryRegistry::start();
@@ -588,7 +638,7 @@ mod tests {
             ClientConfig {
                 protocol: ClientProtocol::Http,
             },
-            RegistryAuthConfig::bearer("pull-token"),
+            RegistryAuthConfig::bearer(registry.host(), "pull-token"),
         );
         let pushed = rt
             .block_on(client.push(&reference(&registry, ":v1"), KIND, b"stored elsewhere"))

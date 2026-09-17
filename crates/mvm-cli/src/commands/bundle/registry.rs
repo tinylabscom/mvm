@@ -100,8 +100,9 @@ fn protocol_for(allow_http: bool) -> ClientProtocol {
 
 /// Everything `--prod` requires of a registry source, checked from the
 /// reference and local policy before any network access: no plain HTTP, a
-/// digest rather than a tag, and a registry the OCI registry policy allows —
-/// the same policy and allowlist `image pull --prod` enforces.
+/// digest rather than a tag, and a registry the OCI registry policy's
+/// allowlist permits — the same allowlist `image pull --prod` enforces. The
+/// policy's cosign section is not required: a bundle carries its own signature.
 pub(super) fn admit_registry_source(
     reference: &ImageReference,
     prod: bool,
@@ -122,7 +123,7 @@ pub(super) fn admit_registry_source(
             )
         },
     )?;
-    crate::commands::image::ensure_prod_registry_policy(reference, prod)
+    crate::commands::image::ensure_prod_registry_allowed(reference, prod)
 }
 
 /// Parse a registry reference, with or without the `oci://` prefix.
@@ -190,7 +191,7 @@ mod tests {
 
     fn decision(source: &str) -> OciRegistryAuthDecision {
         OciRegistryAuthDecision {
-            auth: RegistryAuthConfig::bearer("secret"),
+            auth: RegistryAuthConfig::bearer("registry.example", "secret"),
             source: source.to_string(),
         }
     }

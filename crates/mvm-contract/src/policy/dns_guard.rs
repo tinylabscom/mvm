@@ -1,6 +1,6 @@
 //! DNS answer classification for the host-mediated resolver.
 
-use std::net::IpAddr;
+use core::net::IpAddr;
 
 /// Return whether an address is unsafe to expose through a DNS answer unless
 /// that exact address was explicitly pinned by policy.
@@ -36,14 +36,13 @@ pub fn dns_answer_forbidden(ip: IpAddr) -> bool {
 /// `Ipv4Addr::is_private` does not cover this range, but it is reachable
 /// internal space in some deployments and is already in the connect-time
 /// mandatory-deny set — so the stricter DNS-answer guard must reject it too.
-const fn is_shared_address_space(address: std::net::Ipv4Addr) -> bool {
+const fn is_shared_address_space(address: core::net::Ipv4Addr) -> bool {
     matches!(address.octets(), [100, 64..=127, _, _])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
 
     fn ip(value: &str) -> IpAddr {
         value.parse().unwrap()
