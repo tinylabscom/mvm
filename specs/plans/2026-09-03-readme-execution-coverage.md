@@ -85,6 +85,12 @@ fix product defects uncovered by exercising the documented commands.
   before installing and booting that exact bundle with QEMU TCG. The committed
   Apple Silicon script remains the full unaccelerated build, seal, install,
   and boot lifecycle witness.
+- The first endpoint-complete hosted bootstrap passed source-matched Stage 0
+  launch, then GitHub cancelled the source-kernel compilation at the job's
+  90-minute wrapper while its builder still had a documented 120-minute
+  deadline. The wrapper now carries the same one-budget discipline as the
+  documented-surface lanes: 180 minutes covers setup plus the builder deadline,
+  and structural tests pin both values so GitHub cannot preempt the diagnostic.
 - The full workspace runs exposed parallel-test races in the wasm endpoint-plan
   and workload broker-path witnesses: they read `MVM_HOME` without holding the
   shared environment guard used by the tests mutating that variable. Both now
