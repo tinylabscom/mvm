@@ -86,6 +86,10 @@
       the fetch is staged atomically with architecture and manifest-pin
       refusals. Open: the two post-merge timing runs against the 2026-09-15
       baseline.
+      W3 (#3365) slice W3a: `mvm_core::image_set` defines the signed image-set
+      manifest and lock with pure completeness, architecture, boot-protocol,
+      capability, protocol-range, supersession and lock checks; the updater and
+      the image set share one semver model in `mvm_core::release_version`.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
