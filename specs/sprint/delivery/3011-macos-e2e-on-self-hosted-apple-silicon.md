@@ -87,5 +87,7 @@ event that runs unmerged code. It was checked against a mutation: adding
 
 It cannot stop a fork PR that edits a workflow to name the label. Today that is
 stopped by the `all_external_contributors` approval policy — a person, not a
-mechanism. The mechanism is a runner group limited to selected workflows, which
-GitHub documents for the Team plan; the organization is on Free.
+mechanism. The mechanism is a runner group limited to selected workflows, and
+on 2026-09-16 the organization's settings offered no way to create one on the
+Free plan. That residual risk is accepted rather than proven away, and is worth
+revisiting if the organization moves to Team.

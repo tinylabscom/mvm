@@ -269,21 +269,21 @@ an unprovisioned label would not provide the required live witness.
       narrowly scoped, non-persisted registration token. Record owner,
       patch/update cadence, capacity, alerting, teardown, and credential-rotation
       procedures outside the source tree where operational secrets belong.
-- [ ] Because this is a public repository, prove the unique label is reachable
-      only from trusted merged-main schedules and protected release callers.
-      Fork pull-request code must never execute on this runner. Partial, and
-      the in-tree half is now gated:
+- [ ] ~~Because this is a public repository, prove the unique label is
+      reachable only from trusted merged-main schedules and protected release
+      callers. Fork pull-request code must never execute on this runner.~~
+      **Accepted as a limit, not proven** — on 2026-09-16 the organization's
+      Actions settings offered no *New runner group* on the Free plan, so the
+      mechanical refusal (a runner group limited to selected workflows) is not
+      available without Team. What holds instead:
       `no_untrusted_event_can_place_a_job_on_the_self_hosted_runner`
-      (`tests/github_actions_self_hosted_runner.rs`) follows reusable-workflow
-      callers to a fixed point and fails if any workflow that can place a job
-      on `m1` is triggered by a pull-request, merge-queue, comment or
-      `workflow_run` event, or by a `push` that admits a branch other than
-      `main`. Today only `e2e-docs.yml`, `ci-full.yml` (cron, dispatch) and
-      `release.yml` (tags, dispatch) reach it. The fork-PR approval policy is
-      `all_external_contributors`. What stays open is a fork PR that *edits* a
-      workflow to name the label: only a human approval stops it. The
-      mechanical refusal is a runner group restricted to selected workflows,
-      which GitHub documents as a Team-plan feature; `tinylabscom` is on Free.
+      (`tests/github_actions_self_hosted_runner.rs`) fails if any workflow that
+      can place a job on `m1`, directly or through a reusable workflow, is
+      started by a pull-request, merge-queue, comment or `workflow_run` event,
+      or by a `push` admitting a branch other than `main`; and the fork-PR
+      approval policy is `all_external_contributors`. The residual risk is a
+      maintainer approving a fork PR that edits a workflow to name the label.
+      Revisit if the organization moves to Team.
 - [ ] Ensure each job begins from a clean workspace and leaves no workload VM,
       builder session, TAP/device state, signing material, or job credential
       behind. Bound concurrency to the host's proven capacity.

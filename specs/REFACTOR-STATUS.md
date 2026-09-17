@@ -184,9 +184,10 @@ Last updated: 2026-09-16
       `35151392843`: 309/310 passed, every non-run on the macOS allow-list) and
       #3011 is closed. A red live macOS job is witnessed to refuse the release
       gate without the evidence record standing in (run `35164778251`), and a
-      test now fails if an untrusted event can reach the `m1` label. Still open:
-      mechanically refusing a fork PR that edits a workflow to name the label,
-      which needs a Team-plan runner group.
+      test now fails if an untrusted event can reach the `m1` label. Accepted
+      limit: a fork PR that edits a workflow to name the label is stopped only by
+      the approval policy, because the Free plan offers no runner groups
+      (checked 2026-09-16).
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.
