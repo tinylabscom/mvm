@@ -617,7 +617,10 @@ jobs:
     name: Bootstrap hosted no-KVM launch artifacts
     needs: no-kvm-prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The Stage 0 source-kernel build has a 120-minute internal deadline.
+    # Keep the job wrapper above that deadline plus setup time so the builder
+    # can report its own diagnostic instead of GitHub cancelling it first.
+    timeout-minutes: 180
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
