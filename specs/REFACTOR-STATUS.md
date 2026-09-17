@@ -25,6 +25,10 @@ Last updated: 2026-09-17
       measure-first and sequenced with #3360.
       W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
       the W3.6 live boot is still open.
+  - [x] W1a — issue #3404: every guest-agent child path uses the shared
+        descriptor-closing hook, shared vsock sockets are close-on-exec, and
+        real Linux cold-entrypoint and process-RPC witnesses pass. Public
+        release remains gated on clearance.
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.

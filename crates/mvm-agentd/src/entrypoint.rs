@@ -1110,6 +1110,24 @@ pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
     }
 }
 
+/// Descriptor that must survive exec when [`spawn_path`] names the validated
+/// executable through `/proc/self/fd`. Warm workers do not install the cold
+/// path's fd-3 control channel, so they can retain the validation descriptor
+/// in place while closing every unrelated agent descriptor.
+pub(crate) fn spawn_fd_to_keep(entrypoint: &ValidatedEntrypoint) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        (!entrypoint.use_resolved_path).then_some(entrypoint.file.as_raw_fd() as u32)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = entrypoint;
+        None
+    }
+}
+
 /// Deliver `signal` to the child's whole process group.
 ///
 /// Negating the pid is what makes this reach descendants: the child is its own

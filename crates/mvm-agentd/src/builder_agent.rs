@@ -20,6 +20,12 @@ pub enum HostVmRequest {
 /// Vsock port used by the builder agent.
 pub const BUILDER_AGENT_PORT: u32 = 21470;
 
+fn child_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    command
+}
+
 /// Vsock port used by the persistent builder VM dispatch channel.
 /// Separate from [`BUILDER_AGENT_PORT`] (the legacy guest-listener
 /// used by [`HostVmRequest::Build`] / [`HostVmRequest::Ping`] above)
@@ -173,7 +179,7 @@ pub fn handle_request(req: HostVmRequest) -> Result<HostVmResponse> {
                 });
             }
             // Best-effort mount of /dev/vdb -> /build-out if not already mounted.
-            if Command::new("sh")
+            if child_command("sh")
                 .arg("-c")
                 .arg("mountpoint -q /build-out || (mkdir -p /build-out && mount /dev/vdb /build-out)")
                 .status()
@@ -182,7 +188,7 @@ pub fn handle_request(req: HostVmRequest) -> Result<HostVmResponse> {
                 // continue; the copy will fail and report
             }
             if flake_ref == "/build-in" {
-                let _ = Command::new("sh").arg("-c").arg(
+                let _ = child_command("sh").arg("-c").arg(
                     "mountpoint -q /build-in || (mkdir -p /build-in && mount /dev/vdc /build-in)",
                 ).status();
             }
@@ -192,7 +198,7 @@ pub fn handle_request(req: HostVmRequest) -> Result<HostVmResponse> {
                 "timeout {} nix build {}#{} --no-link --print-out-paths",
                 timeout, flake_ref, attr
             );
-            let output = Command::new("sh")
+            let output = child_command("sh")
                 .arg("-c")
                 .arg(&build_cmd)
                 .output()
@@ -229,7 +235,7 @@ pub fn handle_request(req: HostVmRequest) -> Result<HostVmResponse> {
                  echo '{{\"note\":\"Base fc config placeholder\"}}' > /build-out/fc-base.json",
                 p = out_path
             );
-            let copy_out = Command::new("sh")
+            let copy_out = child_command("sh")
                 .arg("-c")
                 .arg(&copy_cmd)
                 .output()

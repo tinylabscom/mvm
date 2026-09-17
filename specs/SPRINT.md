@@ -59,7 +59,12 @@
       free-page memory return, copy-on-write HVF restore, spawn-time memory and
       task limits, chunked durable checkpoints, measured guest flush cost,
       signed bundles through image registries, and structured agent-facing
-      errors.
+      errors. The highest-priority follow-up, issue #3404, is implemented and
+      locally validated: shared agent sockets are close-on-exec and one
+      descriptor-closing hook covers every guest-agent child-process path.
+      Cold-entrypoint and process-RPC Linux witnesses prove children receive
+      only their declared descriptors; public release remains gated on
+      clearance.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed

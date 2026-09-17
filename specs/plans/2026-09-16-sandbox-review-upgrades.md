@@ -1,11 +1,12 @@
 # Upgrades found by reviewing an external microVM sandbox
 
 Backing: preview
-Validation: none — no workstream has started. Each workstream names the tests
-and live evidence required before its checkbox may be ticked.
+Validation: workstream-specific. Each workstream names the tests and live
+evidence required before its checkbox may be ticked.
 
 **Issues:** #3378 (W1) · #3379 (W2) · #3380 (W3) · #3381 (W4) · #3382 (W5) ·
-#3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10)
+#3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10) ·
+#3404 (W1a)
 
 ## Outcome
 
@@ -90,6 +91,24 @@ can run in parallel with it. Among the upgrades:
       gate refuses the child.
 - [ ] W1.5 Live test: two clones of one snapshot return different `getrandom`
       output immediately after restore.
+
+## W1a — Keep agent descriptors out of every child process (#3404)
+
+**Problem.** The cold entrypoint path closes inherited descriptors, but the
+agent's process RPC, warm workers, detached execution, lifecycle hooks, init
+helpers, health checks, and builder subprocesses do not. A descriptor that
+misses close-on-exec can therefore carry a control-plane listener or live
+connection into an untrusted child.
+
+- [x] W1a.1 Create and accept every shared vsock descriptor close-on-exec.
+- [x] W1a.2 Apply one close-range hook, with the existing bounded fallback, to
+      every child spawn. Preserve only an explicitly required control or
+      validation descriptor.
+- [x] W1a.3 Linux real-process tests hold an intentionally inheritable socket
+      while spawning through the cold entrypoint and process RPC paths, and
+      prove the child sees only its declared descriptors.
+- [x] W1a.4 Host tests, zero-warning clippy, Linux-gated compilation, the full
+      workspace suite, and repository gates pass.
 
 ## W2 — Exclusive machine create (#3379)
 

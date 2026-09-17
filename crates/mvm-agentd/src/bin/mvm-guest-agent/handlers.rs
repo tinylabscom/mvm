@@ -645,9 +645,10 @@ pub(crate) fn handle_post_restore(
         }
     }
     // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
-    let result = std::process::Command::new("kill")
-        .args(["-USR1", "1"])
-        .output();
+    let mut command = std::process::Command::new("kill");
+    command.args(["-USR1", "1"]);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    let result = command.output();
     let signal_detail = match result {
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(format!(

@@ -6,6 +6,30 @@
 //! closes everything else itself, in `pre_exec`, rather than trusting every
 //! open call in the parent to have set the flag.
 
+use std::process::Command;
+
+/// Configure a child command to close every unintended descriptor immediately
+/// before `execve(2)`.
+///
+/// The registered hook uses only raw syscalls, so callers do not have to
+/// duplicate the `pre_exec` safety boundary at every spawn site. Non-Linux
+/// development hosts leave the command unchanged; workload guests are Linux.
+pub fn configure_close_fds(command: &mut Command, first: u32, keep: Option<u32>) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: the closure runs after fork and before exec, calls only the
+        // async-signal-safe raw-syscall implementation below, and captures
+        // only plain integers.
+        unsafe {
+            command.pre_exec(move || close_descriptors_from(first, keep));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (command, first, keep);
+}
+
 /// The inclusive descriptor ranges to close so that everything from `first`
 /// upwards is closed except `keep`. Pure, so the arithmetic is tested on any
 /// host.

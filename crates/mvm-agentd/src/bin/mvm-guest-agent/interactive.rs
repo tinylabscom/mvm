@@ -136,6 +136,8 @@ fn do_run_detached_with(
         .stdout(Stdio::from(console_out))
         .stderr(Stdio::from(console_err));
 
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+
     // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` is
     // async-signal-safe and is the only work done here — it detaches the
     // workload into its own session so it outlives this request's
@@ -171,9 +173,10 @@ fn do_run_detached_with(
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         };
-        let _ = std::process::Command::new(&exit_report_bin)
-            .arg(code.to_string())
-            .status();
+        let mut command = std::process::Command::new(&exit_report_bin);
+        command.arg(code.to_string());
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        let _ = command.status();
     });
 
     GuestResponse::DetachedStarted { pid }
