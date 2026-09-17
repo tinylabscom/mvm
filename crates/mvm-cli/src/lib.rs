@@ -28,7 +28,7 @@ pub mod ui;
 pub mod update;
 pub mod watch;
 
-pub use commands::run;
+pub use commands::{declare_binary_features, run};
 
 /// Launch-budget contract consumed by external validation harnesses.
 pub mod launch_contract {
