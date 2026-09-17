@@ -114,7 +114,7 @@ async fn manifest_fetch_uses_explicit_bearer_auth() {
 
     let fetcher = OciManifestFetcher::with_config_and_auth(
         client_config_for(&reg),
-        RegistryAuthConfig::bearer(token),
+        RegistryAuthConfig::bearer(reg.host(), token),
     );
     let image = reg.image_ref("private/app", "v1");
     let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
@@ -161,7 +161,7 @@ async fn manifest_fetch_rejects_wrong_bearer_auth() {
 
     let fetcher = OciManifestFetcher::with_config_and_auth(
         client_config_for(&reg),
-        RegistryAuthConfig::bearer("wrong-token"),
+        RegistryAuthConfig::bearer(reg.host(), "wrong-token"),
     );
     let image = reg.image_ref("private/app", "v1");
     let err = fetcher.fetch(&image).await.unwrap_err();
@@ -215,7 +215,7 @@ async fn manifest_fetch_uses_basic_auth_when_redeeming_bearer_challenge() {
 
     let fetcher = OciManifestFetcher::with_config_and_auth(
         client_config_for(&reg),
-        RegistryAuthConfig::basic("fixture-user", "fixture-pass"),
+        RegistryAuthConfig::basic(reg.host(), "fixture-user", "fixture-pass"),
     );
     let image = reg.image_ref("private/basic-challenge", "v1");
     let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
@@ -406,7 +406,7 @@ async fn layer_fetch_follows_same_origin_redirect_without_forwarding_auth() {
     let fetcher = OciLayerFetcher::with_config_and_auth(
         client_config_for(&reg),
         LayerFetchOptions::default(),
-        RegistryAuthConfig::bearer(token),
+        RegistryAuthConfig::bearer(reg.host(), token),
     );
     let image = reg.image_ref("library/test", "v1");
     let mut sink = Vec::new();
@@ -698,7 +698,7 @@ async fn layer_fetch_reuses_manifest_fetcher_bearer_auth() {
 
     let manifest_fetcher = OciManifestFetcher::with_config_and_auth(
         client_config_for(&reg),
-        RegistryAuthConfig::bearer(token),
+        RegistryAuthConfig::bearer(reg.host(), token),
     );
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());

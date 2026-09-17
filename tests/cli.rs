@@ -605,6 +605,119 @@ fn receipts_export_refuses_json_and_archive_together() {
     );
 }
 
+#[test]
+fn bundle_help_lists_push() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "--help"])
+        .output()
+        .expect("run mvmctl bundle --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for sub in ["export", "fetch", "install", "push", "gc"] {
+        assert!(
+            stdout.contains(sub),
+            "bundle help must list {sub}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_push_help_lists_positionals_and_flags() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "push", "--help"])
+        .output()
+        .expect("run mvmctl bundle push --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for needle in ["<FILE>", "<REFERENCE>", "--trust-store", "--allow-http"] {
+        assert!(
+            stdout.contains(needle),
+            "push help must list {needle}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_fetch_and_install_help_list_prod_and_registry_sources() {
+    for verb in ["fetch", "install"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(["bundle", verb, "--help"])
+            .output()
+            .expect("run mvmctl bundle --help");
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("--prod"),
+            "{verb} help must list --prod:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("oci:"),
+            "{verb} help must name oci://:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_push_requires_both_positionals() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "push", "./app.mvmpkg"])
+        .output()
+        .expect("run mvmctl bundle push");
+    assert!(!out.status.success(), "a missing reference must be refused");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("<REFERENCE>"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn bundle_fetch_prod_refuses_allow_http() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "bundle",
+            "install",
+            "--prod",
+            "--allow-http",
+            "oci://registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ])
+        .output()
+        .expect("run mvmctl bundle install --prod --allow-http");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--prod refuses --allow-http"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `--prod` with a tag must be refused from the reference alone. The
+/// registry host here does not exist, so reaching the network would fail
+/// with a different message.
+#[test]
+fn bundle_fetch_prod_refuses_a_tag_reference() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "bundle",
+            "fetch",
+            "--prod",
+            "oci://registry.invalid/team/app:v1",
+        ])
+        .output()
+        .expect("run mvmctl bundle fetch --prod");
+    assert!(!out.status.success(), "a tag under --prod must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("digest-pinned"), "stderr: {stderr}");
+}
+
 /// The root build script records this binary's features for the bootstrap
 /// helper to mirror. Every name it records must be a feature the root package
 /// declares, or the helper's `cargo build --features` names one that does not

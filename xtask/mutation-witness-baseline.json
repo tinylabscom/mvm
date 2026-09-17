@@ -133,6 +133,13 @@
       ]
     },
     {
+      "path": "crates/mvm-contract/src/policy/dns_guard.rs",
+      "package": "mvm-contract",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-contract/src/policy/network_policy.rs",
       "package": "mvm-contract",
       "claims": [
@@ -187,13 +194,6 @@
       "claims": [
         8,
         19
-      ]
-    },
-    {
-      "path": "crates/mvm-core/src/policy/dns_guard.rs",
-      "package": "mvm-core",
-      "claims": [
-        10
       ]
     },
     {
