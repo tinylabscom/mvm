@@ -1,7 +1,9 @@
 use crate::oci::OciError;
 use crate::oci::reference::ImageReference;
+use mvm_http::Method;
 use mvm_http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
+use std::sync::{Arc, Mutex};
 
 const DOCKER_HUB_REGISTRY: &str = "docker.io";
 const DOCKER_HUB_LEGACY_REGISTRY: &str = "index.docker.io";
@@ -82,15 +84,23 @@ pub struct RegistryClient {
     http: mvm_http::Client,
     config: ClientConfig,
     auth: RegistryAuthConfig,
+    // The last bearer token a challenge issued. A push sends several requests
+    // to one repository, and without this every one of them would first be
+    // refused and then replayed — including the upload that carries the blob.
+    issued_token: Arc<Mutex<Option<SecretString>>>,
+}
+
+/// What a single request carries besides its method and URL.
+#[derive(Default)]
+struct RequestParts<'a> {
+    accept: Option<&'a [&'a str]>,
+    content_type: Option<&'a str>,
+    body: Option<&'a [u8]>,
 }
 
 impl RegistryClient {
     pub fn new(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
-        Self {
-            http: mvm_http::Client::new(),
-            config,
-            auth,
-        }
+        Self::with_http_client(mvm_http::Client::new(), config, auth)
     }
 
     pub fn with_http_client(
@@ -98,7 +108,12 @@ impl RegistryClient {
         config: ClientConfig,
         auth: RegistryAuthConfig,
     ) -> Self {
-        Self { http, config, auth }
+        Self {
+            http,
+            config,
+            auth,
+            issued_token: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub async fn get_manifest(
@@ -106,13 +121,14 @@ impl RegistryClient {
         reference: &ImageReference,
         accept: &[&str],
     ) -> Result<RegistryResponse, OciError> {
-        self.get(
-            reference,
-            &manifest_path(reference),
-            Some(accept),
-            RedirectPolicy::Refuse,
-        )
-        .await
+        let url = self.endpoint(reference, &manifest_path(reference));
+        let parts = RequestParts {
+            accept: Some(accept),
+            ..RequestParts::default()
+        };
+        let response = self.send(Method::GET, &url, &parts).await?;
+        self.registry_response(url, response, RedirectPolicy::Refuse)
+            .await
     }
 
     pub async fn get_blob(
@@ -120,30 +136,117 @@ impl RegistryClient {
         reference: &ImageReference,
         digest: &str,
     ) -> Result<RegistryResponse, OciError> {
-        self.get(
-            reference,
-            &blob_path(reference, digest),
-            None,
-            RedirectPolicy::Blob,
-        )
-        .await
+        let url = self.endpoint(reference, &blob_path(reference, digest));
+        let response = self
+            .send(Method::GET, &url, &RequestParts::default())
+            .await?;
+        self.registry_response(url, response, RedirectPolicy::Blob)
+            .await
     }
 
-    async fn get(
+    /// Whether the repository already holds a blob with this digest.
+    ///
+    /// Only a `200` counts as present. A registry that answers `HEAD` with a
+    /// redirect to storage is treated as not having it, which costs a
+    /// redundant upload and never a missing blob.
+    pub async fn blob_exists(
         &self,
         reference: &ImageReference,
-        path: &str,
-        accept: Option<&[&str]>,
-        redirect_policy: RedirectPolicy,
-    ) -> Result<RegistryResponse, OciError> {
-        let url = self.endpoint(reference, path);
-        let request = self.build_request(url.clone(), accept, None);
-        let response = request
+        digest: &str,
+    ) -> Result<bool, OciError> {
+        let url = self.endpoint(reference, &blob_path(reference, digest));
+        let response = self
+            .send(Method::HEAD, &url, &RequestParts::default())
+            .await?;
+        match response.status().as_u16() {
+            200 => Ok(true),
+            404 | 307 | 308 => Ok(false),
+            _ => Err(unexpected_status("HEAD", &url, response).await),
+        }
+    }
+
+    /// Upload `bytes` as the blob `digest` with the two-request monolithic
+    /// flow: open an upload session, then close it with the whole body.
+    ///
+    /// The session location must stay on the registry's own origin. The
+    /// request that closes the session carries the registry credentials, and
+    /// a location elsewhere would hand them to whoever the registry named.
+    pub async fn upload_blob(
+        &self,
+        reference: &ImageReference,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), OciError> {
+        let start_url = self.endpoint(
+            reference,
+            &format!("/v2/{}/blobs/uploads/", reference.repository),
+        );
+        let started = self
+            .send(Method::POST, &start_url, &RequestParts::default())
+            .await?;
+        if started.status().as_u16() != 202 {
+            return Err(unexpected_status("POST", &start_url, started).await);
+        }
+        let location = started.headers().get(LOCATION).ok_or_else(|| {
+            OciError::Registry(format!(
+                "POST {start_url} opened an upload without a Location"
+            ))
+        })?;
+        let upload_url = upload_session_url(&start_url, location, digest)?;
+        let parts = RequestParts {
+            content_type: Some("application/octet-stream"),
+            body: Some(bytes),
+            ..RequestParts::default()
+        };
+        let finished = self.send(Method::PUT, upload_url.as_str(), &parts).await?;
+        if finished.status().as_u16() != 201 {
+            return Err(unexpected_status("PUT", &display_url(&upload_url), finished).await);
+        }
+        Ok(())
+    }
+
+    /// Store `bytes` as the manifest at `reference`'s tag, or at its digest
+    /// when it has no tag. Returns the digest the registry reports, if any,
+    /// so the caller can check it against the digest of what it sent.
+    pub async fn put_manifest(
+        &self,
+        reference: &ImageReference,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<Option<String>, OciError> {
+        let url = self.endpoint(reference, &manifest_path(reference));
+        let parts = RequestParts {
+            content_type: Some(media_type),
+            body: Some(bytes),
+            ..RequestParts::default()
+        };
+        let response = self.send(Method::PUT, &url, &parts).await?;
+        if response.status().as_u16() != 201 {
+            return Err(unexpected_status("PUT", &url, response).await);
+        }
+        Ok(response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string))
+    }
+
+    /// Send one request, redeeming a bearer challenge once if the registry
+    /// asks for one.
+    async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        parts: &RequestParts<'_>,
+    ) -> Result<mvm_http::Response, OciError> {
+        let cached = self.cached_authorization();
+        let response = self
+            .build_request(method.clone(), url, parts, cached)
             .send()
             .await
-            .map_err(|e| OciError::Registry(format!("GET {url}: {e}")))?;
+            .map_err(|e| OciError::Registry(format!("{method} {url}: {e}")))?;
         if response.status() != mvm_http::StatusCode::UNAUTHORIZED {
-            return self.registry_response(url, response, redirect_policy).await;
+            return Ok(response);
         }
 
         let challenge = parse_auth_challenge(
@@ -152,24 +255,44 @@ impl RegistryClient {
                 .get(WWW_AUTHENTICATE)
                 .and_then(|value| value.to_str().ok()),
         )?;
-        let token = self.fetch_bearer_token(&url, &challenge).await?;
-        let retry = self
-            .build_request(url.clone(), accept, Some(format!("Bearer {token}")))
+        let token = self.fetch_bearer_token(url, &challenge).await?;
+        let authorization = format!("Bearer {token}");
+        self.remember_token(token);
+        self.build_request(method.clone(), url, parts, Some(authorization))
             .send()
             .await
-            .map_err(|e| OciError::Registry(format!("GET {url} after auth: {e}")))?;
-        self.registry_response(url, retry, redirect_policy).await
+            .map_err(|e| OciError::Registry(format!("{method} {url} after auth: {e}")))
+    }
+
+    fn cached_authorization(&self) -> Option<String> {
+        self.issued_token.lock().ok().and_then(|slot| {
+            slot.as_ref()
+                .map(|token| format!("Bearer {}", token.expose_secret()))
+        })
+    }
+
+    fn remember_token(&self, token: String) {
+        if let Ok(mut slot) = self.issued_token.lock() {
+            *slot = Some(SecretString::from(token));
+        }
     }
 
     fn build_request(
         &self,
-        url: String,
-        accept: Option<&[&str]>,
+        method: Method,
+        url: &str,
+        parts: &RequestParts<'_>,
         authorization: Option<String>,
     ) -> mvm_http::RequestBuilder {
-        let mut request = self.http.get(url);
-        if let Some(accept_values) = accept {
+        let mut request = self.http.request(method, url);
+        if let Some(accept_values) = parts.accept {
             request = request.header(ACCEPT, accept_values.join(", "));
+        }
+        if let Some(content_type) = parts.content_type {
+            request = request.header(CONTENT_TYPE, content_type);
+        }
+        if let Some(body) = parts.body {
+            request = request.body(body.to_vec());
         }
         if let Some(authz) = authorization {
             return request.header(AUTHORIZATION, authz);
@@ -385,6 +508,57 @@ fn display_url(url: &mvm_http::Url) -> String {
     safe.to_string()
 }
 
+/// Resolve an upload session `Location` against the request that opened it,
+/// confine it to the registry's origin, and add the `digest` parameter that
+/// closes the session.
+fn upload_session_url(
+    start_url: &str,
+    location: &mvm_http::header::HeaderValue,
+    digest: &str,
+) -> Result<mvm_http::Url, OciError> {
+    let start = mvm_http::Url::parse(start_url)
+        .map_err(|e| OciError::Registry(format!("registry endpoint is not a valid URL: {e}")))?;
+    let location = location
+        .to_str()
+        .map_err(|_| OciError::Registry("upload Location is not valid text".into()))?;
+    let mut next = start
+        .join(location)
+        .map_err(|_| OciError::Registry("upload Location is not a valid URL".into()))?;
+    if !next.username().is_empty() || next.password().is_some() || next.fragment().is_some() {
+        return Err(OciError::Registry(
+            "upload Location must not contain credentials or a fragment".into(),
+        ));
+    }
+    if !same_origin(&start, &next) {
+        return Err(OciError::Registry(format!(
+            "upload Location from {} points at another origin; refusing to send credentials there",
+            display_url(&start)
+        )));
+    }
+    next.query_pairs_mut().append_pair("digest", digest);
+    Ok(next)
+}
+
+/// Describe a response the caller did not expect, including a bounded prefix
+/// of its body: registries explain refusals there, and an unbounded read would
+/// let one choose how much we buffer to print an error.
+async fn unexpected_status(method: &str, url: &str, mut response: mvm_http::Response) -> OciError {
+    const MAX_ERROR_BODY: usize = 4096;
+    let status = response.status();
+    let mut body = Vec::new();
+    while body.len() < MAX_ERROR_BODY {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    body.truncate(MAX_ERROR_BODY);
+    OciError::Registry(format!(
+        "{method} {url} failed with {status}: {}",
+        String::from_utf8_lossy(&body)
+    ))
+}
+
 pub struct RegistryResponse {
     pub content_type: Option<String>,
     pub docker_content_digest: Option<String>,
@@ -428,7 +602,7 @@ fn parse_auth_challenge(header: Option<&str>) -> Result<BearerChallenge, OciErro
     let mut realm = None;
     let mut service = None;
     let mut scope = None;
-    for part in challenge.split(',') {
+    for part in split_challenge_params(challenge) {
         let (key, value) = part.trim().split_once('=').ok_or_else(|| {
             OciError::Registry(format!("malformed WWW-Authenticate challenge: {header}"))
         })?;
@@ -449,6 +623,26 @@ fn parse_auth_challenge(header: Option<&str>) -> Result<BearerChallenge, OciErro
         service,
         scope,
     })
+}
+
+/// Split challenge parameters on the commas between them, not the commas
+/// inside a quoted value: a push challenge's scope is `pull,push`.
+fn split_challenge_params(challenge: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (index, ch) in challenge.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(&challenge[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&challenge[start..]);
+    parts
 }
 
 #[derive(serde::Deserialize)]
@@ -509,6 +703,56 @@ mod tests {
             parsed.scope.as_deref(),
             Some("repository:library/alpine:pull")
         );
+    }
+
+    #[test]
+    fn parse_bearer_challenge_keeps_commas_inside_a_quoted_scope() {
+        let parsed = parse_auth_challenge(Some(
+            r#"Bearer realm="https://auth.example/token",scope="repository:team/app:pull,push",service="registry.example""#,
+        ))
+        .expect("challenge parses");
+        assert_eq!(
+            parsed.scope.as_deref(),
+            Some("repository:team/app:pull,push")
+        );
+        assert_eq!(parsed.service.as_deref(), Some("registry.example"));
+    }
+
+    #[test]
+    fn upload_session_url_keeps_the_session_query_and_adds_the_digest() {
+        let location = mvm_http::header::HeaderValue::from_static(
+            "/v2/team/app/blobs/uploads/abc?_state=opaque",
+        );
+        let url = upload_session_url(
+            "https://registry.example/v2/team/app/blobs/uploads/",
+            &location,
+            "sha256:00",
+        )
+        .expect("same-origin location is accepted");
+        assert_eq!(
+            url.as_str(),
+            "https://registry.example/v2/team/app/blobs/uploads/abc?_state=opaque&digest=sha256%3A00"
+        );
+    }
+
+    #[test]
+    fn upload_session_url_refuses_another_origin_and_credentials() {
+        for value in [
+            "https://storage.example/upload",
+            "http://registry.example/v2/team/app/blobs/uploads/abc",
+            "https://user:pass@registry.example/upload",
+        ] {
+            let location = mvm_http::header::HeaderValue::from_str(value).expect("header");
+            assert!(
+                upload_session_url(
+                    "https://registry.example/v2/team/app/blobs/uploads/",
+                    &location,
+                    "sha256:00",
+                )
+                .is_err(),
+                "{value} must be refused"
+            );
+        }
     }
 
     #[test]
