@@ -171,6 +171,22 @@ pub fn builder_store_gc_cap_kib() -> u64 {
     u64::from(gib) * 1024 * 1024
 }
 
+/// `stage0-build.conf` key carrying [`builder_store_gc_cap_kib`] into the Stage 0
+/// guest.
+///
+/// The guest cannot read the host's environment, so without this the
+/// [`MVM_BUILDER_STORE_GC_GIB_ENV`] override would govern the steady-state
+/// store and silently not the Stage 0 one.
+pub const STAGE0_STORE_GC_KIB_CONF_KEY: &str = "MVM_STAGE0_STORE_GC_KIB";
+
+/// The `stage0-build.conf` line every Stage 0 build config carries.
+pub fn stage0_store_gc_conf_line() -> String {
+    format!(
+        "{STAGE0_STORE_GC_KIB_CONF_KEY}={}\n",
+        builder_store_gc_cap_kib()
+    )
+}
+
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
 /// through the application-dependency install pipeline. Migrated
 /// from `libkrun_builder.rs` because the install spec staging is a
@@ -2212,5 +2228,24 @@ mod tests {
         // Zero → also falls back (zero would GC the just-built closure).
         env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+    }
+
+    #[test]
+    fn the_stage0_config_carries_the_same_cap_the_steady_state_builder_uses() {
+        let mut env = TestEnv::new();
+
+        env.remove(MVM_BUILDER_STORE_GC_GIB_ENV);
+        assert_eq!(
+            stage0_store_gc_conf_line(),
+            "MVM_STAGE0_STORE_GC_KIB=25165824\n"
+        );
+
+        // The override reaches the guest; before this key it governed only the
+        // steady-state store.
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "2");
+        assert_eq!(
+            stage0_store_gc_conf_line(),
+            format!("{STAGE0_STORE_GC_KIB_CONF_KEY}={}\n", 2 * 1024 * 1024)
+        );
     }
 }

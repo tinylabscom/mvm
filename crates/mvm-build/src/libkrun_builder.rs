@@ -2492,7 +2492,7 @@ fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, B
 /// [`builder_vm_cache_dir`] and matches `cache info`'s
 /// `nix-store-*.img` sparse-footprint report.
 pub fn stage0_nix_store_image_name() -> String {
-    format!("nix-store-stage0-{}.img", host_arch_tag())
+    crate::builder_vm::stage0_store_image_name_for(host_arch_tag())
 }
 
 pub fn prepopulate_stage0_nix_store_image(

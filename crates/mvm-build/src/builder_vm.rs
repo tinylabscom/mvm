@@ -764,15 +764,55 @@ pub fn clear_builder_store_image_at(
     arch: &str,
     dry_run: bool,
 ) -> std::io::Result<BuilderStoreRepair> {
-    let image = dir.join(format!("nix-store-{arch}.img"));
+    clear_store_image_file_at(&dir.join(format!("nix-store-{arch}.img")), dry_run)
+}
+
+/// The Stage 0 Nix store image's file name for `arch`.
+///
+/// Distinct from the steady-state `nix-store-<arch>.img`: it is Stage 0's own
+/// build cache, read by nothing once the builder image exists.
+pub fn stage0_store_image_name_for(arch: &str) -> String {
+    format!("nix-store-stage0-{arch}.img")
+}
+
+/// Remove only the Stage 0 Nix store image, leaving the builder image, the
+/// steady-state store, and the Stage 0 seed in place.
+///
+/// This is the reclaim for a store that is healthy but large. Stage 0 keeps it
+/// so the next bootstrap does not recompile the kernel and host binaries;
+/// dropping it trades that warm start for its disk. Callers must not run this
+/// under an in-flight bootstrap.
+pub fn clear_stage0_store_image(dry_run: bool) -> std::io::Result<BuilderStoreRepair> {
+    clear_stage0_store_image_at(&builder_vm_cache_dir(), host_arch_tag(), dry_run)
+}
+
+/// [`clear_stage0_store_image`] with an explicit dir — the unit-testable core.
+pub fn clear_stage0_store_image_at(
+    dir: &std::path::Path,
+    arch: &str,
+    dry_run: bool,
+) -> std::io::Result<BuilderStoreRepair> {
+    clear_store_image_file_at(&dir.join(stage0_store_image_name_for(arch)), dry_run)
+}
+
+/// Remove one store image and report the disk it held.
+///
+/// The images are sparse with a 64 GiB apparent size, so the freed figure is
+/// the allocated blocks: `len()` would report the cap as if it were disk.
+fn clear_store_image_file_at(
+    image: &std::path::Path,
+    dry_run: bool,
+) -> std::io::Result<BuilderStoreRepair> {
     let existed = image.exists();
     let bytes_freed = if existed {
-        std::fs::metadata(&image).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(image)
+            .map(|m| allocated_bytes(&m))
+            .unwrap_or(0)
     } else {
         0
     };
     if existed && !dry_run {
-        std::fs::remove_file(&image)?;
+        std::fs::remove_file(image)?;
     }
     Ok(BuilderStoreRepair {
         path: image.display().to_string(),
@@ -780,6 +820,17 @@ pub fn clear_builder_store_image_at(
         bytes_freed,
         dry_run,
     })
+}
+
+#[cfg(unix)]
+fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    meta.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+    meta.len()
 }
 
 /// [`clear_builder_store`] with an explicit dir — the unit-testable core.
@@ -1369,6 +1420,62 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_stage0_store_keeps_the_builder_image_and_steady_state_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("builder-vm");
+        std::fs::create_dir_all(store.join("x86_64")).unwrap();
+        std::fs::write(store.join("nix-store-x86_64.img"), vec![0u8; 4096]).unwrap();
+        std::fs::write(store.join("nix-store-stage0-x86_64.img"), vec![1u8; 8192]).unwrap();
+        std::fs::write(store.join("x86_64/rootfs.ext4"), vec![0u8; 256]).unwrap();
+
+        let dry = clear_stage0_store_image_at(&store, "x86_64", true).unwrap();
+        assert!(dry.existed && dry.dry_run);
+        assert!(
+            store.join("nix-store-stage0-x86_64.img").exists(),
+            "dry-run must not delete"
+        );
+
+        let done = clear_stage0_store_image_at(&store, "x86_64", false).unwrap();
+        assert!(done.existed && !done.dry_run);
+        assert_eq!(done.bytes_freed, dry.bytes_freed);
+        assert!(!store.join("nix-store-stage0-x86_64.img").exists());
+        assert!(
+            store.join("nix-store-x86_64.img").exists(),
+            "the steady-state store is not Stage 0's"
+        );
+        assert!(
+            store.join("x86_64/rootfs.ext4").exists(),
+            "the builder image Stage 0 produced must survive"
+        );
+    }
+
+    #[test]
+    fn an_absent_stage0_store_is_nothing_to_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let done = clear_stage0_store_image_at(tmp.path(), "aarch64", false).unwrap();
+        assert!(!done.existed);
+        assert_eq!(done.bytes_freed, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sparse_store_reports_its_allocated_blocks_not_its_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = tmp.path().join(stage0_store_image_name_for("aarch64"));
+        let file = std::fs::File::create(&image).unwrap();
+        file.set_len(1 << 30).unwrap();
+        drop(file);
+
+        let dry = clear_stage0_store_image_at(tmp.path(), "aarch64", true).unwrap();
+
+        assert!(
+            dry.bytes_freed < 1 << 20,
+            "a 1 GiB hole is not 1 GiB of disk: reported {}",
+            dry.bytes_freed
+        );
+    }
+
+    #[test]
     fn clearing_only_the_store_image_keeps_the_expensive_builder_artifacts() {
         // The whole point: a damaged store image must not cost the intact
         // stage0 seed and builder images alongside it.
@@ -1379,9 +1486,11 @@ mod tests {
         std::fs::write(store.join("nix-store-stage0-aarch64.img"), vec![0u8; 512]).unwrap();
         std::fs::write(store.join("hvf/rootfs.ext4"), vec![0u8; 256]).unwrap();
 
+        let allocated =
+            allocated_bytes(&std::fs::metadata(store.join("nix-store-aarch64.img")).unwrap());
         let dry = clear_builder_store_image_at(&store, "aarch64", true).unwrap();
         assert!(dry.existed && dry.dry_run);
-        assert_eq!(dry.bytes_freed, 4096);
+        assert_eq!(dry.bytes_freed, allocated);
         assert!(
             store.join("nix-store-aarch64.img").exists(),
             "dry-run must not delete"
@@ -1389,7 +1498,7 @@ mod tests {
 
         let done = clear_builder_store_image_at(&store, "aarch64", false).unwrap();
         assert!(done.existed && !done.dry_run);
-        assert_eq!(done.bytes_freed, 4096);
+        assert_eq!(done.bytes_freed, allocated);
         assert!(
             !store.join("nix-store-aarch64.img").exists(),
             "the damaged image goes"

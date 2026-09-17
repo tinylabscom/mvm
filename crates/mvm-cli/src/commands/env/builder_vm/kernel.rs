@@ -106,7 +106,10 @@ pub(super) fn run_stage0_rootfs_with_external_kernel(
 
     std::fs::write(
         staging_dir.join("stage0-build.conf"),
-        "MVM_STAGE0_BUILD_ATTR=stage0-rootfs\nMVM_STAGE0_OUTPUT_MODE=rootfs\n",
+        format!(
+            "MVM_STAGE0_BUILD_ATTR=stage0-rootfs\nMVM_STAGE0_OUTPUT_MODE=rootfs\n{}",
+            mvm_build::builder_vm_runtime::stage0_store_gc_conf_line()
+        ),
     )
     .map_err(|e| {
         (

@@ -93,6 +93,7 @@ impl<'a> Stage0ArtifactBuild<'a> {
         if let Some(config_attr) = self.config_attr {
             conf.push_str(&format!("MVM_STAGE0_CONFIG_ATTR={config_attr}\n"));
         }
+        conf.push_str(&mvm_build::builder_vm_runtime::stage0_store_gc_conf_line());
         conf
     }
 }
@@ -187,7 +188,10 @@ mod tests {
         .expect("valid request");
         assert_eq!(
             build.render_conf(),
-            "MVM_STAGE0_BUILD_ATTR=sdk-sidecar-image\nMVM_STAGE0_OUTPUT_MODE=sdk-sidecar\n"
+            format!(
+                "MVM_STAGE0_BUILD_ATTR=sdk-sidecar-image\nMVM_STAGE0_OUTPUT_MODE=sdk-sidecar\n{}",
+                mvm_build::builder_vm_runtime::stage0_store_gc_conf_line()
+            )
         );
     }
 }
