@@ -350,6 +350,15 @@ e2e:
 e2e-docs:
     ./scripts/e2e-documented-surface.sh
 
+# The release lane fetches the signed builder image; this proves a checkout can
+# still build one from nothing. Needs an empty MVM_E2E_HOME, Linux with KVM, and
+# the time a cold Stage 0 takes — Extended CI runs it nightly.
+#
+
+# Bootstrap the builder image from source against a cold home
+e2e-source-bootstrap:
+    ./scripts/e2e-source-bootstrap.sh
+
 # Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
 # suite creates, so it never touches a machine you made.
 #

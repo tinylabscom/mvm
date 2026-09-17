@@ -314,6 +314,61 @@ mod tests {
         );
     }
 
+    /// A real bundle, as `release.yml` published it for `v0.18.0-rc.1`, over the
+    /// builder-VM checksum manifest the boot image fetch asks for by name. The
+    /// asset name cannot tell the two trains apart; only the signing identity can.
+    #[cfg(feature = "manifest-verify")]
+    mod cli_signed_fixture {
+        use super::*;
+
+        const VERSION: &str = "0.18.0-rc.1";
+        const ASSET: &str = "builder-vm-aarch64-checksums-sha256.txt";
+
+        fn verify(train: ReleaseTrain, version: &str) -> Result<(), RuntimeOverlayError> {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/release-signature")
+                .join(format!("v{VERSION}"));
+            verify_release_archive_signature(&ReleaseSignatureRequest {
+                base_url: &format!("file://{}", dir.display()),
+                asset: ASSET,
+                archive_path: &dir.join(ASSET),
+                version,
+                train,
+            })
+        }
+
+        /// Verification runs offline against the embedded trust root, so a
+        /// committed bundle stays verifiable. This is the control for the
+        /// refusal below: without it, that refusal could mean only that the
+        /// fixture is unreadable.
+        #[test]
+        fn a_cli_release_bundle_verifies_under_the_cli_train() {
+            let mut env = TestEnv::new();
+            env.remove(SKIP_COSIGN_VERIFY_ENV);
+
+            verify(ReleaseTrain::Cli, VERSION)
+                .expect("the CLI release workflow's own signature must verify");
+        }
+
+        /// A manifest signed by the CLI release workflow is not a boot image
+        /// manifest, whichever boot image version the train is asked to accept.
+        #[test]
+        fn the_boot_image_train_refuses_a_manifest_signed_by_the_cli_workflow() {
+            let mut env = TestEnv::new();
+            env.remove(SKIP_COSIGN_VERIFY_ENV);
+
+            for version in [VERSION, "0.1.5"] {
+                let err = verify(ReleaseTrain::BootImage, version)
+                    .expect_err("a CLI-workflow signature must not satisfy the boot image train");
+                assert!(
+                    matches!(&err, RuntimeOverlayError::SignatureInvalid { asset, .. } if asset == ASSET),
+                    "the bundle is present and well-formed, so the refusal must be an \
+                     identity failure naming the asset: {err}"
+                );
+            }
+        }
+    }
+
     /// The identities the verifier accepts are the release workflow's, bound to
     /// the running version — not a wildcard and not a different workflow.
     #[test]

@@ -133,20 +133,27 @@ pub(super) fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
 /// produces `stage0.lock`).
 #[cfg(any(feature = "builder-vm", test))]
 pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<Stage0LockGuard> {
+    let lock = lock_builder_vm_cache(std::path::Path::new(out_dir))?;
+    ACTIVE_STAGE0_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(Stage0LockGuard { _lock: lock })
+}
+
+/// The advisory lock every writer of a per-arch builder VM cache holds. A
+/// published-image fetch takes it without [`acquire_stage0_lock`]'s in-process
+/// count, so an interrupted download is not reported as an interrupted build.
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
+fn lock_builder_vm_cache(out_dir: &std::path::Path) -> Result<mvm_core::atomic_io::FileLock> {
     use mvm_core::atomic_io::FileLock;
 
-    let parent = std::path::Path::new(out_dir)
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("builder VM cache path has no parent: {out_dir}"))?;
+    let parent = out_dir.parent().ok_or_else(|| {
+        anyhow::anyhow!("builder VM cache path has no parent: {}", out_dir.display())
+    })?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating builder-vm cache parent {}", parent.display()))?;
     let lock_anchor = parent.join("stage0");
 
     match FileLock::try_acquire(&lock_anchor) {
-        Ok(Some(guard)) => {
-            ACTIVE_STAGE0_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(Stage0LockGuard { _lock: guard })
-        }
+        Ok(Some(guard)) => Ok(guard),
         Ok(None) => anyhow::bail!(
             "another caller of Stage 0 is already bootstrapping the \
              builder VM image on this host (lock held at {}.lock). Wait for it to finish, or — \
@@ -161,7 +168,7 @@ pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<Stage0LockGuard> {
 /// Remove incomplete Stage 0 directories belonging to one final cache
 /// directory. The caller holds the shared Stage 0 lock, so every matching
 /// sibling is from an earlier interrupted process rather than a live writer.
-#[cfg(any(feature = "builder-vm", test))]
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 pub(super) fn sweep_stage0_staging_siblings(final_dir: &std::path::Path) -> Result<u64> {
     let parent = final_dir.parent().ok_or_else(|| {
         anyhow::anyhow!("Stage 0 cache path has no parent: {}", final_dir.display())
@@ -190,7 +197,7 @@ pub(super) fn sweep_stage0_staging_siblings(final_dir: &std::path::Path) -> Resu
     Ok(removed)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 pub(super) fn unique_builder_vm_stage0_staging_dir(
     final_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
@@ -742,13 +749,21 @@ pub(super) fn write_builder_vm_artifact_digest_manifest(dir: &std::path::Path) -
         .with_context(|| format!("writing builder VM artifact digests in {}", dir.display()))
 }
 
+/// Where a builder VM cache came from. A source-checkout build records the
+/// fingerprint it was built from; a fetched image has no source to fingerprint
+/// and records the release it came from instead.
 #[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct BuilderVmSourceCacheProvenance {
     schema_version: u32,
     source_kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     source_fingerprint: String,
     artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acquired_at: Option<String>,
 }
 
 fn builder_vm_source_cache_provenance(
@@ -760,7 +775,20 @@ fn builder_vm_source_cache_provenance(
         source_kind: "source_checkout_stage0".to_string(),
         source_fingerprint: source_fingerprint.to_string(),
         artifacts: builder_vm_artifact_names_present(dir)?,
+        image_tag: None,
+        acquired_at: None,
     })
+}
+
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
+fn write_builder_vm_provenance(
+    dir: &std::path::Path,
+    provenance: &BuilderVmSourceCacheProvenance,
+) -> Result<()> {
+    let json = serde_json::to_string_pretty(provenance)
+        .context("serializing builder VM cache provenance")?;
+    std::fs::write(dir.join(BUILDER_VM_PROVENANCE_FILE), format!("{json}\n"))
+        .with_context(|| format!("writing builder VM provenance in {}", dir.display()))
 }
 
 fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String>> {
@@ -795,11 +823,10 @@ pub(super) fn write_builder_vm_source_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> Result<()> {
-    let provenance = builder_vm_source_cache_provenance(dir, source_fingerprint)?;
-    let json = serde_json::to_string_pretty(&provenance)
-        .context("serializing builder VM source cache provenance")?;
-    std::fs::write(dir.join(BUILDER_VM_PROVENANCE_FILE), format!("{json}\n"))
-        .with_context(|| format!("writing builder VM provenance in {}", dir.display()))
+    write_builder_vm_provenance(
+        dir,
+        &builder_vm_source_cache_provenance(dir, source_fingerprint)?,
+    )
 }
 
 /// Write the full cache-sidecar set — source fingerprint, artifact-digest
@@ -844,28 +871,17 @@ pub(super) fn promote_builder_vm_stage0_cache(
         );
     }
 
-    if final_dir.exists() {
-        if builder_vm_source_cache_ready(final_dir, source_fingerprint) {
-            std::fs::remove_dir_all(staging_dir).with_context(|| {
-                format!(
-                    "removing redundant Stage 0 staging dir {}",
-                    staging_dir.display()
-                )
-            })?;
-            return Ok(());
-        }
-        std::fs::remove_dir_all(final_dir).with_context(|| {
-            format!("removing partial builder VM cache {}", final_dir.display())
+    if final_dir.exists() && builder_vm_source_cache_ready(final_dir, source_fingerprint) {
+        std::fs::remove_dir_all(staging_dir).with_context(|| {
+            format!(
+                "removing redundant Stage 0 staging dir {}",
+                staging_dir.display()
+            )
         })?;
+        return Ok(());
     }
 
-    std::fs::rename(staging_dir, final_dir).with_context(|| {
-        format!(
-            "promoting Stage 0 builder VM cache {} to {}",
-            staging_dir.display(),
-            final_dir.display()
-        )
-    })?;
+    replace_builder_vm_cache_dir(staging_dir, final_dir)?;
     if !builder_vm_source_cache_ready(final_dir, source_fingerprint) {
         anyhow::bail!(
             "promoted Stage 0 builder VM cache {} failed source-cache validation",
@@ -875,99 +891,412 @@ pub(super) fn promote_builder_vm_stage0_cache(
     Ok(())
 }
 
-/// Download the per-arch Layer 1 builder VM artifacts published by the
-/// `builder-vm-image` release-workflow job into the local cache dir,
-/// SHA-256-verified.
+/// Swap a fully prepared `staging_dir` in as `final_dir`.
 ///
-/// Uses the shared verification pipeline: `fetch_expected_hashes` reads the
-/// checksum manifest, and `verify_artifact_hash` then holds every artifact to
-/// the digest that manifest pins. The required artifacts are `vmlinux`,
-/// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
-/// builder-image loader rejects caches that do not carry the full
-/// contract.
+/// Any previous cache is moved aside rather than deleted first, so a failed
+/// rename puts it back: the failure mode is "no update", not "no builder
+/// image". The aside path uses the Stage 0 staging name, so a crash between
+/// the two renames leaves a directory the orphan sweep already reclaims.
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
+fn replace_builder_vm_cache_dir(
+    staging_dir: &std::path::Path,
+    final_dir: &std::path::Path,
+) -> Result<()> {
+    let promote = |from: &std::path::Path| {
+        std::fs::rename(from, final_dir).with_context(|| {
+            format!(
+                "promoting builder VM cache {} to {}",
+                from.display(),
+                final_dir.display()
+            )
+        })
+    };
+    if !final_dir.exists() {
+        return promote(staging_dir);
+    }
+
+    let mut aside = unique_builder_vm_stage0_staging_dir(final_dir)?.into_os_string();
+    aside.push("-previous");
+    let aside = std::path::PathBuf::from(aside);
+    std::fs::rename(final_dir, &aside).with_context(|| {
+        format!(
+            "moving the previous builder VM cache {} aside",
+            final_dir.display()
+        )
+    })?;
+    if let Err(error) = promote(staging_dir) {
+        std::fs::rename(&aside, final_dir).with_context(|| {
+            format!(
+                "restoring the previous builder VM cache to {} after a failed swap",
+                final_dir.display()
+            )
+        })?;
+        return Err(error);
+    }
+    if let Err(error) = std::fs::remove_dir_all(&aside) {
+        // The new cache is already live; the leftover is reclaimed by the next
+        // sweep, so it is not worth failing an install that succeeded.
+        tracing::warn!(path = %aside.display(), %error, "could not remove the previous builder VM cache");
+    }
+    Ok(())
+}
+
+/// A boot image release that publishes builder VM images.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) struct BuilderVmImageRelease<'a> {
+    /// Release tag, e.g. `boot-image/v0.1.5`; recorded as provenance.
+    pub(super) tag: &'a str,
+    /// Version whose signing identity the checksum manifest must carry.
+    pub(super) version: &'a str,
+    /// Per-release download base URL, no trailing slash.
+    pub(super) base_url: &'a str,
+}
+
+/// The two network legs of a published builder VM image fetch.
 ///
-/// Gated behind `release-artifact-bootstrap`. Contributor
-/// builds (default) never compile this in, so the "no flake + cache
-/// miss" branch in [`bootstrap_builder_vm_image`] has no escape hatch
-/// and surfaces a hard error. End-user-binary release builds opt in
-/// at compile time via `--features release-artifact-bootstrap`.
+/// Everything else — staging, digest and manifest checks, provenance,
+/// promotion — is the same whether the bytes come from a release or from a
+/// test, so only these two are substitutable.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) trait BuilderVmReleaseSource {
+    /// The `asset -> sha256` pins for `wanted`, from a checksum manifest whose
+    /// signature has already been verified. A refusal here must come before any
+    /// pin is returned.
+    fn verified_checksums(
+        &self,
+        manifest: &ChecksumManifest<'_>,
+        wanted: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>>;
+
+    /// Download `url` to `dest`.
+    fn fetch(&self, url: &str, dest: &str) -> Result<()>;
+}
+
+/// The published release, reached over the network.
+#[cfg(feature = "release-artifact-bootstrap")]
+struct PublishedRelease;
+
+#[cfg(feature = "release-artifact-bootstrap")]
+impl BuilderVmReleaseSource for PublishedRelease {
+    fn verified_checksums(
+        &self,
+        manifest: &ChecksumManifest<'_>,
+        wanted: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        fetch_expected_hashes(manifest, wanted)
+    }
+
+    fn fetch(&self, url: &str, dest: &str) -> Result<()> {
+        download_file(url, dest)
+    }
+}
+
+/// Download the per-arch Layer 1 builder VM image published on the boot image
+/// release train into the local cache.
+///
+/// Gated behind `release-artifact-bootstrap`. Contributor builds (default)
+/// never compile this in, so the "no flake + cache miss" branch in
+/// [`bootstrap_builder_vm_image`] has no escape hatch and surfaces a hard
+/// error. End-user-binary release builds opt in at compile time via
+/// `--features release-artifact-bootstrap`.
 #[cfg(feature = "release-artifact-bootstrap")]
 pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
-    let names = builder_vm_artifact_names(arch);
     // Builder-VM images ship on the boot image counter, not the CLI's.
-    let (tag, image_version) = crate::update::boot_image_release()?;
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
-    let kernel_url = format!("{base_url}/{}", names.kernel);
-    let rootfs_url = format!("{base_url}/{}", names.rootfs);
-    let cmdline_url = format!("{base_url}/{}", names.cmdline);
-    let manifest_url = format!("{base_url}/{}", names.manifest);
-
-    // The builder-image cache contract is fail-closed: every artifact
-    // the runtime loader consumes must be listed in checksums and
-    // downloaded here before the cache is considered usable.
-    let expected = fetch_expected_hashes(
-        &ChecksumManifest {
+    let (tag, version) = crate::update::boot_image_release()?;
+    let base_url = crate::update::boot_image_asset_base_url(&tag);
+    fetch_builder_vm_image(
+        &PublishedRelease,
+        &BuilderVmImageRelease {
+            tag: &tag,
+            version: &version,
             base_url: &base_url,
+        },
+        arch,
+        std::path::Path::new(cache_dir),
+    )
+}
+
+/// Fetch, verify, and install a published builder VM image for `arch` into
+/// `cache_dir`, all or nothing.
+///
+/// The checksum manifest's signature is the trust anchor, so it is settled
+/// before any artifact is requested. Every artifact then lands in a staging
+/// directory beside the cache and is held to its signed pin there, and the
+/// image's own manifest must name this architecture and agree with those pins.
+/// Only then is the staging directory swapped in. The bootstrap readiness
+/// check looks only at the kernel and rootfs, so a cache holding those two
+/// without the rest would read as ready and fail at boot; on any refusal the
+/// staging directory is removed and an existing cache is not touched.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) fn fetch_builder_vm_image(
+    source: &dyn BuilderVmReleaseSource,
+    release: &BuilderVmImageRelease<'_>,
+    arch: &str,
+    cache_dir: &std::path::Path,
+) -> Result<()> {
+    refuse_foreign_builder_vm_arch(arch)?;
+    let names = builder_vm_artifact_names(arch);
+    let _lock = lock_builder_vm_cache(cache_dir)?;
+    sweep_stage0_staging_siblings(cache_dir)?;
+
+    let files = names.cache_files();
+    let wanted: Vec<&str> = files.iter().map(|file| file.asset).collect();
+    let pins = source.verified_checksums(
+        &ChecksumManifest {
+            base_url: release.base_url,
             asset: &names.checksums,
-            version: &image_version,
+            version: release.version,
             train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
-        &[
-            &names.kernel,
-            &names.rootfs,
-            &names.cmdline,
-            &names.manifest,
-        ],
+        &wanted,
     )?;
 
-    ui::info("  Fetching kernel...");
-    let kernel_path = format!("{cache_dir}/vmlinux");
-    download_file(&kernel_url, &kernel_path).map_err(|e| {
-        bump_verify_outcome("network");
-        e.context(format!(
-            "Failed to download builder VM kernel from {kernel_url}"
-        ))
-    })?;
-    verify_artifact_hash(&kernel_path, &names.kernel, expected.get(&names.kernel))?;
-
-    ui::info("  Fetching rootfs...");
-    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-    download_file(&rootfs_url, &rootfs_path).map_err(|e| {
-        bump_verify_outcome("network");
-        e.context(format!(
-            "Failed to download builder VM rootfs from {rootfs_url}"
-        ))
-    })?;
-    verify_artifact_hash(&rootfs_path, &names.rootfs, expected.get(&names.rootfs))?;
-
-    ui::info("  Fetching cmdline...");
-    let cmdline_path = format!("{cache_dir}/cmdline.txt");
-    download_file(&cmdline_url, &cmdline_path).map_err(|e| {
-        bump_verify_outcome("network");
-        e.context(format!(
-            "Failed to download builder VM cmdline from {cmdline_url}"
-        ))
-    })?;
-    verify_artifact_hash(&cmdline_path, &names.cmdline, expected.get(&names.cmdline))?;
-
-    ui::info("  Fetching manifest...");
-    let manifest_path = format!("{cache_dir}/manifest.json");
-    download_file(&manifest_url, &manifest_path).map_err(|e| {
-        bump_verify_outcome("network");
-        e.context(format!(
-            "Failed to download builder VM manifest from {manifest_url}"
-        ))
-    })?;
-    verify_artifact_hash(
-        &manifest_path,
-        &names.manifest,
-        expected.get(&names.manifest),
-    )?;
+    let staging = unique_builder_vm_stage0_staging_dir(cache_dir)?;
+    let install = PublishedBuilderVmInstall {
+        source,
+        release,
+        arch,
+        names: &names,
+        pins: &pins,
+    };
+    let outcome = install
+        .stage(&staging)
+        .and_then(|()| promote_fetched_builder_vm_cache(&staging, cache_dir));
+    if outcome.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    outcome?;
 
     ui::success(&format!(
-        "Builder VM image downloaded, hash-verified, and cached at {cache_dir}."
+        "Builder VM image downloaded, hash-verified, and cached at {}.",
+        cache_dir.display()
+    ));
+    ui::notice(&fetched_builder_vm_image_line(
+        release.tag,
+        &active_verification_waivers(),
     ));
     Ok(())
+}
+
+/// A builder VM runs on the host's own CPU, so an image for another
+/// architecture can only fail to boot. Refused before any request is made.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn refuse_foreign_builder_vm_arch(arch: &str) -> Result<()> {
+    let host = super::builder_vm_host_arch();
+    if arch != host {
+        anyhow::bail!(
+            "refusing to fetch a builder VM image for {arch}: this host is {host}, and a \
+             builder VM image only boots on its own architecture"
+        );
+    }
+    Ok(())
+}
+
+/// The one line a log can match to learn where the builder image came from.
+///
+/// Its wording is a contract with whoever greps for it, so it changes only
+/// when what it attests changes — and a waived check is never reported as a
+/// verified one.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) fn fetched_builder_vm_image_line(tag: &str, waivers: &[&str]) -> String {
+    let verification = if waivers.is_empty() {
+        "signature and digests verified".to_string()
+    } else {
+        format!("verification waived by {}", waivers.join(", "))
+    };
+    format!("Builder VM image source: fetched ({tag}), {verification}")
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn active_verification_waivers() -> Vec<&'static str> {
+    [
+        mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV,
+        "MVM_SKIP_HASH_VERIFY",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some())
+    .collect()
+}
+
+/// One published asset and the cache file it becomes.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) struct BuilderVmCacheFile<'a> {
+    /// What an operator calls it in an error.
+    pub(super) label: &'static str,
+    /// The published asset name.
+    pub(super) asset: &'a str,
+    /// The file name inside the cache directory.
+    pub(super) cache_name: &'static str,
+}
+
+/// The inputs one staged install is checked against.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+struct PublishedBuilderVmInstall<'a> {
+    source: &'a dyn BuilderVmReleaseSource,
+    release: &'a BuilderVmImageRelease<'a>,
+    arch: &'a str,
+    names: &'a BuilderVmArtifactNames,
+    pins: &'a std::collections::HashMap<String, String>,
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+impl PublishedBuilderVmInstall<'_> {
+    /// Populate `staging` with every verified artifact, check the image's own
+    /// manifest against the signed pins, and record provenance.
+    fn stage(&self, staging: &std::path::Path) -> Result<()> {
+        std::fs::create_dir_all(staging)
+            .with_context(|| format!("creating builder VM staging dir {}", staging.display()))?;
+        for file in self.names.cache_files() {
+            self.fetch_verified(&file, staging)?;
+        }
+        check_published_builder_vm_manifest(staging, self.arch, self.names, self.pins)?;
+        write_builder_vm_provenance(
+            staging,
+            &fetched_builder_vm_provenance(
+                staging,
+                &crate::commands::image::boot::cache::AcquiredProvenance::fetched(self.release.tag),
+            )?,
+        )
+    }
+
+    fn fetch_verified(
+        &self,
+        file: &BuilderVmCacheFile<'_>,
+        staging: &std::path::Path,
+    ) -> Result<()> {
+        let url = format!("{}/{}", self.release.base_url, file.asset);
+        let dest = staging.join(file.cache_name).to_string_lossy().into_owned();
+        ui::info(&format!("  Fetching {}...", file.label));
+        self.source.fetch(&url, &dest).map_err(|e| {
+            bump_verify_outcome("network");
+            e.context(format!(
+                "Failed to download builder VM {} ({}) from {url}",
+                file.label, file.asset
+            ))
+        })?;
+        verify_artifact_hash(&dest, file.asset, self.pins.get(file.asset))
+    }
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn fetched_builder_vm_provenance(
+    dir: &std::path::Path,
+    acquired: &crate::commands::image::boot::cache::AcquiredProvenance,
+) -> Result<BuilderVmSourceCacheProvenance> {
+    Ok(BuilderVmSourceCacheProvenance {
+        schema_version: 1,
+        source_kind: acquired.source.to_string(),
+        source_fingerprint: String::new(),
+        artifacts: builder_vm_artifact_names_present(dir)?,
+        image_tag: Some(acquired.image_tag.clone()),
+        acquired_at: Some(acquired.acquired_at.clone()),
+    })
+}
+
+/// The fields of the image's own `manifest.json` that bind it to an
+/// architecture and to the bytes it ships with. The loader reads the cache
+/// contract fields separately; everything else is ignored here.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+#[derive(serde::Deserialize)]
+struct PublishedBuilderVmManifest {
+    system: String,
+    vmlinux: PublishedArtifactPin,
+    rootfs_ext4: PublishedArtifactPin,
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+#[derive(serde::Deserialize)]
+struct PublishedArtifactPin {
+    sha256: String,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+/// Refuse an image whose manifest names another architecture, or describes a
+/// kernel or rootfs other than the ones the signed checksums pinned.
+///
+/// The manifest's own bytes are already digest-verified, so a disagreement is
+/// not transport damage: it is a release assembled from mismatched parts.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn check_published_builder_vm_manifest(
+    staging: &std::path::Path,
+    arch: &str,
+    names: &BuilderVmArtifactNames,
+    pins: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let path = staging.join("manifest.json");
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading builder VM manifest {}", names.manifest))?;
+    let manifest: PublishedBuilderVmManifest = serde_json::from_str(&body)
+        .with_context(|| format!("parsing builder VM manifest {}", names.manifest))?;
+
+    let expected_system = format!("{arch}-linux");
+    if manifest.system != expected_system {
+        anyhow::bail!(
+            "builder VM manifest {} declares system `{}`, expected `{expected_system}`; \
+             refusing an image built for another architecture",
+            names.manifest,
+            manifest.system
+        );
+    }
+    for (field, pin, asset, cache_name) in [
+        ("vmlinux", &manifest.vmlinux, &names.kernel, "vmlinux"),
+        (
+            "rootfs_ext4",
+            &manifest.rootfs_ext4,
+            &names.rootfs,
+            "rootfs.ext4",
+        ),
+    ] {
+        check_manifest_pin(field, pin, asset, &staging.join(cache_name), pins)
+            .with_context(|| format!("checking builder VM manifest {}", names.manifest))?;
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn check_manifest_pin(
+    field: &str,
+    pin: &PublishedArtifactPin,
+    asset: &str,
+    staged: &std::path::Path,
+    pins: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let signed = pins
+        .get(asset)
+        .ok_or_else(|| anyhow::anyhow!("internal: no signed pin recorded for {asset}"))?;
+    if !pin.sha256.eq_ignore_ascii_case(signed) {
+        bump_verify_outcome("digest_mismatch");
+        anyhow::bail!(
+            "`{field}.sha256` is {}, but the signed checksum manifest pins {asset} to {signed}",
+            pin.sha256
+        );
+    }
+    if let Some(declared) = pin.size {
+        let actual = std::fs::metadata(staged)
+            .with_context(|| format!("stat {}", staged.display()))?
+            .len();
+        if declared != actual {
+            bump_verify_outcome("digest_mismatch");
+            anyhow::bail!(
+                "`{field}.size` is {declared} bytes, but the verified {asset} is {actual} bytes"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Promote a fully staged fetched image. The staged directory must already
+/// satisfy the readiness check the bootstrap applies, so a promoted cache is
+/// never re-fetched as not-ready.
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+fn promote_fetched_builder_vm_cache(
+    staging: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Result<()> {
+    validate_builder_vm_stage0_artifacts(staging)?;
+    builder_vm_artifact_names_present(staging)?;
+    replace_builder_vm_cache_dir(staging, cache_dir)
 }
 
 /// Per-arch artifact filenames the release workflow's
@@ -992,6 +1321,36 @@ pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
         cmdline: format!("builder-vm-{arch}.cmdline.txt"),
         manifest: format!("builder-vm-{arch}.manifest.json"),
         checksums: format!("builder-vm-{arch}-checksums-sha256.txt"),
+    }
+}
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+impl BuilderVmArtifactNames {
+    /// Every asset the builder cache contract requires, in the order they are
+    /// fetched, paired with the cache file it becomes.
+    pub(super) fn cache_files(&self) -> [BuilderVmCacheFile<'_>; 4] {
+        [
+            BuilderVmCacheFile {
+                label: "kernel",
+                asset: &self.kernel,
+                cache_name: "vmlinux",
+            },
+            BuilderVmCacheFile {
+                label: "rootfs",
+                asset: &self.rootfs,
+                cache_name: "rootfs.ext4",
+            },
+            BuilderVmCacheFile {
+                label: "cmdline",
+                asset: &self.cmdline,
+                cache_name: "cmdline.txt",
+            },
+            BuilderVmCacheFile {
+                label: "manifest",
+                asset: &self.manifest,
+                cache_name: "manifest.json",
+            },
+        ]
     }
 }
 

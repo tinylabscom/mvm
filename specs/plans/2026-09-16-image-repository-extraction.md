@@ -296,14 +296,22 @@ may combine the trust-root switch with deletion of the old producer.
 
 ### W1 — Remove source image preparation from release E2E (#3363)
 
-- [ ] Set the Linux documented-surface release lane to fetch the currently
+- [x] Set the Linux documented-surface release lane to fetch the currently
       pinned signed builder image, matching the live macOS lane.
-- [ ] Move the source/Stage-0 bootstrap witness into a focused trusted nightly
+- [x] Move the source/Stage-0 bootstrap witness into a focused trusted nightly
       job instead of running it before all 313 release scenarios.
-- [ ] Retain a live flake build through the fetched builder so the release gate
+- [x] Retain a live flake build through the fetched builder so the release gate
       still exercises user-visible build behavior.
-- [ ] Record phase timings in the suite output and compare against the
-      2026-09-15 baseline.
+- [x] Record phase timings in the suite output.
+- [ ] Compare two post-merge runs against the 2026-09-15 baseline (10 minutes
+      of build, 37 minutes of source image preparation, 67 minutes of
+      scenarios; 118-minute job) and record the result on #3363.
+
+Delivered so far: `specs/sprint/delivery/3363-release-e2e-fetches-the-builder-image.md`.
+The published-image fetch now stages and swaps atomically, refuses a foreign
+architecture or a manifest that disagrees with the signed pins, and records its
+provenance. Revocation is deferred to W3: boot images have no published
+revocation channel yet, so a fail-closed check would refuse every fetch.
 
 Acceptance:
 
