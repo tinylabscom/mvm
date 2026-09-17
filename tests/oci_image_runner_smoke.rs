@@ -650,6 +650,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
                 compile_out.to_str().expect("compile out utf-8"),
                 "--entrypoint",
                 "-d",
+                "--name",
+                "named-entrypoint",
                 "--agent-verb",
                 "ping",
                 "--agent-verb",
@@ -669,6 +671,10 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     assert!(
         run_combined.contains("\"hello ari\""),
         "listed RunEntrypoint witness missing hello-app output.\nstdout:\n{run_stdout}\nstderr:\n{run_stderr}"
+    );
+    assert!(
+        run_combined.contains("Machine kept alive: named-entrypoint"),
+        "the kept-alive entrypoint must report its requested machine name.\nstdout:\n{run_stdout}\nstderr:\n{run_stderr}"
     );
     let session_id = kept_alive_session_id(&run_combined)
         .expect("machine run --entrypoint -d must print the kept-alive session id")
@@ -691,6 +697,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     let info_json: SessionInfo =
         serde_json::from_slice(&info.stdout).expect("parse session info json");
     let vm_name = info_json.vm_name;
+    assert_eq!(vm_name, "named-entrypoint");
 
     let console_log = console_log_path(&data_dir, &vm_name);
     let console = wait_for_file_contains(

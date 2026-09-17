@@ -1091,7 +1091,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     ));
     let vm = match crate::exec::boot_session_vm(
         &template_id,
-        "session",
+        crate::exec::SessionVmName::Prefixed("session"),
         args.cpus,
         args.memory_mib,
         &mvm_core::network_policy::NetworkPolicy::deny_all(),

@@ -44,7 +44,7 @@ pub(crate) use backend_select::{
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
 pub use session::{
-    AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm,
+    AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, SessionVmName, boot_session_vm,
     dispatch_in_session, tear_down_session_vm, wait_for_agent,
 };
 use transient::{
