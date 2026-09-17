@@ -53,6 +53,65 @@ pub fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
     atomic_write(path, content.as_bytes())
 }
 
+/// Write `data` to `path`, but only if `path` does not already exist.
+///
+/// Same crash-safety as [`atomic_write`] — write to a temp file in the same
+/// directory, flush, `fdatasync`, then move into place — except the final
+/// step is a no-clobber move (`renameat2(..., RENAME_NOREPLACE)` on Linux,
+/// its macOS equivalent, or a `link` + `unlink` fallback where neither is
+/// available) instead of an unconditional rename.
+///
+/// Two writers racing to create the same path can no longer both "win": the
+/// filesystem admits exactly one no-clobber move, and the loser gets back an
+/// error whose chain carries a [`std::io::Error`] of kind
+/// [`std::io::ErrorKind::AlreadyExists`] (test with [`is_already_exists`]).
+/// The loser's own temp file is removed automatically — it was never linked
+/// into the target directory under its final name.
+pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create parent dir: {}", parent.display()))?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
+
+    tmp.write_all(data)
+        .with_context(|| format!("failed to write temp file for {}", path.display()))?;
+    tmp.flush()?;
+    tmp.as_file().sync_data()?;
+
+    match tmp.persist_noclobber(path) {
+        // The dropped `PersistError::file` here is the losing temp file;
+        // `NamedTempFile`'s `Drop` deletes it, so a lost race leaves nothing
+        // behind under the target directory.
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let kind = err.error.kind();
+            Err(std::io::Error::new(
+                kind,
+                format!(
+                    "failed to persist temp file to {}: {}",
+                    path.display(),
+                    err.error
+                ),
+            )
+            .into())
+        }
+    }
+}
+
+/// Whether `err`'s cause chain carries an `AlreadyExists` I/O error — the
+/// signal [`atomic_write_new`] raises when a concurrent writer already
+/// claimed the path. `anyhow::Error::downcast_ref` walks the whole
+/// `.context()` chain, not just the outermost frame, so this sees through
+/// any context a caller layered on top.
+pub fn is_already_exists(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::AlreadyExists)
+}
+
 /// RAII file lock using `flock(2)`.
 ///
 /// Acquires an exclusive lock on a `.lock` file adjacent to the target path.
@@ -153,6 +212,67 @@ mod tests {
         let path = dir.path().join("test.txt");
         atomic_write_str(&path, "hello").expect("write");
         assert_eq!(fs::read_to_string(&path).expect("read"), "hello");
+    }
+
+    #[test]
+    fn atomic_write_new_creates_an_absent_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        atomic_write_new(&path, b"first").expect("write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "first");
+    }
+
+    #[test]
+    fn atomic_write_new_refuses_an_existing_file_and_leaves_it_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        atomic_write_new(&path, b"original").expect("first write");
+
+        let err = atomic_write_new(&path, b"second writer loses").expect_err("refused");
+        assert!(is_already_exists(&err), "expected AlreadyExists: {err:#}");
+
+        // The loser must not have clobbered the winner's content.
+        assert_eq!(fs::read_to_string(&path).expect("read"), "original");
+    }
+
+    #[test]
+    fn atomic_write_new_leaves_no_temp_file_behind_on_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        atomic_write_new(&path, b"original").expect("first write");
+
+        atomic_write_new(&path, b"loses").expect_err("refused");
+
+        // Only the target file remains in the directory — the losing
+        // writer's temp file was cleaned up when its `NamedTempFile` guard
+        // dropped rather than left orphaned under a `.tmp*` name.
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("state.json")]);
+    }
+
+    #[test]
+    fn is_already_exists_is_false_for_unrelated_errors() {
+        let err = anyhow::anyhow!("some other failure");
+        assert!(!is_already_exists(&err));
+
+        let other_io =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!is_already_exists(&other_io));
+    }
+
+    #[test]
+    fn is_already_exists_sees_through_added_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        atomic_write_new(&path, b"original").expect("first write");
+
+        let err = atomic_write_new(&path, b"loses")
+            .context("wrapped by a caller")
+            .expect_err("refused");
+        assert!(is_already_exists(&err), "expected AlreadyExists: {err:#}");
     }
 
     #[test]

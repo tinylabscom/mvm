@@ -524,6 +524,53 @@ async fn persistent_name_collision_needs_force_to_recreate() {
     assert_eq!(spec.cpus, 4);
 }
 
+#[test]
+fn concurrent_persistent_creates_of_one_name_produce_exactly_one_success() {
+    // Two `mvmctl machine create` invocations racing on the same name must
+    // not both succeed — the second one used to silently overwrite the
+    // first's definition. Threads racing one isolated `MVM_HOME` reproduce
+    // that: each builds its own client and request (the request/backend
+    // carry no shared state), then all attempt `create_from_request` at
+    // once.
+    let home = Isolated::new();
+    let rootfs = home.rootfs();
+    const CREATORS: usize = 16;
+    let barrier = Arc::new(std::sync::Barrier::new(CREATORS));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let threads: Vec<_> = (0..CREATORS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let sender = sender.clone();
+            let rootfs = rootfs.clone();
+            std::thread::spawn(move || {
+                let client = mock_client();
+                let request = persistent_request(&rootfs, "p-race").build().unwrap();
+                barrier.wait();
+                let result = client.create_from_request(&request);
+                sender.send(result).expect("receiver stays alive");
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("creator thread exits");
+    }
+    drop(sender);
+    let results: Vec<_> = receiver.iter().collect();
+
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(successes, 1, "exactly one creator should win the race");
+    for err in results.iter().filter_map(|r| r.as_ref().err()) {
+        assert!(
+            matches!(err, mvm_core::client::MvmError::Conflict { .. }),
+            "loser should see a conflict, got: {err}"
+        );
+    }
+    assert!(
+        machine_spec_path("p-race").exists(),
+        "the winner's spec landed"
+    );
+}
+
 #[tokio::test]
 async fn removing_a_running_persistent_machine_needs_the_force_flow() {
     let home = Isolated::new();
