@@ -19,10 +19,10 @@
 //! ## What counts as a caller
 //!
 //! A mention in production Rust, outside the file that defines the symbol and
-//! outside any `#[cfg(test)]` module or `tests/` tree. Tests are excluded on
-//! purpose: a symbol exercised only by its own tests is exactly the shape
-//! being hunted, and counting them would make the gate agree with every defect
-//! it exists to catch.
+//! outside any `#[cfg(test)]` module, `tests/` tree, benchmark, fuzz target, or
+//! example binary. Those are excluded on purpose: a symbol exercised only by
+//! validation tooling is exactly the shape being hunted, and counting it would
+//! make the gate agree with every defect it exists to catch.
 //!
 //! ## What this cannot do
 //!
@@ -140,8 +140,8 @@ fn finish(entry: PartialControl) -> Result<Control> {
     })
 }
 
-/// Every production `.rs` file: no `tests/` trees, no `target/`, no fuzz
-/// corpora.
+/// Every production `.rs` file: no tests, examples, benchmarks, targets, or
+/// fuzz corpora.
 fn production_sources(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.join("crates")];
@@ -153,7 +153,10 @@ fn production_sources(root: &Path) -> Result<Vec<std::path::PathBuf>> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
-                if matches!(name.as_str(), "target" | "tests" | "fuzz" | "benches") {
+                if matches!(
+                    name.as_str(),
+                    "target" | "tests" | "examples" | "fuzz" | "benches"
+                ) {
                     continue;
                 }
                 stack.push(path);
@@ -469,6 +472,25 @@ mod tests {
             "a test-only call must not read as reachable: {stripped}"
         );
         assert!(stripped.contains("production"), "real code survives");
+    }
+
+    #[test]
+    fn example_binaries_do_not_count_as_production_callers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_root = tmp.path().join("crates").join("demo");
+        std::fs::create_dir_all(crate_root.join("src")).unwrap();
+        std::fs::create_dir_all(crate_root.join("examples")).unwrap();
+        std::fs::write(crate_root.join("src/lib.rs"), "fn production() {}\n").unwrap();
+        std::fs::write(
+            crate_root.join("examples/fixture.rs"),
+            "fn main() { apply_install_gate(); }\n",
+        )
+        .unwrap();
+
+        let sources = production_sources(tmp.path()).unwrap();
+
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        assert!(sources[0].ends_with("crates/demo/src/lib.rs"));
     }
 
     #[test]

@@ -9,6 +9,11 @@ Last updated: 2026-09-17
       Linux helper subprocesses no longer replace shared Firecracker
       auto-detection with a local QEMU override.
 
+- [x] **Claim 11 and claim 13 evidence matches the shipped tree.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.2, issue #3316.
+      The dormant CVE severity gate is explicit, and function witnesses must
+      identify exactly one definition.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is

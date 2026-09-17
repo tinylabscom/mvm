@@ -136,7 +136,7 @@ impl<'a> NetworkEndpoint<'a> {
     /// carries the raw credential). Refuses — without decrypting — when the
     /// placeholder is unknown, the destination is unbound (claim 12), or the
     /// auth type is a signing scheme (those take the signer path).
-    pub fn substitute(
+    pub fn substitute_bound_credential(
         &self,
         placeholder: &str,
         destination: &str,
@@ -441,7 +441,7 @@ mod tests {
             ph.as_str()
         );
         let out = endpoint
-            .substitute(ph.as_str(), "api.openai.com", &req)
+            .substitute_bound_credential(ph.as_str(), "api.openai.com", &req)
             .unwrap();
         assert!(out.contains("Authorization: Bearer sk-live-zzz"));
         assert!(!out.contains(ph.as_str()), "placeholder must be gone");
@@ -453,7 +453,7 @@ mod tests {
         let reg = SubstitutionRegistry::new();
         let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
-            .substitute(
+            .substitute_bound_credential(
                 "mvm-secret-deadbeef",
                 "api.openai.com",
                 "Bearer mvm-secret-deadbeef",
@@ -470,7 +470,7 @@ mod tests {
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
         let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
-            .substitute(
+            .substitute_bound_credential(
                 ph.as_str(),
                 "evil.example.com",
                 &format!("Bearer {}", ph.as_str()),

@@ -57,6 +57,18 @@ broker protocol directly. This entry fails the moment that path lands and \
 `false` becomes producible, which is the signal to delete it."""
 
 [[control]]
+symbol = "apply_install_gate"
+file = "crates/mvm-build/src/app_deps_gate.rs"
+dormant = true
+why = """
+The severity gate is exercised at seal time in the app-deps security lane, but
+no production launch path calls it. Admission re-verifies the sealed volume's
+content and manifest hashes; it does not currently refuse a validly sealed
+volume because its CVE report contains a high or critical finding. Keep this
+declaration until launch carries a typed dependency-volume gate posture and a
+production caller applies it."""
+
+[[control]]
 symbol = "enforced_grants_after_start"
 file = "crates/mvm-client/src/boot.rs"
 dormant = false

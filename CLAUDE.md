@@ -455,19 +455,22 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
-11. **Every application-dep volume is hash-locked, attestation-checked,
-    CVE-scanned, SBOM-enumerated, and bound to the workload's audit
-    chain.** ADR-014 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
-    this end-to-end: the builder VM (`mvm-host-vm-init` +
+11. **Every application-dep volume is CVE-scanned and SBOM-enumerated
+    when sealed, then hash-locked, attestation-checked, and bound to the
+    workload's audit chain.** ADR-014 / Plan 73 Followups A +
+    B.1/B.2/B.3 + C + D wire the sealed-volume lifecycle: the builder VM
+    (`mvm-host-vm-init` +
     `LibkrunBuilderVm::run_build` Install arm) installs deps into a
     sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
     hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
     calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
-    launch and refuses tampered volumes; `mvmctl machine run --prod` fails
-    closed on high/critical CVE findings or stub SBOM/CVE
-    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
-   inspect` / `mvmctl deps audit` surface the sealed sidecars without
+    launch and refuses tampered volumes. The seal-time security lane applies
+    `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
+    high/critical CVE findings or stub SBOM/CVE; production launch does not
+    currently call that severity gate, and the dormant-control manifest pins
+    that limitation. `mvmctl deps inspect` / `mvmctl deps audit` surface the
+    sealed sidecars without
     a VM spawn. The `app-deps-audit` job lives in
     `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
     on the nightly cron and on release tags, so this lane does **not**
