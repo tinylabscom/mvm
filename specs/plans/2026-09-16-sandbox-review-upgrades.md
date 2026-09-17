@@ -235,22 +235,27 @@ cost.
 accepts only a path or an `https://` URL, and the registry client
 (`crates/mvm-fs/src/oci/registry.rs`) can only pull.
 
-- [ ] W9.1 Add blob upload and manifest put to the registry client.
-- [ ] W9.2 `mvmctl bundle push <file> <ref>`: one artifact manifest carrying
+- [x] W9.1 Add blob upload and manifest put to the registry client.
+- [x] W9.2 `mvmctl bundle push <file> <ref>`: one artifact manifest carrying
       the `.mvmpkg` archive and its detached signature.
-- [ ] W9.3 `mvmctl bundle fetch <ref>` accepts tag and digest references, and
+- [x] W9.3 `mvmctl bundle fetch <ref>` accepts tag and digest references, and
       re-hashes every manifest and blob fetched by digest.
-- [ ] W9.4 Trust decisions stay in `read_and_verify_bundle`; the registry is
+- [x] W9.4 Trust decisions stay in `read_and_verify_bundle`; the registry is
       only a transport.
-- [ ] W9.5 `--prod` refuses a tag reference and requires a digest.
-- [ ] W9.6 Align media-type naming with #3365.
-- [ ] W9.7 Tests: a push and fetch round trip against a local registry fixture,
+- [x] W9.5 `--prod` refuses a tag reference and requires a digest.
+- [ ] W9.6 Align media-type naming with #3365. The push uses
+      `application/vnd.mvm.bundle.v1` (`artifactType`) and
+      `application/vnd.mvm.bundle.v1.tar` (layer), declared once in
+      `mvm_contract::plan::bundle`. #3365 has not landed names yet; this box
+      closes when its image-set manifest types are chosen consistently with
+      these, or these are renamed to match.
+- [x] W9.7 Tests: a push and fetch round trip against a local registry fixture,
       plus refusal of each of:
-  - [ ] a tampered blob;
-  - [ ] a tampered manifest;
-  - [ ] a manifest whose bytes don't match its digest;
-  - [ ] a tag reference under `--prod`;
-  - [ ] an unsigned or untrusted bundle.
+  - [x] a tampered blob;
+  - [x] a tampered manifest;
+  - [x] a manifest whose bytes don't match its digest;
+  - [x] a tag reference under `--prod`;
+  - [x] an unsigned or untrusted bundle.
 
 ## W10 — Agent-facing failures (#3387)
 

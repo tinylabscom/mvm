@@ -1257,8 +1257,9 @@ running microVM.
 | `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
 | `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
-| `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` against the local trust store, reporting the parsed manifest                                                                                   |
-| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` into `~/.mvm/bundles/<sha>/`                                                                                            |
+| `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
+| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`                                                                  |
+| `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
 | `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts                                                                                                                            |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
@@ -1266,6 +1267,30 @@ running microVM.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+### Bundles in image registries
+
+`mvmctl bundle push ./app.mvmpkg oci://registry.example/team/app:v1` stores the
+bundle as one artifact manifest: `artifactType` is
+`application/vnd.mvm.bundle.v1`, the config is the empty descriptor, and the
+single layer (`application/vnd.mvm.bundle.v1.tar`) is the archive itself, which
+already carries its signature. Push refuses a bundle that does not verify
+against the local trust store, skips blobs the registry already holds, and
+prints the digest-pinned reference.
+
+`bundle fetch` and `bundle install` accept `oci://<registry>/<repository>:<tag>`
+and `oci://<registry>/<repository>@sha256:<digest>`. Only the `oci://` prefix
+selects a registry; any other string that is not an `https://` or `http://` URL
+is a local path, even one shaped like `host/name:tag`. The manifest is held to
+the pinned digest and to the digest the registry advertises, the layer to its
+descriptor digest and size, and both to size caps. The registry is only a
+transport: the bundle is accepted or refused by the same signature check as a
+local file. `--prod` refuses a tag reference before contacting the registry, and
+a pull by tag reports the digest it resolved to.
+
+Credentials are read from `MVM_OCI_BEARER_TOKEN_<REGISTRY>` or
+`MVM_OCI_BEARER_TOKEN`, as for `mvmctl image pull`; a registry's bearer challenge
+is redeemed once and the token reused. Plain HTTP needs `--allow-http`.
 
 ## Security
 
