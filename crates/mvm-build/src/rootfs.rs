@@ -608,7 +608,11 @@ fn materialize_ext4_in_builder_vm(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let script = ext4_materialization_script(&options.guest_output_device, device_size_bytes);
+    let script = ext4_materialization_script(
+        &options.guest_output_device,
+        device_size_bytes,
+        &crate::oci_runtime_inject::injected_root_owned_paths(),
+    );
     let shell_job = BuilderShellJob {
         work_dir: input.unpacked_root.clone(),
         artifact_out,
@@ -679,10 +683,16 @@ fn ext4_block_count(device_size_bytes: u64) -> u64 {
 /// the ext4 to an explicit block count a margin below it so the image
 /// mounts on a workload backend whose virtio-blk device reports slightly
 /// fewer blocks than the builder VM saw (see [`EXT4_DEVICE_MARGIN_BYTES`]).
+///
+/// `root_owned` names the paths the image builder owns. The copy keeps
+/// whatever ids the transport carried in — the host account's, not root's —
+/// so the script sets each of those paths back to root after it, the same
+/// guarantee the in-process writer gives through the owner table.
 #[cfg(any(test, feature = "builder-vm"))]
 pub(crate) fn ext4_materialization_script(
     guest_output_device: &str,
     device_size_bytes: u64,
+    root_owned: &mvm_fs::ownership::RootOwnedPaths,
 ) -> String {
     format!(
         r#"#!/bin/sh
@@ -691,19 +701,44 @@ set -eu
 ROOTFS_DEV='{guest_output_device}'
 MOUNTPOINT=/tmp/mvm-image-rootfs
 
+chown_root() {{
+    if [ -e "$1" ] || [ -L "$1" ]; then chown -h 0:0 "$1"; fi
+}}
+chown_root_tree() {{
+    if [ -e "$1" ] || [ -L "$1" ]; then chown -Rh 0:0 "$1"; fi
+}}
+
 mkdir -p "$MOUNTPOINT"
 /sbin/mkfs.ext4 -F -b {block_size} "$ROOTFS_DEV" {block_count}
 mount -t ext4 "$ROOTFS_DEV" "$MOUNTPOINT"
 trap 'umount "$MOUNTPOINT" 2>/dev/null || true' EXIT
 cp -aR /work/. "$MOUNTPOINT"/
-sync
+{chown_root_owned}sync
 umount "$MOUNTPOINT"
 trap - EXIT
 "#,
         guest_output_device = shell_single_quote_escape(guest_output_device),
         block_size = EXT4_BLOCK_SIZE_BYTES,
         block_count = ext4_block_count(device_size_bytes),
+        chown_root_owned = chown_root_owned_lines(root_owned),
     )
+}
+
+/// One `chown_root` line per claimed path and one `chown_root_tree` line per
+/// claimed tree, each under the image mount point.
+#[cfg(any(test, feature = "builder-vm"))]
+fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> String {
+    let path_lines = root_owned.paths().map(|path| ("chown_root", path));
+    let tree_lines = root_owned.trees().map(|tree| ("chown_root_tree", tree));
+    path_lines
+        .chain(tree_lines)
+        .map(|(function, path)| {
+            format!(
+                "{function} \"$MOUNTPOINT\"'{}'\n",
+                shell_single_quote_escape(path)
+            )
+        })
+        .collect()
 }
 
 #[cfg(feature = "pure-mkfs")]
@@ -1144,7 +1179,11 @@ mod tests {
 
     #[test]
     fn script_formats_mounts_copies_and_unmounts_inside_guest() {
-        let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024);
+        let script = ext4_materialization_script(
+            "/dev/vdc",
+            64 * 1024 * 1024,
+            &mvm_fs::ownership::RootOwnedPaths::none(),
+        );
         // Formats to an explicit block count a margin below the device
         // so the image mounts on a backend reporting fewer blocks.
         assert!(script.contains("/sbin/mkfs.ext4 -F -b 4096 \"$ROOTFS_DEV\""));
@@ -1152,6 +1191,53 @@ mod tests {
         assert!(script.contains("cp -aR /work/. \"$MOUNTPOINT\"/"));
         assert!(script.contains("umount \"$MOUNTPOINT\""));
         assert!(!script.contains("mke2fs -d"));
+    }
+
+    /// The builder VM copies the host tree with the ids the transport carried
+    /// — the host account's — so the files mvm injects are set back to root
+    /// after the copy and before the image is flushed, matching the
+    /// in-process writer's guarantee.
+    #[test]
+    fn script_sets_every_injected_path_back_to_root_after_the_copy() {
+        let claimed = crate::oci_runtime_inject::injected_root_owned_paths();
+        let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024, &claimed);
+        let copy = script.find("cp -aR /work/.").expect("copies the tree");
+        let flush = script.find("\nsync\n").expect("flushes the image");
+        for line in [
+            "chown_root \"$MOUNTPOINT\"'/etc/passwd'",
+            "chown_root \"$MOUNTPOINT\"'/etc/group'",
+            "chown_root \"$MOUNTPOINT\"'/etc'",
+            "chown_root \"$MOUNTPOINT\"'/usr/lib/mvm/wrappers/oci-entrypoint'",
+            "chown_root_tree \"$MOUNTPOINT\"'/etc/mvm'",
+            "chown_root_tree \"$MOUNTPOINT\"'/mvm'",
+        ] {
+            let at = script
+                .find(line)
+                .unwrap_or_else(|| panic!("missing {line}"));
+            assert!(copy < at && at < flush, "{line} must run after the copy");
+        }
+        assert_eq!(
+            script.matches("chown_root ").count() + script.matches("chown_root_tree ").count(),
+            claimed.paths().count() + claimed.trees().count(),
+            "one line per claim, nothing else chowned"
+        );
+        assert!(
+            script.contains("chown -h 0:0") && script.contains("chown -Rh 0:0"),
+            "never follows a link out of the image"
+        );
+    }
+
+    /// A claimed path the image does not carry — the trust policy on an
+    /// unsealed run — is skipped rather than failing a `set -e` script.
+    #[test]
+    fn script_chowns_only_what_exists() {
+        let script = ext4_materialization_script(
+            "/dev/vdc",
+            64 * 1024 * 1024,
+            &mvm_fs::ownership::RootOwnedPaths::none().with_path("etc/absent"),
+        );
+        assert!(script.contains(r#"if [ -e "$1" ] || [ -L "$1" ]; then chown -h 0:0 "$1"; fi"#));
+        assert!(script.contains("chown_root \"$MOUNTPOINT\"'/etc/absent'"));
     }
 
     #[test]

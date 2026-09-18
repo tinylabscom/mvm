@@ -139,6 +139,8 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         owners,
         evidence,
     } = request;
+    crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
+        .context("admit the image's deferred layer nodes")?;
     let bins = resolve_guest_binaries(cache_root)?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
@@ -624,6 +626,30 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production entry point refuses a deferred layer node at an
+    /// injected path before it touches the tree or resolves a single guest
+    /// binary, so the refusal is not something a later step can undo.
+    #[test]
+    fn a_deferred_node_at_an_injected_path_stops_the_run_before_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("rootfs.ext4");
+        let err = inject_and_materialize(
+            InjectAndMaterializeRequest::builder(tmp.path(), &root, &output, "hostile")
+                .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+                    path: "/etc/passwd".to_string(),
+                    target: "/srv/accounts".to_string(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
+                }])
+                .build(),
+        )
+        .expect_err("a layer must not replace the account database");
+        assert!(format!("{err:#}").contains("/etc/passwd"), "{err:#}");
+        assert!(!root.join("etc").exists(), "nothing was injected");
+        assert!(!output.exists());
+    }
 
     /// Build an unpacked-rootfs tree whose `lib/` carries `loader`.
     fn tree_with_loader(loader: &str) -> tempfile::TempDir {

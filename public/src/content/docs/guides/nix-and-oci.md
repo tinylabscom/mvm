@@ -39,6 +39,7 @@ That boundary matters for DX and security. The developer gets a normal local com
 - Record requested ref and resolved digest.
 - Verify manifest and blob digests.
 - Apply whiteout, symlink, hardlink, mode, ownership, and size policies during unpack.
+- Expect the files `mvm` adds to an image to be root's. `/etc/passwd`, `/etc/group`, everything under `/etc/mvm`, `/mvm`, and `/usr/lib/mvm`, the mount points, and the directories leading to them are root-owned in the built rootfs whatever owner the image's layers declare. An image that ships one of those paths as a symbolic link, or as something other than a regular file where `mvm` writes one, is refused rather than written through.
 - Scope caches by workload or deployment boundary.
 - Emit audit events for resolve, fetch, cache hit, materialize, verify, launch, and delete.
 

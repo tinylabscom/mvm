@@ -149,6 +149,37 @@ data directory ships owned by its own account boots with root-owned files.
   - [x] changing only an owner changes the fingerprint.
 - [ ] W3.6 Live test: an image whose service data directory is owned by a
       non-root account starts that service.
+- [x] W3.7 Keep the files mvm injects root-owned whatever a layer declares
+      (#3430). The owner table forces root on every injected destination,
+      mount point, directory leading to one, and mvm-only tree, so a layer
+      cannot take `/etc/passwd`, `/etc/group`, the verb-trust policy, or the
+      entrypoint wrapper.
+  - [x] adversarial tests through the production materializer and the ext4
+        oracle, including stacked layers (whiteout, opaque directory, hard
+        link); a path mvm does not inject keeps its declared owner;
+  - [x] the injection refuses an image that makes an injected path, or a
+        directory on the way to one, a symbolic link, and writes every
+        injected file as a fresh inode (no shared hard link, no layer mode or
+        extended attributes);
+  - [x] a deferred layer node at an injected path is refused rather than laid
+        over the runtime's file;
+  - [x] the builder-VM writer sets the claimed paths back to root after its
+        copy;
+  - [x] a builder-VM refusal names the route that reached it;
+  - [x] owner and deferred-node sidecars are written atomically, and a corrupt
+        one forces a re-unpack instead of a hard error.
+- [ ] W3.8 Builder-VM input fidelity, found while closing W3.7. An image
+      materialized through the builder VM does not keep the tree it was
+      given:
+  - [ ] the work-input staging copies a symbolic link's host-resolved target
+        instead of the link, so an absolute link in an image reads a host file
+        into the rootfs (or fails the copy when the target is missing);
+  - [ ] the input tar records the host account's uid and gid for every file,
+        and the guest extracts and copies them, so every path mvm does not
+        claim is owned by the host account rather than root;
+  - [ ] on macOS the unpacker's hard-link fallback removes the link source,
+        not the destination, when an earlier layer wrote it, and then refuses
+        the link.
 
 ## W4 — Return freed guest memory on HVF (#3381)
 

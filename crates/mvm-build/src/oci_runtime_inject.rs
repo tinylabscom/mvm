@@ -54,8 +54,9 @@ const CONTENT_DIGEST_FRAMING: &str = "mvm-runtime-id-v1";
 /// Version of host-side injection behavior that cannot be inferred from the
 /// injected files or their destination paths. Bumping this invalidates cached
 /// rootfs images when interpretation changes, such as preserving image `Env`
-/// even when the image declares no command.
-pub const INJECT_SEMANTICS_VERSION: &str = "2";
+/// even when the image declares no command, or writing every injected file as
+/// a fresh root-owned inode rather than into whatever the image left there.
+pub const INJECT_SEMANTICS_VERSION: &str = "3";
 
 impl MvmRuntimeBinaries {
     /// The four artifacts in a fixed order, tagged with the name each is
@@ -213,7 +214,8 @@ const INJECT_DESTS: &[&str] = &[
 const INJECT_TREES: &[&str] = &["etc/mvm", "mvm", "usr/lib/mvm"];
 
 /// The guest paths this module owns in a materialized image: every injected
-/// file and mount point, plus the trees that hold nothing else.
+/// file and mount point, the directories on the way to them, and the trees
+/// that hold nothing else.
 ///
 /// An OCI layer may name any of them in its tar headers — `/etc/passwd` most
 /// of all — and the owner it declares is otherwise applied to the built
@@ -221,6 +223,11 @@ const INJECT_TREES: &[&str] = &["etc/mvm", "mvm", "usr/lib/mvm"];
 /// wrapper it boots and the trust policy it enforces are the runtime's, not
 /// the image's, so the materializer hands this set to the ext4 writer and a
 /// declared owner never reaches them.
+///
+/// The directories leading to an injected path are claimed as well, one node
+/// each: an image that owned `/etc` could rename its own file over
+/// `/etc/passwd` wherever the root is writable. Their other contents keep the
+/// owners the layers declared.
 ///
 /// Derived from the same tables the injection itself walks, so a destination
 /// added there is claimed here without a second edit.
@@ -230,19 +237,153 @@ pub fn injected_root_owned_paths() -> mvm_fs::ownership::RootOwnedPaths {
     for tree in INJECT_TREES {
         claimed = claimed.with_tree(tree);
     }
-    for (rel, _mode) in INJECT_DIRS {
-        claimed = claimed.with_path(rel);
-    }
-    for dest in INJECT_DESTS {
-        claimed = claimed.with_path(dest);
+    for rel in INJECT_DIRS
+        .iter()
+        .map(|(rel, _mode)| *rel)
+        .chain(INJECT_DESTS.iter().copied())
+    {
+        for claimed_rel in Path::new(rel).ancestors() {
+            if claimed_rel.as_os_str().is_empty() {
+                continue;
+            }
+            claimed = claimed.with_path(claimed_rel);
+        }
     }
     claimed
+}
+
+/// Refuse layer nodes the unpack deferred to the image writer at a path this
+/// module owns.
+///
+/// A deferred node is one the host tree could not hold — a device node on
+/// macOS, the loser of a case-insensitive name collision — and the image
+/// writer lays it *over* whatever the walk found at that path. At an injected
+/// path that would replace the runtime's file with the layer's: a symlink at
+/// `/etc/passwd` pointing into a directory the image owns is exactly the
+/// account-database takeover [`injected_root_owned_paths`] exists to stop, and
+/// forcing the symlink itself to root would not stop it.
+pub fn refuse_layer_nodes_at_injected_paths(nodes: &[mvm_fs::ext4::Node]) -> io::Result<()> {
+    let claimed = injected_root_owned_paths();
+    match nodes.iter().find(|node| claimed.claims(node.path())) {
+        Some(node) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the image places {} at a path mvm injects into every rootfs, in a form the \
+                 host filesystem could not hold; refusing to let a layer replace it",
+                node.path()
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Every path the injection writes through, relative to the rootfs root.
+fn injected_write_paths() -> impl Iterator<Item = &'static str> {
+    INJECT_DIRS
+        .iter()
+        .map(|(rel, _mode)| *rel)
+        .chain(INJECT_DESTS.iter().copied())
+        .chain(INJECT_TREES.iter().copied())
+}
+
+/// Refuse a tree in which the injection would write through a path the image
+/// shaped.
+///
+/// The injection runs on the host, as the invoking user, before the tree is
+/// sealed. A layer is free to ship `/etc/passwd`, `/etc`, `/tmp` or anything
+/// under `/mvm` as a symbolic link, and the unpacker keeps the link target as
+/// written — absolute, or climbing out with `..`. Writing through it would
+/// read and rewrite a file outside the rootfs; even a target inside it would
+/// move the injected file to a path the image's own owners govern. A
+/// non-regular file where a regular one is written (a directory, a FIFO a
+/// read would block on) is refused for the same reason: the injection must
+/// create what it claims, not adopt what it finds.
+fn refuse_unsafe_injection_paths(rootfs_dir: &Path) -> io::Result<()> {
+    for rel in injected_write_paths() {
+        if let Some(link) = first_symlink_on(rootfs_dir, Path::new(rel))? {
+            return Err(shaped_path_error(&link, "is a symbolic link"));
+        }
+    }
+    for tree in INJECT_TREES {
+        if let Some(link) = symlink_beneath(&rootfs_dir.join(tree))? {
+            let rel = link.strip_prefix(rootfs_dir).unwrap_or(&link);
+            return Err(shaped_path_error(rel, "is a symbolic link"));
+        }
+    }
+    for dest in INJECT_DESTS {
+        match std::fs::symlink_metadata(rootfs_dir.join(dest)) {
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err(shaped_path_error(Path::new(dest), "is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn shaped_path_error(rel: &Path, what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "the image's /{} {what}, and mvm writes its own file there; refusing to inject \
+             through a path the image shaped",
+            rel.display()
+        ),
+    )
+}
+
+/// The first component of `rel` under `root` that is a symbolic link, as a
+/// path relative to `root`. Stops at the first component that does not exist:
+/// nothing beneath it can be a link yet.
+fn first_symlink_on(root: &Path, rel: &Path) -> io::Result<Option<PathBuf>> {
+    let mut walked = PathBuf::new();
+    for component in rel.components() {
+        walked.push(component);
+        match std::fs::symlink_metadata(root.join(&walked)) {
+            Ok(meta) if meta.file_type().is_symlink() => return Ok(Some(walked)),
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
+}
+
+/// Any symbolic link at or beneath `dir`, which is itself known not to be one.
+/// A missing `dir` holds nothing.
+fn symlink_beneath(dir: &Path) -> io::Result<Option<PathBuf>> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let meta = match std::fs::symlink_metadata(&at) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if meta.file_type().is_symlink() {
+            return Ok(Some(at));
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(&at)? {
+                stack.push(entry?.path());
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
 /// Idempotent: re-running overwrites the injected files. Returns the paths
 /// written so the caller can verify the resulting rootfs shape.
+///
+/// Every file it writes is a fresh inode: whatever the image left at that
+/// path — a hard link shared with an image file, extended attributes such as
+/// an ACL granting another account write access, a permissive mode — is
+/// replaced rather than written into. A tree the image shaped so that a write
+/// would land somewhere else is refused (see
+/// [`refuse_unsafe_injection_paths`]).
 pub fn inject_mvm_runtime(
     rootfs_dir: &Path,
     bins: &MvmRuntimeBinaries,
@@ -259,6 +400,8 @@ pub fn inject_mvm_runtime(
         ));
     }
 
+    refuse_unsafe_injection_paths(rootfs_dir)?;
+
     for (rel, mode) in INJECT_DIRS {
         ensure_dir(rootfs_dir, rel, *mode)?;
     }
@@ -270,10 +413,24 @@ pub fn inject_mvm_runtime(
     // left with a uid `getpwuid` cannot resolve — `whoami` fails, `ls -l`
     // prints digits, and an interactive shell greets you as `I have no name!`.
     // Appends only, and never over an entry the image already claims.
+    //
+    // Provisioning appends in place, so each database the image shipped is
+    // first moved onto a fresh inode: an image file hard-linked to it would
+    // otherwise receive the append, and the layer's mode and extended
+    // attributes would survive it.
+    for database in ACCOUNT_DATABASES {
+        let path = rootfs_dir.join(database);
+        if path.exists() {
+            reseat_file(&path, 0o644)?;
+        }
+    }
     mvm_agentd::workload_identity::provision_in(
         rootfs_dir,
         mvm_agentd::guest_mount::WORKLOAD_HOME,
     )?;
+    for database in ACCOUNT_DATABASES {
+        set_mode(&rootfs_dir.join(database), 0o644)?;
+    }
 
     let etc_mvm = rootfs_dir.join("etc").join("mvm");
     std::fs::create_dir_all(&etc_mvm)?;
@@ -345,12 +502,47 @@ pub struct InjectedPaths {
     pub runtime_mount_point: PathBuf,
 }
 
+/// The account databases a guest resolves uids through. Both are in
+/// [`INJECT_DESTS`]; named here because they are the two whose contents the
+/// injection keeps from the image.
+const ACCOUNT_DATABASES: [&str; 2] = ["etc/passwd", "etc/group"];
+
+/// Write `contents` to `path` as a new inode with `mode`, never into the one
+/// already there.
+///
+/// Truncating in place would keep the old inode's extended attributes and any
+/// hard link an image file shares with it. `create_new` also refuses to follow
+/// a symbolic link that appeared at `path`, so the write cannot land outside
+/// the tree however the path came to be shaped.
 fn write_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), io::Error> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, contents)?;
+    remove_if_present(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    drop(file);
     set_mode(path, mode)
+}
+
+/// Replace the regular file at `path` with a fresh inode holding the same
+/// bytes, under `mode`.
+fn reseat_file(path: &Path, mode: u32) -> Result<(), io::Error> {
+    let contents = std::fs::read(path)?;
+    write_file(path, &contents, mode)
+}
+
+fn remove_if_present(path: &Path) -> Result<(), io::Error> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn ensure_dir(rootfs_dir: &Path, rel: &str, mode: u32) -> Result<(), io::Error> {
@@ -425,6 +617,278 @@ mod tests {
             !claimed.claims("/etc/hosts"),
             "a path the injection never writes stays the image's own"
         );
+    }
+
+    /// The directories on the way to an injected file are claimed, one node
+    /// each, and only that: `/usr/local/bin` is the runtime's, the image's
+    /// own programs in it are not.
+    #[test]
+    fn the_directories_leading_to_an_injected_path_are_claimed_alone() {
+        let claimed = injected_root_owned_paths();
+        for dir in ["/etc", "/usr", "/usr/local", "/usr/local/bin", "/home"] {
+            assert!(claimed.claims(dir), "{dir} must be claimed");
+        }
+        for image_path in ["/usr/local/bin/app", "/home/app", "/etc/hosts"] {
+            assert!(
+                !claimed.claims(image_path),
+                "{image_path} is the image's own"
+            );
+        }
+        assert!(
+            !claimed.paths().any(|path| path == "/"),
+            "the root is not an ancestor the table names"
+        );
+    }
+
+    /// A root holding the files an image layer could leave at injected paths,
+    /// plus the scratch directory outside it that a hostile link points into.
+    struct ShapedRoot {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        outside: PathBuf,
+        bins: MvmRuntimeBinaries,
+    }
+
+    fn shaped_root() -> ShapedRoot {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let bins = fake_bins(tmp.path());
+        ShapedRoot {
+            _tmp: tmp,
+            root,
+            outside,
+            bins,
+        }
+    }
+
+    fn refusal(shaped: &ShapedRoot) -> io::Error {
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false)
+            .expect_err("a tree the image shaped must be refused")
+    }
+
+    /// The account database as a link out of the rootfs: injecting through it
+    /// would read a host file into the image and append to it on the host.
+    #[test]
+    fn a_symlinked_account_database_is_refused_and_its_target_untouched() {
+        let shaped = shaped_root();
+        let host_file = shaped.outside.join("host-secret");
+        std::fs::write(&host_file, b"host bytes\n").unwrap();
+        std::os::unix::fs::symlink(&host_file, shaped.root.join("etc/passwd")).unwrap();
+
+        let err = refusal(&shaped);
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("/etc/passwd"), "{err}");
+        assert_eq!(std::fs::read(&host_file).unwrap(), b"host bytes\n");
+    }
+
+    /// A link *inside* the rootfs is refused too: the file would land at a
+    /// path the image's own owners govern, not at the one mvm claims.
+    #[test]
+    fn a_symlink_into_the_image_at_an_injected_path_is_refused() {
+        let shaped = shaped_root();
+        std::fs::create_dir_all(shaped.root.join("srv")).unwrap();
+        std::fs::write(shaped.root.join("srv/group"), b"").unwrap();
+        std::os::unix::fs::symlink("../srv/group", shaped.root.join("etc/group")).unwrap();
+
+        assert!(refusal(&shaped).to_string().contains("/etc/group"));
+    }
+
+    /// `/etc` itself as a link: every injected file under it would be written
+    /// wherever it points.
+    #[test]
+    fn a_symlinked_parent_directory_is_refused_before_anything_is_written() {
+        let shaped = shaped_root();
+        std::fs::remove_dir(shaped.root.join("etc")).unwrap();
+        std::os::unix::fs::symlink(&shaped.outside, shaped.root.join("etc")).unwrap();
+
+        let err = refusal(&shaped);
+
+        assert!(err.to_string().contains("/etc "), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&shaped.outside).unwrap().count(),
+            0,
+            "nothing was written through the link"
+        );
+        assert!(
+            !shaped.root.join("mvm").exists(),
+            "the refusal comes before the first write"
+        );
+    }
+
+    /// A mount point as a link: creating it and setting its mode would chmod
+    /// whatever directory it names.
+    #[test]
+    fn a_symlinked_mount_point_is_refused_and_its_target_mode_kept() {
+        let shaped = shaped_root();
+        std::fs::set_permissions(&shaped.outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&shaped.outside, shaped.root.join("tmp")).unwrap();
+
+        assert!(refusal(&shaped).to_string().contains("/tmp"));
+        assert_eq!(
+            std::fs::metadata(&shaped.outside)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+    }
+
+    /// A link anywhere beneath a tree only mvm writes, including names no
+    /// table lists yet: the provenance mark is written there after injection.
+    #[test]
+    fn a_symlink_beneath_an_mvm_only_tree_is_refused() {
+        let shaped = shaped_root();
+        std::fs::create_dir_all(shaped.root.join("mvm")).unwrap();
+        std::os::unix::fs::symlink(
+            shaped.outside.join("mark"),
+            shaped.root.join("mvm/provenance.json"),
+        )
+        .unwrap();
+
+        assert!(
+            refusal(&shaped)
+                .to_string()
+                .contains("/mvm/provenance.json")
+        );
+    }
+
+    /// A directory where the account database goes cannot be adopted; a FIFO
+    /// there would block the read forever.
+    #[test]
+    fn a_non_regular_file_at_an_injected_destination_is_refused() {
+        let shaped = shaped_root();
+        std::fs::create_dir_all(shaped.root.join("etc/passwd")).unwrap();
+
+        let err = refusal(&shaped);
+
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    fn inode_of(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).unwrap().ino()
+    }
+
+    /// A layer can hard-link an image file to `/etc/passwd`. Writing in place
+    /// would put the image file on the account database's inode; the
+    /// injection writes a new one, and the image file keeps its own bytes.
+    #[test]
+    fn an_account_database_hard_linked_to_an_image_file_is_given_its_own_inode() {
+        let shaped = shaped_root();
+        let passwd = shaped.root.join("etc/passwd");
+        std::fs::write(&passwd, "root:x:0:0:root:/root:/bin/sh\n").unwrap();
+        std::fs::create_dir_all(shaped.root.join("srv")).unwrap();
+        let linked = shaped.root.join("srv/accounts");
+        std::fs::hard_link(&passwd, &linked).unwrap();
+
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
+
+        assert_ne!(inode_of(&passwd), inode_of(&linked));
+        assert_eq!(
+            std::fs::read_to_string(&linked).unwrap(),
+            "root:x:0:0:root:/root:/bin/sh\n",
+            "the image file is not the account database"
+        );
+        assert!(
+            std::fs::read_to_string(&passwd)
+                .unwrap()
+                .contains("mvm-worker:x:901:")
+        );
+    }
+
+    /// Even an image that already names the workload identity, where
+    /// provisioning writes nothing, gets a fresh database inode.
+    #[test]
+    fn an_account_database_provisioning_leaves_alone_is_still_reseated() {
+        let shaped = shaped_root();
+        let passwd = shaped.root.join("etc/passwd");
+        let existing = "root:x:0:0:root:/root:/bin/sh\napp:x:901:901::/app:/bin/sh\n";
+        std::fs::write(&passwd, existing).unwrap();
+        let linked = shaped.root.join("etc/passwd-link");
+        std::fs::hard_link(&passwd, &linked).unwrap();
+
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
+
+        assert_ne!(inode_of(&passwd), inode_of(&linked));
+        assert_eq!(std::fs::read_to_string(&passwd).unwrap(), existing);
+    }
+
+    /// A layer's mode and extended attributes on an injected file — a
+    /// world-writable `/etc/group`, an attribute the image writer would carry
+    /// into the guest — do not survive injection.
+    #[test]
+    fn an_injected_file_keeps_neither_the_layers_mode_nor_its_xattrs() {
+        let shaped = shaped_root();
+        let group = shaped.root.join("etc/group");
+        std::fs::write(&group, "root:x:0:\n").unwrap();
+        std::fs::set_permissions(&group, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::create_dir_all(shaped.root.join("etc/mvm")).unwrap();
+        let variant = shaped.root.join("etc/mvm/variant");
+        std::fs::write(&variant, b"prod\n").unwrap();
+        // Skip the xattr half where the host filesystem cannot hold one.
+        let planted = xattr::set(&group, "user.mvm.planted", b"layer").is_ok()
+            && xattr::set(&variant, "user.mvm.planted", b"layer").is_ok();
+
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
+
+        assert_eq!(
+            std::fs::metadata(&group).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        if planted {
+            for path in [&group, &variant] {
+                assert_eq!(
+                    xattr::get(path, "user.mvm.planted").unwrap(),
+                    None,
+                    "{} kept the layer's attribute",
+                    path.display()
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&variant).unwrap(), "dev\n");
+    }
+
+    fn symlink_node(path: &str) -> mvm_fs::ext4::Node {
+        mvm_fs::ext4::Node::Symlink {
+            path: path.to_string(),
+            target: "/srv/owned-by-the-image".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
+        }
+    }
+
+    /// A deferred node is laid over what the walk found. At an injected path
+    /// it would replace the runtime's file with the layer's, so it is refused
+    /// — at a claimed file, and anywhere beneath a claimed tree.
+    #[test]
+    fn a_deferred_layer_node_at_an_injected_path_is_refused() {
+        for path in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/mvm/anything",
+            "/mvm/runtime",
+        ] {
+            let err = refuse_layer_nodes_at_injected_paths(&[symlink_node(path)])
+                .expect_err("a layer must not replace an injected path");
+            assert!(err.to_string().contains(path), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_deferred_layer_node_elsewhere_is_admitted() {
+        assert!(
+            refuse_layer_nodes_at_injected_paths(&[
+                symlink_node("/srv/current"),
+                // Beneath a mount point, which claims only itself.
+                symlink_node("/tmp/cache"),
+            ])
+            .is_ok()
+        );
+        assert!(refuse_layer_nodes_at_injected_paths(&[]).is_ok());
     }
 
     /// The identity must come from the artifacts' bytes, not their paths.

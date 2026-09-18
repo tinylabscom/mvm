@@ -285,6 +285,18 @@ impl RootOwnedPaths {
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.trees.is_empty()
     }
+
+    /// The single nodes claimed, guest-absolute, in sorted order. For a writer
+    /// that cannot consult [`Self::claims`] per node and has to name the
+    /// paths instead.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.paths.iter().map(String::as_str)
+    }
+
+    /// The claimed trees, guest-absolute, in sorted order.
+    pub fn trees(&self) -> impl Iterator<Item = &str> {
+        self.trees.iter().map(String::as_str)
+    }
 }
 
 /// Guest-absolute key for a layer-relative path: `./usr/bin/` and `usr/bin`
@@ -501,6 +513,17 @@ mod tests {
         );
         assert!(RootOwnedPaths::none().is_empty());
         assert!(!claimed.is_empty());
+    }
+
+    #[test]
+    fn the_claimed_paths_and_trees_are_enumerable_as_guest_keys() {
+        let claimed = RootOwnedPaths::none()
+            .with_path("./tmp/")
+            .with_path("etc/passwd")
+            .with_tree("usr/lib/mvm");
+        assert_eq!(claimed.paths().collect::<Vec<_>>(), ["/etc/passwd", "/tmp"]);
+        assert_eq!(claimed.trees().collect::<Vec<_>>(), ["/usr/lib/mvm"]);
+        assert_eq!(RootOwnedPaths::none().paths().count(), 0);
     }
 
     #[test]

@@ -124,6 +124,9 @@
       only their declared descriptors. The W10 review follow-ups (issue
       #3432) are implemented: detection can no longer outrun the misplaced
       image-reference refusal, and every agent-facing failure carries a code.
+      W3.7 (issue #3430) keeps every file mvm
+      injects into a container-layer rootfs root-owned whatever a layer
+      declares, on both the in-process and the builder-VM writer.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
