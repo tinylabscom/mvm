@@ -507,7 +507,7 @@ mod server_tests {
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
     use crate::supervisor::network_endpoint_proxy::SubstitutionService;
     use crate::supervisor::network_endpoint_proxy::test_support::{
-        MockForwarder, RedirectForwarder, bearer_ref, service_with,
+        MockForwarder, RedirectForwarder, bearer_ref, gate_admitting, service_with,
     };
     use crate::supervisor::redactor::STREAM_TRANSFORM_OVERLAP;
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
@@ -594,6 +594,7 @@ mod server_tests {
             Arc::new(registry),
             resolver,
             forwarder.clone(),
+            gate_admitting(&[("hooks.example.com", 443)]),
         ));
         let body = b"what do ya want for nothing?";
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
@@ -696,6 +697,7 @@ mod server_tests {
             Arc::new(registry),
             resolver,
             forwarder.clone(),
+            gate_admitting(&[("api.openai.com", 443)]),
         ));
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(sender);

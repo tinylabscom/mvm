@@ -11,6 +11,17 @@ use tempfile::tempdir;
 
 use super::{ForwardError, ForwardResponse, Forwarder, SubstitutionService};
 use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
+use mvm_runtime::vmm::egress_gate::EgressGate;
+
+mod gate;
+pub(crate) use gate::gate_admitting;
+
+/// The gate for a test that sends only to hosts its secret is bound to, over
+/// `https`: each bound host admitted on 443.
+fn gate_admitting_bound_hosts(hosts: &[&str]) -> Arc<EgressGate> {
+    let destinations: Vec<(&str, u16)> = hosts.iter().map(|host| (*host, 443)).collect();
+    gate_admitting(&destinations)
+}
 
 pub(super) fn resolver_with(name: &str, value: &str) -> (tempfile::TempDir, LocalResolver) {
     let dir = tempdir().unwrap();
@@ -101,32 +112,51 @@ impl Forwarder for RedirectForwarder {
     }
 }
 
-/// Build a service over a file store seeded with `openai`=value, a registry
-/// holding one minted placeholder for `hosts`, and a `MockForwarder`.
-/// Returns the service, the minted placeholder string, and the forwarder.
-pub(super) fn service_with(
-    value: &str,
-    hosts: &[&str],
-) -> (
+/// A test service, the placeholder it minted, its recording forwarder, and the
+/// directory holding its secret store.
+pub(super) type TestService = (
     Arc<SubstitutionService>,
     String,
     Arc<MockForwarder>,
     tempfile::TempDir,
-) {
-    service_with_policies(value, hosts, None, None)
+);
+
+/// Build a service over a file store seeded with `openai`=value, a registry
+/// holding one minted placeholder for `hosts`, and a `MockForwarder`. Its gate
+/// admits each of `hosts` on 443; a test sending anywhere else uses
+/// [`service_with_gate`].
+pub(super) fn service_with(value: &str, hosts: &[&str]) -> TestService {
+    service_with_gate(value, hosts, gate_admitting_bound_hosts(hosts))
 }
 
+/// [`service_with`] under a caller-chosen gate.
+pub(super) fn service_with_gate(value: &str, hosts: &[&str], gate: Arc<EgressGate>) -> TestService {
+    build_service(value, hosts, None, None, gate)
+}
+
+/// [`service_with`] carrying redaction and reversible-replacement policies.
 pub(super) fn service_with_policies(
     value: &str,
     hosts: &[&str],
     redaction_policy: Option<mvm_core::policy::RedactionPolicy>,
     reversible_policy: Option<mvm_core::policy::ReversibleReplacementPolicy>,
-) -> (
-    Arc<SubstitutionService>,
-    String,
-    Arc<MockForwarder>,
-    tempfile::TempDir,
-) {
+) -> TestService {
+    build_service(
+        value,
+        hosts,
+        redaction_policy,
+        reversible_policy,
+        gate_admitting_bound_hosts(hosts),
+    )
+}
+
+fn build_service(
+    value: &str,
+    hosts: &[&str],
+    redaction_policy: Option<mvm_core::policy::RedactionPolicy>,
+    reversible_policy: Option<mvm_core::policy::ReversibleReplacementPolicy>,
+    gate: Arc<EgressGate>,
+) -> TestService {
     let dir = tempdir().unwrap();
     let store = FileSecretStore::with_dir(dir.path());
     store
@@ -142,7 +172,7 @@ pub(super) fn service_with_policies(
     let forwarder = Arc::new(MockForwarder {
         seen: Mutex::new(None),
     });
-    let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone());
+    let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone(), gate);
     if let Some(policy) = redaction_policy {
         service = service.with_redaction_policy(policy);
     }

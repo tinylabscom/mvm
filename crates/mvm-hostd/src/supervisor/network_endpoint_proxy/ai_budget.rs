@@ -185,6 +185,7 @@ mod ai_metering_tests {
 
     use super::*;
     use crate::keyholder::SubstitutionRegistry;
+    use crate::supervisor::network_endpoint_proxy::test_support::gate_admitting;
     use crate::supervisor::network_endpoint_proxy::{
         ForwardError, ForwardResponse, ForwardStreamResponse, Forwarder, PreparedRequest,
     };
@@ -278,6 +279,9 @@ mod ai_metering_tests {
                 Arc::new(SubstitutionRegistry::default()),
                 Arc::new(NullResolver),
                 forwarder,
+                // Every destination these tests send to, so a budget refusal
+                // can only be the budget's.
+                gate_admitting(&[("api.openai.com", 443), ("example.com", 443)]),
             )
             .with_instance_id("vm-1")
             .with_ai_policy(policy)

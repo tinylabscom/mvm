@@ -240,10 +240,9 @@ fn build_service(
     )]);
     let gate = build_egress_gate(&policy);
 
-    let service = SubstitutionService::new(Arc::new(registry), resolver, forwarder)
+    let service = SubstitutionService::new(Arc::new(registry), resolver, forwarder, Arc::new(gate))
         .with_tenant(TENANT)
-        .with_recorder(recorder)
-        .with_egress_gate(gate);
+        .with_recorder(recorder);
 
     (Arc::new(service), handed, verifying_key, audit_path)
 }
