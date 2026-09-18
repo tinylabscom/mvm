@@ -86,6 +86,11 @@ Last updated: 2026-09-18
       - [x] W3b #3365: offline signed verification and revocation.
       - [ ] W3c #3365: checked-in lock and generated pins.
       - [ ] W3d #3365: offline verifier command.
+      - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
+            Rust consumers W5 must replace.
+      - [ ] W4a #3362: `mvm` exports its guest recipes as flake outputs.
+      - [ ] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input.
+      - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

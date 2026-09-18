@@ -140,6 +140,9 @@
       against the lock before the bytes are parsed, the detached signature under
       the locked identity next, then structure, lock fields, on-disk artifact
       size and digest, and revocation keyed on the locked signer.
+      W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
+      pack move; the guest binary recipes stay in `mvm` and are consumed from a
+      pinned `mvm` flake input, so nothing is copied between the repositories.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
