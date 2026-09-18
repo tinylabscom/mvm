@@ -10,6 +10,13 @@
 
 ## In progress
 
+- [ ] **Prevent agent child processes from inheriting control-plane descriptors — issue #3404.**
+      The entrypoint path is already protected. The remaining RPC, streaming
+      exec, and warm-worker spawn paths now close inherited descriptors above
+      their explicit child contracts; Linux regression coverage holds an extra
+      descriptor open while spawning. Host and Linux validation, including a
+      real Firecracker/KVM boot smoke, pass; promotion is pending.
+
 - [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
       Persistent entrypoint runs now use the requested `--name` as the machine
       identity instead of replacing it with an internal invocation name. The
