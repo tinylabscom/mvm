@@ -10,6 +10,13 @@
 
 ## In progress
 
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      Design recorded; implementation and end-to-end certification remain open.
+      Typed encrypted guest telemetry, VM-lifetime host collection, bounded
+      non-waiting emission, explicit loss/coverage, and host-only export.
+
 - [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
       Persistent entrypoint runs now use the requested `--name` as the machine
       identity instead of replacing it with an internal invocation name. The

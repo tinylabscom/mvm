@@ -4,6 +4,13 @@ Last updated: 2026-09-17
 
 ## In progress
 
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      W1-W7 open: inventory, typed encrypted service, nonblocking guest capture,
+      VM-lifetime host collector, host views/export, real-backend certification,
+      default-on rollout and merge-queue delivery. Design is not implementation.
+
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
       Persistent entrypoint sessions preserve `--name` and report both the
