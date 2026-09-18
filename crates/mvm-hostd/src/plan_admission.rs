@@ -2438,6 +2438,7 @@ mod tests {
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            outputs: Vec::new(),
             grants: None,
             stream_edges: Vec::new(),
             kernel_sha256: None,

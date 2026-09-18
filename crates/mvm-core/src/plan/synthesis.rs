@@ -174,6 +174,10 @@ pub struct SynthesisInput<'a> {
     /// Synthesis prepends the environment (image), the workload bundle, the
     /// sealed deps volume, and every share that carries a `content_sha256`.
     pub assets: Vec<crate::plan::AssetIdentity>,
+    /// Directories the workload may hand back to the host. Each must name a
+    /// guest path that one of `shares` backs with a writable disk; synthesis
+    /// refuses the plan otherwise.
+    pub outputs: Vec<crate::plan::OutputGrant>,
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: crate::policy::RedactionPolicy,
@@ -260,6 +264,7 @@ pub struct SynthesisInputBuilder<'a> {
     deps_volume: Option<DepsVolumeBinding>,
     shares: Option<Vec<crate::plan::HostShareGrant>>,
     assets: Option<Vec<crate::plan::AssetIdentity>>,
+    outputs: Option<Vec<crate::plan::OutputGrant>>,
     redaction: Option<crate::policy::RedactionPolicy>,
     reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
     audit_labels: Option<AuditLabels>,
@@ -305,6 +310,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             deps_volume: None,
             shares: None,
             assets: None,
+            outputs: None,
             redaction: None,
             reversible_replacement: None,
             audit_labels: None,
@@ -517,6 +523,13 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set the output grants (optional; defaults to none).
+    #[must_use]
+    pub fn outputs(mut self, outputs: Vec<crate::plan::OutputGrant>) -> Self {
+        self.outputs = Some(outputs);
+        self
+    }
+
     /// Set `redaction`.
     #[must_use]
     pub fn redaction(mut self, redaction: crate::policy::RedactionPolicy) -> Self {
@@ -655,6 +668,7 @@ impl<'a> SynthesisInputBuilder<'a> {
                 .shares
                 .ok_or(BuilderError::missing("SynthesisInput", "shares"))?,
             assets: self.assets.unwrap_or_default(),
+            outputs: self.outputs.unwrap_or_default(),
             redaction: self
                 .redaction
                 .ok_or(BuilderError::missing("SynthesisInput", "redaction"))?,
@@ -833,6 +847,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         asset_identities: assemble_asset_identities(input),
+        outputs: input.outputs.clone(),
         services: input.services.clone(),
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
@@ -841,6 +856,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     };
 
     plan.validate_ingress()?;
+    plan.validate_outputs()?;
 
     // Content-address the finished plan. The fresh nonce makes this unique per
     // synthesis; the signature the caller applies next covers the derived id.
@@ -1021,6 +1037,40 @@ mod tests {
     }
 
     #[test]
+    fn an_output_grant_is_signed_into_the_plan_only_when_a_writable_disk_backs_it() {
+        let grant = crate::plan::OutputGrant {
+            guest_path: "/data/out".into(),
+            host_path: "/host/results".into(),
+            max_bytes: 1 << 20,
+            max_entries: 10,
+        };
+        let mut unbacked = input("vm-output");
+        unbacked.outputs = vec![grant.clone()];
+        let error = synthesize_plan(&unbacked).expect_err("no disk backs the grant");
+        assert!(error.to_string().contains("no writable disk"), "{error}");
+
+        let mut backed = input("vm-output");
+        backed.outputs = vec![grant.clone()];
+        backed.shares = vec![crate::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/state/outputs/run/output-0.img".into(),
+            guest_path: "/data/out".into(),
+            kind: crate::plan::ShareKind::Disk,
+            read_only: false,
+            encrypted: false,
+            content_sha256: None,
+        }];
+        let plan = synthesize_plan(&backed).expect("a backed grant synthesizes");
+        assert_eq!(plan.outputs, vec![grant]);
+        let without = synthesize_plan(&input("vm-output")).expect("synthesize");
+        let json = serde_json::to_string(&without).expect("plan serializes");
+        assert!(
+            !json.contains("\"outputs\""),
+            "a plan that returns nothing must keep its bytes"
+        );
+    }
+
+    #[test]
     fn asset_identity_field_moves_plan_content_address() {
         let base = synthesize_plan(&input("vm-ca")).expect("synthesize");
         let mut keyed = input("vm-ca");
@@ -1041,6 +1091,7 @@ mod tests {
 
     fn input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            outputs: Vec::new(),
             grants: None,
             kernel_sha256: None,
             network_mode: NetworkMode::default(),

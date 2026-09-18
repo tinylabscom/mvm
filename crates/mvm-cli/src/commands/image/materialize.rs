@@ -49,9 +49,10 @@ pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
 
 fn oci_runtime_tag_from_identity(identity: &str) -> String {
     format!(
-        "{}-inject-{}-guest-{}",
+        "{}-inject-{}-unpack-{}-guest-{}",
         env!("CARGO_PKG_VERSION"),
         mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+        mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION,
         runtime_tag_prefix(identity)
     )
 }
@@ -163,6 +164,7 @@ pub(super) struct MaterializeCall<'a> {
     pub(super) entrypoint: Option<&'a ImageRuntimeConfig>,
     pub(super) sealed: bool,
     pub(super) deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    pub(super) owners: mvm_fs::ownership::OwnerTable,
     pub(super) evidence: Option<mvm_build::provenance_mark::SealEvidence<'a>>,
 }
 
@@ -181,6 +183,11 @@ pub(super) fn rematerialize_cached_image(
     let Some(unpacked_root) =
         super::cache::unpacked_dir_if_present(cache_root, &image.resolved_digest)
     else {
+        return Ok(None);
+    };
+    // A tree unpacked before owners were recorded would rebuild an image with
+    // every file owned by root. Unpack it again instead.
+    let Some(owners) = super::cache::read_layer_owners(cache_root, &image.resolved_digest)? else {
         return Ok(None);
     };
     let rootfs_path = match (
@@ -217,6 +224,7 @@ pub(super) fn rematerialize_cached_image(
                 .as_ref(),
             sealed: prod,
             deferred_nodes: super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
+            owners,
             evidence,
         })
         .with_context(|| {
@@ -264,6 +272,7 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
         entrypoint,
         sealed,
         deferred_nodes,
+        owners,
         evidence,
     } = call;
     mvm_build::run_image::inject_and_materialize(
@@ -276,6 +285,7 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
         .entrypoint(entrypoint)
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
+        .owners(owners)
         .evidence(evidence)
         .build(),
     )
@@ -318,6 +328,7 @@ pub(super) fn materialize_overlay_lean_rootfs(
     rootfs_abs: &Path,
     image_label: &str,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
 ) -> Result<()> {
     let staging_root = rootfs_abs.with_extension("staging");
     if staging_root.exists() {
@@ -339,6 +350,7 @@ pub(super) fn materialize_overlay_lean_rootfs(
         entrypoint: None,
         sealed: false,
         deferred_nodes,
+        owners,
         evidence: None,
     });
     let cleanup = fs::remove_dir_all(&staging_root);
@@ -428,10 +440,20 @@ mod tests {
         assert_eq!(
             tag,
             format!(
+                "{}-inject-{}-unpack-{}-guest-0123456789abcdef",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+                mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION
+            )
+        );
+        assert_ne!(
+            tag,
+            format!(
                 "{}-inject-{}-guest-0123456789abcdef",
                 env!("CARGO_PKG_VERSION"),
                 mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
-            )
+            ),
+            "an image cached before layer owners were recorded must become stale"
         );
         assert_ne!(
             tag,
@@ -519,9 +541,10 @@ mod tests {
         let tag = oci_runtime_tag(tmp.path());
         assert!(
             tag.starts_with(&format!(
-                "{}-inject-{}-guest-",
+                "{}-inject-{}-unpack-{}-guest-",
                 env!("CARGO_PKG_VERSION"),
-                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+                mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION
             )),
             "unexpected runtime tag: {tag}"
         );
@@ -709,6 +732,12 @@ mod tests {
             .join("unpacked")
             .join(super::super::cache::sha256_hex(&image.resolved_digest).expect("digest hex"));
         fs::create_dir_all(&unpacked).expect("create unpacked tree");
+        super::super::cache::write_layer_owners(
+            cache_root,
+            &image.resolved_digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
     }
 
     #[test]
@@ -757,6 +786,36 @@ mod tests {
             "mark names the canonical image reference"
         );
         assert_eq!(seen["evidence"]["image_digest"], digest);
+    }
+
+    #[test]
+    fn a_tree_unpacked_before_owners_were_recorded_is_not_rematerialized() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.config_path = None;
+        seed_index_and_unpacked(tmp.path(), &image);
+        let hex = super::super::cache::sha256_hex(digest).expect("digest hex");
+        fs::remove_file(
+            tmp.path()
+                .join("unpacked")
+                .join(format!("{hex}.owners.json")),
+        )
+        .expect("drop the owner sidecar");
+        let runtime_tag = oci_runtime_tag(tmp.path());
+
+        let repaired = rematerialize_cached_image(
+            tmp.path(),
+            image,
+            &runtime_tag,
+            evidence_recording_materialize,
+            false,
+        )
+        .expect("no error");
+        assert!(
+            repaired.is_none(),
+            "the caller must unpack again rather than rebuild a root-owned image"
+        );
     }
 
     #[test]

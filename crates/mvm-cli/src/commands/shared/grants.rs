@@ -15,7 +15,7 @@ use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 use mvm_core::grants_resolve::{
     GrantLayer, GrantProvenance, GrantSurface, load_grants_file, resolve_grants,
 };
-use mvm_core::network_policy::{AiPolicy, NetworkPolicy};
+use mvm_core::network_policy::{AiPolicy, NetworkPolicy, NetworkPreset};
 use mvm_core::user_config::MvmConfig;
 
 /// The grant-authoring flags of one invocation, plus the lower surfaces it
@@ -38,6 +38,8 @@ pub(in crate::commands) struct GrantInputs<'a> {
     /// a preset rather than destinations — so it only reaches the policy when
     /// nothing authored an egress grant.
     pub net: bool,
+    /// `--network-preset`: an explicit maintained egress posture.
+    pub network_preset: Option<NetworkPreset>,
     /// `--grants-file`: a JSON document naming any subset of the dimensions.
     pub grants_file: Option<&'a Path>,
     /// The project manifest's `[grants]` table, already typed.
@@ -93,6 +95,7 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
     let network_policy = enforced_network_policy(
         plan_grants.as_ref().and_then(|g| g.egress.as_ref()),
         inputs.net,
+        inputs.network_preset,
         inputs.allow_host,
     )?
     .with_ai(inputs.ai.cloned())
@@ -152,6 +155,7 @@ fn refuse_over_ceiling(
 pub(in crate::commands) fn enforced_network_policy(
     egress: Option<&EgressGrant>,
     net: bool,
+    network_preset: Option<NetworkPreset>,
     allow_host: &[String],
 ) -> Result<NetworkPolicy> {
     match egress {
@@ -161,7 +165,12 @@ pub(in crate::commands) fn enforced_network_policy(
                 ..Default::default()
             }),
         ),
-        None => super::resolve_run_network_policy(net, allow_host),
+        None => super::resolve_run_network_policy_with_preset_and_peers(
+            net,
+            network_preset,
+            allow_host,
+            &[],
+        ),
     }
 }
 
@@ -218,6 +227,7 @@ mod tests {
             allow_host,
             peer: &[],
             net: false,
+            network_preset: None,
             grants_file: None,
             manifest: None,
             config,

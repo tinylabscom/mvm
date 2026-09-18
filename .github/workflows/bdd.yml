@@ -82,7 +82,10 @@ jobs:
     name: BDD live microVM witness
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Cold hosted runners can spend 15+ minutes installing the pinned cross
+    # toolchain before compiling and booting the live witness. Keep a bounded
+    # deadline, but leave enough time for the witness itself to finish.
+    timeout-minutes: 45
     env:
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API

@@ -208,6 +208,7 @@ fn audit_binding(
 fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     SynthesisInput {
+        outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,

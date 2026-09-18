@@ -110,6 +110,7 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name,

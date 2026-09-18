@@ -3,8 +3,9 @@
 //! in from the former `mvm-policy` crate.
 
 pub mod audit;
-/// Strict DNS answer filtering for SSRF and rebinding defense.
-pub mod dns_guard;
+/// Strict DNS answer filtering for SSRF and rebinding defense. Lives in
+/// `mvm-contract` so the registry client in `mvm-fs` can share it.
+pub use mvm_contract::policy::dns_guard;
 /// DNS admission-time pin data model. State-only slice (types +
 /// tests, no resolver / no enforcement / no audit emission).
 pub mod dns_pin;

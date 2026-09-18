@@ -3068,8 +3068,19 @@
                     "null"
                   ]
                 },
+                "reseed_shortfall": {
+                  "description": "Why a requested rotation did not happen, so the host can tell an image that cannot reseed from a reseed that failed. `None` when the guest reseeded or no rotation was requested.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ReseedShortfall"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "reseeded": {
-                  "description": "`true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.",
+                  "description": "`true` iff the delivered generation token changed and the guest rekeyed its kernel generator from it (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore) and for a reseed that failed. Defaults to `false` on the wire for forward-compat with a pre-rotation ack.",
                   "default": false,
                   "type": "boolean"
                 },
@@ -4044,6 +4055,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "ReseedShortfall": {
+      "description": "Why a restored guest did not reseed its kernel generator when asked to.",
+      "oneOf": [
+        {
+          "description": "The guest has no reseed helper: its init predates restore reseeding, or the helper could not be started at boot. Rebuilding the image is the fix; retrying is not.",
+          "type": "string",
+          "enum": [
+            "helper_missing"
+          ]
+        },
+        {
+          "description": "A helper exists but the reseed did not complete.",
+          "type": "string",
+          "enum": [
+            "failed"
+          ]
+        }
+      ]
     },
     "RootfsConfig": {
       "description": "Root device the guest mounts as `/`.  Three mount shapes, selected by which optional fields are set, plus one mount-free shape:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot. - **in place** (`in_place`): the runtime already owns `/` — a shared-kernel container whose root is the image itself. Nothing is mounted and no pivot happens; activation is the privilege drop and the gate flip only.",

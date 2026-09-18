@@ -43,3 +43,10 @@ or authorization. Those remain in `mvm-client` and its backend.
 Run `cargo test -p mvm-mcp`. Add tests for valid dispatch, unknown methods,
 invalid/oversized frames, unavailable capabilities, output limits, and redacted
 errors whenever the protocol surface changes.
+
+The advertised tool surface is pinned in `tests/fixtures/tool-contract.json`:
+each tool's name, description, input schema, and gating client operation.
+Changing any of them fails `tool_surface_matches_the_pinned_contract`. An agent
+reads that surface as its contract, so review the change as one, then re-bless
+with `MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol
+tool_surface_matches_the_pinned_contract` and commit the fixture diff.

@@ -331,6 +331,12 @@ pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> 
 }
 
 fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+    if !args.run.outputs.is_empty() {
+        anyhow::bail!(
+            "machine run --entrypoint does not accept --output; collect outputs from a \
+             foreground `machine run -- <cmd>`"
+        );
+    }
     if args.run.deployment.is_some() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --deployment; use a manifest or flake source"
@@ -356,9 +362,16 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         );
     };
     let (memory_mib, _) = validate_machine_memory(&args.run.memory, None)?;
+    let machine_name = resolve_entrypoint_machine_name(&args)?;
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
-    let network_policy = shared::resolve_run_network_policy(args.run.net, &args.run.allow_host)?;
+    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+        args.run.net,
+        args.run.network_preset,
+        &args.run.allow_host,
+        &[],
+    )?
+    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget));
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
@@ -369,6 +382,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         from_workload_ir: args.from_workload_ir.clone(),
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
+        machine_name,
         reset: args.reset,
         keep_alive: args.persistent(),
         keep_alive_dev: false,
@@ -378,6 +392,18 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
     })
+}
+
+/// Resolve the VM identity for a fresh entrypoint boot.
+///
+/// Persistent entrypoint machines use the same explicit-or-generated naming
+/// contract as every other persistent `machine run`; transient boots keep the
+/// collision-resistant internal session name.
+fn resolve_entrypoint_machine_name(args: &MachineRunArgs) -> Result<Option<String>> {
+    if args.attach || !args.persistent() {
+        return Ok(None);
+    }
+    resolve_machine_run_name(args).map(Some)
 }
 
 /// Turn `--stdin` into what the entrypoint call should do about stdin.
@@ -479,6 +505,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_secure_with_source(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
+            if !args.run.outputs.is_empty() {
+                anyhow::bail!(
+                    "--output is collected when a foreground run exits; a persistent machine \
+                     (-d, --ttl, --port, --healthcheck, --up-json) has no exit to collect at"
+                );
+            }
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
         }
         MachineRunMode::InteractiveTransient => {
@@ -534,6 +566,21 @@ pub(in crate::commands) fn boot_persistent_by_name(
 #[cfg(test)]
 mod entrypoint_stdin_tests {
     use super::*;
+
+    #[test]
+    fn a_persistent_entrypoint_preserves_the_requested_machine_name() {
+        let args = MachineRunArgs {
+            name: Some("named-agent".to_string()),
+            detach: true,
+            entrypoint: true,
+            ..MachineRunArgs::default()
+        };
+
+        assert_eq!(
+            resolve_entrypoint_machine_name(&args).expect("valid machine name"),
+            Some("named-agent".to_string())
+        );
+    }
 
     /// Name the variant the flag resolved to. A payload and a stream are
     /// different contracts with the guest, and only one of them puts the input
@@ -684,6 +731,7 @@ mod network_surface_tests {
         mvm_contract::ir::Network {
             mode: mvm_contract::ir::NetworkMode::Bridge,
             ports: vec![],
+            preset: None,
             egress: None,
             peers: vec![],
             dns: None,

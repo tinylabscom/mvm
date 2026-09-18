@@ -886,19 +886,6 @@ class GuestResponse23:
 
 
 @dataclass
-class PostRestoreAck:
-    success: bool
-    clock_resynced: Optional[bool] = None
-    detail: Optional[str] = None
-    reseeded: Optional[bool] = False
-
-
-@dataclass
-class GuestResponse24:
-    PostRestoreAck: PostRestoreAck
-
-
-@dataclass
 class UnixSocketForwardStarted:
     guest_path: str
     host_vsock_port: int
@@ -1200,6 +1187,17 @@ class ReadinessReport:
     profile: AgentProfile
     volumes: ComponentState
     warm_pool: ComponentState
+
+
+class ReseedShortfall1(Enum):
+    helper_missing = 'helper_missing'
+
+
+class ReseedShortfall2(Enum):
+    failed = 'failed'
+
+
+ReseedShortfall = Union[ReseedShortfall1, ReseedShortfall2]
 
 
 @dataclass
@@ -1572,6 +1570,20 @@ class GuestResponse17:
 @dataclass
 class GuestResponse19:
     EntrypointEvent: EntrypointEvent
+
+
+@dataclass
+class PostRestoreAck:
+    success: bool
+    clock_resynced: Optional[bool] = None
+    detail: Optional[str] = None
+    reseed_shortfall: Optional[ReseedShortfall] = None
+    reseeded: Optional[bool] = False
+
+
+@dataclass
+class GuestResponse24:
+    PostRestoreAck: PostRestoreAck
 
 
 @dataclass

@@ -870,6 +870,7 @@ mod tests {
                     egress: None,
                     peers: vec![],
                     dns: None,
+                    preset: None,
                     ai: None,
                 }),
                 resources: Resources {

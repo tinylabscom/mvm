@@ -167,12 +167,14 @@ fn build_minimal_rootfs() -> Vec<u8> {
             path: "/sbin".to_string(),
             mode: 0o755,
             xattrs: vec![],
+            owner: mvm_fs::ext4::Owner::ROOT,
         },
         mvm_fs::ext4::Node::File {
             path: "/sbin/init".to_string(),
             mode: 0o755,
             data: b"#!/bin/sh\nexec /bin/sh\n".to_vec(),
             xattrs: vec![],
+            owner: mvm_fs::ext4::Owner::ROOT,
         },
     ];
     mvm_fs::ext4::build_image(nodes).expect("build minimal ext4 rootfs")

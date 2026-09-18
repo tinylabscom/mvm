@@ -46,6 +46,14 @@ pub const SIGNATURE_FILENAME: &str = "manifest.sig";
 /// bytes (kernel, rootfs, verity sidecar, ...).
 pub const ARTIFACTS_DIR: &str = "artifacts";
 
+/// `artifactType` of an image-registry manifest that carries one signed
+/// bundle. The manifest's config is the empty descriptor and its only layer
+/// is the `.mvmpkg` archive, which already holds the signature.
+pub const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.mvm.bundle.v1";
+
+/// Media type of that layer: the `.mvmpkg` archive byte for byte, plain tar.
+pub const BUNDLE_LAYER_MEDIA_TYPE: &str = "application/vnd.mvm.bundle.v1.tar";
+
 /// Content-derived identifier for a publisher's Ed25519 key. Equals
 /// `sha256(pubkey_bytes)` truncated to 32 hex characters.
 ///

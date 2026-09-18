@@ -45,6 +45,7 @@ import type {
   JsonSchemaShape,
   Mount,
   Network,
+  NetworkPreset,
   PortForward,
   Resources,
   Source,
@@ -302,6 +303,8 @@ export function aiPolicy(opts: {
 export function network(opts: {
   mode?: "none" | "bridge" | "host";
   ports?: PortForward[];
+  preset?: NetworkPreset;
+  egress?: Network["egress"];
   /**
    * Optional AI egress metering and budget policy. When set, the host
    * records token usage for known AI providers and refuses further AI
@@ -309,10 +312,15 @@ export function network(opts: {
    */
   ai?: AiPolicy;
 }): Network {
+  if (opts.preset !== undefined && opts.egress !== undefined) {
+    throw new Error("network preset and explicit egress are mutually exclusive");
+  }
   return {
     mode: opts.mode ?? "none",
     ports: opts.ports ?? [],
     peers: [],
+    ...(opts.preset ? { preset: opts.preset } : {}),
+    ...(opts.egress ? { egress: opts.egress } : {}),
     ...(opts.ai ? { ai: opts.ai } : {}),
   };
 }

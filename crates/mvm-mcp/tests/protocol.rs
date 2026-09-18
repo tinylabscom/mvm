@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mvm_client::dto::{MachineFilter, MachineId, MachineStatus};
@@ -278,5 +280,155 @@ async fn list_status_filter_uses_the_wire_enum() {
         .expect("mock list")[0]
             .id,
         MachineId("m1".into())
+    );
+}
+
+/// Where the agent-facing tool contract is pinned.
+const TOOL_CONTRACT_FIXTURE: &str = "tests/fixtures/tool-contract.json";
+
+/// Set to rewrite the pinned contract from what the server advertises.
+const TOOL_CONTRACT_UPDATE_ENV: &str = "MVM_UPDATE_MCP_TOOL_CONTRACT";
+
+fn operation_keys() -> Vec<String> {
+    serde_json::to_value(ClientOperationCapabilities::default())
+        .expect("operation capabilities serialize")
+        .as_object()
+        .expect("operation capabilities are an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn operations_serving(keys: &[String]) -> ClientOperationCapabilities {
+    let fields = keys
+        .iter()
+        .map(|key| (key.clone(), Value::Bool(true)))
+        .collect();
+    serde_json::from_value(Value::Object(fields)).expect("known operation keys deserialize")
+}
+
+async fn advertised_tools(operations: ClientOperationCapabilities) -> Vec<Value> {
+    let server = McpServer::new(Arc::new(MockBackend::default().with_operations(operations)));
+    request(&server, 80, "tools/list", json!({})).await["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .clone()
+}
+
+fn tool_name(tool: &Value) -> String {
+    tool["name"].as_str().expect("tool name").to_string()
+}
+
+/// Rebuild `value` with every object's keys in sorted order, whatever map
+/// ordering `serde_json` was compiled with.
+fn sort_keys(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let sorted: BTreeMap<String, Value> = object
+                .into_iter()
+                .map(|(key, value)| (key, sort_keys(value)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sort_keys).collect()),
+        other => other,
+    }
+}
+
+/// The advertised tool surface in its pinned form: every tool a fully capable
+/// client is offered, with the one client operation that gates it (`null` when
+/// every client is offered it), sorted by name, keys sorted, pretty-printed.
+async fn normalized_tool_contract() -> String {
+    let keys = operation_keys();
+    let always: Vec<String> = advertised_tools(ClientOperationCapabilities::default())
+        .await
+        .iter()
+        .map(tool_name)
+        .collect();
+    let mut gates: BTreeMap<String, String> = BTreeMap::new();
+    for key in &keys {
+        for tool in advertised_tools(operations_serving(std::slice::from_ref(key))).await {
+            let name = tool_name(&tool);
+            if !always.contains(&name) {
+                gates.insert(name, key.clone());
+            }
+        }
+    }
+
+    let mut tools = advertised_tools(operations_serving(&keys)).await;
+    tools.sort_by_key(tool_name);
+    let contract: Vec<Value> = tools
+        .into_iter()
+        .map(|mut tool| {
+            let name = tool_name(&tool);
+            let requires = if always.contains(&name) {
+                Value::Null
+            } else {
+                let key = gates.get(&name).unwrap_or_else(|| {
+                    panic!("`{name}` is not gated by a single client operation")
+                });
+                Value::String(key.clone())
+            };
+            tool.as_object_mut()
+                .expect("tool is an object")
+                .insert("requires".into(), requires);
+            sort_keys(tool)
+        })
+        .collect();
+    let mut rendered =
+        serde_json::to_string_pretty(&json!({ "tools": contract })).expect("contract serializes");
+    rendered.push('\n');
+    rendered
+}
+
+/// Names of tools present in only one side, or present in both but different.
+fn contract_drift(pinned: &str, advertised: &str) -> String {
+    let by_name = |text: &str| -> BTreeMap<String, Value> {
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|contract| contract["tools"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool| (tool_name(&tool), tool))
+            .collect()
+    };
+    let (pinned, advertised) = (by_name(pinned), by_name(advertised));
+    let mut lines = Vec::new();
+    for (name, tool) in &advertised {
+        match pinned.get(name) {
+            None => lines.push(format!("  added:   {name}")),
+            Some(previous) if previous != tool => lines.push(format!("  changed: {name}")),
+            Some(_) => {}
+        }
+    }
+    for name in pinned.keys().filter(|name| !advertised.contains_key(*name)) {
+        lines.push(format!("  removed: {name}"));
+    }
+    if lines.is_empty() {
+        lines.push("  (formatting only)".into());
+    }
+    lines.join("\n")
+}
+
+#[tokio::test]
+async fn tool_surface_matches_the_pinned_contract() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TOOL_CONTRACT_FIXTURE);
+    let advertised = normalized_tool_contract().await;
+
+    if std::env::var_os(TOOL_CONTRACT_UPDATE_ENV).is_some() {
+        std::fs::write(&path, &advertised).expect("write pinned tool contract");
+        return;
+    }
+
+    let pinned = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        pinned == advertised,
+        "the MCP tool surface no longer matches {TOOL_CONTRACT_FIXTURE}:\n{}\n\n\
+         Tool names, descriptions, input schemas, and gating operations are what an agent \
+         is offered, so a change here is a contract change. If it is intended, re-bless and \
+         review the fixture diff:\n  \
+         {TOOL_CONTRACT_UPDATE_ENV}=1 cargo test -p mvm-mcp --test protocol \
+         tool_surface_matches_the_pinned_contract",
+        contract_drift(&pinned, &advertised)
     );
 }

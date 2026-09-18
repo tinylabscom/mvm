@@ -173,7 +173,7 @@ impl FlowMuxIdentityMaterial {
         path: &Path,
         contents: &IdentityDriveContents<'_>,
     ) -> Result<()> {
-        use mvm_fs::ext4::{BuildOptions, Node, build_image_with_options};
+        use mvm_fs::ext4::{BuildOptions, Node, Owner, build_image_with_options};
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -197,18 +197,21 @@ impl FlowMuxIdentityMaterial {
                 mode: GUEST_SIGNING_KEY_MODE,
                 data: self.guest_signing_key.to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             Node::File {
                 path: format!("/{HOST_SIGNER_PUB_FILE}"),
                 mode: HOST_SIGNER_PUB_MODE,
                 data: self.host_signer_pub.to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             Node::File {
                 path: format!("/{INGRESS_TARGETS_FILE}"),
                 mode: HOST_SIGNER_PUB_MODE,
                 data: targets_json,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
         ];
         if let Some(cert_pem) = contents.egress_ca_cert_pem {
@@ -226,6 +229,7 @@ impl FlowMuxIdentityMaterial {
                 mode: EGRESS_CA_CERT_MODE,
                 data: cert_pem.as_bytes().to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             });
         }
         let image = build_image_with_options(

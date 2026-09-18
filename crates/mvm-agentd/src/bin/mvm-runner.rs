@@ -94,6 +94,7 @@ fn dispatch(config: &RuntimeConfig, dispatch_dir: &str, stdin: &[u8]) -> Result<
     cmd.env("MVM_FORMAT", config.format.as_str());
     cmd.env("MVM_SOURCE_PATH", &config.source_path);
     cmd.stdin(Stdio::piped());
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

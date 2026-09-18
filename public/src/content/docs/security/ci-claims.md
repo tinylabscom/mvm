@@ -28,7 +28,7 @@ Each numbered claim is backed by a test or a CI workflow gate.
 | 8 | Every workload runs from a signed, audited `ExecutionPlan`. | Admission and audit |
 | 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch and at admit time. | Supply chain |
 | 10 | No untrusted workload reaches the network unless explicitly admitted by policy. | Data containment |
-| 11 | Every application-dependency volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain. | Supply chain (app layer) |
+| 11 | Application-dependency volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked, attestation-checked, and bound to the workload's audit chain. | Supply chain (app layer) |
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited. | Admission and audit |
 | 13 | The managed substitution path hands the guest placeholders, never raw secret values. | Data containment |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log. | Supply chain |

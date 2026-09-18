@@ -22,12 +22,30 @@ pub(super) fn require_fresh_child_identity(
     child_vm_name: &str,
     outcome: &PostRestoreOutcome,
 ) -> std::result::Result<(), StandbyError> {
+    let reported = || {
+        outcome
+            .detail
+            .as_deref()
+            .map(|detail| format!(" (guest reported: {detail})"))
+            .unwrap_or_default()
+    };
     let unproven = if !outcome.acknowledged {
-        "did not acknowledge the post-restore signal"
+        format!("did not acknowledge the post-restore signal{}", reported())
     } else if !outcome.reseeded {
-        "acknowledged without rotating its generation identity"
+        // The guest's own account decides the advice: an image without a
+        // reseed helper has to be rebuilt, and a failed reseed may be retried.
+        format!(
+            "cannot be admitted as a fresh clone: {}",
+            mvm_agentd::vsock::describe_missing_reseed(
+                outcome.reseed_shortfall,
+                outcome.detail.as_deref(),
+            )
+        )
     } else if !outcome.clock_resynced {
-        "acknowledged without resynchronizing its wall clock"
+        format!(
+            "acknowledged without resynchronizing its wall clock{}",
+            reported()
+        )
     } else {
         return Ok(());
     };
@@ -74,6 +92,7 @@ mod tests {
             detail: None,
             reseeded: true,
             clock_resynced: true,
+            reseed_shortfall: None,
         };
         assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
 
@@ -85,7 +104,7 @@ mod tests {
             ),
             (
                 |o: &mut PostRestoreOutcome| o.reseeded = false,
-                "without rotating its generation identity",
+                "did not rotate its generation identity",
             ),
             (
                 |o: &mut PostRestoreOutcome| o.clock_resynced = false,
@@ -101,6 +120,40 @@ mod tests {
                 "refusal must name the unproven flag ({expected}): {err}"
             );
         }
+    }
+
+    /// An image with no reseed helper and a reseed that failed are refused
+    /// with different advice, and each carries the guest's own reason.
+    #[test]
+    fn an_unreseeded_child_is_refused_with_advice_that_matches_the_cause() {
+        use mvm_agentd::vsock::ReseedShortfall;
+        let refusal = |shortfall, detail: &str| {
+            let outcome = PostRestoreOutcome {
+                acknowledged: true,
+                detail: Some(detail.to_string()),
+                reseeded: false,
+                clock_resynced: true,
+                reseed_shortfall: Some(shortfall),
+            };
+            let err = require_fresh_child_identity("vm-a", &outcome)
+                .expect_err("an unreseeded child must be refused");
+            assert!(matches!(err, StandbyError::ClaimFailed(_)), "{err}");
+            err.to_string()
+        };
+
+        let missing = refusal(ReseedShortfall::HelperMissing, "no reseed helper");
+        assert!(
+            missing.contains("rebuild the image") && missing.contains("no reseed helper"),
+            "{missing}"
+        );
+        assert!(!missing.contains("did not acknowledge"), "{missing}");
+
+        let failed = refusal(ReseedShortfall::Failed, "RNDRESEEDCRNG: EPERM");
+        assert!(
+            failed.contains("retry") && failed.contains("RNDRESEEDCRNG: EPERM"),
+            "{failed}"
+        );
+        assert!(!failed.contains("rebuild"), "{failed}");
     }
 
     /// The three fail-closed reasons must stay distinguishable, and the

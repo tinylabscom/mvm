@@ -362,6 +362,7 @@ fn synthesis_input_for_app<'a>(
     let ingress = lower_ingress(app)?;
 
     Ok(SynthesisInput {
+        outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,

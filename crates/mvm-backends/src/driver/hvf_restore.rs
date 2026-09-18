@@ -644,7 +644,7 @@ mod tests {
     /// restores the child perfectly well and is simply unbounded, so the argv is
     /// the only thing that distinguishes the two.
     #[test]
-    fn a_restored_child_is_cpu_bounded_by_its_admitted_grant() {
+    fn an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())

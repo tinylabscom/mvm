@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
+use crate::plan::output_grant::{OutputGrant, OutputGrantError};
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     CallerCommitment, DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant,
@@ -264,6 +265,14 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asset_identities: Vec<crate::plan::types::AssetIdentity>,
 
+    /// Directories a transient workload may hand back to the host, each backed
+    /// by a writable disk named in `shares` and bounded in bytes and entries.
+    /// Recording the grant here is what makes returned bytes an admitted
+    /// decision rather than a side channel. Skip-serialized when empty so plans
+    /// that return nothing keep their bytes, and with them their identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<OutputGrant>,
+
     /// Host services this workload is authorized to call over the broker
     /// channel. The broker's dispatch gate refuses any service that is not
     /// listed here, and the launch path reads the same list to decide whether
@@ -327,6 +336,12 @@ impl ExecutionPlan {
     pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
         validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)?;
         validate_ingress_material(&self.ingress, &self.secrets)
+    }
+
+    /// Validate that every output grant is bounded, unique, and backed by a
+    /// writable disk the plan also admits.
+    pub fn validate_outputs(&self) -> Result<(), OutputGrantError> {
+        crate::plan::output_grant::validate_output_grants(&self.outputs, &self.shares)
     }
 
     /// Validate and return the admitted networking ceilings for this plan.
@@ -418,6 +433,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         asset_identities: Vec::new(),
+        outputs: Vec::new(),
         services: Vec::new(),
         extensions: Vec::new(),
         stream_edges: Vec::new(),

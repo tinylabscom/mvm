@@ -43,8 +43,24 @@ pub const CAP_SYS_TIME: u32 = 25;
 /// is exactly why the bounding set has to be narrowed before the capability
 /// sets are, and not after.
 pub const CAP_SETPCAP: u32 = 8;
+/// Linux capability `RNDRESEEDCRNG` requires. Held only by the CRNG reseed
+/// helper, never by the agent.
+pub const CAP_SYS_ADMIN: u32 = 21;
 /// Capabilities explicitly retained by the guest agent after boot setup.
 pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
+/// Capabilities retained by the CRNG reseed helper, and nothing else.
+pub const CRNG_RESEED_HELPER_CAPABILITIES: u32 = 1u32 << CAP_SYS_ADMIN;
+/// Identity of the CRNG reseed helper. Distinct from [`WORKLOAD_UID`], which
+/// the agent and workload share, so neither can signal it, change its limits,
+/// or pose as it on the helper socket. mkGuest images reserve the same number.
+pub const CRNG_RESEED_HELPER_UID: u32 = 988;
+/// Group of the CRNG reseed helper on the universal initramfs path.
+pub const CRNG_RESEED_HELPER_GID: u32 = 988;
+
+#[cfg(target_os = "linux")]
+mod capability_sets;
+#[cfg(target_os = "linux")]
+use capability_sets::{raise_ambient_capabilities, set_capabilities};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -791,10 +807,17 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 /// applying it here binds the agent and everything under it just as firmly.
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
+    assume_identity_retaining(uid, gid, RESTORE_AGENT_CAPABILITIES)
+}
+
+/// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
+/// usable from `pre_exec`.
+#[cfg(target_os = "linux")]
+pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    narrow_bounding_set_where_enforceable(RESTORE_AGENT_CAPABILITIES)?;
+    narrow_bounding_set_where_enforceable(keep)?;
     if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -804,8 +827,8 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
     if unsafe { libc::setuid(uid) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    set_capabilities(RESTORE_AGENT_CAPABILITIES)?;
-    raise_ambient_capabilities(RESTORE_AGENT_CAPABILITIES)?;
+    set_capabilities(keep)?;
+    raise_ambient_capabilities(keep)?;
     set_no_new_privileges()?;
     if unsafe { libc::getuid() } == 0 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
@@ -813,49 +836,6 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn set_capabilities(capabilities: u32) -> std::io::Result<()> {
-    let header = CapHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let data = [
-        CapData {
-            effective: capabilities,
-            permitted: capabilities,
-            inheritable: capabilities,
-        },
-        CapData::default(),
-    ];
-    let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
-    if rc != 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
-    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_TIME] {
-        if capabilities & (1u32 << capability) == 0 {
-            continue;
-        }
-        let rc = unsafe {
-            libc::prctl(
-                PR_CAP_AMBIENT,
-                PR_CAP_AMBIENT_RAISE,
-                capability as libc::c_ulong,
-                0,
-                0,
-            )
-        };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
 /// The capability slots `PR_CAPBSET_DROP` is asked about.
 ///
 /// The kernel's own ceiling is `CAP_LAST_CAP`, which grows between releases.
@@ -987,54 +967,9 @@ pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[repr(C)]
-struct CapHeader {
-    version: u32,
-    pid: libc::pid_t,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-struct CapData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-// Layout contract with linux/capability.h `__user_cap_header_struct` and
-// `__user_cap_data_struct`. Both are passed to capset(2) by pointer; the
-// kernel reads each capability word by offset, so a Rust layout drift would
-// silently request the wrong privilege set.
-//
-// Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read from these
-// Rust definitions. `pid_t` is i32 on every Linux target mvm builds for.
-#[cfg(target_os = "linux")]
-const _: () = {
-    use core::mem::{align_of, offset_of, size_of};
-
-    assert!(size_of::<CapHeader>() == 8);
-    assert!(align_of::<CapHeader>() == 4);
-    assert!(offset_of!(CapHeader, version) == 0);
-    assert!(offset_of!(CapHeader, pid) == 4);
-
-    assert!(size_of::<CapData>() == 12);
-    assert!(align_of::<CapData>() == 4);
-    assert!(offset_of!(CapData, effective) == 0);
-    assert!(offset_of!(CapData, permitted) == 4);
-    assert!(offset_of!(CapData, inheritable) == 8);
-};
-
-#[cfg(target_os = "linux")]
-const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-#[cfg(target_os = "linux")]
 const PR_SET_KEEPCAPS: libc::c_int = 8;
 #[cfg(target_os = "linux")]
 const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
-#[cfg(target_os = "linux")]
-const PR_CAP_AMBIENT: libc::c_int = 47;
-#[cfg(target_os = "linux")]
-const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
 #[cfg(target_os = "linux")]
 const PR_CAPBSET_DROP: libc::c_int = 24;
 
@@ -2389,6 +2324,38 @@ mod privilege_tests {
         );
     }
 
+    #[test]
+    fn crng_reseed_helper_keep_mask_retains_exactly_sys_admin() {
+        let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(CRNG_RESEED_HELPER_CAPABILITIES, *cap))
+            .collect();
+        assert_eq!(
+            retained,
+            vec![CAP_SYS_ADMIN],
+            "the reseed helper must retain CAP_SYS_ADMIN and nothing else"
+        );
+    }
+
+    /// The whole reason the reseed runs in a separate process: the agent serves
+    /// host requests and spawns workload code, so the capability the reseed
+    /// needs must never be in the agent's own set, and the helper needs none of
+    /// the agent's.
+    #[test]
+    fn the_agent_and_the_reseed_helper_share_no_capability() {
+        assert_eq!(
+            RESTORE_AGENT_CAPABILITIES & CRNG_RESEED_HELPER_CAPABILITIES,
+            0
+        );
+        assert!(!bounding_set_retains(
+            RESTORE_AGENT_CAPABILITIES,
+            CAP_SYS_ADMIN
+        ));
+        assert!(
+            !bounding_set_retains(CRNG_RESEED_HELPER_CAPABILITIES, CAP_SETPCAP),
+            "the helper's bounding drop has the same narrow-first ordering as the agent's"
+        );
+    }
+
     /// The workload's mask is empty, and is a strict subset of the agent's.
     /// Stated as a subset rather than as a literal so it stays true if the
     /// agent's retained set ever changes.
@@ -2467,7 +2434,7 @@ mod privilege_tests {
             return;
         }
         super::harden_init_process().expect("harden_init_process should succeed as root");
-        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        let status = std::fs::read_to_string("/proc/thread-self/status").expect("read status");
         assert!(
             status.contains("NoNewPrivs:\t1"),
             "NoNewPrivs must be 1 after hardening; got:\n{status}"
@@ -2477,6 +2444,39 @@ mod privilege_tests {
         assert!(
             status.contains("CapBnd:\t0000000002000020"),
             "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
+        );
+    }
+
+    /// Live witness for the reseed helper's drop from root. Irreversible and
+    /// gated exactly like the agent-drop witness below.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root() {
+        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        if unsafe { libc::getuid() } != 0 {
+            return;
+        }
+        super::assume_identity_retaining(
+            CRNG_RESEED_HELPER_UID,
+            CRNG_RESEED_HELPER_GID,
+            CRNG_RESEED_HELPER_CAPABILITIES,
+        )
+        .expect("the helper privilege drop must succeed as root");
+        assert_eq!(unsafe { libc::getuid() }, CRNG_RESEED_HELPER_UID);
+        let status = std::fs::read_to_string("/proc/thread-self/status").expect("read status");
+        assert!(
+            status.contains("CapPrm:\t0000000000200000"),
+            "CapPrm must be exactly CAP_SYS_ADMIN; got:\n{status}"
+        );
+        assert!(
+            status.contains("NoNewPrivs:\t1"),
+            "NoNewPrivs must be 1 after the drop; got:\n{status}"
+        );
+        assert!(
+            status.contains("CapBnd:\t0000000000200000"),
+            "CapBnd must be exactly CAP_SYS_ADMIN; got:\n{status}"
         );
     }
 
@@ -2507,7 +2507,7 @@ mod privilege_tests {
             WORKLOAD_UID,
             "the drop must land on the workload uid"
         );
-        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        let status = std::fs::read_to_string("/proc/thread-self/status").expect("read status");
         assert!(
             status.contains("NoNewPrivs:\t1"),
             "NoNewPrivs must be 1 after the drop; got:\n{status}"

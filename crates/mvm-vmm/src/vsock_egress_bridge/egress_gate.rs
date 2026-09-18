@@ -393,6 +393,17 @@ impl EgressGate {
         self.decide_udp_request_with(target, resolve_hostname_ips)
     }
 
+    /// Whether this gate could admit any UDP datagram at all: an unrestricted
+    /// grant, or a rule set carrying at least one UDP rule. A gate that answers
+    /// `false` refuses every datagram, so a caller may refuse the association
+    /// outright rather than open one whose every send would be denied.
+    pub fn admits_udp(&self) -> bool {
+        match &self.egress {
+            CanonicalEgress::Unrestricted => true,
+            CanonicalEgress::Rules(rules) => rules.iter().any(|rule| rule.proto == Proto::Udp),
+        }
+    }
+
     /// Host names the policy admits, in registry order. The pin registry is the
     /// admission record — a name is pinned exactly when the allow-list named it —
     /// so this is what a caller can suggest instead of the refused destination.
@@ -950,6 +961,62 @@ mod tests {
         }]);
         let gate = EgressGate::from_network_policy(&unpinned, &pins, now);
         assert!(gate.decide_request("93.184.216.34:443").is_deny());
+    }
+
+    /// A bare allow-list naming one TCP host admits no UDP, port 53 included,
+    /// to a public or a private resolver. Names resolve through the DNS
+    /// verdict; a raw datagram is not a second way to reach a resolver.
+    #[test]
+    fn an_allow_list_admits_no_udp_to_any_port_53() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let now = "2026-01-01T00:00:00Z";
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "api.example.test",
+            vec!["198.51.100.7".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.test", 443)]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, now);
+
+        // The projection succeeded: the named host is admitted on its port.
+        assert!(!gate.decide_request("198.51.100.7:443").is_deny());
+        assert!(gate.decide_udp_request("203.0.113.53:53").is_deny());
+        assert!(gate.decide_udp_request("192.168.1.1:53").is_deny());
+        assert!(!gate.admits_udp());
+    }
+
+    /// `admits_udp` is true exactly when some datagram could be admitted: an
+    /// unrestricted grant or an explicit UDP rule, never a TCP-only rule set.
+    #[test]
+    fn admits_udp_is_true_only_for_unrestricted_or_an_explicit_udp_rule() {
+        use mvm_core::policy::projection::CanonicalRule;
+
+        assert!(EgressGate::new(CanonicalEgress::Unrestricted).admits_udp());
+        assert!(!EgressGate::default_deny().admits_udp());
+        assert!(
+            !EgressGate::new(CanonicalEgress::Rules(vec![allow_rule(
+                "198.51.100.7/32",
+                443
+            )]))
+            .admits_udp()
+        );
+        let udp = CanonicalRule {
+            proto: Proto::Udp,
+            net: "198.51.100.7/32".parse().unwrap(),
+            port_lo: 5353,
+            port_hi: 5353,
+        };
+        assert!(
+            EgressGate::new(CanonicalEgress::Rules(vec![
+                allow_rule("198.51.100.7/32", 443),
+                udp
+            ]))
+            .admits_udp()
+        );
     }
 
     /// An IP-host allow-list with the matching pin admits exactly that

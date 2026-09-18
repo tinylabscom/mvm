@@ -61,6 +61,7 @@ pub(crate) fn stage0_root_mount_nodes() -> Vec<mvm_fs::ext4::Node> {
         path: path.to_string(),
         mode: 0o755,
         xattrs: Vec::new(),
+        owner: mvm_fs::ext4::Owner::ROOT,
     })
     .collect::<Vec<_>>();
     nodes.push(mvm_fs::ext4::Node::File {
@@ -68,6 +69,7 @@ pub(crate) fn stage0_root_mount_nodes() -> Vec<mvm_fs::ext4::Node> {
         mode: 0o600,
         data: vec![0; crate::stage0::ROOT_RUNTIME_RESERVE_BYTES],
         xattrs: Vec::new(),
+        owner: mvm_fs::ext4::Owner::ROOT,
     });
     nodes
 }

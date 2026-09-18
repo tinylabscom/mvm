@@ -109,6 +109,10 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// digested shares, and the resolved network policy). Empty for runs
     /// that declare no assets.
     pub assets: Vec<crate::commands::shared::AssetSpec>,
+    /// Output grants recorded in the signed plan: which guest directories the
+    /// workload may hand back, where they land on the host, and the bounds the
+    /// collection enforces. Each must be backed by a writable disk in `shares`.
+    pub outputs: Vec<mvm_core::plan::OutputGrant>,
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
@@ -440,6 +444,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
     };
 
     let input = SynthesisInput {
+        outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
         // check below measures what the user actually asked for and the
         // signature covers it.
@@ -1027,7 +1032,7 @@ pub(super) fn enforce_kernel(
 /// Both transient paths close the same way, so they share this rather than each
 /// carrying its own copy of the two branches.
 pub(in crate::commands::vm) fn record_transient_outcome<T>(
-    admitted: Option<AdmissionContext>,
+    admitted: Option<&AdmissionContext>,
     backend: &str,
     strategy: mvm_build::run_image::RootStrategy,
     outcome: &Result<T>,
@@ -1035,10 +1040,10 @@ pub(in crate::commands::vm) fn record_transient_outcome<T>(
     let Some(ctx) = admitted else { return };
     match outcome {
         Ok(_) => {
-            emit_launched(&ctx, backend, false);
-            emit_boot_posture(&ctx, strategy);
+            emit_launched(ctx, backend, false);
+            emit_boot_posture(ctx, strategy);
         }
-        Err(e) => emit_failed(&ctx, "launch", e),
+        Err(e) => emit_failed(ctx, "launch", e),
     }
 }
 
@@ -1275,6 +1280,7 @@ mod admit_plan_tests {
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
         AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-pinned",
@@ -1342,6 +1348,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1381,6 +1388,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1410,6 +1418,7 @@ mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-happy",
@@ -1474,6 +1483,7 @@ mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-missing",
@@ -1553,6 +1563,7 @@ mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                outputs: Vec::new(),
                 network_mode: mode,
                 grants: None,
                 backend_kind: None,
@@ -1608,6 +1619,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-1",
@@ -1641,6 +1653,7 @@ mod admit_plan_tests {
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-2",
@@ -1688,6 +1701,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name,
@@ -1753,7 +1767,7 @@ mod admit_plan_tests {
 
         let outcome: Result<()> = Ok(());
         record_transient_outcome(
-            Some(ctx),
+            Some(&ctx),
             "firecracker",
             mvm_build::run_image::RootStrategy::BlockExt4,
             &outcome,
@@ -1774,7 +1788,7 @@ mod admit_plan_tests {
 
         let outcome: Result<()> = Err(anyhow::anyhow!("the guest never came up"));
         record_transient_outcome(
-            Some(ctx),
+            Some(&ctx),
             "firecracker",
             mvm_build::run_image::RootStrategy::BlockExt4,
             &outcome,
@@ -1813,6 +1827,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-local-default",
@@ -1871,6 +1886,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-allow-list",
@@ -1936,6 +1952,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-unrestricted",
@@ -2043,6 +2060,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             shares: vec![
@@ -2103,6 +2121,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2166,6 +2185,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2218,6 +2238,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2279,6 +2300,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2336,6 +2358,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2385,6 +2408,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
@@ -2615,6 +2639,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-shares",
@@ -2706,6 +2731,7 @@ allow_hosts = ["localhost:8443"]
             allow_host: &[],
             peer: &[],
             net: false,
+            network_preset: None,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
@@ -2719,6 +2745,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-granted",
@@ -2797,6 +2824,7 @@ allow_hosts = ["localhost:8443"]
             // `--net` would select the broad dev preset; the granted allow-list
             // is what wins.
             net: true,
+            network_preset: None,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
@@ -2852,6 +2880,7 @@ allow_hosts = ["localhost:8443"]
             allow_host: &[],
             peer: &[],
             net: false,
+            network_preset: None,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
@@ -2874,6 +2903,7 @@ allow_hosts = ["localhost:8443"]
             allow_host: &[],
             peer: &[],
             net: false,
+            network_preset: None,
             grants_file: None,
             manifest: Some(&declared),
             config: &MvmConfig::default(),
@@ -2887,6 +2917,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-over-ceiling",
@@ -2937,6 +2968,7 @@ allow_hosts = ["localhost:8443"]
             allow_host: &[],
             peer: &[],
             net: false,
+            network_preset: None,
             grants_file: None,
             manifest: None,
             config: &config,
@@ -2951,6 +2983,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-ungranted",

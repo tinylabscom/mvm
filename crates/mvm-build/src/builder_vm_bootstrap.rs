@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 
@@ -58,6 +59,95 @@ static CURRENT_EXE_CARRIES_HOST_BINARIES: AtomicBool = AtomicBool::new(false);
 /// binaries a builder-VM bootstrap needs. Called once by `mvmctl` at startup.
 pub fn declare_current_exe_carries_host_binaries(carries: bool) {
     CURRENT_EXE_CARRIES_HOST_BINARIES.store(carries, Ordering::Relaxed);
+}
+
+/// The Cargo features the running `mvmctl` was compiled with, as the root
+/// package's build script recorded them. Unset in a binary that declares none.
+static CURRENT_EXE_FEATURES: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Declare the Cargo features this `mvmctl` was compiled with, as a
+/// comma-separated list of root-package feature names. Called once by `mvmctl`
+/// at startup.
+///
+/// A bootstrap helper this binary has to compile is built with the same set.
+/// Built with `embed-host-bins` alone, it dropped every feature that decides how
+/// artifacts are acquired — `release-artifact-bootstrap` among them — so a
+/// caller that asked to fetch the builder image got a helper that could only
+/// build it from source.
+pub fn declare_current_exe_features(enabled: &str) {
+    let _ = CURRENT_EXE_FEATURES.set(
+        enabled
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    );
+}
+
+/// The Cargo feature selection a bootstrap helper is compiled with.
+///
+/// The helper is this `mvmctl` plus the embedded host binaries, so it mirrors
+/// the caller's features — with or without the default set — and adds
+/// `embed-host-bins`. A binary that declared nothing gets `embed-host-bins` over
+/// the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HelperFeatures {
+    /// Sorted and deduplicated; always contains `embed-host-bins`.
+    features: Vec<String>,
+    default_features: bool,
+}
+
+impl HelperFeatures {
+    const EMBED_HOST_BINS: &'static str = "embed-host-bins";
+    const DEFAULT: &'static str = "default";
+
+    fn for_caller(declared: Option<&[String]>) -> Self {
+        let Some(declared) = declared else {
+            return Self {
+                features: vec![Self::EMBED_HOST_BINS.to_owned()],
+                default_features: true,
+            };
+        };
+        let mut features: Vec<String> = declared
+            .iter()
+            .filter(|name| name.as_str() != Self::DEFAULT)
+            .cloned()
+            .chain(std::iter::once(Self::EMBED_HOST_BINS.to_owned()))
+            .collect();
+        features.sort();
+        features.dedup();
+        Self {
+            features,
+            default_features: declared.iter().any(|name| name == Self::DEFAULT),
+        }
+    }
+
+    fn cargo_args(&self) -> Vec<String> {
+        let selection = ["--features".to_owned(), self.features.join(",")];
+        if self.default_features {
+            selection.to_vec()
+        } else {
+            std::iter::once("--no-default-features".to_owned())
+                .chain(selection)
+                .collect()
+        }
+    }
+
+    /// The record kept beside a built helper. A later caller whose selection
+    /// differs rebuilds the helper rather than reusing one built without its
+    /// features.
+    fn stamp(&self) -> String {
+        self.cargo_args().join(" ")
+    }
+}
+
+fn current_helper_features() -> HelperFeatures {
+    HelperFeatures::for_caller(CURRENT_EXE_FEATURES.get().map(Vec::as_slice))
+}
+
+fn helper_features_stamp_path(helper_bin: &Path) -> PathBuf {
+    helper_bin.with_extension("features")
 }
 
 /// The running executable, when it has declared a host-binary payload and the
@@ -217,19 +307,6 @@ fn builder_vm_helper_command(
         // Marks the child as a bootstrap so it never spawns one of its own.
         cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
     }
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        // Source-checkout bootstrap on Linux should follow the Linux builder
-        // path, not the libkrun-default host path. The runtime-overlay
-        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
-        // aligned so a cold builder-image cache does not fall into a libkrun
-        // networking prerequisite that the Linux builder path itself does not
-        // require.
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
     Ok(cmd)
 }
 
@@ -276,10 +353,13 @@ fn resolve_builder_vm_bootstrap_bin_for(
 
     let helper_target_dir = builder_vm_bootstrap_helper_target_dir(workspace_root);
     let helper_bin = helper_target_dir.join("debug").join("mvmctl");
-    if helper_bin.is_file() && !bootstrap_helper_needs_rebuild(&helper_bin, workspace_root) {
+    let features = current_helper_features();
+    if helper_bin.is_file()
+        && !bootstrap_helper_needs_rebuild(&helper_bin, workspace_root, &features)
+    {
         return Ok(helper_bin);
     }
-    // The helper is built `--features embed-host-bins`, which cross-compiles
+    // The helper is built with `embed-host-bins`, which cross-compiles
     // the host binaries with the pinned zig + musl Rust. Ask for that toolchain
     // before spending minutes on a compile whose build script would only panic
     // about it at the very end.
@@ -301,6 +381,7 @@ fn resolve_builder_vm_bootstrap_bin_for(
         &cargo,
         workspace_root,
         &helper_target_dir,
+        &features,
     )?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
@@ -309,14 +390,26 @@ fn resolve_builder_vm_bootstrap_bin_for(
     })?;
     if !status.success() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build --bin mvmctl --features embed-host-bins exited with {} while \
-             preparing the builder VM bootstrap helper. {}",
+            "cargo build --bin mvmctl {} exited with {} while preparing the builder VM \
+             bootstrap helper. {}",
+            features.stamp(),
             status.code().unwrap_or(-1),
             BOOTSTRAP_HELPER_WAYS_OUT,
         )));
     }
 
     if helper_bin.is_file() {
+        // A missing record costs one rebuild on the next call, never a helper
+        // with the wrong features, so failing to write it does not fail a build
+        // that succeeded.
+        let stamp = helper_features_stamp_path(&helper_bin);
+        if let Err(e) = fs::write(&stamp, features.stamp()) {
+            tracing::warn!(
+                path = %stamp.display(),
+                error = %e,
+                "could not record the builder VM bootstrap helper's features; it will be rebuilt next time"
+            );
+        }
         return Ok(helper_bin);
     }
 
@@ -368,23 +461,33 @@ fn builder_vm_bootstrap_helper_build_command(
     cargo: &std::ffi::OsStr,
     workspace_root: &Path,
     helper_target_dir: &Path,
+    features: &HelperFeatures,
 ) -> Result<Command, BuilderVmError> {
     host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelperBuild)?;
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace_root)
         .env("CARGO_TARGET_DIR", helper_target_dir)
-        .args([
-            "build",
-            "-q",
-            "--bin",
-            "mvmctl",
-            "--features",
-            "embed-host-bins",
-        ]);
+        .args(["build", "-q", "--bin", "mvmctl"])
+        .args(features.cargo_args());
     Ok(cmd)
 }
 
-fn bootstrap_helper_needs_rebuild(helper_bin: &Path, workspace_root: &Path) -> bool {
+fn bootstrap_helper_needs_rebuild(
+    helper_bin: &Path,
+    workspace_root: &Path,
+    features: &HelperFeatures,
+) -> bool {
+    !helper_built_with(helper_bin, features) || helper_sources_are_newer(helper_bin, workspace_root)
+}
+
+/// Whether the helper on disk was built with exactly `features`. A helper with
+/// no record predates the record, and is rebuilt once.
+fn helper_built_with(helper_bin: &Path, features: &HelperFeatures) -> bool {
+    fs::read_to_string(helper_features_stamp_path(helper_bin))
+        .is_ok_and(|recorded| recorded == features.stamp())
+}
+
+fn helper_sources_are_newer(helper_bin: &Path, workspace_root: &Path) -> bool {
     let Ok(helper_metadata) = fs::metadata(helper_bin) else {
         return true;
     };
@@ -652,6 +755,72 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&observed).unwrap(), "1");
     }
 
+    fn backend_observer_script(scratch: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let observed = scratch.join("builder-backend");
+        let script = scratch.join("observe-builder-backend.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{{}:-unset}}\" > builder-backend\n",
+                crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (script, observed)
+    }
+
+    #[test]
+    fn bootstrap_helper_does_not_inject_a_backend_when_the_caller_set_none() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV);
+        let scratch = TempDir::new().unwrap();
+        let (script, observed) = backend_observer_script(scratch.path());
+
+        let status = builder_vm_helper_command(
+            &HostProcess::undeclared(),
+            &script,
+            scratch.path(),
+            BuilderVmHelperCommand::Bootstrap,
+        )
+        .expect("mvmctl may run its helper")
+        .status()
+        .expect("run backend observer");
+
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(observed).unwrap(), "unset");
+    }
+
+    #[test]
+    fn bootstrap_helper_inherits_an_explicit_backend_unchanged() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.set(
+            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
+            "firecracker",
+        );
+        let scratch = TempDir::new().unwrap();
+        let (script, observed) = backend_observer_script(scratch.path());
+
+        let status = builder_vm_helper_command(
+            &HostProcess::undeclared(),
+            &script,
+            scratch.path(),
+            BuilderVmHelperCommand::Bootstrap,
+        )
+        .expect("mvmctl may run its helper")
+        .status()
+        .expect("run backend observer");
+
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(observed).unwrap(), "firecracker");
+    }
+
     #[test]
     fn bootstrap_helper_build_command_uses_isolated_target_dir() {
         let cmd = builder_vm_bootstrap_helper_build_command(
@@ -659,6 +828,7 @@ mod tests {
             std::ffi::OsStr::new("cargo"),
             Path::new("/workspace"),
             Path::new("/tmp/helper-target"),
+            &HelperFeatures::for_caller(None),
         )
         .expect("mvmctl may build its helper");
 
@@ -747,84 +917,204 @@ mod tests {
         );
     }
 
+    /// A workspace holding a helper binary and every input its staleness check
+    /// reads. Every input is dated `inputs_secs` except `mvm-cli`'s source, which
+    /// is dated `cli_src_secs`; the helper is dated `helper_secs`.
+    fn workspace_with_helper(
+        helper_secs: u64,
+        inputs_secs: u64,
+        cli_src_secs: u64,
+    ) -> (TempDir, PathBuf) {
+        let workspace = TempDir::new().expect("workspace");
+        let root = workspace.path();
+        let at = |secs| std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let write = |rel: &str, body: &str, secs: u64| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, body).expect("write");
+            set_mtime(&path, at(secs));
+            path
+        };
+
+        write("Cargo.toml", "[workspace]\n", inputs_secs);
+        write("Cargo.lock", "# lock\n", inputs_secs);
+        write("crates/mvm-build/Cargo.toml", "[package]\n", inputs_secs);
+        write("crates/mvm-cli/Cargo.toml", "[package]\n", inputs_secs);
+        write(
+            "crates/mvm-build/src/lib.rs",
+            "pub fn build() {}\n",
+            inputs_secs,
+        );
+        write("crates/mvm-cli/src/main.rs", "fn main() {}\n", cli_src_secs);
+        let helper = write(
+            "target/mvm-builder-vm-bootstrap/debug/mvmctl",
+            "helper",
+            helper_secs,
+        );
+        (workspace, helper)
+    }
+
+    fn record_features(helper: &Path, features: &HelperFeatures) {
+        std::fs::write(helper_features_stamp_path(helper), features.stamp()).expect("stamp");
+    }
+
     #[test]
     fn bootstrap_helper_needs_rebuild_when_tracked_source_is_newer() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
+        let (workspace, helper) = workspace_with_helper(10, 10, 20);
+        let features = HelperFeatures::for_caller(None);
+        // A matching record, so the only reason left to rebuild is the source.
+        record_features(&helper, &features);
 
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
-
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&helper, older);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, newer);
-
-        assert!(bootstrap_helper_needs_rebuild(&helper, workspace.path()));
+        assert!(bootstrap_helper_needs_rebuild(
+            &helper,
+            workspace.path(),
+            &features
+        ));
     }
 
     #[test]
     fn bootstrap_helper_needs_rebuild_skips_fresh_helper() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
+        let (workspace, helper) = workspace_with_helper(20, 10, 10);
+        let features = HelperFeatures::for_caller(None);
+        record_features(&helper, &features);
 
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
+        assert!(!bootstrap_helper_needs_rebuild(
+            &helper,
+            workspace.path(),
+            &features
+        ));
+    }
 
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, older);
-        set_mtime(&helper, newer);
+    /// The regression this record exists for. A helper cached by an earlier
+    /// build that knew nothing of the caller's features is fresh by every
+    /// source date, and reusing it would keep handing a fetch-configured caller
+    /// a helper that cannot fetch.
+    #[test]
+    fn a_fresh_helper_built_with_other_features_is_rebuilt() {
+        let (workspace, helper) = workspace_with_helper(20, 10, 10);
+        record_features(&helper, &HelperFeatures::for_caller(None));
 
-        assert!(!bootstrap_helper_needs_rebuild(&helper, workspace.path()));
+        let caller = HelperFeatures::for_caller(Some(&[
+            "default".to_owned(),
+            "release-artifact-bootstrap".to_owned(),
+        ]));
+        assert!(bootstrap_helper_needs_rebuild(
+            &helper,
+            workspace.path(),
+            &caller
+        ));
+    }
+
+    #[test]
+    fn a_fresh_helper_with_no_feature_record_is_rebuilt() {
+        let (workspace, helper) = workspace_with_helper(20, 10, 10);
+
+        assert!(bootstrap_helper_needs_rebuild(
+            &helper,
+            workspace.path(),
+            &HelperFeatures::for_caller(None),
+        ));
+    }
+
+    fn helper_build_args(features: &HelperFeatures) -> Vec<String> {
+        builder_vm_bootstrap_helper_build_command(
+            &HostProcess::undeclared(),
+            std::ffi::OsStr::new("cargo"),
+            Path::new("/workspace"),
+            Path::new("/tmp/helper-target"),
+            features,
+        )
+        .expect("mvmctl may build its helper")
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    fn declared(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The fetch this caller was configured for must survive into the helper
+    /// it builds. Without `release-artifact-bootstrap` the helper cannot
+    /// download the builder image and falls through to a Stage 0 build.
+    #[test]
+    fn the_helper_is_built_with_the_callers_acquisition_features() {
+        let caller = declared(&["default", "release-artifact-bootstrap", "user"]);
+
+        assert_eq!(
+            helper_build_args(&HelperFeatures::for_caller(Some(&caller))),
+            vec![
+                "build",
+                "-q",
+                "--bin",
+                "mvmctl",
+                "--features",
+                "embed-host-bins,release-artifact-bootstrap,user",
+            ]
+        );
+    }
+
+    /// Mirroring means not inventing features either: a caller built without
+    /// the default set gets a helper built without it.
+    #[test]
+    fn a_caller_built_without_default_features_gets_a_helper_without_them() {
+        let caller = declared(&["host"]);
+
+        assert_eq!(
+            helper_build_args(&HelperFeatures::for_caller(Some(&caller))),
+            vec![
+                "build",
+                "-q",
+                "--bin",
+                "mvmctl",
+                "--no-default-features",
+                "--features",
+                "embed-host-bins,host",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_caller_that_already_embeds_lists_embed_host_bins_once() {
+        let caller = declared(&["default", "embed-host-bins", "user"]);
+
+        assert_eq!(
+            HelperFeatures::for_caller(Some(&caller)).features,
+            declared(&["embed-host-bins", "user"])
+        );
+    }
+
+    /// The root build script turns Cargo's `CARGO_FEATURE_<NAME>` variables back
+    /// into feature names by lowercasing and mapping `_` to `-`. That is exact
+    /// only while no root feature name contains `_`, and the helper command
+    /// names root features directly, so both have to hold for the mirror to be
+    /// a mirror.
+    #[test]
+    fn root_feature_names_survive_the_build_script_mapping() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).expect("read the root manifest");
+        let parsed: toml::Table = text.parse().expect("parse the root manifest");
+        let features = parsed
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("the root package declares features");
+
+        for name in features.keys() {
+            assert!(
+                !name.contains('_'),
+                "root feature {name:?} contains '_', which the build script cannot recover \
+                 from CARGO_FEATURE_*"
+            );
+        }
+        for needed in [
+            HelperFeatures::EMBED_HOST_BINS,
+            "release-artifact-bootstrap",
+        ] {
+            assert!(
+                features.contains_key(needed),
+                "the helper build names root feature {needed:?}, which the root package must declare"
+            );
+        }
     }
 
     fn assert_refused(err: BuilderVmError, expected: CliSpawn) {
@@ -871,6 +1161,7 @@ mod tests {
             std::ffi::OsStr::new("cargo"),
             Path::new("/workspace"),
             Path::new("/tmp/helper-target"),
+            &HelperFeatures::for_caller(None),
         )
         .expect_err("an embedder never builds mvmctl");
 

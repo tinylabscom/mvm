@@ -6,7 +6,7 @@ use std::path::Path;
 
 use cucumber::{given, then, when};
 use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
-use mvm_fs::ext4::Node;
+use mvm_fs::ext4::{Node, Owner};
 use mvm_fs::overlay::{RuntimeOverlayResolver, read_overlay_artifact_from_dir};
 
 use crate::world::CliWorld;
@@ -32,6 +32,7 @@ fn build_minimal_runtime_overlay(source_dir: &Path) -> mvm_fs::overlay::RuntimeO
             mode: 0o644,
             data: b"bdd-runtime-overlay-stub".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         })
         .collect();
 

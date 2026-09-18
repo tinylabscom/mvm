@@ -204,6 +204,7 @@ jobs:
                      scripts/cargo-stable.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
+                     scripts/installer-compat/*.sh \
                      .githooks/pre-commit \
                      .githooks/pre-commit.test.sh
 
@@ -307,6 +308,14 @@ jobs:
       # place their failure reporting is exercised before it has to work.
       - name: Security lane verdict tests
         run: bash scripts/security-lane-verdict.test.sh
+
+      # installer-compat.yml needs published releases and runs weekly and on
+      # installer pull requests, and it is not a required check. What decides
+      # its verdicts — release selection, the archive-derived expectations, the
+      # tolerated refusal, the docs extraction — runs here on every pull
+      # request, against synthetic releases through the real install.sh.
+      - name: Installer compat script tests
+        run: bash scripts/installer-compat/installer-compat.test.sh
 
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'
@@ -896,6 +905,29 @@ jobs:
         # also runs (man pages, the addons feature, doctests) are covered on
         # x86_64 and would only duplicate cost here.
         run: cargo nextest run --workspace --exclude mvm-fs --all-targets
+
+      - name: Run the privileged CRNG reseed helper tests
+        # The reseed helper is killed on any syscall outside its seccomp
+        # allowlist, and aarch64 is what HVF guests run. The suite above drives
+        # the helper unprivileged; these root-only tests add the uid drop, the
+        # capability sets and the listening helper on this architecture. Each
+        # privilege witness drops its own process for good, so each runs alone,
+        # and each must report one test passed — a filter that matched nothing
+        # would otherwise pass silently.
+        run: |
+          set -euo pipefail
+          executables=$(cargo test -p mvm-agentd --lib --test crng_reseed_helper --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .executable != null) | "\(.target.kind[0]) \(.executable)"')
+          lib=$(awk '$1 == "lib" { print $2 }' <<<"$executables")
+          helper=$(awk '$1 == "test" { print $2 }' <<<"$executables")
+          sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$helper" --test-threads=1 2>&1 | tee helper.log
+          grep -q "3 passed" helper.log
+          for witness in harden_init_process_narrows_bounding_set_and_sets_no_new_privs \
+                         drop_guest_agent_privilege_reaches_the_agent_identity_from_root \
+                         drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root; do
+            sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "guest_mount::privilege_tests::$witness" 2>&1 | tee witness.log
+            grep -q "1 passed" witness.log
+          done
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)

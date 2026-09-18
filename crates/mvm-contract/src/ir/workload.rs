@@ -3,7 +3,7 @@ use crate::ir::hooks::Hooks;
 // Only pulled in by the `#[cfg(feature = "schema")]` `JsonSchemaShape`
 // impl and the `#[cfg_attr(feature = "schema", derive(...))]` derives
 // below (schemars-generated code calls `.to_owned()`).
-use crate::policy::network_policy::AiPolicy;
+use crate::policy::network_policy::{AiPolicy, NetworkPreset};
 #[cfg(feature = "schema")]
 use alloc::borrow::ToOwned;
 #[cfg(feature = "schema")]
@@ -654,6 +654,10 @@ pub struct Network {
     pub mode: NetworkMode,
     #[serde(default)]
     pub ports: Vec<PortForward>,
+    /// Named egress posture. Mutually exclusive with `egress`; use a preset
+    /// for a maintained service set or `egress` for an explicit allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<NetworkPreset>,
     /// Granular egress allowlist. Each entry names a `host:port`
     /// pair the guest may dial. Wildcard hosts
     /// (`*`, `0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`) are rejected with
@@ -684,6 +688,8 @@ struct NetworkWire {
     #[serde(default)]
     ports: Vec<PortForward>,
     #[serde(default)]
+    preset: Option<NetworkPreset>,
+    #[serde(default)]
     egress: Option<NetworkEgress>,
     #[serde(default)]
     peers: Vec<String>,
@@ -704,9 +710,13 @@ impl TryFrom<NetworkWire> for Network {
                 "raw_ip_stack has been retired; use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated ping, or a typed connector",
             );
         }
+        if wire.preset.is_some() && wire.egress.is_some() {
+            return Err("network preset and explicit egress allowlist are mutually exclusive");
+        }
         Ok(Self {
             mode: wire.mode,
             ports: wire.ports,
+            preset: wire.preset,
             egress: wire.egress,
             peers: wire.peers,
             dns: wire.dns,
@@ -1047,5 +1057,45 @@ mod tests {
                 "{pattern} is not a single-label wildcard"
             );
         }
+    }
+
+    #[test]
+    fn network_agent_preset_and_ai_budget_round_trip() {
+        let json = r#"{
+            "mode":"bridge",
+            "preset":"agent",
+            "ai":{"metering":true,"budget":{"max_total_tokens":12000}}
+        }"#;
+        let network: Network = serde_json::from_str(json).expect("network parses");
+        assert_eq!(network.preset, Some(NetworkPreset::Agent));
+        assert_eq!(
+            network
+                .ai
+                .as_ref()
+                .and_then(|ai| ai.budget.as_ref())
+                .and_then(|budget| budget.max_total_tokens),
+            Some(12_000)
+        );
+        let encoded = serde_json::to_string(&network).expect("network serializes");
+        assert_eq!(
+            serde_json::from_str::<Network>(&encoded).expect("round trip parses"),
+            network
+        );
+    }
+
+    #[test]
+    fn network_rejects_preset_with_explicit_egress() {
+        let error = serde_json::from_str::<Network>(
+            r#"{
+                "mode":"bridge",
+                "preset":"agent",
+                "egress":{"allowlist":[{"host":"example.com","port":443}]}
+            }"#,
+        )
+        .expect_err("preset and explicit egress must conflict");
+        assert!(
+            error.to_string().contains("mutually exclusive"),
+            "unexpected error: {error}"
+        );
     }
 }

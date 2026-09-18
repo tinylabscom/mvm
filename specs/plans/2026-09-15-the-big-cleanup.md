@@ -94,15 +94,12 @@ opposite one, `drop_page_cache`).
       and fix the one tree-side residue
       (`crates/mvm-cli/src/commands/mod.rs:128` allows
       `clippy::large_enum_variant` for an `Up` variant ADR-027 deleted).
-- [ ] **A2.2** **Claim 11's CVE gate has no production caller.**
-      `apply_install_gate` (`crates/mvm-build/src/app_deps_gate.rs:149`) has 14
-      in-edges and every one is a test or the nightly fixture example.
-      `machine run` never reaches it, so ADR-001:151's "a production launch
-      fails closed on a high or critical CVE finding" describes a control that
-      does not run. And claim 13's **sole** witness `fn:substitute` matches
-      **six** definitions under `content.contains("fn substitute(")`, one of
-      them a trait default returning `None` — delete the real implementation
-      and the gate stays green. #3316.
+- [x] **A2.2** **Claim 11's CVE gate has no production caller.** #3316.
+      Restate claim 11 as seal-time CVE/SBOM evidence plus admission-time
+      integrity verification, and declare `apply_install_gate` dormant until a
+      typed launch posture reaches it. Claim-catalog function witnesses must
+      now resolve exactly once; claim 13 names the bound-credential production
+      control, and the Firecracker/HVF restore witnesses have distinct names.
 - [ ] **A2.3** No citation gate covers `specs/adrs/`. ADR-041 says
       `mvm_hostd::nodectl` is implemented and the module has zero bytes;
       ADR-015 pins `PROTOCOL_VERSION = 2` against a tree that says `3`, with a
@@ -330,7 +327,10 @@ next oversized file arrives unnoticed.
       The repair must scan `crates/`, root `src/`, `xtask/`, and `build.rs`,
       exempt modules gated at their declaration site, and pin every current
       oversized file to a shrinking-only allowance.
-- [ ] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
+- [x] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302. Now a
+      facade plus twelve responsibility modules under
+      `network_endpoint_proxy/`, the largest at about 500 production lines;
+      external paths are unchanged and its grandfathered size allowance is gone.
 - [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
       nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
       to exactly one crate each. The remaining five core modules have

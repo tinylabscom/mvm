@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use mvm_core::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
 
-use mvm_core::atomic_io::atomic_write;
+use mvm_core::atomic_io::{atomic_write, atomic_write_new, is_already_exists};
 use mvm_core::util::parse_human_size;
 use mvm_core::{config, naming};
 
@@ -104,18 +104,38 @@ fn is_false(value: &bool) -> bool {
 
 /// Persist `spec` to disk. Fails if the spec already exists and `force` is
 /// `false`.
+///
+/// The non-force path never checks for existence ahead of the write — a
+/// check-then-write pair races two callers creating the same name at once,
+/// and the loser's rename would clobber the winner's spec. Instead the write
+/// itself is exclusive (a no-clobber rename, [`atomic_write_new`]), so two
+/// concurrent callers can never both succeed: exactly one write lands, and
+/// the loser gets this same "already exists" error, distinguishable from any
+/// other write failure via [`is_already_exists`].
 pub fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
     let path = config::machine_spec_path(&spec.name);
-    if path.exists() && !force {
-        bail!(
-            "machine {:?} already exists; pass --force to overwrite",
-            spec.name
-        );
-    }
     let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
-    atomic_write(&path, &bytes)
-        .with_context(|| format!("writing machine spec {}", path.display()))?;
-    Ok(())
+    if force {
+        atomic_write(&path, &bytes)
+            .with_context(|| format!("writing machine spec {}", path.display()))?;
+        return Ok(());
+    }
+    match atomic_write_new(&path, &bytes) {
+        Ok(()) => Ok(()),
+        // Every caller of this arm already believed nothing was there —
+        // some checked, some are `mvmctl machine create`'s own first write —
+        // so "pass --force" alone would mislead a caller who raced another
+        // `create` and already had it set. Say both honestly: force fixes a
+        // spec that was genuinely already there; a retry fixes a lost race.
+        Err(err) if is_already_exists(&err) => Err(err).with_context(|| {
+            format!(
+                "machine {:?} already exists (it may have just been created \
+                 concurrently by another caller); pass --force to overwrite, or retry",
+                spec.name
+            )
+        }),
+        Err(err) => Err(err).with_context(|| format!("writing machine spec {}", path.display())),
+    }
 }
 
 /// Overwrite an existing spec unconditionally (no `force` flag required).
@@ -541,6 +561,54 @@ mod tests {
         assert!(err.to_string().contains("already exists"));
         // Force flag allows overwrite.
         save_machine_spec(&spec, true).expect("force overwrites");
+    }
+
+    #[test]
+    fn concurrent_saves_of_one_name_produce_exactly_one_success() {
+        // Two (or sixteen) processes racing `machine create <name>` must not
+        // both win: the second one's rename should refuse rather than
+        // clobber the first one's spec. Threads racing one isolated
+        // `MVM_HOME` stand in for that: they all target the same path, and
+        // `save_machine_spec`'s exclusivity has to hold at the filesystem
+        // level, not just in this process's call ordering.
+        let _state = IsolatedMachineState::new();
+        const WRITERS: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let sender = sender.clone();
+                std::thread::spawn(move || {
+                    let mut spec = spec_fixture("race");
+                    // Distinguish each writer's payload so a corrupted or
+                    // interleaved write would be detectable, not just an
+                    // unexpected extra success.
+                    spec.cpus = i as u32 + 1;
+                    barrier.wait();
+                    let result = save_machine_spec(&spec, false);
+                    sender.send(result).expect("receiver stays alive");
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("writer thread exits");
+        }
+        drop(sender);
+        let results: Vec<_> = receiver.iter().collect();
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(successes, 1, "exactly one writer should win the race");
+        for err in results.iter().filter_map(|r| r.as_ref().err()) {
+            assert!(
+                err.to_string().contains("already exists"),
+                "loser's error should read as a conflict: {err}"
+            );
+        }
+
+        // The persisted spec is whichever writer won — not a mix of two.
+        let loaded = load_machine_spec("race").expect("load");
+        assert!((1..=WRITERS as u32).contains(&loaded.cpus));
     }
 
     #[test]

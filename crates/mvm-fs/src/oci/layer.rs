@@ -205,6 +205,12 @@ impl OciLayerFetcher {
         }
     }
 
+    /// Share an existing registry client, so a caller that has already
+    /// redeemed a bearer challenge does not redeem it again for the blob.
+    pub(crate) fn from_registry_client(client: RegistryClient, options: LayerFetchOptions) -> Self {
+        Self { client, options }
+    }
+
     /// Construct from a pre-built `mvm_http::Client`. Tests use
     /// this to point at a hermetic localhost registry fixture.
     pub fn with_client(client: mvm_http::Client, options: LayerFetchOptions) -> Self {
@@ -803,7 +809,7 @@ fn is_gzip_layer(media_type: &str) -> bool {
         || media_type.contains("tar.gzip")
 }
 
-fn validate_layer_digest(d: &str) -> Result<(), OciError> {
+pub(crate) fn validate_layer_digest(d: &str) -> Result<(), OciError> {
     let (alg, hex_part) = d
         .split_once(':')
         .ok_or_else(|| OciError::MalformedDigest(format!("missing algorithm prefix: {d:?}")))?;

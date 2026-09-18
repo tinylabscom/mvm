@@ -32,3 +32,15 @@ Feature: Default-deny egress through the auditable vsock seam
       | hvf     |
       | libkrun |
       | firecracker |
+
+  Scenario Outline: Agent egress and its AI token budget reach each production backend
+    When I run mvmctl with "machine run --image alpine --name bdd-agent-policy-<backend> -d --hypervisor <backend> --network-preset agent --ai-token-budget 12000 --dry-run"
+    Then the command exits with code 0
+    And the output contains "network: allow-list:api.anthropic.com:443,api.github.com:443,api.openai.com:443,github.com:443"
+    And the output contains "ai token budget: 12000"
+    And the output contains "enforced: <backend>:l4-host-port"
+
+    Examples:
+      | backend     |
+      | hvf         |
+      | firecracker |

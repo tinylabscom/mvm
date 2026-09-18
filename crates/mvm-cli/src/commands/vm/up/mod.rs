@@ -127,18 +127,12 @@ pub(in crate::commands) struct Args {
     /// The VM keeps running after the shell exits; `down` stops it.
     #[arg(long, conflicts_with_all = ["detach", "up_json", "wait", "forward"])]
     pub console: bool,
-    /// Network preset (unrestricted, none, registries, dev)
-    #[arg(long)]
-    pub network_preset: Option<String>,
-    /// Network allowlist entry (format: HOST:PORT). Repeatable
-    #[arg(long)]
-    pub network_allow: Vec<String>,
     /// Named security profile selecting the per-seam capability matrix
     /// (seccomp tier + egress posture). Defaults to `production`: the
     /// highest-security, deployable posture (seccomp floor + deny-all egress).
     /// The only alternative is `dev` — looser for development and never
-    /// deployable (refused under `--prod`). Explicit `--seccomp` /
-    /// `--network-preset` override the profile.
+    /// deployable (refused under `--prod`). Explicit `--seccomp` overrides
+    /// the profile.
     #[arg(long = "security-profile")]
     pub security_profile: Option<String>,
     /// Seccomp profile tier (essential, minimal, standard, network, unrestricted).
@@ -147,9 +141,6 @@ pub(in crate::commands) struct Args {
     /// opt-in only; the project's posture is "defaults must be safe."
     #[arg(long)]
     pub seccomp: Option<String>,
-    /// Named dev network to attach VM to (default: "default")
-    #[arg(long, default_value = "default")]
-    pub network: String,
     /// Sandbox tag in `KEY=VALUE` form. Repeatable. Validated against
     /// `mvm_core::crypto::policy::InputValidator` charset/length rules.
     #[arg(long = "tag", value_name = "KEY=VALUE")]

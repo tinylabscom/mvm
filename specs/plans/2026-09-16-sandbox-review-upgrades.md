@@ -1,11 +1,12 @@
 # Upgrades found by reviewing an external microVM sandbox
 
 Backing: preview
-Validation: none — no workstream has started. Each workstream names the tests
-and live evidence required before its checkbox may be ticked.
+Validation: workstream-specific. Each workstream names the tests and live
+evidence required before its checkbox may be ticked.
 
 **Issues:** #3378 (W1) · #3379 (W2) · #3380 (W3) · #3381 (W4) · #3382 (W5) ·
-#3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10)
+#3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10) ·
+#3404 (W1a)
 
 ## Outcome
 
@@ -69,20 +70,48 @@ can run in parallel with it. Among the upgrades:
   generator behind `getrandom`, so sibling clones can produce identical output
   until the kernel's scheduled reseed.
 
-- [ ] W1.1 Make `on_genid` return whether the reseed happened, and report
+- [x] W1.1 Make `on_genid` return whether the reseed happened, and report
       `reseeded` only on success.
-- [ ] W1.2 Force an immediate reseed. Decide between:
+- [x] W1.2 Force an immediate reseed. Decide between:
   - [ ] a generation-ID device node from each backend, with `VMGENID` confirmed
         in the built guest kernel (`nix/images/kernel/base.nix`), or
-  - [ ] a privileged helper that calls `RNDADDENTROPY` and then
+  - [x] a privileged helper that calls `RNDADDENTROPY` and then
         `RNDRESEEDCRNG`. The agent runs as uid 901 and cannot make those calls
         itself.
-- [ ] W1.3 Correct the module comment that says the write alone makes clones
+        Decided: a helper holding only `CAP_SYS_ADMIN` under its own uid (988),
+        seccomp-confined and non-dumpable, started by whatever is still root
+        (PID 1 before its privilege drop, or the shell init). It credits the
+        token with `RNDADDENTROPY`, then calls `RNDRESEEDCRNG`. The
+        generation-ID device was rejected: the built workload kernel has
+        `CONFIG_VIRT_DRIVERS` off, and the prebuilt container kernel's config
+        is not ours. W1.2 stays open until W1.5 witnesses the reseed live.
+- [x] W1.3 Correct the module comment that says the write alone makes clones
       diverge.
-- [ ] W1.4 Unit test: a failed reseed reports `reseeded: false`, and the host
+- [x] W1.4 Unit test: a failed reseed reports `reseeded: false`, and the host
       gate refuses the child.
-- [ ] W1.5 Live test: two clones of one snapshot return different `getrandom`
-      output immediately after restore.
+- [x] W1.5 Live test: two clones of one snapshot return different `getrandom`
+      output immediately after restore. The Firecracker/KVM witness captures
+      one parent, restores each sibling in an isolated mount-namespace
+      subprocess, requires the authenticated reseed acknowledgement, and
+      compares the first 32 bytes returned by `getrandom(2)`.
+
+## W1a — Keep agent descriptors out of every child process (#3404)
+
+**Problem.** The cold entrypoint path closes inherited descriptors, but the
+agent's process RPC, warm workers, detached execution, lifecycle hooks, init
+helpers, health checks, and builder subprocesses do not. A descriptor that
+misses close-on-exec can therefore carry a control-plane listener or live
+connection into an untrusted child.
+
+- [x] W1a.1 Create and accept every shared vsock descriptor close-on-exec.
+- [x] W1a.2 Apply one close-range hook, with the existing bounded fallback, to
+      every child spawn. Preserve only an explicitly required control or
+      validation descriptor.
+- [x] W1a.3 Linux real-process tests hold an intentionally inheritable socket
+      while spawning through the cold entrypoint and process RPC paths, and
+      prove the child sees only its declared descriptors.
+- [x] W1a.4 Host tests, zero-warning clippy, Linux-gated compilation, the full
+      workspace suite, and repository gates pass.
 
 ## W2 — Exclusive machine create (#3379)
 
@@ -91,11 +120,11 @@ and `save_machine_spec` (`crates/mvm-runtime/src/machine/persist.rs:107-119`)
 check whether the spec exists and then rename a temp file over it. Two creates
 that run together both succeed, and the second overwrites the first.
 
-- [ ] W2.1 Make the non-force create exclusive at the filesystem (a
+- [x] W2.1 Make the non-force create exclusive at the filesystem (a
       no-clobber persist, or `create_new`), and map "already exists" to
       `MvmError::Conflict`.
-- [ ] W2.2 Leave `--force` and `overwrite_machine_spec` unchanged.
-- [ ] W2.3 Test: N concurrent creates of one name produce exactly one success.
+- [x] W2.2 Leave `--force` and `overwrite_machine_spec` unchanged.
+- [x] W2.3 Test: N concurrent creates of one name produce exactly one success.
       The existing reconcile tests still pass.
 
 ## W3 — Keep file ownership in container-layer rootfs images (#3380)
@@ -105,18 +134,18 @@ fields, `write_inode` (`:1171`) writes uid 0, and the unpacker writes into a
 host directory that cannot keep the owners from tar headers. A service whose
 data directory ships owned by its own account boots with root-owned files.
 
-- [ ] W3.1 Record each tar entry's uid and gid during unpack
+- [x] W3.1 Record each tar entry's uid and gid during unpack
       (`crates/mvm-fs/src/oci/unpack/`), in a side table keyed by path.
-- [ ] W3.2 Add owner fields to `Node`, and write the low and high uid/gid
+- [x] W3.2 Add owner fields to `Node`, and write the low and high uid/gid
       inode fields.
-- [ ] W3.3 Include ownership in `fingerprint_ext4_nodes`
+- [x] W3.3 Include ownership in `fingerprint_ext4_nodes`
       (`crates/mvm-fs/src/rootfs.rs`).
-- [ ] W3.4 Keep host-directory walks (`--mount`) normalized unless a caller
+- [x] W3.4 Keep host-directory walks (`--mount`) normalized unless a caller
       asks for ownership.
-- [ ] W3.5 Tests:
-  - [ ] a layer file owned 999:999 round-trips;
-  - [ ] a uid above 65535 round-trips through the high fields;
-  - [ ] changing only an owner changes the fingerprint.
+- [x] W3.5 Tests:
+  - [x] a layer file owned 999:999 round-trips;
+  - [x] a uid above 65535 round-trips through the high fields;
+  - [x] changing only an owner changes the fingerprint.
 - [ ] W3.6 Live test: an image whose service data directory is owned by a
       non-root account starts that service.
 
@@ -228,22 +257,27 @@ cost.
 accepts only a path or an `https://` URL, and the registry client
 (`crates/mvm-fs/src/oci/registry.rs`) can only pull.
 
-- [ ] W9.1 Add blob upload and manifest put to the registry client.
-- [ ] W9.2 `mvmctl bundle push <file> <ref>`: one artifact manifest carrying
+- [x] W9.1 Add blob upload and manifest put to the registry client.
+- [x] W9.2 `mvmctl bundle push <file> <ref>`: one artifact manifest carrying
       the `.mvmpkg` archive and its detached signature.
-- [ ] W9.3 `mvmctl bundle fetch <ref>` accepts tag and digest references, and
+- [x] W9.3 `mvmctl bundle fetch <ref>` accepts tag and digest references, and
       re-hashes every manifest and blob fetched by digest.
-- [ ] W9.4 Trust decisions stay in `read_and_verify_bundle`; the registry is
+- [x] W9.4 Trust decisions stay in `read_and_verify_bundle`; the registry is
       only a transport.
-- [ ] W9.5 `--prod` refuses a tag reference and requires a digest.
-- [ ] W9.6 Align media-type naming with #3365.
-- [ ] W9.7 Tests: a push and fetch round trip against a local registry fixture,
+- [x] W9.5 `--prod` refuses a tag reference and requires a digest.
+- [ ] W9.6 Align media-type naming with #3365. The push uses
+      `application/vnd.mvm.bundle.v1` (`artifactType`) and
+      `application/vnd.mvm.bundle.v1.tar` (layer), declared once in
+      `mvm_contract::plan::bundle`. #3365 has not landed names yet; this box
+      closes when its image-set manifest types are chosen consistently with
+      these, or these are renamed to match.
+- [x] W9.7 Tests: a push and fetch round trip against a local registry fixture,
       plus refusal of each of:
-  - [ ] a tampered blob;
-  - [ ] a tampered manifest;
-  - [ ] a manifest whose bytes don't match its digest;
-  - [ ] a tag reference under `--prod`;
-  - [ ] an unsigned or untrusted bundle.
+  - [x] a tampered blob;
+  - [x] a tampered manifest;
+  - [x] a manifest whose bytes don't match its digest;
+  - [x] a tag reference under `--prod`;
+  - [x] an unsigned or untrusted bundle.
 
 ## W10 — Agent-facing failures (#3387)
 
@@ -252,16 +286,16 @@ failure as plain text, although `MvmError` already classifies it. And
 `mvmctl machine run <image-ref> -- <cmd>` treats a misplaced image reference as
 the command, with no hint.
 
-- [ ] W10.1 Add a stable `code` and a `retryable` flag, derived from the
+- [x] W10.1 Add a stable `code` and a `retryable` flag, derived from the
       `MvmError` variant, to every tool error's `_meta`.
-- [ ] W10.2 With no image source flag, refuse a first command word that parses
+- [x] W10.2 With no image source flag, refuse a first command word that parses
       as an image reference, and suggest `--image`.
-- [ ] W10.3 Refuse a known run flag placed after `--`, taking the flag list from
+- [x] W10.3 Refuse a known run flag placed after `--`, taking the flag list from
       the argument parser's own definitions.
-- [ ] W10.4 Tests:
-  - [ ] one tool server test per `MvmError` variant;
-  - [ ] CLI tests for both refusals;
-  - [ ] a colon-bearing command still runs when an image source is given.
+- [x] W10.4 Tests:
+  - [x] one tool server test per `MvmError` variant;
+  - [x] CLI tests for both refusals;
+  - [x] a colon-bearing command still runs when an image source is given.
 
 ## Definition of done for each workstream
 

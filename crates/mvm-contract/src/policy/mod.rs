@@ -10,6 +10,8 @@
 pub mod approval;
 pub mod audit;
 pub mod bundle;
+/// Strict DNS answer filtering for SSRF and rebinding defense.
+pub mod dns_guard;
 pub mod dns_pin;
 pub mod network_policy;
 pub mod policies;

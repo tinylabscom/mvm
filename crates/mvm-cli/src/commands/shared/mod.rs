@@ -28,10 +28,12 @@ pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_asset_spec,
     parse_port_spec, parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
 };
+pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, parse_peer_binding, resolve_effective_hypervisor,
-    resolve_flake_ref, resolve_manifest_arg, resolve_run_network_policy,
-    resolve_run_network_policy_with_peers,
+    ManifestArgRef, egress_enforcement_label, parse_peer_binding, parse_run_network_preset,
+    persisted_run_network, resolve_ai_policy, resolve_effective_hypervisor, resolve_flake_ref,
+    resolve_manifest_arg, resolve_run_network_policy,
+    resolve_run_network_policy_with_preset_and_peers,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

@@ -745,6 +745,14 @@ reachable fabric path may ship before M2.
 
 ## M7 — Complete Telemetry/Input migration and remove the old workload stream plane
 
+The independently deliverable tracing/telemetry slice is tracked by epic #3419
+and [Every-VM host-mediated tracing](2026-09-17-host-mediated-telemetry.md).
+Its W1-W7 include complete producer coverage, encrypted typed transport,
+VM-lifetime host ownership, bounded non-waiting capture, explicit losses and
+real-backend certification. Input and functional-stream migrations remain here;
+the telemetry slice does not wait for mailbox/store implementation. None of
+these migration checkboxes is complete merely because the design is recorded.
+
 - [ ] Route every stdout source through `Telemetry`.
 - [ ] Route every stderr source through `Telemetry`.
 - [ ] Route structured traces through `Telemetry`.

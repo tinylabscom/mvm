@@ -133,6 +133,13 @@
       ]
     },
     {
+      "path": "crates/mvm-contract/src/policy/dns_guard.rs",
+      "package": "mvm-contract",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-contract/src/policy/network_policy.rs",
       "package": "mvm-contract",
       "claims": [
@@ -158,13 +165,6 @@
       "package": "mvm-contract",
       "claims": [
         18
-      ]
-    },
-    {
-      "path": "crates/mvm-contract/src/substitution.rs",
-      "package": "mvm-contract",
-      "claims": [
-        13
       ]
     },
     {
@@ -194,13 +194,6 @@
       "claims": [
         8,
         19
-      ]
-    },
-    {
-      "path": "crates/mvm-core/src/policy/dns_guard.rs",
-      "package": "mvm-core",
-      "claims": [
-        10
       ]
     },
     {
@@ -282,18 +275,6 @@
       "claims": [
         17
       ]
-    },
-    {
-      "path": "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
-      "package": "mvm-hostd",
-      "claims": [
-        13
-      ],
-      "scope": {
-        "examine_re": "prepare_request|SubstitutionDriver.*substitute",
-        "why": "This file enters claim 13's mutation surface because it implements the generically named `SubstitutionDriver::substitute` witness adapter. The claim-relevant boundary is that adapter plus `prepare_request`, which refuses substitution errors before forwarding. The rest of this 4,700-line module is FlowMux transport, streaming, redaction, AI metering, and vsock plumbing covered by its focused unit, integration, and fuzz suites rather than the no-secret-over-broker-channel claim.",
-        "excluded_tracked_by": "#2033"
-      }
     },
     {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",

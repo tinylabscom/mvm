@@ -604,3 +604,389 @@ fn receipts_export_refuses_json_and_archive_together() {
         "a refused invocation must not have written anything"
     );
 }
+
+#[test]
+fn bundle_help_lists_push() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "--help"])
+        .output()
+        .expect("run mvmctl bundle --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for sub in ["export", "fetch", "install", "push", "gc"] {
+        assert!(
+            stdout.contains(sub),
+            "bundle help must list {sub}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_push_help_lists_positionals_and_flags() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "push", "--help"])
+        .output()
+        .expect("run mvmctl bundle push --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for needle in ["<FILE>", "<REFERENCE>", "--trust-store", "--allow-http"] {
+        assert!(
+            stdout.contains(needle),
+            "push help must list {needle}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_fetch_and_install_help_list_prod_and_registry_sources() {
+    for verb in ["fetch", "install"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(["bundle", verb, "--help"])
+            .output()
+            .expect("run mvmctl bundle --help");
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("--prod"),
+            "{verb} help must list --prod:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("oci:"),
+            "{verb} help must name oci://:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn bundle_push_requires_both_positionals() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "push", "./app.mvmpkg"])
+        .output()
+        .expect("run mvmctl bundle push");
+    assert!(!out.status.success(), "a missing reference must be refused");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("<REFERENCE>"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn bundle_fetch_prod_refuses_allow_http() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "bundle",
+            "install",
+            "--prod",
+            "--allow-http",
+            "oci://registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ])
+        .output()
+        .expect("run mvmctl bundle install --prod --allow-http");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--prod refuses --allow-http"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `--prod` with a tag must be refused from the reference alone. The
+/// registry host here does not exist, so reaching the network would fail
+/// with a different message.
+#[test]
+fn bundle_fetch_prod_refuses_a_tag_reference() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "bundle",
+            "fetch",
+            "--prod",
+            "oci://registry.invalid/team/app:v1",
+        ])
+        .output()
+        .expect("run mvmctl bundle fetch --prod");
+    assert!(!out.status.success(), "a tag under --prod must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("digest-pinned"), "stderr: {stderr}");
+}
+
+/// The root build script records this binary's features for the bootstrap
+/// helper to mirror. Every name it records must be a feature the root package
+/// declares, or the helper's `cargo build --features` names one that does not
+/// exist. Checked against the manifest rather than a fixed list, so it holds
+/// under any feature selection this test is compiled with.
+#[test]
+fn recorded_features_are_declared_root_features() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("read the root manifest");
+    let parsed: toml::Table = text.parse().expect("parse the root manifest");
+    let declared = parsed
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .expect("the root package declares features");
+
+    let recorded: Vec<&str> = env!("MVMCTL_ENABLED_FEATURES")
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .collect();
+    // Without this, a build script that recorded nothing would pass: the loop
+    // below checks only what was recorded.
+    if cfg!(feature = "default") {
+        assert!(
+            recorded.contains(&"default"),
+            "this test was compiled with default features, so they must be recorded: {recorded:?}"
+        );
+    }
+    for name in recorded {
+        assert!(
+            declared.contains_key(name),
+            "recorded feature {name:?} is not declared by the root package"
+        );
+    }
+}
+
+/// Run `mvmctl agent-session …` against an isolated home.
+fn agent_session(mvm_home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home)
+        .env("HOME", mvm_home)
+        .env("MVM_NO_AUTO_DEV", "1")
+        .arg("agent-session")
+        .args(args)
+        .output()
+        .expect("run mvmctl agent-session")
+}
+
+/// `park` and `resume` advertise the generation fence that makes a retry
+/// exact.
+#[test]
+fn agent_session_park_and_resume_help_list_the_retry_flags() {
+    let home = tempfile::tempdir().unwrap();
+    for verb in ["park", "resume"] {
+        let out = agent_session(home.path(), &[verb, "--help"]);
+        assert!(
+            out.status.success(),
+            "agent-session {verb} --help must exit 0, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(help.contains("--expected-generation"), "{verb}: {help}");
+        assert!(help.contains("--json"), "{verb}: {help}");
+    }
+}
+
+#[test]
+fn agent_session_park_refuses_a_non_numeric_expected_generation() {
+    let home = tempfile::tempdir().unwrap();
+    let out = agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "idle",
+            "--expected-generation",
+            "one",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--expected-generation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A park whose response was lost is retried with the same arguments and is
+/// told it already applied, rather than being refused as "not active".
+#[test]
+fn agent_session_park_retry_is_reported_as_a_replay() {
+    let home = tempfile::tempdir().unwrap();
+    let open = agent_session(home.path(), &["open", "sess-a"]);
+    assert!(
+        open.status.success(),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    let park = [
+        "park",
+        "sess-a",
+        "--reason",
+        "approval-wait",
+        "--expected-generation",
+        "1",
+        "--json",
+    ];
+    let replayed = |out: &std::process::Output| -> bool {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["replayed"].as_bool().unwrap()
+    };
+    assert!(!replayed(&agent_session(home.path(), &park)));
+    assert!(replayed(&agent_session(home.path(), &park)));
+
+    let changed = agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "idle",
+            "--expected-generation",
+            "1",
+        ],
+    );
+    assert!(!changed.status.success());
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("recorded approval_wait, retried idle"),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+}
+
+#[test]
+fn agent_session_renew_help_lists_its_flags() {
+    let home = tempfile::tempdir().unwrap();
+    let out = agent_session(home.path(), &["renew", "--help"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--for",
+        "--expected-deadline",
+        "--expected-generation",
+        "--json",
+    ] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    let park = agent_session(home.path(), &["park", "--help"]);
+    assert!(String::from_utf8_lossy(&park.stdout).contains("--retain-for"));
+}
+
+/// Park with a deadline, read it back, renew exactly twice, then try to
+/// shorten: the real binary replays the retry and refuses the shortening.
+#[test]
+fn agent_session_renew_extends_replays_and_refuses_to_shorten() {
+    let home = tempfile::tempdir().unwrap();
+    let ok = |out: std::process::Output| -> serde_json::Value {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
+    };
+    ok(agent_session(home.path(), &["open", "sess-a"]));
+    ok(agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "operator",
+            "--retain-for",
+            "1h",
+        ],
+    ));
+    let shown = ok(agent_session(home.path(), &["show", "sess-a", "--json"]));
+    assert_eq!(shown["retention"]["state"], "alive");
+    let deadline = shown["retain_until_unix"].as_u64().unwrap().to_string();
+
+    let renew = [
+        "renew",
+        "sess-a",
+        "--for",
+        "5h",
+        "--expected-generation",
+        "1",
+        "--expected-deadline",
+        deadline.as_str(),
+        "--json",
+    ];
+    assert_eq!(ok(agent_session(home.path(), &renew))["replayed"], false);
+    assert_eq!(ok(agent_session(home.path(), &renew))["replayed"], true);
+
+    let shorten = agent_session(home.path(), &["renew", "sess-a", "--for", "1m"]);
+    assert!(!shorten.status.success());
+    assert!(
+        String::from_utf8_lossy(&shorten.stderr).contains("can only extend"),
+        "{}",
+        String::from_utf8_lossy(&shorten.stderr)
+    );
+}
+
+/// `--output` is advertised on `machine run`, and each pre-boot refusal fires
+/// before anything is resolved or booted: a profile that allows no host
+/// shares, a persistent machine that has no exit to collect at, and a
+/// destination that already holds files.
+#[test]
+fn machine_run_output_is_advertised_and_refused_before_boot() {
+    #[allow(deprecated)]
+    let help = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "run", "--help"])
+        .output()
+        .unwrap();
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help.status.success());
+    assert!(
+        help_text.contains("--output <HOST_DIR:GUEST[:SIZE]>"),
+        "help must advertise --output:\n{help_text}"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let populated = tmp.path().join("populated");
+    std::fs::create_dir(&populated).unwrap();
+    std::fs::write(populated.join("keep"), b"mine").unwrap();
+    let fresh = format!("{}:/data/out", tmp.path().join("fresh").display());
+    let occupied = format!("{}:/data/out", populated.display());
+
+    let run = |extra: &[&str]| {
+        #[allow(deprecated)]
+        let out = Command::cargo_bin("mvmctl")
+            .unwrap()
+            .env("HOME", tmp.path())
+            .env("MVM_HOME", tmp.path().join("state"))
+            .env("MVM_NO_AUTO_DEV", "1")
+            .args(["machine", "run", "--image", "alpine"])
+            .args(extra)
+            .args(["--", "true"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{extra:?} must not run");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let stderr = run(&["--profile", "restrictive", "--output", &fresh]);
+    assert!(
+        stderr.contains("does not allow --mount or --output"),
+        "restrictive must refuse --output, stderr: {stderr}"
+    );
+    let stderr = run(&["-d", "--output", &fresh]);
+    assert!(
+        stderr.contains("has no exit to collect at"),
+        "a persistent machine must refuse --output, stderr: {stderr}"
+    );
+    let stderr = run(&["--output", &occupied]);
+    assert!(
+        stderr.contains("not an empty directory"),
+        "a populated destination must be refused, stderr: {stderr}"
+    );
+    assert_eq!(std::fs::read(populated.join("keep")).unwrap(), b"mine");
+    assert!(!tmp.path().join("fresh").exists());
+}

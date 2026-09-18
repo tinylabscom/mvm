@@ -604,6 +604,7 @@ mod tests {
             ("checkpoint.forked", Lifecycle),
             ("session.parked", Lifecycle),
             ("session.resumed", Lifecycle),
+            ("session.renewed", Lifecycle),
             ("cmd.up.completed", Lifecycle),
             ("readiness.probe", Readiness),
             ("volume.sealed", Volume),

@@ -352,8 +352,13 @@ pub mod dns_stub {
         let mut buffer = vec![0u8; mvm_core::protocol::dns::MAX_DNS_MESSAGE + 1];
         loop {
             let (length, peer) = socket.recv_from(&mut buffer).await?;
-            if length > mvm_core::protocol::dns::MAX_DNS_MESSAGE {
-                warn!(%peer, length, "dropping oversized UDP DNS query");
+            if let Err(error) = validate_dns_length(length) {
+                // Out of bounds either way: too long to be a bounded query,
+                // or shorter than a DNS header and too short to even carry a
+                // transaction id to answer. Dropped silently, the same way a
+                // query that fails to decode further down is dropped rather
+                // than answered.
+                warn!(%peer, length, %error, "dropping malformed UDP DNS datagram");
                 continue;
             }
             let query = buffer[..length].to_vec();
@@ -434,9 +439,19 @@ pub mod dns_stub {
         }
     }
 
+    /// Reject a declared or observed message length outside the bounds a DNS
+    /// message can occupy: longer than the configured limit, or shorter than
+    /// the fixed 12-byte header (too short to even carry a transaction id).
+    ///
+    /// The UDP caller drops the datagram on `Err`; the TCP caller propagates
+    /// it and closes the connection — in both cases the same outcome a
+    /// message that fails to decode further down already gets, rather than
+    /// answering with a FORMERR.
     fn validate_dns_length(length: usize) -> io::Result<()> {
         if length > mvm_core::protocol::dns::MAX_DNS_MESSAGE {
             Err(invalid_dns_length())
+        } else if length < mvm_core::protocol::dns::MIN_DNS_MESSAGE {
+            Err(too_short_dns_length())
         } else {
             Ok(())
         }
@@ -449,6 +464,13 @@ pub mod dns_stub {
         )
     }
 
+    fn too_short_dns_length() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DNS frame is shorter than a DNS header",
+        )
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -456,6 +478,30 @@ pub mod dns_stub {
         use mvm_contract::protocol::network_flow::hello::Handshake;
         use mvm_contract::protocol::network_flow::{Opcode, encode_into};
         use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
+        #[test]
+        fn validate_dns_length_accepts_exactly_a_dns_header() {
+            validate_dns_length(mvm_core::protocol::dns::MIN_DNS_MESSAGE)
+                .expect("a message exactly as long as a DNS header must be accepted");
+        }
+
+        #[test]
+        fn validate_dns_length_rejects_one_byte_short_of_a_dns_header() {
+            validate_dns_length(mvm_core::protocol::dns::MIN_DNS_MESSAGE - 1)
+                .expect_err("a message one byte shorter than a DNS header must be rejected");
+        }
+
+        #[test]
+        fn validate_dns_length_accepts_exactly_the_configured_maximum() {
+            validate_dns_length(mvm_core::protocol::dns::MAX_DNS_MESSAGE)
+                .expect("a message exactly at the configured maximum must be accepted");
+        }
+
+        #[test]
+        fn validate_dns_length_rejects_one_byte_over_the_configured_maximum() {
+            validate_dns_length(mvm_core::protocol::dns::MAX_DNS_MESSAGE + 1)
+                .expect_err("a message one byte over the configured maximum must be rejected");
+        }
 
         fn generate_keypair() -> (SigningKey, VerifyingKey) {
             let bytes: [u8; 32] = rand::random();
@@ -595,6 +641,335 @@ pub mod dns_stub {
 
             task.abort();
             host.await.unwrap();
+        }
+
+        /// A minimal well-formed DNS response: header only, `RCODE` success,
+        /// zero answers. Enough for a test to tell "the stub answered" from
+        /// "the stub is dead" without caring about the payload.
+        fn minimal_ok_response() -> Vec<u8> {
+            let mut response = vec![0u8; 12];
+            response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+            response
+        }
+
+        /// A well-formed `example.com` A query carrying `id` as its
+        /// transaction id.
+        fn example_com_a_query(id: u16) -> Vec<u8> {
+            let mut query = vec![0u8; 12];
+            query[0..2].copy_from_slice(&id.to_be_bytes());
+            query[2..4].copy_from_slice(&0x0100_u16.to_be_bytes());
+            query[4..6].copy_from_slice(&1_u16.to_be_bytes());
+            query.extend_from_slice(&[
+                7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+            ]);
+            query.extend_from_slice(&1_u16.to_be_bytes());
+            query.extend_from_slice(&1_u16.to_be_bytes());
+            query
+        }
+
+        /// Complete a FlowMux handshake over an in-memory duplex and hand
+        /// back a live [`FlowMuxReconnectClient`] plus the host-side task
+        /// driving it. Each `Resolve` frame the guest sends is answered with
+        /// whatever `on_resolve` returns, so a test can shape a normal,
+        /// empty, or otherwise malformed host answer.
+        ///
+        /// The returned `watch::Sender` must be kept alive for as long as
+        /// the resolver is used.
+        async fn spawn_resolver(
+            on_resolve: impl Fn(Vec<u8>) -> Vec<u8> + Send + 'static,
+        ) -> (
+            FlowMuxReconnectClient,
+            watch::Sender<Option<Arc<crate::flowmux::FlowMuxClient>>>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (guest_stream, host_stream) = tokio::io::duplex(4096);
+            let (guest_key, _guest_anchor) = generate_keypair();
+            let (host_key, host_anchor) = generate_keypair();
+
+            let host = tokio::spawn(async move {
+                let handle = tokio::runtime::Handle::try_current().unwrap();
+                let (mut host_stream, mut host_session) = tokio::task::spawn_blocking(move || {
+                    let mut adapter =
+                        crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
+                    let result = mvm_core::net::session::Session::host(
+                        &mut adapter,
+                        "test-session",
+                        host_key,
+                    );
+                    let stream = adapter.into_inner();
+                    result.map(|(session, _peer)| (stream, session))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+
+                let (_opcode, _sid, _payload_len, _payload) =
+                    read_frame(&mut host_stream, &mut host_session)
+                        .await
+                        .unwrap();
+                send_frame(
+                    &mut host_stream,
+                    &mut host_session,
+                    Opcode::HelloAck,
+                    0,
+                    &Handshake::local("test-host").encode(),
+                )
+                .await;
+
+                while let Some((opcode, sid, _payload_len, payload)) =
+                    read_frame(&mut host_stream, &mut host_session).await
+                {
+                    if opcode != Opcode::Resolve {
+                        continue;
+                    }
+                    let response = on_resolve(payload);
+                    send_frame(
+                        &mut host_stream,
+                        &mut host_session,
+                        Opcode::Resolved,
+                        sid,
+                        &response,
+                    )
+                    .await;
+                }
+            });
+
+            let client =
+                crate::flowmux::FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+                    .await
+                    .unwrap();
+            let (tx, rx) = watch::channel(Some(Arc::new(client)));
+            let resolver = FlowMuxReconnectClient::from_receiver(rx);
+            (resolver, tx, host)
+        }
+
+        #[tokio::test]
+        async fn dns_stub_udp_receive_loop_survives_short_datagrams_and_still_answers() {
+            let (resolver, _tx, host) = spawn_resolver(|_query| minimal_ok_response()).await;
+
+            let stub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let stub_addr = stub.local_addr().unwrap();
+            let task = tokio::spawn(serve_udp(stub, resolver));
+
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // A 0-byte datagram, a 1-byte datagram, and an 11-byte datagram
+            // (one short of a full 12-byte DNS header) must not kill the
+            // receive loop.
+            client_socket.send_to(&[], stub_addr).await.unwrap();
+            client_socket.send_to(&[0u8], stub_addr).await.unwrap();
+            client_socket.send_to(&[0u8; 11], stub_addr).await.unwrap();
+
+            // Give a buggy receive loop time to panic and exit before we
+            // check whether it is still alive.
+            let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
+            assert!(
+                outcome.is_err(),
+                "the UDP DNS receive loop exited after a short datagram: {outcome:?}"
+            );
+
+            client_socket
+                .send_to(&example_com_a_query(0x1234), stub_addr)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 512];
+            let (_len, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client_socket.recv_from(&mut buf),
+            )
+            .await
+            .expect("the stub must still answer a valid query after a short datagram")
+            .unwrap();
+            assert_eq!(&buf[..2], &0x1234_u16.to_be_bytes());
+
+            host.abort();
+        }
+
+        #[tokio::test]
+        async fn dns_stub_tcp_connection_task_does_not_panic_on_a_too_short_declared_length() {
+            for declared_length in [0u16, 1, 11] {
+                let (resolver, _tx, host) = spawn_resolver(|_query| minimal_ok_response()).await;
+
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let mut client = TcpStream::connect(addr).await.unwrap();
+                let (server_stream, _peer) = listener.accept().await.unwrap();
+
+                let connection = tokio::spawn(serve_tcp_connection(server_stream, resolver));
+
+                client
+                    .write_all(&declared_length.to_be_bytes())
+                    .await
+                    .unwrap();
+                client
+                    .write_all(&vec![0u8; usize::from(declared_length)])
+                    .await
+                    .unwrap();
+                client.flush().await.unwrap();
+
+                let joined = tokio::time::timeout(std::time::Duration::from_secs(2), connection)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "connection task hung on a declared length of \
+                             {declared_length} bytes"
+                        )
+                    });
+                assert!(
+                    joined.is_ok(),
+                    "connection task panicked on a declared length of \
+                     {declared_length} bytes: {joined:?}"
+                );
+                assert!(
+                    joined.unwrap().is_err(),
+                    "a declared length of {declared_length} bytes is shorter than a \
+                     DNS header and must close the connection with an error"
+                );
+
+                host.abort();
+            }
+        }
+
+        #[tokio::test]
+        async fn dns_stub_tcp_connection_task_does_not_panic_when_length_prefix_is_truncated() {
+            let (resolver, _tx, host) = spawn_resolver(|_query| minimal_ok_response()).await;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let (server_stream, _peer) = listener.accept().await.unwrap();
+
+            let connection = tokio::spawn(serve_tcp_connection(server_stream, resolver));
+
+            // Write exactly one byte of the two-byte length prefix, then
+            // drop the connection before the second byte ever arrives.
+            client.write_all(&[0u8]).await.unwrap();
+            client.flush().await.unwrap();
+            drop(client);
+
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), connection)
+                .await
+                .expect("connection task hung on a truncated length prefix");
+            assert!(
+                joined.is_ok(),
+                "connection task panicked on a truncated length prefix: {joined:?}"
+            );
+
+            host.abort();
+        }
+
+        #[tokio::test]
+        async fn dns_stub_tcp_listener_keeps_serving_after_a_malformed_connection() {
+            let (resolver, _tx, host) = spawn_resolver(|_query| minimal_ok_response()).await;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(serve_tcp(listener, resolver));
+
+            // A connection carrying a too-short declared length.
+            let mut bad = TcpStream::connect(addr).await.unwrap();
+            bad.write_all(&1u16.to_be_bytes()).await.unwrap();
+            bad.write_all(&[0u8]).await.unwrap();
+            bad.flush().await.unwrap();
+            let mut discard = [0u8; 1];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(2), bad.read(&mut discard))
+                    .await
+                    .expect("malformed connection must be closed, not left hanging");
+            // Closing a socket with an unread trailing byte still sitting in
+            // its receive buffer can surface as a clean EOF or as a reset,
+            // depending on the platform; either is "closed", which is all
+            // this assertion cares about. A hang is the only failure.
+            match read {
+                Ok(length) => {
+                    assert_eq!(length, 0, "a too-short DNS frame must close the connection")
+                }
+                Err(error) => assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset,
+                    "unexpected error closing a too-short DNS frame's connection: {error}"
+                ),
+            }
+
+            // The listener must still answer a fresh, valid connection.
+            let mut ok = TcpStream::connect(addr).await.unwrap();
+            let query = example_com_a_query(0x4321);
+            let query_len = u16::try_from(query.len()).unwrap();
+            ok.write_all(&query_len.to_be_bytes()).await.unwrap();
+            ok.write_all(&query).await.unwrap();
+            ok.flush().await.unwrap();
+
+            let mut length = [0u8; 2];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                ok.read_exact(&mut length),
+            )
+            .await
+            .expect("stub must still be serving after refusing the short frame")
+            .unwrap();
+            let response_len = usize::from(u16::from_be_bytes(length));
+            let mut response = vec![0u8; response_len];
+            ok.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response[..2], &0x4321_u16.to_be_bytes());
+
+            task.abort();
+            host.abort();
+        }
+
+        #[tokio::test]
+        async fn dns_stub_udp_survives_a_short_answer_from_the_host() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let call_count_for_host = Arc::clone(&call_count);
+            let (resolver, _tx, host) = spawn_resolver(move |_query| {
+                let call = call_count_for_host.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    // Fewer than 2 bytes: not even enough to carry a
+                    // transaction id.
+                    vec![0u8; 1]
+                } else {
+                    minimal_ok_response()
+                }
+            })
+            .await;
+
+            let stub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let stub_addr = stub.local_addr().unwrap();
+            let task = tokio::spawn(serve_udp(stub, resolver));
+
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut buf = vec![0u8; 512];
+
+            client_socket
+                .send_to(&example_com_a_query(0x1111), stub_addr)
+                .await
+                .unwrap();
+            let (len, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client_socket.recv_from(&mut buf),
+            )
+            .await
+            .expect("the stub must forward even a too-short host answer rather than hang")
+            .unwrap();
+            assert_eq!(len, 1, "the malformed answer is forwarded byte-for-byte");
+
+            client_socket
+                .send_to(&example_com_a_query(0x2222), stub_addr)
+                .await
+                .unwrap();
+            let (_len, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client_socket.recv_from(&mut buf),
+            )
+            .await
+            .expect("the stub must still answer after a malformed host response")
+            .unwrap();
+            assert_eq!(&buf[..2], &0x2222_u16.to_be_bytes());
+
+            task.abort();
+            host.abort();
         }
     }
 }

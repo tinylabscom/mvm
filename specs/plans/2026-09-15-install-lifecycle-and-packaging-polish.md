@@ -126,15 +126,32 @@ Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
       preserving the historical `*-unknown-linux-gnu` archive names requested
       by already-installed clients. Verify `mvmctl` and every adjacent runtime
       helper is static before upload. Issue #3371.
-- [ ] A workflow running the *current* installer against the last N *published*
+- [x] A workflow running the *current* installer against the last N *published*
       releases, on a macOS and a Linux runner.
-- [ ] A workflow running the released Linux binary in debian, ubuntu, rocky and
+      `.github/workflows/installer-compat.yml` (`installer` and `upgrade` jobs).
+- [x] A workflow running the released Linux binary in debian, ubuntu, rocky and
       fedora containers, to make glibc drift visible. This also quantifies what
       staying on `-unknown-linux-gnu` costs us versus musl.
-- [ ] A cold first-run smoke on Linux that executes the exact commands from
+      Same workflow, `distro` job, x86_64 and aarch64. First measurement:
+      `v0.17.0` and `v0.18.0-rc.1` require `GLIBC_2.39`, so Rocky 9 (2.34)
+      cannot run them. Those immutable pre-static artifacts remain reported as
+      a narrow historical baseline; every later release fails the lane on a
+      loader error. The workflow passes the exact-tag baseline through the
+      `docker run` boundary, with a static regression assertion in the focused
+      compat suite. The merge-queue live BDD witness has a separately pinned
+      45-minute bound: cold cross-toolchain setup previously exhausted the
+      30-minute job budget before the guest lifecycle could finish.
+- [x] A cold first-run smoke on Linux that executes the exact commands from
       `public/src/content/docs/install/linux.md`, triggered by edits to that
       page or to `install.sh`. The macOS equivalent can only cover install plus
       `doctor` until a self-hosted Apple Silicon runner exists (#3011).
+      Same workflow, `docs-smoke` job. The macOS install-plus-`doctor` half is
+      the `installer` job on `macos-latest`.
+- [x] Install `v0.17.0`, the baked default, on macOS even though that archive
+      keeps its entitlement profile under `resources/`, not `assets/` (#3370).
+      The installer adopts legacy profiles into the canonical `assets/`
+      location, and the compat facts/test suite distinguishes that supported
+      layout from an archive that genuinely lacks the required profile.
 
 ## WS7 — Nix hygiene
 

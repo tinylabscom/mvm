@@ -10,6 +10,60 @@
 
 ## In progress
 
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      Design recorded; implementation and end-to-end certification remain open.
+      Typed encrypted guest telemetry, VM-lifetime host collection, bounded
+      non-waiting emission, explicit loss/coverage, and host-only export.
+
+- [ ] **Prevent agent child processes from inheriting control-plane descriptors — issue #3404.**
+      The entrypoint path is already protected. The remaining RPC, streaming
+      exec, and warm-worker spawn paths now close inherited descriptors above
+      their explicit child contracts; Linux regression coverage holds an extra
+      descriptor open while spawning. Host and Linux validation, including a
+      real Firecracker/KVM boot smoke, pass; promotion is pending.
+
+- [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
+      Persistent entrypoint runs now use the requested `--name` as the machine
+      identity instead of replacing it with an internal invocation name. The
+      kept-alive notice reports the machine name alongside the session ID, and
+      still identifies the live machine if session-record persistence fails.
+      Focused regressions, the serialized workspace suite excluding the known
+      macOS-only `mvm-build` environment probes, zero-warning clippy, workspace
+      check, and Linux plus feature-gated checks pass.
+
+- [x] **Published installer and distro compatibility lanes — issue #3273.**
+      Exercise the current installer against published releases on Linux and
+      macOS, walk atomic upgrades and rollback, run release binaries across
+      four Linux distributions on both architectures, and execute the install
+      page's own commands. The PR-gated synthetic suite distinguishes legacy
+      entitlement profiles under `resources/` from profiles absent entirely,
+      so the fixed default macOS release must install while only explicitly
+      non-strict missing-profile releases may be tolerated. Immutable
+      pre-static v0.17.0/v0.18.0-rc.1 loader failures remain visible without
+      keeping Rocky 9 red; the workflow forwards that exact-tag baseline into
+      the distro container, and a static regression check pins the boundary.
+      Every later release still fails closed. Hosted
+      macOS provisions the trusted historical libkrun runtime before exercising
+      v0.16.1. The focused suite, shellcheck, and actionlint pass on the rebased
+      head. The merge-queue live BDD witness now has a 45-minute bound so a
+      cold hosted runner cannot consume the entire budget installing the
+      pinned cross toolchain before the guest lifecycle runs.
+
+- [x] **Preserve builder backend selection across bootstrap helpers — issue #3390.**
+      Remove the stale Linux-only QEMU override so helper subprocesses inherit
+      the caller's explicit backend or leave selection to the shared detector.
+      Regression coverage exercises both unset and explicit Firecracker
+      environments. Workspace check, zero-warning clippy, Linux cross-target
+      and feature-gated checks, and all 68 repository gates pass.
+
+- [x] **Make claim-control gaps mechanically honest — issue #3316.**
+      Claim 11 now states the shipped seal-time CVE/SBOM and admission-integrity
+      contract, while the unused severity gate is pinned as dormant. Function
+      witnesses must resolve to exactly one definition; claims 13 and 18 use
+      unique production-control or backend-specific witnesses.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
@@ -19,7 +73,14 @@
       free-page memory return, copy-on-write HVF restore, spawn-time memory and
       task limits, chunked durable checkpoints, measured guest flush cost,
       signed bundles through image registries, and structured agent-facing
-      errors.
+      errors. W1 is complete: a live Firecracker/KVM witness restores two
+      siblings from one snapshot and proves their immediate `getrandom(2)`
+      outputs differ after authenticated reseed acknowledgements. The
+      highest-priority follow-up, issue #3404, is implemented and
+      locally validated: shared agent sockets are close-on-exec and one
+      descriptor-closing hook covers every guest-agent child-process path.
+      Cold-entrypoint and process-RPC Linux witnesses prove children receive
+      only their declared descriptors.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
@@ -54,6 +115,13 @@
       whether a separately approved, archived history rewrite is worthwhile.
       Production must never auto-discover or accept unsigned local sibling
       artifacts.
+      W1 (#3363) implementation: the Linux release lane fetches the pinned
+      signed builder image, Firecracker builds the source-matched SDK sidecar
+      inside it, the cold source bootstrap runs as the nightly
+      `source-bootstrap-linux` witness, both harnesses emit phase timings, and
+      the fetch is staged atomically with architecture and manifest-pin
+      refusals. Open: the two post-merge timing runs against the 2026-09-15
+      baseline.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
@@ -299,8 +367,11 @@
       image locks remain held through teardown, and directory snapshots remain
       read-only. A no-explicit-sync write survived into a second fresh Alpine
       VM on macOS HVF. Gated compilation, the full workspace nextest suite, doc
-      tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
-      the plan's broader output-surface design and merge delivery remain.
+      tests, all-targets zero-warning Clippy, policy checks, and BDD are green.
+      The `--output` surface, signed grant, bounded collection, and
+      `plan.outputs` record have landed (see
+      `specs/sprint/delivery/workload-output-manifest.md`); hard-link refusal
+      remains open.
 
 - [ ] **Retire runtime directory-share volume variants.**
       `2026-09-02-retire-dirshare`.
@@ -4030,3 +4101,18 @@ writes the plan:
 - [x] Complete the required focused, workspace, gated-target, generated-stub,
       and hermetic BDD validation matrix.
 - [ ] Merge through the queue and close #3263 from landed evidence.
+
+## 2026-09-17 agent network and AI budget surfaces
+
+- [x] Expose maintained network presets and a positive AI token budget on
+      `machine run`, rejecting the unrestricted preset and conflicting explicit
+      network flags.
+- [x] Carry the preset and AI policy through admission, dry-run receipts,
+      entrypoint dispatch, persistent machine restart, and Workload IR.
+- [x] Add matching Rust, Python, and TypeScript SDK construction and validation,
+      regenerate the schema-derived bindings, and remove the undispatched
+      legacy `up` network fields.
+- [x] Complete focused SDK/CLI/IR coverage, the full workspace suite, Clippy,
+      explicit HVF/Firecracker receipt coverage, Linux builder-VM Clippy,
+      gated-target checks, generated-artifact checks, and all repository gates.
+- [ ] Merge through the queue and close #3287 from landed evidence.

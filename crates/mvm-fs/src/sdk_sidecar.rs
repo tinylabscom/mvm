@@ -462,7 +462,7 @@ mod tests {
     /// `libc` implies, because the resolver reads them. A stub would make every
     /// libc assertion below pass for the wrong reason.
     fn sidecar_image_bytes_for(with_lib: bool, libc: GuestLibc) -> Vec<u8> {
-        use crate::ext4::Node;
+        use crate::ext4::{Node, Owner};
         let payload = if with_lib {
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
@@ -472,6 +472,7 @@ mod tests {
                     libc.libc_soname().expect("a fixture names a real libc"),
                 ]),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             }
         } else {
             Node::File {
@@ -479,6 +480,7 @@ mod tests {
                 mode: 0o444,
                 data: b"no cdylib here".to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             }
         };
         let nodes = vec![
@@ -486,6 +488,7 @@ mod tests {
                 path: "/lib".into(),
                 mode: 0o555,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             payload,
         ];

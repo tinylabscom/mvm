@@ -151,3 +151,4 @@ pub use crate::ir::{
     Resources as IrResources, SecretMount, SecretRef, Source as IrSource, ValidationError,
     Volume as IrVolume, Workload as IrWorkload, ir_hash,
 };
+pub use mvm_contract::policy::network_policy::{AiBudget, AiPolicy, NetworkPreset};

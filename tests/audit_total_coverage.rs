@@ -343,12 +343,14 @@ const SESSION_SUB: &[(&str, AuditPosture)] = &[
 
 const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
     // Creating the durable record is covered by the top-level command
-    // envelope; parking and resuming also append their lifecycle entries.
+    // envelope; parking, resuming and renewing also append their lifecycle
+    // entries.
     ("open", AuditPosture::Emits("cmd.agent-session")),
     ("ls", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
     ("park", AuditPosture::Emits("session.parked")),
     ("resume", AuditPosture::Emits("session.resumed")),
+    ("renew", AuditPosture::Emits("session.renewed")),
 ];
 
 const PROC_SUB: &[(&str, AuditPosture)] = &[
@@ -417,6 +419,9 @@ const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
     // `bundle gc` removes one (or all) installed bundles and emits
     // `LocalAuditKind::BundleGc` on the success arm.
     ("gc", AuditPosture::Emits("BundleGc")),
+    // `bundle push` publishes a verified bundle to an image registry and
+    // emits `LocalAuditKind::BundlePush` naming the digest it landed at.
+    ("push", AuditPosture::Emits("BundlePush")),
 ];
 
 // trust add/remove mutate `~/.mvm/trusted-publishers/` and emit
@@ -808,6 +813,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "VmProcStdin",
         "BundleGc",
         "BundleInstall",
+        "BundlePush",
         "ImageExportOci",
         "ImageFetch",
         "TranscriptArmed",
@@ -826,6 +832,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "plan.launched",
         "session.parked",
         "session.resumed",
+        "session.renewed",
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",

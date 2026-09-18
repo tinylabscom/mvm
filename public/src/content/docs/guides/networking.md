@@ -33,7 +33,9 @@ Proxy-aware TCP applications use the injected loopback SOCKS5 listener; UDP
 applications use SOCKS5 `UDP ASSOCIATE`. The host resolves names, applies the
 signed allow/deny policy separately for TCP and UDP, and opens the external
 socket only after admission. This keeps DNS and egress on the same auditable
-host seam.
+host seam. An allow-list of hosts admits TCP to those hosts and no UDP, DNS
+port included: a `UDP ASSOCIATE` under it is refused, and names resolve
+through the host's DNS path instead.
 
 Raw ICMP and arbitrary non-proxy-aware sockets are intentionally not available
 on this path. `ping` is therefore not a valid egress smoke test; use an HTTP,

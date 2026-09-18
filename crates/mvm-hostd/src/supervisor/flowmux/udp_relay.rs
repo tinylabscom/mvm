@@ -36,6 +36,34 @@ pub(super) struct UdpAssociationHandle {
     pub(super) tx: std::sync::mpsc::Sender<UdpSendMsg>,
     pub(super) waker: Arc<Waker>,
     pub(super) peer_admission: UdpPeerAdmission,
+    /// Destinations whose refusal on this association has already been
+    /// audited. Every refusal is still enforced; only the first per
+    /// destination is recorded, because recording signs and syncs on the
+    /// session thread and a guest repeating a refused send would otherwise
+    /// turn each datagram into a stall of its own session.
+    pub(super) audited_denials: BTreeSet<SocketAddr>,
+}
+
+impl UdpAssociationHandle {
+    /// A handle with no denial audited yet.
+    pub(super) fn new(
+        tx: std::sync::mpsc::Sender<UdpSendMsg>,
+        waker: Arc<Waker>,
+        peer_admission: UdpPeerAdmission,
+    ) -> Self {
+        Self {
+            tx,
+            waker,
+            peer_admission,
+            audited_denials: BTreeSet::new(),
+        }
+    }
+
+    /// Note a refusal of `target`, answering whether it is the first one on
+    /// this association and so the one to audit.
+    pub(super) fn first_denial_of(&mut self, target: SocketAddr) -> bool {
+        self.audited_denials.insert(target)
+    }
 }
 
 /// Parameters for the per-association UDP relay thread.

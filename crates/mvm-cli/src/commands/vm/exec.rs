@@ -274,11 +274,17 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, conflicts_with = "runtime")]
     pub no_detect: bool,
     /// Enable outbound networking (off by default).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "network_preset")]
     pub net: bool,
+    /// Select a maintained outbound-network preset.
+    #[arg(long, value_name = "PRESET", value_parser = super::shared::parse_run_network_preset, conflicts_with_all = ["net", "allow_host"])]
+    pub network_preset: Option<mvm_core::network_policy::NetworkPreset>,
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Cap total AI tokens for this run.
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub ai_token_budget: Option<u64>,
     /// Bind a peer route this workload may dial (repeatable).
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
@@ -325,6 +331,16 @@ pub(in crate::commands) struct RunArgs {
     // summary gate caps that at 64 characters too.
     #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
     pub assets: Vec<String>,
+    /// Collect a guest directory into HOST_DIR after exit (repeatable).
+    //
+    // HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]. The guest gets a fresh writable
+    // disk at /GUEST; after the workload exits the host copies regular files
+    // and directories out of it into HOST_DIR (absent or empty), refusing the
+    // whole collection past SIZE bytes (default 64M) or MAX_ENTRIES entries
+    // (default 10000). The grant is signed into the plan and the result is a
+    // chain-signed `plan.outputs` entry. Plain comment: see `--mount`.
+    #[arg(long = "output", value_name = "HOST_DIR:GUEST[:SIZE]")]
+    pub outputs: Vec<String>,
     /// Not a flag: the libc of the image this run will boot, when it is known
     /// before the rootfs exists. A catalogued `--runtime` pins its image, so
     /// the entry states the libc and detection copies it here; an arbitrary
@@ -459,7 +475,9 @@ impl Default for RunArgs {
             runtime: None,
             no_detect: false,
             net: false,
+            network_preset: None,
             allow_host: Vec::new(),
+            ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
             // this host selects — a test pins the two together, because a
@@ -476,6 +494,7 @@ impl Default for RunArgs {
             receipt: None,
             caller_commitment: None,
             assets: Vec::new(),
+            outputs: Vec::new(),
             json: false,
             dry_run: false,
             launch_plan: None,
@@ -634,23 +653,22 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
-    // One policy model for every backend: resolve the grant surfaces here —
-    // which settles the egress policy in the same step — and thread the result
-    // down both the json/receipt and the streaming paths.
+    // Prepare outputs before admission binds them to the grant.
+    let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
+    let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
+    let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
         allow_host: &args.allow_host,
         peer: &args.peer,
         net: args.net,
+        network_preset: args.network_preset,
         grants_file: args.grants_file.as_deref(),
-        // A transient run names its image on the command line and reads no
-        // project manifest; `machine create` is the verb that sources a
-        // `[grants]` table.
         manifest: None,
         config: &host_config,
-        ai: None,
+        ai: ai_policy.as_ref(),
     })?;
     let network_policy = resolved_grants.network_policy.clone();
 
@@ -709,6 +727,7 @@ pub(in crate::commands) fn run_secure_with_source(
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",
             vm_name,
@@ -803,23 +822,17 @@ pub(in crate::commands) fn run_secure_with_source(
             prod: args.prod,
             runtime_pack: args.runtime_pack,
         };
-        let req = build_exec_request(
+        let req = outputs.attach(build_exec_request(
             args.into_exec_args(),
             "`mvmctl run`",
             selection,
             network_policy,
             source_override.clone(),
             &oci_provenance,
-        )?;
+        )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
-        super::up::record_transient_outcome(
-            admit_ctx.borrow_mut().take(),
-            &receipt_backend,
-            posture.get(),
-            &result,
-        );
-        let output = result?;
+        let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -861,6 +874,7 @@ pub(in crate::commands) fn run_secure_with_source(
             ctx: &admit_ctx,
             backend: &receipt_backend,
             oci_provenance: &oci_provenance,
+            outputs: &outputs,
         },
     )
 }
@@ -932,8 +946,8 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
     if !grants.env && !args.env.is_empty() {
         anyhow::bail!("--profile {name} does not allow --env");
     }
-    if !grants.host_shares && !args.mounts.is_empty() {
-        anyhow::bail!("--profile {name} does not allow --mount");
+    if !grants.host_shares && !(args.mounts.is_empty() && args.outputs.is_empty()) {
+        anyhow::bail!("--profile {name} does not allow --mount or --output");
     }
 
     for spec in &args.mounts {
@@ -1007,6 +1021,9 @@ struct RunAudit<'a> {
     backend: &'a str,
     /// Filled by image resolution, read by the admission that boots it.
     oci_provenance: &'a OciProvenanceSink,
+    /// Output grants whose disks the run attaches and whose collection is
+    /// recorded once it exits.
+    outputs: &'a super::outputs::PreparedOutputs,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -1039,25 +1056,21 @@ fn run_run_args(
     source_override: Option<crate::exec::ImageSource>,
     audit: RunAudit<'_>,
 ) -> Result<()> {
-    let req = build_exec_request(
+    let req = audit.outputs.attach(build_exec_request(
         args,
         "`mvmctl run`",
         selection,
         network_policy,
         source_override,
         audit.oci_provenance,
-    )?;
+    )?);
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
-    super::up::record_transient_outcome(
-        audit.ctx.borrow_mut().take(),
-        audit.backend,
-        posture.get(),
-        &result,
-    );
-    let exit_code = result?;
+    let exit_code = audit
+        .outputs
+        .close_run(audit.ctx, audit.backend, posture.get(), result)?;
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
@@ -1332,12 +1345,10 @@ struct ReceiptInput {
     /// Requested egress posture (`deny-all`, `preset:dev`,
     /// `allow-list:host:port,...`). Non-sensitive; the signature covers it.
     network_posture: String,
-    /// How faithfully the resolved backend actually enforces that posture
-    /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
-    /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
-    /// now port-gated on every backend (Firecracker nftables; libkrun/HVF via the
-    /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
+    /// Backend enforcement fidelity, recorded in the signed receipt.
     egress_enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai_token_budget: Option<u64>,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     mounts: Vec<ReceiptMount>,
@@ -1388,13 +1399,13 @@ use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
-        // Resolve the egress policy once: the requested posture and the honest
-        // per-backend enforcement tier are two views of the same policy.
-        let policy = super::shared::resolve_run_network_policy_with_peers(
+        let policy = super::shared::resolve_run_network_policy_with_preset_and_peers(
             args.net,
+            args.network_preset,
             &args.allow_host,
             &args.peer,
-        )?;
+        )?
+        .with_ai(super::shared::resolve_ai_policy(args.ai_token_budget));
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),
@@ -1466,6 +1477,7 @@ impl ReceiptInput {
                 .to_string(),
             network_posture: policy.posture_label(),
             egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
+            ai_token_budget: args.ai_token_budget,
             command,
             env_keys,
             mounts,
@@ -1817,6 +1829,23 @@ mod tests {
         args.allow_host = vec!["api.example.com".into()];
         let r = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
         assert_eq!(r.network_posture, "allow-list:api.example.com:443");
+    }
+
+    #[test]
+    fn agent_preset_and_ai_budget_reach_hvf_and_firecracker_receipts() {
+        let mut args = run_args(RunProfile::Standard);
+        args.network_preset = Some(mvm_core::network_policy::NetworkPreset::Agent);
+        args.ai_token_budget = Some(12_000);
+
+        for backend in ["hvf", "firecracker"] {
+            let receipt = ReceiptInput::from_run_args(&args, backend).expect("receipt input");
+            assert_eq!(receipt.network_posture, "preset:agent");
+            assert_eq!(
+                receipt.egress_enforcement,
+                format!("{backend}:l4-host-port")
+            );
+            assert_eq!(receipt.ai_token_budget, Some(12_000));
+        }
     }
 
     #[test]

@@ -172,7 +172,45 @@ pub fn resolve_run_network_policy(
     net: bool,
     allow_host: &[String],
 ) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    resolve_run_network_policy_with_peers(net, allow_host, &[])
+    resolve_run_network_policy_with_preset_and_peers(net, None, allow_host, &[])
+}
+
+pub fn parse_run_network_preset(
+    value: &str,
+) -> std::result::Result<mvm_core::network_policy::NetworkPreset, String> {
+    use std::str::FromStr as _;
+
+    let preset = mvm_core::network_policy::NetworkPreset::from_str(value)
+        .map_err(|error| error.to_string())?;
+    if preset.is_unrestricted() {
+        return Err(
+            "the unrestricted preset is not available here; use a narrower preset or explicit --allow-host entries"
+                .to_string(),
+        );
+    }
+    Ok(preset)
+}
+
+pub fn resolve_ai_policy(token_budget: Option<u64>) -> Option<mvm_core::network_policy::AiPolicy> {
+    token_budget.map(mvm_core::network_policy::AiPolicy::metered_with_total_budget)
+}
+
+pub fn persisted_run_network(
+    net: bool,
+    preset: Option<mvm_core::network_policy::NetworkPreset>,
+    allow_host: &[String],
+) -> (bool, Vec<String>) {
+    match preset {
+        Some(preset) => (
+            false,
+            preset
+                .rules()
+                .into_iter()
+                .map(|rule| rule.to_string())
+                .collect(),
+        ),
+        None => (net, allow_host.to_vec()),
+    }
 }
 
 /// As [`resolve_run_network_policy`], plus the `--peer` routes.
@@ -182,8 +220,19 @@ pub fn resolve_run_network_policy(
 /// service that only talks to its own database. So the peer set is attached to
 /// whichever policy the egress precedence selected rather than being an arm of
 /// it.
-pub fn resolve_run_network_policy_with_peers(
+#[cfg(test)]
+fn resolve_run_network_policy_with_peers(
     net: bool,
+    allow_host: &[String],
+    peer: &[String],
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    resolve_run_network_policy_with_preset_and_peers(net, None, allow_host, peer)
+}
+
+/// Resolve egress flags including the named preset surface.
+pub fn resolve_run_network_policy_with_preset_and_peers(
+    net: bool,
+    preset: Option<mvm_core::network_policy::NetworkPreset>,
     allow_host: &[String],
     peer: &[String],
 ) -> Result<mvm_core::network_policy::NetworkPolicy> {
@@ -195,6 +244,8 @@ pub fn resolve_run_network_policy_with_peers(
             .map(|s| parse_allow_host(s))
             .collect::<Result<Vec<_>>>()?;
         NetworkPolicy::allow_list(rules)
+    } else if let Some(preset) = preset {
+        NetworkPolicy::preset(preset)
     } else if net {
         NetworkPolicy::preset(NetworkPreset::Dev)
     } else {
@@ -577,6 +628,21 @@ mod tests {
             p,
             NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]),
             "--allow-host must narrow, winning over --net"
+        );
+    }
+
+    #[test]
+    fn explicit_agent_preset_resolves_to_agent_policy() {
+        let policy = resolve_run_network_policy_with_preset_and_peers(
+            false,
+            Some(mvm_core::network_policy::NetworkPreset::Agent),
+            &[],
+            &[],
+        )
+        .expect("agent preset resolves");
+        assert_eq!(
+            policy.resolve_rules(),
+            Some(mvm_core::network_policy::NetworkPreset::Agent.rules())
         );
     }
 

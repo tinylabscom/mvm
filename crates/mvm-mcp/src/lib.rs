@@ -13,7 +13,7 @@ use mvm_client::dto::{
     ResumeOpts,
 };
 use mvm_client::{
-    BackendCapabilityReport, ClientOperationCapabilities, MvmClient, validate_vm_name,
+    BackendCapabilityReport, ClientOperationCapabilities, MvmClient, MvmError, validate_vm_name,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -25,6 +25,7 @@ pub const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
 pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 
 const CATALOG_TTL_MS: u64 = 300_000;
+const UNKNOWN_TOOL: &str = "unknown tool";
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -214,8 +215,16 @@ impl McpServer {
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
                     Ok(value) => response_result(id, self.tool_success(value)),
-                    Err(ToolFailure::Input(message) | ToolFailure::Backend(message)) => {
-                        response_result(id, tool_error(&message))
+                    Err(ToolFailure::Input(message)) => response_result(
+                        id,
+                        tool_error_classified(&message, GENERIC_INPUT_ERROR_CODE, false),
+                    ),
+                    Err(ToolFailure::Backend(error)) => {
+                        let message = format!("MvmClient operation failed: {error}");
+                        response_result(
+                            id,
+                            tool_error_classified(&message, error.code(), error.retryable()),
+                        )
                     }
                 }
             }
@@ -388,7 +397,7 @@ impl McpServer {
                     .map_err(ToolFailure::backend)?;
                 Ok(json!({"ok": true}))
             }
-            _ => Err(ToolFailure::Input("unknown tool".into())),
+            _ => Err(ToolFailure::Input(UNKNOWN_TOOL.into())),
         }
     }
 
@@ -540,19 +549,24 @@ fn discover_result() -> Value {
     })
 }
 
+fn server_meta_object() -> Map<String, Value> {
+    let mut meta = Map::new();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        json!({"name":"mvm", "version":env!("CARGO_PKG_VERSION")}),
+    );
+    meta
+}
+
 fn server_meta() -> Value {
-    json!({
-        "io.modelcontextprotocol/serverInfo": {
-            "name":"mvm",
-            "version":env!("CARGO_PKG_VERSION")
-        }
-    })
+    Value::Object(server_meta_object())
 }
 
 fn tools_result(operations: &ClientOperationCapabilities) -> Value {
-    let tools: Vec<Value> = tool_specs()
-        .into_iter()
-        .filter(|tool| tool_enabled(tool["name"].as_str().unwrap_or_default(), operations))
+    let tools: Vec<Value> = tool_catalog()
+        .iter()
+        .filter(|tool| tool.offered(operations))
+        .map(ToolSpec::to_value)
         .collect();
     json!({
         "resultType":"complete",
@@ -564,115 +578,170 @@ fn tools_result(operations: &ClientOperationCapabilities) -> Value {
 }
 
 fn tool_enabled(name: &str, operations: &ClientOperationCapabilities) -> bool {
-    match name {
-        "mvm.backend_capabilities" => true,
-        "mvm.machine.list" => operations.list,
-        "mvm.machine.inspect" => operations.inspect,
-        "mvm.machine.create" => operations.create,
-        "mvm.machine.run" => operations.run,
-        "mvm.machine.start" => operations.start,
-        "mvm.machine.stop" => operations.stop,
-        "mvm.machine.pause" => operations.pause,
-        "mvm.machine.resume" => operations.resume,
-        "mvm.machine.remove" => operations.remove,
-        "mvm.machine.logs" => operations.logs,
-        "mvm.machine.exec" => operations.exec,
-        "mvm.machine.reconfigure" => operations.reconfigure,
-        "mvm.machine.set_ttl" => operations.set_ttl,
-        _ => false,
+    tool_catalog()
+        .iter()
+        .any(|tool| tool.name == name && tool.offered(operations))
+}
+
+/// Which client operation must be served before a tool is advertised.
+type OperationGate = fn(&ClientOperationCapabilities) -> bool;
+
+/// One agent-facing tool. The advertisement and the gate that decides whether
+/// it is offered live in the same row, so a tool cannot be described without
+/// saying what enables it.
+struct ToolSpec {
+    name: &'static str,
+    description: &'static str,
+    /// `None` is offered by every client.
+    requires: Option<OperationGate>,
+    input_schema: Value,
+}
+
+impl ToolSpec {
+    fn always(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+        Self {
+            name,
+            description,
+            requires: None,
+            input_schema,
+        }
+    }
+
+    fn gated(
+        name: &'static str,
+        description: &'static str,
+        requires: OperationGate,
+        input_schema: Value,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            requires: Some(requires),
+            input_schema,
+        }
+    }
+
+    fn offered(&self, operations: &ClientOperationCapabilities) -> bool {
+        self.requires.is_none_or(|gate| gate(operations))
+    }
+
+    fn to_value(&self) -> Value {
+        json!({"name":self.name, "description":self.description, "inputSchema":self.input_schema})
     }
 }
 
-fn tool_specs() -> Vec<Value> {
+fn tool_catalog() -> &'static [ToolSpec] {
+    static CATALOG: OnceLock<Vec<ToolSpec>> = OnceLock::new();
+    CATALOG.get_or_init(build_tool_catalog)
+}
+
+fn build_tool_catalog() -> Vec<ToolSpec> {
     vec![
-        tool(
+        ToolSpec::always(
             "mvm.backend_capabilities",
             "Describe the selected backend and client operation surface.",
             empty_schema(),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.list",
             "List machines visible through the selected client.",
+            |ops| ops.list,
             object_schema(
                 json!({"name":{"type":"string"}, "status":{"type":"string","enum":["starting","running","stopped","paused","failed"]}}),
                 &[],
             ),
         ),
-        tool("mvm.machine.inspect", "Inspect one machine.", id_schema()),
-        tool(
-            "mvm.machine.create",
-            "Create a stopped machine through MvmClient.",
-            launch_schema(),
-        ),
-        tool(
-            "mvm.machine.run",
-            "Create and start a machine through MvmClient.",
-            launch_schema(),
-        ),
-        tool("mvm.machine.start", "Start a created machine.", id_schema()),
-        tool(
-            "mvm.machine.stop",
-            "Stop a machine idempotently.",
+        ToolSpec::gated(
+            "mvm.machine.inspect",
+            "Inspect one machine.",
+            |ops| ops.inspect,
             id_schema(),
         ),
-        tool(
+        ToolSpec::gated(
+            "mvm.machine.create",
+            "Create a stopped machine through MvmClient.",
+            |ops| ops.create,
+            launch_schema(),
+        ),
+        ToolSpec::gated(
+            "mvm.machine.run",
+            "Create and start a machine through MvmClient.",
+            |ops| ops.run,
+            launch_schema(),
+        ),
+        ToolSpec::gated(
+            "mvm.machine.start",
+            "Start a created machine.",
+            |ops| ops.start,
+            id_schema(),
+        ),
+        ToolSpec::gated(
+            "mvm.machine.stop",
+            "Stop a machine idempotently.",
+            |ops| ops.stop,
+            id_schema(),
+        ),
+        ToolSpec::gated(
             "mvm.machine.pause",
             "Pause a running machine.",
+            |ops| ops.pause,
             object_schema(
                 json!({"id":{"type":"string"},"primed_barrier":{"type":"boolean"},"primed_timeout_secs":{"type":"integer","minimum":1}}),
                 &["id"],
             ),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.resume",
             "Resume a paused machine.",
+            |ops| ops.resume,
             object_schema(
                 json!({"id":{"type":"string"},"warm":{"type":"boolean"}}),
                 &["id"],
             ),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.remove",
             "Remove a machine idempotently.",
+            |ops| ops.remove,
             id_schema(),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.logs",
             "Read bounded machine logs.",
+            |ops| ops.logs,
             object_schema(
                 json!({"id":{"type":"string"},"follow":{"type":"boolean"},"tail_lines":{"type":"integer","minimum":0}}),
                 &["id"],
             ),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.exec",
             "Run a non-interactive command when the selected client supports it.",
+            |ops| ops.exec,
             object_schema(
                 json!({"id":{"type":"string"},"command":{"type":"array","items":{"type":"string"},"minItems":1}}),
                 &["id", "command"],
             ),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.reconfigure",
             "Patch supported machine configuration fields.",
+            |ops| ops.reconfigure,
             object_schema(
                 json!({"id":{"type":"string"},"net":{"type":"boolean"},"allow_host":{"type":"array","items":{"type":"string"}},"cpus":{"type":"integer","minimum":1},"memory_mib":{"type":"integer","minimum":1}}),
                 &["id"],
             ),
         ),
-        tool(
+        ToolSpec::gated(
             "mvm.machine.set_ttl",
             "Set or clear a machine TTL.",
+            |ops| ops.set_ttl,
             object_schema(
                 json!({"id":{"type":"string"},"expires_at":{"type":["string","null"]}}),
                 &["id"],
             ),
         ),
     ]
-}
-
-fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({"name":name, "description":description, "inputSchema":input_schema})
 }
 
 fn empty_schema() -> Value {
@@ -716,6 +785,12 @@ fn response_error(id: Value, code: i64, message: &str) -> String {
     .expect("JSON-RPC error values are serializable")
 }
 
+/// The `code` a tool error carries when it did not originate from an
+/// [`MvmError`] (bad tool arguments, an unknown tool name). It is deliberately
+/// generic and non-retryable: these are properties of the request the caller
+/// sent, not of backend state, so retrying unchanged can never help.
+const GENERIC_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+
 fn tool_error(message: &str) -> Value {
     let message: String = message.chars().take(512).collect();
     json!({
@@ -723,6 +798,23 @@ fn tool_error(message: &str) -> Value {
         "content":[{"type":"text", "text":message}],
         "isError":true,
         "_meta":server_meta()
+    })
+}
+
+/// Like [`tool_error`], but with a stable machine-readable `code` and a
+/// `retryable` flag folded into `_meta` alongside the existing server keys —
+/// so an automated caller can branch on the failure instead of parsing the
+/// message text.
+fn tool_error_classified(message: &str, code: &str, retryable: bool) -> Value {
+    let message: String = message.chars().take(512).collect();
+    let mut meta = server_meta_object();
+    meta.insert("code".to_string(), json!(code));
+    meta.insert("retryable".to_string(), json!(retryable));
+    json!({
+        "resultType":"complete",
+        "content":[{"type":"text", "text":message}],
+        "isError":true,
+        "_meta":Value::Object(meta)
     })
 }
 
@@ -740,17 +832,25 @@ fn parse_arguments<T: for<'de> Deserialize<'de>>(
 
 #[derive(Debug)]
 enum ToolFailure {
+    /// Rejected before any client call — bad tool arguments, an unknown
+    /// tool, or an argument the client trait cannot express. Not an
+    /// [`MvmError`], so it carries no variant to classify.
     Input(String),
-    Backend(String),
+    /// The typed facade error, carried through rather than stringified here,
+    /// so the dispatch site can still classify it by variant when building
+    /// the tool result's `_meta`.
+    Backend(MvmError),
 }
 
 impl ToolFailure {
-    fn backend(error: impl std::fmt::Display) -> Self {
-        Self::Backend(format!("MvmClient operation failed: {error}"))
+    fn backend(error: MvmError) -> Self {
+        Self::Backend(error)
     }
 
     fn serialization(_: impl std::fmt::Display) -> Self {
-        Self::Backend("MvmClient result could not be serialized".into())
+        Self::Backend(MvmError::Backend {
+            reason: "MvmClient result could not be serialized".into(),
+        })
     }
 }
 
@@ -921,4 +1021,97 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, limit: usize) -> io::Result<Fr
         bytes.pop();
     }
     Ok(String::from_utf8(bytes).map_or(Frame::InvalidUtf8, Frame::Line))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use mvm_client::mock::MockBackend;
+
+    use super::*;
+
+    /// Every field of `ClientOperationCapabilities`, read off its wire form so
+    /// a new operation is picked up without this list being edited.
+    fn operation_keys() -> Vec<String> {
+        serde_json::to_value(ClientOperationCapabilities::default())
+            .expect("operation capabilities serialize")
+            .as_object()
+            .expect("operation capabilities are an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn operations_serving(keys: &[String]) -> ClientOperationCapabilities {
+        let fields = keys
+            .iter()
+            .map(|key| (key.clone(), Value::Bool(true)))
+            .collect();
+        serde_json::from_value(Value::Object(fields)).expect("known operation keys deserialize")
+    }
+
+    #[test]
+    fn every_specified_tool_is_offered_by_a_real_gate() {
+        let keys = operation_keys();
+        let serving_all = operations_serving(&keys);
+        let serving_none = ClientOperationCapabilities::default();
+        let mut names = BTreeSet::new();
+
+        for tool in tool_catalog() {
+            assert!(
+                names.insert(tool.name),
+                "`{}` is specified twice in the MCP tool catalog",
+                tool.name
+            );
+            assert!(
+                tool_enabled(tool.name, &serving_all),
+                "`{}` is specified but no client ever offers it: its gate must read a \
+                 `ClientOperationCapabilities` field, or the tool must be `ToolSpec::always`",
+                tool.name
+            );
+            if tool.requires.is_none() {
+                continue;
+            }
+            assert!(
+                !tool.offered(&serving_none),
+                "`{}` is declared gated but a client serving no operations still offers it; \
+                 use `ToolSpec::always` if that is the intent",
+                tool.name
+            );
+            let enabling: Vec<&String> = keys
+                .iter()
+                .filter(|key| tool.offered(&operations_serving(std::slice::from_ref(*key))))
+                .collect();
+            assert_eq!(
+                enabling.len(),
+                1,
+                "`{}` must be gated by exactly one client operation, but is offered by {enabling:?}",
+                tool.name
+            );
+        }
+
+        assert!(
+            !tool_enabled("mvm.machine.unspecified", &serving_all),
+            "a tool absent from the catalog must never be offered"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_specified_tool_has_a_handler() {
+        let server = McpServer::new(Arc::new(MockBackend::default()));
+        let report = server
+            .capabilities()
+            .await
+            .expect("mock capability report")
+            .clone();
+        for tool in tool_catalog() {
+            let outcome = server.call_tool(tool.name, Map::new(), &report).await;
+            assert!(
+                !matches!(&outcome, Err(ToolFailure::Input(message)) if message == UNKNOWN_TOOL),
+                "`{}` is advertised but `call_tool` has no arm for it",
+                tool.name
+            );
+        }
+    }
 }

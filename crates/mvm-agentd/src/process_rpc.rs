@@ -445,12 +445,16 @@ fn build_command(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+
     // SAFETY: pre_exec's closure runs post-fork/pre-exec, where only async-
-    // signal-safe calls are allowed. It calls only setrlimit (async-signal-safe),
-    // allocates nothing, and touches no shared Rust state.
+    // signal-safe calls are allowed. It calls only raw syscalls, allocates
+    // nothing, and touches no shared Rust state.
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
+            #[cfg(target_os = "linux")]
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
             let lim = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
@@ -1080,6 +1084,39 @@ mod tests {
         let env = BTreeMap::new();
         build_command(&["echo".to_string()], &env, None)
             .expect("a bare command name on the search path must resolve");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rpc_process_drops_inherited_descriptors() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let source = std::fs::File::open("/dev/null").expect("open held descriptor");
+        // SAFETY: fcntl duplicates a descriptor we own; OwnedFd adopts it.
+        let raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 20) };
+        assert!(raw >= 20, "duplicate descriptor above the child contract");
+        // SAFETY: fcntl returned an owned descriptor on success.
+        let _held = unsafe { OwnedFd::from_raw_fd(raw) };
+
+        let mut command = build_command(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "ls -1 /proc/self/fd".to_string(),
+            ],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("build command");
+        let output = command.output().expect("spawn RPC process");
+        assert!(output.status.success());
+        let inherited = String::from_utf8(output.stdout).expect("fd listing is utf-8");
+        assert!(
+            inherited
+                .lines()
+                .all(|fd| fd.parse::<u32>().is_ok_and(|fd| fd <= 3)),
+            "child retained unexpected descriptors: {inherited}"
+        );
     }
 
     #[test]

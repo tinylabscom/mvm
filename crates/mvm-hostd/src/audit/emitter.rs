@@ -1207,7 +1207,7 @@ impl AuditEmitter {
         Ok(signed)
     }
 
-    fn emit<E>(&self, plan: &ExecutionPlan, event: &str, extras: E) -> Result<()>
+    pub(crate) fn emit<E>(&self, plan: &ExecutionPlan, event: &str, extras: E) -> Result<()>
     where
         E: IntoIterator<Item = (String, String)>,
     {
@@ -2013,6 +2013,37 @@ mod tests {
         assert!(content.contains("approval-wait"));
         assert!(
             content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn session_renewed_event_is_chain_signed_and_keeps_the_plan_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[41u8; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-RENEW");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+
+        emitter
+            .emit_session_renewed(
+                &plan,
+                vec![
+                    ("renewed_session".to_string(), "sess-alpha".to_string()),
+                    ("renewed_until_unix".to_string(), "1800000000".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.renewed"));
+        assert!(content.contains("renewed_until_unix"));
+        assert!(
+            content.contains("session_id"),
             "the plan's own session labels must survive the merge: {content}"
         );
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);

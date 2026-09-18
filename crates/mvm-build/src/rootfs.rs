@@ -71,6 +71,11 @@ pub struct MaterializeExt4Input {
     /// [`mvm_fs::oci::unpack::UnpackReport::deferred_nodes`]. Empty on
     /// Linux and on any case-sensitive volume.
     pub deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    /// Owners the image layers declared, by guest path. The unpacked tree
+    /// cannot carry them — the unpack runs unprivileged — so the pure writer
+    /// applies them to the walked nodes. Empty for a tree that is not built
+    /// from image layers, which leaves every node root-owned.
+    pub owners: mvm_fs::ownership::OwnerTable,
 }
 
 impl MaterializeExt4Input {
@@ -92,6 +97,7 @@ pub struct MaterializeExt4InputBuilder {
     emit_verity: Option<bool>,
     volume_label: Option<String>,
     deferred_nodes: Option<Vec<mvm_fs::ext4::Node>>,
+    owners: Option<mvm_fs::ownership::OwnerTable>,
 }
 
 impl MaterializeExt4InputBuilder {
@@ -105,6 +111,7 @@ impl MaterializeExt4InputBuilder {
             emit_verity: None,
             volume_label: None,
             deferred_nodes: None,
+            owners: None,
         }
     }
 
@@ -150,6 +157,13 @@ impl MaterializeExt4InputBuilder {
         self
     }
 
+    /// Set `owners`.
+    #[must_use]
+    pub fn owners(mut self, owners: mvm_fs::ownership::OwnerTable) -> Self {
+        self.owners = Some(owners);
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<MaterializeExt4Input, BuilderError> {
         Ok(MaterializeExt4Input {
@@ -172,6 +186,9 @@ impl MaterializeExt4InputBuilder {
                 "MaterializeExt4Input",
                 "deferred_nodes",
             ))?,
+            owners: self
+                .owners
+                .ok_or(BuilderError::missing("MaterializeExt4Input", "owners"))?,
         })
     }
 }
@@ -191,12 +208,19 @@ impl MaterializeExt4Input {
             emit_verity: false,
             volume_label: None,
             deferred_nodes: Vec::new(),
+            owners: mvm_fs::ownership::OwnerTable::new(),
         }
     }
 
     /// Carry the unpacker's deferred nodes into the image.
     pub fn with_deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
         self.deferred_nodes = deferred_nodes;
+        self
+    }
+
+    /// Give the image the owners its layers declared.
+    pub fn with_owners(mut self, owners: mvm_fs::ownership::OwnerTable) -> Self {
+        self.owners = owners;
         self
     }
 
@@ -341,6 +365,13 @@ pub enum RootfsError {
     )]
     DeferredNodesUnsupported(usize),
 
+    #[error(
+        "the builder-VM materializer copies the host tree, so it cannot give the {0} \
+         path(s) the image layers assign to a non-root account their owners; use the \
+         in-process materializer (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+    )]
+    LayerOwnershipUnsupported(usize),
+
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
@@ -451,6 +482,7 @@ pub fn materialize_ext4(
         ));
     }
 
+    refuse_tree_only_materialization_loss(input)?;
     let size_bytes = estimate_ext4_size(input.uncompressed_size_bytes, options)?;
 
     #[cfg(not(feature = "builder-vm"))]
@@ -476,6 +508,24 @@ pub fn materialize_ext4(
             verity_root_hash,
         })
     }
+}
+
+/// The builder-VM materializer copies the host tree into the image, so
+/// anything the host tree cannot hold is lost: a node the host filesystem
+/// refused, and an owner an unprivileged unpack could not apply. Fail closed
+/// rather than emit an image that is quietly missing paths or has a service's
+/// files owned by root.
+fn refuse_tree_only_materialization_loss(input: &MaterializeExt4Input) -> Result<(), RootfsError> {
+    if !input.deferred_nodes.is_empty() {
+        return Err(RootfsError::DeferredNodesUnsupported(
+            input.deferred_nodes.len(),
+        ));
+    }
+    let non_root = input.owners.non_root_count();
+    if non_root > 0 {
+        return Err(RootfsError::LayerOwnershipUnsupported(non_root));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "builder-vm")]
@@ -505,15 +555,6 @@ fn materialize_ext4_in_builder_vm(
     device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
     use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob};
-
-    // This path copies `/work` (the host tree) into the mounted ext4, so
-    // it has no way to place a node the host tree never held. Fail closed
-    // rather than emit an image that is quietly missing paths.
-    if !input.deferred_nodes.is_empty() {
-        return Err(RootfsError::DeferredNodesUnsupported(
-            input.deferred_nodes.len(),
-        ));
-    }
 
     let artifact_out = input
         .output
@@ -656,6 +697,7 @@ pub fn materialize_ext4_pure_with_walk_options(
     let mut options = mvm_fs::rootfs::MaterializeOptions::builder()
         .walk(walk)
         .extra_nodes(input.deferred_nodes.clone())
+        .owners(input.owners.clone())
         .build();
     if let Some(label) = &input.volume_label {
         options = options.with_volume_label(label.as_bytes());
@@ -1123,5 +1165,74 @@ mod materialize_ext4_options_builder_tests {
     #[test]
     fn an_untouched_builder_matches_the_type_default() {
         assert!(MaterializeExt4Options::builder().build() == MaterializeExt4Options::default());
+    }
+}
+
+#[cfg(test)]
+mod tree_only_materialization_loss_tests {
+    use super::*;
+
+    fn input_in(dir: &tempfile::TempDir) -> MaterializeExt4Input {
+        MaterializeExt4Input::new(dir.path().to_path_buf(), dir.path().join("rootfs.ext4"), 1)
+    }
+
+    fn owners_from_layer(uid: u64) -> mvm_fs::ownership::OwnerTable {
+        let tree = tempfile::tempdir().unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("var/lib/svc/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o750);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(uid);
+        header.set_gid(uid);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            tree.path(),
+            &mvm_fs::oci::unpack::UnpackOptions::default(),
+        )
+        .unwrap();
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+        owners
+    }
+
+    /// Copying the host tree would land the service's files owned by
+    /// whoever ran the unpack, so the builder-VM materializer refuses — before
+    /// allocating an image or starting anything.
+    #[test]
+    fn non_root_layer_owners_refuse_the_tree_copy_materializer() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_from_layer(999));
+        let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
+        assert!(
+            matches!(err, RootfsError::LayerOwnershipUnsupported(1)),
+            "got {err:?}"
+        );
+        assert!(!input.output.exists(), "refused before allocating an image");
+    }
+
+    /// Layers that declare only root lose nothing in a tree copy.
+    #[test]
+    fn root_only_layer_owners_are_not_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_from_layer(0));
+        assert!(refuse_tree_only_materialization_loss(&input).is_ok());
+    }
+
+    #[test]
+    fn deferred_nodes_are_still_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+            path: "/a".into(),
+            target: "b".into(),
+            owner: mvm_fs::ext4::Owner::ROOT,
+        }]);
+        assert!(matches!(
+            refuse_tree_only_materialization_loss(&input),
+            Err(RootfsError::DeferredNodesUnsupported(1))
+        ));
     }
 }

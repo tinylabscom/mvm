@@ -85,9 +85,27 @@ pub struct AdmitInputs<'a> {
     pub volumes: &'a [mvm_core::vm_backend::VmVolume],
 }
 
+/// Identity policy for a session-style VM boot.
+#[derive(Debug, Clone, Copy)]
+pub enum SessionVmName<'a> {
+    /// Preserve a user-visible persistent machine identity exactly.
+    Exact(&'a str),
+    /// Generate an internal collision-resistant name under this prefix.
+    Prefixed(&'a str),
+}
+
+impl SessionVmName<'_> {
+    fn resolve(self) -> String {
+        match self {
+            Self::Exact(name) => name.to_string(),
+            Self::Prefixed(prefix) => format!("{prefix}-{}", transient_vm_name()),
+        }
+    }
+}
+
 pub fn boot_session_vm(
     env: &str,
-    vm_name_prefix: &str,
+    vm_name: SessionVmName<'_>,
     cpus: u32,
     memory_mib: u32,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
@@ -107,9 +125,7 @@ pub fn boot_session_vm(
     } else {
         AnyBackend::auto_select()
     };
-    // Append the same nanosecond suffix transient_vm_name uses so
-    // concurrent boots in the same session don't collide.
-    let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
+    let vm_name = vm_name.resolve();
 
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
@@ -372,4 +388,14 @@ pub(super) fn wait_for_agent_timed(
         attempt = attempt.saturating_add(1);
     }
     false
+}
+
+#[cfg(test)]
+mod session_vm_name_tests {
+    use super::SessionVmName;
+
+    #[test]
+    fn an_exact_session_vm_name_is_not_rewritten() {
+        assert_eq!(SessionVmName::Exact("named-agent").resolve(), "named-agent");
+    }
 }

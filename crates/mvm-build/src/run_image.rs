@@ -26,6 +26,7 @@ pub struct InjectAndMaterializeRequest<'a> {
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
     evidence: Option<SealEvidence<'a>>,
 }
 
@@ -44,6 +45,7 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             entrypoint: None,
             sealed: false,
             deferred_nodes: Vec::new(),
+            owners: mvm_fs::ownership::OwnerTable::new(),
             evidence: None,
         }
     }
@@ -57,6 +59,7 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
     evidence: Option<SealEvidence<'a>>,
 }
 
@@ -75,6 +78,14 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
     /// host filesystem could not hold — into the materialized image.
     pub fn deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
         self.deferred_nodes = deferred_nodes;
+        self
+    }
+
+    /// Give the materialized image the owners its layers declared. The
+    /// unpacked tree cannot hold them, so without this every file in the
+    /// image is root-owned.
+    pub fn owners(mut self, owners: mvm_fs::ownership::OwnerTable) -> Self {
+        self.owners = owners;
         self
     }
 
@@ -97,6 +108,7 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             entrypoint: self.entrypoint,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
+            owners: self.owners,
             evidence: self.evidence,
         }
     }
@@ -124,6 +136,7 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         entrypoint,
         sealed,
         deferred_nodes,
+        owners,
         evidence,
     } = request;
     let bins = resolve_guest_binaries(cache_root)?;
@@ -143,7 +156,8 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     materialize_run_rootfs(
         &MaterializeExt4Input::new(unpacked_root.to_path_buf(), output.to_path_buf(), tree_size)
-            .with_deferred_nodes(deferred_nodes),
+            .with_deferred_nodes(deferred_nodes)
+            .with_owners(owners),
     )?;
 
     // `--prod`: seal the rootfs before the sidecar is written. If this fails we

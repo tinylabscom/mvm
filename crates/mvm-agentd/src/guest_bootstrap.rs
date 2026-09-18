@@ -567,12 +567,12 @@ pub fn run_one(path: Option<PathBuf>, label: &str) {
     let Some(path) = path else {
         return;
     };
-    match Command::new(&path)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(&path);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-    {
+        .stderr(Stdio::inherit());
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    match cmd.status() {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!("mvm-guest-init: {label} exited {status}"),
         Err(e) => eprintln!("mvm-guest-init: run {label} at {}: {e}", path.display()),
@@ -587,12 +587,12 @@ pub fn spawn_one(path: &Path, label: &str) {
         );
         return;
     }
-    match Command::new(path)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(path);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
+        .stderr(Stdio::inherit());
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    match cmd.spawn() {
         Ok(child) => eprintln!("mvm-guest-init: spawned {label} pid={}", child.id()),
         Err(e) => eprintln!("mvm-guest-init: spawn {label} at {}: {e}", path.display()),
     }
@@ -622,6 +622,7 @@ pub fn spawn_one_as(path: &Path, label: &str, uid: u32, gid: u32) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
     // SAFETY: the hook runs in the forked child before exec. It calls only
     // async-signal-safe syscalls and allocates nothing, which is what
     // `drop_guest_agent_privilege_raw` exists to guarantee.
@@ -745,22 +746,24 @@ pub fn bring_loopback_up_with_busybox() -> bool {
     if !is_executable(busybox) {
         return false;
     }
-    let ip_ok = Command::new(busybox)
-        .args(["ip", "link", "set", "lo", "up"])
+    let mut ip = Command::new(busybox);
+    ip.args(["ip", "link", "set", "lo", "up"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
+        .stderr(Stdio::null());
+    crate::fd_hygiene::configure_close_fds(&mut ip, 3, None);
+    let ip_ok = ip.status().map(|status| status.success()).unwrap_or(false);
     if ip_ok {
         return true;
     }
-    Command::new(busybox)
+    let mut ifconfig = Command::new(busybox);
+    ifconfig
         .args(["ifconfig", "lo", "up"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::fd_hygiene::configure_close_fds(&mut ifconfig, 3, None);
+    ifconfig
         .status()
         .map(|status| status.success())
         .unwrap_or(false)

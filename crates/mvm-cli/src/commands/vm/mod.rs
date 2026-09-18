@@ -20,6 +20,7 @@ pub(crate) mod invoke;
 pub(crate) mod launch_sample;
 pub(super) mod logs;
 pub(super) mod managed_secrets;
+mod outputs;
 pub(super) mod pause;
 pub(crate) mod phase_timing;
 pub(super) mod plan_persist;

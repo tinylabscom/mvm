@@ -38,6 +38,11 @@ tier = "parse"
 reason = "needs a signed .mvmpkg published by a real publisher key; scripts/make-bundle-fixture.sh builds one, wiring it in is follow-on work"
 
 [[command]]
+path = "bundle push"
+tier = "parse"
+reason = "needs a trusted signed .mvmpkg and a reachable image registry; the in-process registry coverage exercises execution"
+
+[[command]]
 path = "cache info"
 tier = "exec"
 

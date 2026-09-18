@@ -1,13 +1,51 @@
 # Refactor status
 
-Last updated: 2026-09-16
+Last updated: 2026-09-18
 
 ## In progress
+
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      W1-W7 open: inventory, typed encrypted service, nonblocking guest capture,
+      VM-lifetime host collector, host views/export, real-backend certification,
+      default-on rollout and merge-queue delivery. Design is not implementation.
+
+- [ ] **Agent child descriptor isolation — issue #3404.**
+      Close non-contract descriptors in the RPC, streaming-exec, and
+      warm-worker child paths. Linux regression and Firecracker/KVM validation
+      pass; promotion is pending.
+
+- [x] **Kept-alive entrypoint machines retain their requested names.**
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
+      Persistent entrypoint sessions preserve `--name` and report both the
+      machine and session identities when they remain alive.
+
+- [x] **Bootstrap helpers inherit the selected builder backend.**
+      `specs/plans/2026-09-15-vmm-agnostic-stage0.md` W8, issue #3390.
+      Linux helper subprocesses no longer replace shared Firecracker
+      auto-detection with a local QEMU override.
+
+- [x] **Claim 11 and claim 13 evidence matches the shipped tree.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.2, issue #3316.
+      The dormant CVE severity gate is explicit, and function witnesses must
+      identify exactly one definition.
 
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
       measure-first and sequenced with #3360.
+      W1 is complete: the live Firecracker/KVM sibling-restore witness proves
+      immediate post-restore `getrandom(2)` divergence.
+      W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
+      the W3.6 live boot is still open.
+  - [x] W1a — issue #3404: every guest-agent child path uses the shared
+        descriptor-closing hook, shared vsock sockets are close-on-exec, and
+        real Linux cold-entrypoint and process-RPC witnesses pass. Public
+        release remains gated on clearance.
+  - [x] W9 — signed bundles push to and fetch from image registries
+        (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
+        W9.6 media-type alignment with #3365 stays open.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`
@@ -31,6 +69,11 @@ Last updated: 2026-09-16
       trust tier, and keeps legacy consumers working through dual publication.
       After cutover, separately measure and gate any history compaction rather
       than folding a destructive rewrite into the repository move.
+      - [x] W1 #3363: release E2E fetches the signed builder image; cold source
+            bootstrap is the nightly `source-bootstrap-linux` witness; phase
+            timings emitted; fetch staged atomically with arch refusals.
+      - [ ] W1 #3363: two post-merge runs compared against the 2026-09-15
+            baseline.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
@@ -73,14 +116,19 @@ Last updated: 2026-09-16
       terminates a CONNECT flow to a host carrying a bound secret (#3283
       T0-T4), and the per-VM CA that turns it on is in review. Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
-      transport (#3261), MCP (#3262), and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
+      transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
+      by a checked-in contract fixture, so the new tools land as reviewed
+      contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
       transport in favour of one versioned C ABI from a new top-of-graph
       crate. The stale `host.secrets.v1` claim authority is resolved: claim 13
       and the SDK sidecar catalog now name the live substitution endpoint and
-      shipped typed services respectively.
+      shipped typed services respectively. WS-S T12 is complete: `machine run`
+      and Workload IR expose the agent preset and AI token budget across Rust,
+      Python, and TypeScript, while the undispatched legacy network fields are
+      removed (#3287).
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.
@@ -95,17 +143,23 @@ Last updated: 2026-09-16
       Epic #3277. Execution started. The stable install URL and its daily live
       monitor, production-host deploy check, and API-free normal install path
       are complete, as are versioned installs with atomic upgrade and rollback,
-      the full host-binary set, and the uninstaller; remaining work adds
-      in-process signature verification to close the claim 20 limits note,
-      installer and distro compat lanes, and Nix version-from-manifest.
+      the full host-binary set, the uninstaller, and the installer, distro and
+      install-page compat lanes; remaining work adds in-process signature
+      verification to close the claim 20 limits note.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
         every host binary the release carries (#3270, #3342)
   - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
-  - [ ] WS5–WS6 — verification and compat (#3272–#3273); Linux release
-        payloads are now static-musl while retaining compatible asset names
-        (#3371)
+  - [ ] WS5 — verification (#3272)
+  - [x] WS6 — installer back-compat, distro glibc, and install-page smoke lanes
+        in `installer-compat.yml` (#3273); Linux release payloads are now
+        static-musl while retaining compatible asset names (#3371), and the
+        installer accepts legacy entitlement profiles under `resources/`
+        (#3370); the immutable Rocky loader baseline is forwarded explicitly
+        into the distro container and pinned by the focused suite; the live
+        merge-queue BDD witness retains a bounded 45-minute budget so cold
+        cross-toolchain setup cannot crowd out the guest lifecycle
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`
@@ -302,7 +356,13 @@ Last updated: 2026-09-16
       mounts are admitted while directory snapshots remain read-only. A
       no-explicit-sync write survived a second fresh Alpine VM on macOS HVF;
       gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
-      policy checks, and BDD are green. Broader surface design and merge remain.
+      policy checks, and BDD are green. `--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]`
+      now hands results back through a fresh writable disk the host reads after
+      teardown: a signed `ExecutionPlan.outputs` grant, bounded link-refusing
+      collection in `mvm_fs::output`, a sorted manifest beside the outputs, and
+      a chain-signed `plan.outputs` entry. Live on macOS HVF (collected, symlink
+      refused, byte bound refused). Hard-link refusal needs inode identity the
+      ext4 reader does not expose; that item stays open.
 
 - [x] **Refresh host-directory snapshots at machine start.**
       `2026-09-03-refresh-host-snapshot-at-start`.
@@ -1602,9 +1662,15 @@ resume` takes a `current_head` and refuses when it differs from the
       credential minting are not implemented; the synthesized plan carries
       `grants: None`, so a resumed session re-arms neither a wall-clock bound
       nor a CPU share; a session parked with `approval_head: None` resumes
-      with no ledger fence at all. WS5 is partial: retention classes, expiry,
-      a scheduler that calls `demote`, and actual byte movement between tiers
-      remain undelivered.
+      with no ledger fence at all. WS5 is partial: a per-record retention
+      deadline landed (set at park, extend-only `agent-session renew`, alive or
+      expired in `ls`/`show`), but retention classes, a scheduler that acts on
+      expiry, and actual byte movement between tiers remain undelivered. The
+      scheduler is held back on purpose: no demotion yet releases what the
+      lower tier claims to. The checkpoint sweep keeps the parent-link closure
+      of every checkpoint it retains (tagged, inside the age cut, or a session
+      resume point), and `mvmctl machine checkpoint rm` refuses a checkpoint a
+      stored descendant restores through, naming it.
 
       WS6 is done and WS7 is partial, both via
       `2026-08-19-session-cli-and-audit` and
@@ -1622,6 +1688,15 @@ resume` takes a `current_head` and refuses when it differs from the
       derived from it; the derived file is not itself pinned. WS7 still lacks
       whole-session chain verification and several lifecycle events; WS8 BDD
       remains untouched.
+
+      Park and resume are retry-exact
+      (`specs/sprint/delivery/session-exact-replay-and-retention.md`): the
+      record keeps its last transition's identity
+      (`mvm_core::session_transition`), and a retry carrying
+      `--expected-generation` replays the recorded result with no write and no
+      chain entry, or refuses naming the input or generation that differs. A
+      retried `resume --boot` is refused rather than replayed. `renew` takes the
+      same fence plus `--expected-deadline`, and emits `session.renewed`.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

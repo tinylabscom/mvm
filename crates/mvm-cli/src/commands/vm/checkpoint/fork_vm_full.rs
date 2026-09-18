@@ -379,6 +379,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
+            outputs: Vec::new(),
             network_mode: super::parent_network_mode(p.checkpoint, p.store),
             tenant: &tenant,
             vm_name: p.child_vm_name,
@@ -604,7 +605,11 @@ fn deliver_hvf_fork_post_restore(
     );
     anyhow::ensure!(
         outcome.reseeded,
-        "guest acknowledged PostRestore without rotating its generation identity"
+        "refusing the fork: {}",
+        mvm_agentd::vsock::describe_missing_reseed(
+            outcome.reseed_shortfall,
+            outcome.detail.as_deref()
+        )
     );
     anyhow::ensure!(
         outcome.clock_resynced,
@@ -653,7 +658,8 @@ fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply)
     anyhow::ensure!(reply.acknowledged, "guest did not acknowledge PostRestore");
     anyhow::ensure!(
         reply.reseeded,
-        "guest acknowledged PostRestore without rotating its generation identity"
+        "refusing the fork: {}",
+        mvm_agentd::vsock::describe_missing_reseed(reply.reseed_shortfall, reply.detail.as_deref())
     );
     anyhow::ensure!(
         reply.clock_resynced,
@@ -923,33 +929,40 @@ mod tests {
 
     #[test]
     fn fork_post_restore_requires_acknowledgement_and_reseed() {
-        let acknowledged = mvm_agentd::vsock::PostRestoreReply {
+        use mvm_agentd::vsock::{PostRestoreReply, ReseedShortfall};
+        let proven = PostRestoreReply {
             acknowledged: true,
             reseeded: true,
             clock_resynced: true,
+            detail: None,
+            reseed_shortfall: None,
         };
-        assert!(require_fork_post_restore_success(acknowledged).is_ok());
+        assert!(require_fork_post_restore_success(proven.clone()).is_ok());
 
-        let not_reseeded = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: true,
+        let helper_missing = PostRestoreReply {
             reseeded: false,
-            clock_resynced: true,
+            detail: Some("restore reseed unavailable: no helper".into()),
+            reseed_shortfall: Some(ReseedShortfall::HelperMissing),
+            ..proven.clone()
         };
-        let err = require_fork_post_restore_success(not_reseeded).unwrap_err();
-        assert!(err.to_string().contains("without rotating"));
+        let err = require_fork_post_restore_success(helper_missing).unwrap_err();
+        assert!(
+            err.to_string().contains("rebuild the image") && err.to_string().contains("no helper"),
+            "{err}"
+        );
 
-        let not_acknowledged = mvm_agentd::vsock::PostRestoreReply {
+        let not_acknowledged = PostRestoreReply {
             acknowledged: false,
             reseeded: false,
             clock_resynced: false,
+            ..proven.clone()
         };
         let err = require_fork_post_restore_success(not_acknowledged).unwrap_err();
         assert!(err.to_string().contains("did not acknowledge"));
 
-        let not_clock_resynced = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: true,
-            reseeded: true,
+        let not_clock_resynced = PostRestoreReply {
             clock_resynced: false,
+            ..proven
         };
         let err = require_fork_post_restore_success(not_clock_resynced).unwrap_err();
         assert!(err.to_string().contains("wall clock"));
