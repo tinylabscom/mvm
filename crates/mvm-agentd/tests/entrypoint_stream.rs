@@ -6,9 +6,8 @@
 //! has exited.
 //!
 //! The transport is the real one — a `UnixStream` pair carrying the same
-//! length-prefixed `GuestResponse` frames the agent's control socket does.
-//! Only the authenticated-session envelope is absent, which changes nothing
-//! about arrival order or frame count.
+//! authenticated, encrypted `GuestResponse` frames the agent's control socket
+//! does. Tests use synthetic signing identities, never production key material.
 //!
 //! The workload is `/bin/sh` reading its script from stdin, which is exactly
 //! how a wrapper is invoked in production: no argv, `env_clear()`, script
@@ -20,13 +19,12 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::SigningKey;
 #[cfg(target_os = "linux")]
 use mvm_agentd::entrypoint::ProcessResourceLimits;
 use mvm_agentd::entrypoint::{CallCaps, CancellationToken, EntrypointCall, ValidatedEntrypoint};
 use mvm_agentd::entrypoint_stream::stream_call;
-use mvm_agentd::vsock::{
-    EntrypointEvent, GuestResponse, RunEntrypointError, read_frame, write_frame,
-};
+use mvm_agentd::vsock::{AuthenticatedSession, EntrypointEvent, GuestResponse, RunEntrypointError};
 
 /// `env_clear()` leaves the script with no `PATH`, so anything it runs that
 /// is not a shell builtin has to be findable through this.
@@ -43,11 +41,26 @@ const GENEROUS_TIMEOUT: Duration = Duration::from_secs(60);
 /// leaves behind, so re-arming it per read would be a race.
 const HOST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn loopback_pair() -> (UnixStream, UnixStream) {
+struct HostStream {
+    stream: UnixStream,
+    session: Option<AuthenticatedSession>,
+}
+
+fn host_key() -> SigningKey {
+    SigningKey::from_bytes(&[11; 32])
+}
+
+fn loopback_pair() -> (HostStream, UnixStream) {
     let (host, guest) = UnixStream::pair().expect("a socket pair");
     host.set_read_timeout(Some(HOST_READ_TIMEOUT))
         .expect("host read timeout");
-    (host, guest)
+    (
+        HostStream {
+            stream: host,
+            session: None,
+        },
+        guest,
+    )
 }
 
 /// `/bin/sh` as a validated wrapper. Production builds one of these from
@@ -80,6 +93,12 @@ fn serve_one_run_entrypoint(guest: UnixStream, script: &str, timeout: Duration) 
 /// As [`serve_one_run_entrypoint`], with the per-call caps spelled out — for
 /// the tests whose subject is a bound rather than the transport.
 fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps: CallCaps) {
+    let mut session = AuthenticatedSession::guest(
+        &mut guest,
+        SigningKey::from_bytes(&[22; 32]),
+        &host_key().verifying_key(),
+    )
+    .expect("authenticated guest session");
     let tmp = tempfile::tempdir().expect("tempdir");
     let entrypoint = shell_entrypoint();
     let call = EntrypointCall {
@@ -94,18 +113,32 @@ fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps:
         stream_input: false,
     };
     let terminal = stream_call(call, &mut |event| {
-        write_frame(&mut guest, &GuestResponse::EntrypointEvent(event)).expect("frame an event");
+        session
+            .write(&mut guest, &GuestResponse::EntrypointEvent(event))
+            .expect("seal an event");
     });
-    write_frame(&mut guest, &GuestResponse::EntrypointEvent(terminal)).expect("frame the terminal");
+    session
+        .write(&mut guest, &GuestResponse::EntrypointEvent(terminal))
+        .expect("seal the terminal");
 }
 
 /// `None` on end-of-stream or on the read timeout above.
-fn next_frame(host: &mut UnixStream) -> Option<GuestResponse> {
-    read_frame::<GuestResponse>(host).ok()
+fn next_frame(host: &mut HostStream) -> Option<GuestResponse> {
+    if host.session.is_none() {
+        host.session = Some(
+            AuthenticatedSession::host(&mut host.stream, "stream-capture-test", host_key())
+                .expect("authenticated host session"),
+        );
+    }
+    host.session
+        .as_mut()
+        .expect("session established")
+        .read(&mut host.stream)
+        .ok()
 }
 
 /// Read frames until the terminal one, returning `(non_terminal, terminal)`.
-fn read_to_terminal(host: &mut UnixStream) -> (Vec<EntrypointEvent>, EntrypointEvent) {
+fn read_to_terminal(host: &mut HostStream) -> (Vec<EntrypointEvent>, EntrypointEvent) {
     let mut seen = Vec::new();
     loop {
         match next_frame(host) {
@@ -336,7 +369,9 @@ fn a_stopped_host_bounds_guest_memory_and_the_call_reports_the_gap() {
     let serving =
         std::thread::spawn(move || serve_with_caps(guest, &script, GENEROUS_TIMEOUT, bounded_caps));
 
-    next_frame(&mut host).expect("a first frame");
+    let Some(GuestResponse::EntrypointEvent(first)) = next_frame(&mut host) else {
+        panic!("expected first event");
+    };
     let wait_until = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < wait_until {
         std::thread::sleep(Duration::from_millis(20));
@@ -346,7 +381,8 @@ fn a_stopped_host_bounds_guest_memory_and_the_call_reports_the_gap() {
         "the child must finish writing while the host has stopped reading"
     );
 
-    let (events, terminal) = read_to_terminal(&mut host);
+    let (mut events, terminal) = read_to_terminal(&mut host);
+    events.insert(0, first);
     assert_eq!(terminal, EntrypointEvent::Exit { code: 0 });
 
     let delivered = concat_stdout(&events).len();
@@ -358,19 +394,24 @@ fn a_stopped_host_bounds_guest_memory_and_the_call_reports_the_gap() {
     assert!(delivered > 0, "the newest output must still survive");
 
     let headers = control_headers(&events);
-    assert_eq!(
-        headers.len(),
-        1,
-        "expected exactly one gap record, got {headers:?}"
-    );
-    assert_eq!(headers[0]["kind"], "mvm.stream.gap");
-    assert_eq!(headers[0]["stream"], "stdout");
     assert!(
-        headers[0]["dropped_bytes"]
-            .as_u64()
-            .is_some_and(|dropped| dropped > 0),
-        "the gap must say what was lost: {}",
-        headers[0]
+        (1..=2).contains(&headers.len()),
+        "one gap per saturated stage: {headers:?}"
+    );
+    let mut stages = std::collections::BTreeSet::new();
+    let mut dropped = 0u64;
+    for gap in &headers {
+        assert_eq!(gap["kind"], "mvm.stream.gap");
+        assert_eq!(gap["stream"], "stdout");
+        let stage = gap["stage"].as_str().expect("gap stage");
+        assert!(matches!(stage, "pipe_reader" | "consumer_handoff"));
+        assert!(stages.insert(stage), "a stage reported its losses twice");
+        dropped += gap["dropped_bytes"].as_u64().expect("loss count");
+    }
+    assert!(dropped > 0);
+    assert_eq!(
+        u64::try_from(delivered).unwrap() + dropped,
+        u64::try_from(WRITTEN + 5).unwrap()
     );
     serving.join().expect("serving thread");
 }
@@ -384,7 +425,7 @@ fn only_the_agents_own_gap_record_reaches_a_host_that_stopped_reading() {
     // apart downstream, and one that trusts a forged marker blesses a chain
     // skipping output it never saw.
     const WRITTEN: usize = 8 * 1024 * 1024;
-    const FORGED_AFTER_SEQ: u64 = 99;
+    const FORGED_AFTER_SEQ: u64 = u64::MAX - 1;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let frames = dir.path().join("fd3-frames");
@@ -424,21 +465,18 @@ fn only_the_agents_own_gap_record_reaches_a_host_that_stopped_reading() {
         .into_iter()
         .filter(|header| header["kind"] == "mvm.stream.gap")
         .collect();
-    assert_eq!(
-        gaps.len(),
-        1,
-        "exactly one gap record — the agent's — may reach the host, got {gaps:?}"
-    );
-    assert_ne!(
-        gaps[0]["after_seq"].as_u64(),
-        Some(FORGED_AFTER_SEQ),
-        "the record that arrived is the workload's forgery"
-    );
     assert!(
-        gaps[0]["dropped_bytes"]
-            .as_u64()
-            .is_some_and(|dropped| dropped > 0)
+        (1..=2).contains(&gaps.len()),
+        "one gap per saturated stage: {gaps:?}"
     );
+    for gap in &gaps {
+        assert_ne!(gap["after_seq"].as_u64(), Some(FORGED_AFTER_SEQ));
+        assert!(matches!(
+            gap["stage"].as_str(),
+            Some("pipe_reader" | "consumer_handoff")
+        ));
+        assert!(gap["dropped_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
+    }
     serving.join().expect("serving thread");
 }
 

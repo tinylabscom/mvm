@@ -141,6 +141,16 @@ share the 48-request data admission budget.
 | Console PTY traffic                         | Raw bytes on a dedicated vsock port           | Raw transport     | TTY-shaped reads                    | Close or PTY exit                        | Kernel/socket backpressure; only the host CID may connect.                     | No.                                             |
 | Declared ingress                            | Authenticated FlowMux frames on `NetworkFlow` | 256 KiB per frame | Credit-bounded stream chunks        | Flow close/refusal                       | Shared per-VM FlowMux budget.                                                  | Metadata only; payload bytes never enter audit. |
 
+Entrypoint capture bounds both pipe-reader and consumer handoffs. Queue offers
+do not wait for capacity; saturation discards old stdout/stderr and emits
+`mvm.stream.gap` with a `pipe_reader` or `consumer_handoff` stage. Reader failures
+emit `mvm.stream.capture_incomplete` with an unknown tail. Completion transfers
+bounded tails without queue sends; each pipe retains order, but cross-pipe order
+is unspecified. A ring may retain one newest frame above a sub-frame byte cap,
+in addition to fixed queue slots. Pending tails/loss summaries may wait for the
+next offer or EOF. This is invocation capture, not detached, every-VM tracing;
+synchronous host sinks and pipe-EOF waits still exist.
+
 ### Redaction invariant
 
 The following audit / readiness / progress / receipt surfaces are

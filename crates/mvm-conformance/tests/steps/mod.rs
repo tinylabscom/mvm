@@ -25,6 +25,7 @@ mod sdk_sidecar;
 mod secrets_pii;
 mod service_plane;
 mod snapshot;
+pub(crate) mod stream_capture;
 mod transcript;
 mod verified_boot;
 mod volume;
