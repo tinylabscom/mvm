@@ -857,7 +857,7 @@ pub fn execute_streaming(
         cmd.pre_exec(move || {
             install_fd3_in_child(write_raw)?;
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::close_descriptors_from(4, Some(program_fd))?;
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(4, Some(program_fd))?;
             #[cfg(target_os = "linux")]
             if let Some(limits) = resource_limits {
                 apply_process_resource_limits(limits)?;
