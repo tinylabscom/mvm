@@ -29,12 +29,14 @@ pub(crate) fn run_shell_with_timeout(
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(cmd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    let mut child = command.spawn()?;
     let _owned = mvm_agentd::child_wait::OwnedChild::new(child.id());
 
     // Poll until the child exits or the timeout fires.

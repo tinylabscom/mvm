@@ -445,9 +445,11 @@ fn build_command(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+
     // SAFETY: pre_exec's closure runs post-fork/pre-exec, where only async-
-    // signal-safe calls are allowed. It calls only setrlimit (async-signal-safe),
-    // allocates nothing, and touches no shared Rust state.
+    // signal-safe calls are allowed. It calls only raw syscalls, allocates
+    // nothing, and touches no shared Rust state.
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {

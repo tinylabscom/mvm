@@ -632,6 +632,7 @@ fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, entrypoint::spawn_fd_to_keep(entrypoint));
 
     // Workers execute through the validated `/proc/self/fd/<n>` path, so keep
     // that descriptor and close every other inherited agent descriptor.

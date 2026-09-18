@@ -136,13 +136,14 @@ fn do_run_detached_with(
         .stdout(Stdio::from(console_out))
         .stderr(Stdio::from(console_err));
 
-    // SAFETY: runs in the post-fork pre-exec child. It uses only
-    // async-signal-safe syscalls, detaches the workload into its own session,
-    // and removes any non-contract descriptor inherited from the agent.
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+
+    // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` is
+    // async-signal-safe and is the only work done here — it detaches the
+    // workload into its own session so it outlives this request's
+    // connection and isn't tied to the agent's controlling terminal.
     unsafe {
         cmd.pre_exec(|| {
-            #[cfg(target_os = "linux")]
-            mvm_agentd::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -172,9 +173,10 @@ fn do_run_detached_with(
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         };
-        let _ = std::process::Command::new(&exit_report_bin)
-            .arg(code.to_string())
-            .status();
+        let mut command = std::process::Command::new(&exit_report_bin);
+        command.arg(code.to_string());
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        let _ = command.status();
     });
 
     GuestResponse::DetachedStarted { pid }

@@ -38,6 +38,7 @@ mod linux {
         command.env_clear();
         command.envs(resolved.vars());
         command.current_dir(resolved.working_dir());
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
 
         let err = command.exec();
         eprintln!(

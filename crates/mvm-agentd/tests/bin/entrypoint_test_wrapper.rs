@@ -33,6 +33,15 @@ use std::io::{self, Read, Write};
 use std::time::Duration;
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--list-fds")) {
+        let mut out = io::stdout().lock();
+        for (fd, target) in open_descriptors() {
+            writeln!(out, "{fd} {target}").unwrap();
+        }
+        out.flush().unwrap();
+        return;
+    }
+
     let mut stdin_bytes = Vec::new();
     if let Err(e) = io::stdin().read_to_end(&mut stdin_bytes) {
         eprintln!("entrypoint-test-wrapper: read stdin: {e}");

@@ -151,17 +151,7 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
         .stderr(Stdio::piped());
     #[cfg(unix)]
     builder.process_group(0);
-    // The stream process owns only its standard streams. Close every other
-    // agent descriptor in the post-fork child as defense in depth against a
-    // future descriptor that misses close-on-exec at creation.
-    #[cfg(unix)]
-    unsafe {
-        builder.pre_exec(|| {
-            #[cfg(target_os = "linux")]
-            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
-            Ok(())
-        });
-    }
+    crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
     let mut child = match builder.spawn() {
         Ok(c) => c,
         Err(e) => {
