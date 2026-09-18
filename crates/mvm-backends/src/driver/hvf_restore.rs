@@ -362,7 +362,13 @@ fn prepare_child_state_dir(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfi
 ///
 /// Longer than a cold boot's pid-file wait because more happens before the
 /// signal: the frame is read and checked and every device and CPU is restored.
-/// None of it scales with guest RAM — the RAM is mapped, not read.
+/// None of it scales with guest RAM — the RAM is mapped, not read — so the
+/// bound is fixed rather than sized to the guest. Measured spawn-to-ready on a
+/// debug build under heavy host load was tens to a few hundred milliseconds for
+/// 1 GiB and 4 GiB guests alike; the rest of the budget covers the
+/// supervisor's one-off self-signing on its first launch after a rebuild. Each
+/// restore logs its spawn-to-ready time, so a regression shows up before it
+/// reaches this bound.
 pub const RESTORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How a restore starts its supervisor.
@@ -426,6 +432,12 @@ fn restore_hvf_vm_with(
     let mut cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
     prepare_child_state_dir(req, &cfg)?;
+    // The private copies are created in the state dir under a temporary name,
+    // so it has to be reachable by this user alone before one is made. State
+    // dirs are created at the process umask; this puts it, and every
+    // directory above it inside the mvm home, at 0700.
+    mvm_core::config::create_private_dir(req.state_dir)
+        .with_context(|| format!("making {} private", req.state_dir.display()))?;
     // Verification comes before anything that could map: the supervisor is
     // handed only descriptors of private copies that already matched the
     // checkpoint's recorded digests, and it refuses a restore named by path.
@@ -434,6 +446,7 @@ fn restore_hvf_vm_with(
     cfg.restore_fds = Some(fds);
 
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
+    let spawned_at = Instant::now();
     let mut child = spawner.spawn(req, &cfg, &[fds.ram, fds.frame])?;
     // The supervisor holds its own copies now; ours close here.
     drop(saved);
@@ -452,7 +465,16 @@ fn restore_hvf_vm_with(
         let _ = child.wait();
         return Err(error.context(restore_failure(req, &cfg, "could not be configured")));
     }
-    await_restored(&mut child, req, &cfg, ready_timeout)
+    let restored = await_restored(&mut child, req, &cfg, ready_timeout)?;
+    let spawn_to_ready = spawned_at.elapsed();
+    tracing::info!(
+        vm = req.vm_name,
+        memory_mib = cfg.memory_mib,
+        spawn_to_ready_ms = u64::try_from(spawn_to_ready.as_millis()).unwrap_or(u64::MAX),
+        ready_timeout_ms = u64::try_from(ready_timeout.as_millis()).unwrap_or(u64::MAX),
+        "HVF restore: supervisor reported the machine running"
+    );
+    Ok(restored)
 }
 
 /// Wait for the supervisor to announce the restored machine running.
@@ -1174,6 +1196,26 @@ mod tests {
             1,
             "verified state reaches the spawner"
         );
+    }
+
+    /// State dirs are created at the umask, so a restore locks its own down
+    /// before creating a private copy in it rather than refusing to run.
+    #[test]
+    fn a_restore_makes_its_state_dir_private_before_copying_into_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        restorable(tmp.path());
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spawner = ScriptedSupervisor::new("cat >/dev/null; exit 99");
+        let content = matching_content();
+        let _ = restore_hvf_vm_with(
+            &restore_request(tmp.path(), &content),
+            &spawner,
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(spawner.spawned.get(), 1, "verification passed");
+        let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     /// The supervisor publishes its pid before it adopts, maps or validates
