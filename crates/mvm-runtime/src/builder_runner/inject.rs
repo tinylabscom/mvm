@@ -84,6 +84,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         snapshot_frame: None,
         restore_ram: None,
         restore_frame: None,
+        restore_fds: None,
         timeout_secs: 120,
         // The builder VM boots from no admitted plan: no bound to enforce.
         plan: None,

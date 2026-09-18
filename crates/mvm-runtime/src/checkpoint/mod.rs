@@ -149,14 +149,37 @@ impl CheckpointStore {
 /// the largest blob rather than the sum of all of them. The error reported is
 /// the first failing blob in manifest order, whichever finished first.
 pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
+    verify_content_except(store, meta, &[])
+}
+
+/// [`verify_content`], leaving the digest of each blob named in `deferred` to
+/// the restorer that loads it.
+///
+/// Only for a restorer that verifies those blobs itself, against the same
+/// recorded digests, on the exact bytes it loads — hashing them here as well
+/// would read multi-gigabyte machine state twice and still leave a window
+/// between this check and the load. A deferred blob must still exist.
+fn verify_content_except(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    deferred: &[&str],
+) -> Result<()> {
     let dir = store.content_dir(&meta.id);
-    let paths: Vec<PathBuf> = meta
+    let (deferred_blobs, hashed): (Vec<_>, Vec<_>) = meta
         .content
         .iter()
-        .map(|blob| dir.join(&blob.name))
-        .collect();
+        .partition(|blob| deferred.contains(&blob.name.as_str()));
+    for blob in deferred_blobs {
+        anyhow::ensure!(
+            dir.join(&blob.name).is_file(),
+            "checkpoint '{}' blob {:?} is missing",
+            meta.id,
+            blob.name
+        );
+    }
+    let paths: Vec<PathBuf> = hashed.iter().map(|blob| dir.join(&blob.name)).collect();
     let digests = sha256_files_parallel(paths.clone());
-    for ((blob, path), actual) in meta.content.iter().zip(&paths).zip(digests) {
+    for ((blob, path), actual) in hashed.iter().zip(&paths).zip(digests) {
         let actual =
             actual.with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
         if actual != blob.sha256 {
@@ -358,14 +381,36 @@ pub struct RestoredChild<'a> {
     /// The CPU share the child's admitted plan grants, or `None` for a plan
     /// that grants none — which means unbounded, not zero.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+    /// The parent's content manifest, already verified against the signed
+    /// chain. A restorer that verifies blobs on load checks them against this.
+    pub content: &'a [ContentBlob],
 }
 
 /// Stages a forked child's snapshot into position and starts the VM. Taken as a
-/// callback so [`fork_vm_full`] is testable without a live
-/// hypervisor, and so the VMM-specific restorers can live in `mvm-backends`
-/// without this crate naming them: `FcForkRestorer` loads Firecracker's
-/// snapshot triple, `HvfForkRestorer` maps private RAM and restores the frame.
-pub type ForkRestore<'a> = dyn Fn(&RestoredChild<'_>) -> Result<()> + 'a;
+/// seam so [`fork_vm_full`] is testable without a live hypervisor, and so the
+/// VMM-specific restorers can live in `mvm-backends` without this crate naming
+/// them: `FcForkRestorer` loads Firecracker's snapshot triple, `HvfForkRestorer`
+/// maps private RAM and restores the frame. Any `Fn(&RestoredChild)` closure is
+/// a restorer that verifies nothing itself.
+pub trait ForkRestorer {
+    /// Blobs this restorer verifies against [`RestoredChild::content`] on the
+    /// exact bytes it loads, so the fork need not hash them first.
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Bring the child up from its staged copies.
+    fn restore(&self, child: &RestoredChild<'_>) -> Result<()>;
+}
+
+impl<F: Fn(&RestoredChild<'_>) -> Result<()>> ForkRestorer for F {
+    fn restore(&self, child: &RestoredChild<'_>) -> Result<()> {
+        self(child)
+    }
+}
+
+/// The restorer [`fork_vm_full`] takes.
+pub type ForkRestore<'a> = dyn ForkRestorer + 'a;
 
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity AND its content-address against the signed audit chain, CoW-clone
@@ -467,7 +512,7 @@ pub fn fork_vm_full(
             parent.vm_name
         );
     }
-    verify_content(store, &parent)?;
+    verify_content_except(store, &parent, restore.verifies_on_load())?;
     // Same fail-closed posture as fork_checkpoint: the parent's sealed record
     // must still match the digest the host signed at creation before we clone.
     verify_checkpoint_against_chain(anchor, &parent)?;
@@ -508,10 +553,11 @@ pub fn fork_vm_full(
     // check is what the restorer starts the child's VMM under. Without this the
     // check would decide only what may be *recorded* for the child, and a child
     // admitted to 1.5 cores would restore with no quota at all.
-    restore(&RestoredChild {
+    restore.restore(&RestoredChild {
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
         cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),
+        content: &parent.content,
     })?;
 
     let child = CheckpointMeta::builder(
@@ -959,6 +1005,9 @@ pub trait VmFullRestore {
     /// checkpoint; the backend rebuilds the target state dir from it (every stop
     /// reaps the live one). `None` for legacy checkpoints — fall through to the
     /// existing live-state-dir behavior.
+    ///
+    /// `content` is the checkpoint's manifest, already verified against the
+    /// signed chain.
     fn restore(
         &self,
         target_vm: &str,
@@ -966,7 +1015,14 @@ pub trait VmFullRestore {
         memory: &Path,
         machine_id: &Path,
         config_src: Option<&Path>,
+        content: &[ContentBlob],
     ) -> Result<()>;
+
+    /// Blobs this restorer verifies against `content` on the exact bytes it
+    /// loads, so [`restore_checkpoint`] need not hash them first.
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// The same-identity restore mechanism for the VMM that produced `meta`.
@@ -1029,7 +1085,7 @@ pub fn restore_checkpoint(
             meta.id
         );
     }
-    verify_content(store, &meta)?;
+    verify_content_except(store, &meta, restore.verifies_on_load())?;
     verify_checkpoint_against_chain(anchor, &meta)?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
     let dir = store.content_dir(&meta.id);
@@ -1047,6 +1103,7 @@ pub fn restore_checkpoint(
         &dir.join("memory.bin"),
         &dir.join("machine-id"),
         config_src,
+        &meta.content,
     )
 }
 
@@ -2021,6 +2078,7 @@ mod tests {
             memory: &Path,
             machine_id: &Path,
             config_src: Option<&Path>,
+            _content: &[ContentBlob],
         ) -> Result<()> {
             *self.seen.borrow_mut() = Some((
                 target_vm.to_string(),
@@ -2814,6 +2872,28 @@ mod tests {
             assert!(restorer.seen.borrow().is_none(), "no VMM was started");
             assert!(!dest.exists(), "no saved state was cloned");
         }
+    }
+
+    /// A restorer that verifies blobs on load still requires them to exist:
+    /// deferring the digest is not permission to proceed without the file.
+    #[test]
+    fn deferred_blobs_must_still_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-deferred");
+        let memory = store
+            .content_dir(&parent.id)
+            .join(mvm_core::checkpoint::MEMORY_BLOB);
+
+        std::fs::write(&memory, b"tampered").unwrap();
+        verify_content(&store, &parent).expect_err("the full check hashes memory.bin");
+        verify_content_except(&store, &parent, &[mvm_core::checkpoint::MEMORY_BLOB])
+            .expect("a deferred blob is left to the restorer's own check");
+
+        std::fs::remove_file(&memory).unwrap();
+        let error = verify_content_except(&store, &parent, &[mvm_core::checkpoint::MEMORY_BLOB])
+            .expect_err("a deferred blob must still exist");
+        assert!(error.to_string().contains("missing"), "{error}");
     }
 
     #[test]

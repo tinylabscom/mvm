@@ -26,6 +26,7 @@ use super::HvfError;
 #[cfg(test)]
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
+pub use super::host_channels::HostChannels;
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::mmio_layout::{
     BALLOON_IRQ, BALLOON_MMIO_BASE, MAX_DISKS, RNG_IRQ, RNG_MMIO_BASE, VSOCK_IRQ, VSOCK_MMIO_BASE,
@@ -297,83 +298,6 @@ pub struct KernelShutdownTiming {
     pub vcpu_destroy: Duration,
     /// Time spent destroying the process-global HVF VM.
     pub vm_destroy: Duration,
-}
-
-/// Host-supplied boot inputs the supervisor threads into a guest: the vsock
-/// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
-/// egress relay UDS) plus the kernel cmdline. Bundled so the boot entry stays
-/// under the argument-count lint. The two socket paths fall back to the
-/// `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live drivers);
-/// the productionized path threads them through the supervisor config.
-#[derive(Default)]
-pub struct HostChannels {
-    pub agent_socket: Option<PathBuf>,
-    pub substitution_socket: Option<PathBuf>,
-    /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
-    /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
-    /// closed at the bridge (an hvf VM must always carry a relay socket).
-    pub egress_relay: Option<PathBuf>,
-    /// Trusted-builder tier: relay egress without the per-workload byte-rate
-    /// cap. False for every workload.
-    pub trusted_builder_egress: bool,
-    /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
-    /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
-    /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
-    pub broker_socket: Option<PathBuf>,
-    /// Additional host-dial listeners, including telemetry and admitted console
-    /// data channels. Telemetry is present independently of console grants.
-    pub console_data_sockets: Vec<(u32, PathBuf)>,
-    /// Builder-tier control listeners: job dispatch and the resident daemon's
-    /// typed channel, for a persistent builder VM. Empty for every workload.
-    /// Rides the same host-dial bridge as the console ports — the guest listens,
-    /// the host dials — and the two ranges never overlap.
-    pub builder_control_sockets: Vec<(u32, PathBuf)>,
-    /// Full kernel cmdline. `None` ⇒ the built-in [`default_bootargs`] (workload
-    /// default: `init=/init`). A caller that boots an image expecting a different
-    /// PID 1 — e.g. the builder rootfs, whose init is the static
-    /// `/sbin/mvm-host-vm-init`, not the `/init` shell script — sets it here.
-    /// `MVM_HVF_BOOTARGS` still overrides both (dev hook).
-    pub cmdline: Option<String>,
-    /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
-    /// several GiB so `nix build` doesn't OOM.
-    pub mem_mib: u32,
-    /// Guest vCPUs. `0` ⇒ 1.
-    ///
-    /// Read by exactly two things that must agree: the device tree, which tells
-    /// the guest how many CPUs exist, and the vCPU creation below. A tree that
-    /// describes more CPUs than the VMM creates hangs the boot waiting for
-    /// secondaries; fewer, and the extra vCPUs are never onlined.
-    pub vcpus: u32,
-    /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
-    /// Host console log to mirror guest output into as the guest emits it.
-    ///
-    /// The whole-run transcript comes back in [`KernelBootResult::console`]
-    /// either way; this is what makes it readable *before* the run loop
-    /// returns, so a guest that never finishes booting can be diagnosed while
-    /// it is still hung instead of only once it has been stopped. Opened
-    /// write-only: the console carries guest output to the host and never the
-    /// other way.
-    pub console_log: Option<PathBuf>,
-    /// Optional host-visible marker acknowledged after the run loop enters its
-    /// pause hold. It is removed when resume is observed.
-    pub pause_state: Option<PathBuf>,
-    /// Host-side request file asking the paused run loop to serialize RAM and
-    /// deterministic device/vCPU state.
-    pub snapshot_request: Option<PathBuf>,
-    /// Fixed supervisor-owned raw RAM output for a parent snapshot.
-    pub snapshot_ram: Option<PathBuf>,
-    /// Fixed supervisor-owned vCPU/device frame output for a parent snapshot.
-    pub snapshot_frame: Option<PathBuf>,
-    /// Raw parent RAM file to map privately for a restored child.
-    pub restore_ram: Option<PathBuf>,
-    /// Complete parent frame to restore into a fresh child VMM.
-    pub restore_frame: Option<PathBuf>,
-    /// Fixed supervisor-owned live-handoff control socket.
-    pub handoff_socket: Option<PathBuf>,
-    /// Trusted root from which the supervisor derives child channel paths.
-    pub handoff_root: Option<PathBuf>,
-    /// Host identity public key pinned for handoff authentication.
-    pub handoff_verify_key: Option<String>,
 }
 
 static NEVER_STOP: AtomicBool = AtomicBool::new(false);
@@ -683,13 +607,15 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // them, so idle residency tracks the working set instead of `ram_size`.
     // `guest_ram` owns the region and unmaps it on drop, after `hv_vm_destroy`.
     let mut guest_ram = GuestRam::new(ram_size)?;
-    let restore_mapping_micros = if let Some(path) = channels.restore_ram.as_deref() {
-        let started = Instant::now();
-        guest_ram.map_private_file(path)?;
-        Some(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
-    } else {
-        None
-    };
+    let started = Instant::now();
+    let restore_frame = channels
+        .restore
+        .as_ref()
+        .map(|image| super::snapshot::map_restore_image(image, &mut guest_ram))
+        .transpose()?;
+    let restore_mapping_micros = restore_frame
+        .as_ref()
+        .map(|_| u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
     let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
@@ -743,7 +669,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         }));
     }
 
-    if channels.restore_frame.is_none() {
+    if restore_frame.is_none() {
         kernel.load_into(&mut guest_ram, load_off)?;
         guest_ram.copy_at(dtb_off, &dtb)?;
         if let Some(rd) = initramfs {
@@ -784,8 +710,8 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
                 snapshot_frame: channels.snapshot_frame,
-                restore_ram: channels.restore_ram,
-                restore_frame: channels.restore_frame,
+                restore_frame,
+                ready_marker: channels.ready_marker,
                 handoff_socket: channels.handoff_socket,
                 handoff_root: channels.handoff_root,
                 handoff_verify_key: channels.handoff_verify_key,
@@ -848,8 +774,10 @@ struct RunInputs {
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
     snapshot_frame: Option<PathBuf>,
-    restore_ram: Option<PathBuf>,
-    restore_frame: Option<PathBuf>,
+    /// The validated frame of a restore whose RAM is already mapped.
+    restore_frame: Option<Vec<u8>>,
+    /// See [`HostChannels::ready_marker`].
+    ready_marker: Option<PathBuf>,
     handoff_socket: Option<PathBuf>,
     handoff_root: Option<PathBuf>,
     handoff_verify_key: Option<String>,
@@ -857,6 +785,15 @@ struct RunInputs {
     cpu_millicores: Option<u32>,
     /// Where to write the measured quota record on exit.
     quota_record: Option<PathBuf>,
+}
+
+/// Announce that the machine's state is applied and its vCPUs are released.
+///
+/// Renamed into place, so a launcher polling for the marker never reads it
+/// half-written.
+fn publish_ready_marker(marker: &std::path::Path) -> Result<(), HvfError> {
+    mvm_core::util::atomic_io::atomic_write(marker, b"ready\n")
+        .map_err(|_| HvfError::SnapshotState("ready marker write failed"))
 }
 
 /// Raise or lower a device interrupt line on the process-global in-kernel GIC.
@@ -1172,7 +1109,12 @@ fn run_primary<B: run::DeviceBus>(
                     "a parked state per CPU beyond the boot CPU"
                 );
 
-                let ram_bytes = guest_ram.snapshot_bytes();
+                // RAM goes first and whole, and the frame is renamed into
+                // place: the host takes the frame's appearance as the signal
+                // that both files are complete, so neither may be visible
+                // half-written.
+                let ram_layout = super::snapshot::write_ram_image(guest_ram, ram_path)
+                    .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
                 let device_bytes = capture_device_states(devices).map_err(|error| {
                     eprintln!("HVF snapshot device capture failed: {error}");
                     HvfError::SnapshotState("snapshot device capture failed")
@@ -1186,16 +1128,14 @@ fn run_primary<B: run::DeviceBus>(
                 let frame = super::snapshot::encode_hvf_snapshot_frame(
                     HVF_SNAPSHOT_BACKEND_KIND,
                     0,
-                    &ram_bytes,
+                    ram_layout,
                     &device_bytes,
                     &gic_bytes,
                     &vcpu_states,
                     &[],
                 )
                 .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
-                std::fs::write(ram_path, &ram_bytes)
-                    .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
-                std::fs::write(frame_path, frame)
+                mvm_core::util::atomic_io::atomic_write(frame_path, &frame)
                     .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
                 std::fs::remove_file(request_path)
                     .map_err(|_| HvfError::SnapshotState("snapshot request cleanup failed"))?;
@@ -1489,8 +1429,8 @@ unsafe fn run(
         snapshot_request,
         snapshot_ram,
         snapshot_frame,
-        restore_ram: _restore_ram,
         restore_frame,
+        ready_marker,
         handoff_socket,
         handoff_root,
         handoff_verify_key,
@@ -1810,14 +1750,13 @@ unsafe fn run(
         let mut restored_boot = None;
         let mut restored_gic = None;
 
-        if let Some(frame_path) = restore_frame.as_deref() {
-            let frame = std::fs::read(frame_path)
-                .map_err(|_| HvfError::SnapshotState("restore frame read failed"))?;
+        if let Some(frame) = restore_frame.as_deref() {
             // Validate the complete frame and its machine shape before
             // constructing restore targets. Device restore mutates live state,
             // so a snapshot from a differently-sized machine must fail first.
-            let restored_vcpus = super::snapshot::hvf_snapshot_vcpu_count(&frame, guest_ram.len())
-                .map_err(|_| HvfError::SnapshotState("restore frame validation failed"))?;
+            let restored_vcpus =
+                super::snapshot::hvf_snapshot_vcpu_count(frame, guest_ram.len())
+                    .map_err(|_| HvfError::SnapshotState("restore frame validation failed"))?;
             if restored_vcpus != vcpus as usize {
                 return Err(HvfError::SnapshotState(
                     "snapshot vCPU count does not match this machine",
@@ -1840,7 +1779,7 @@ unsafe fn run(
             // lets a vCPU's registers be written from the thread that created
             // it, and those threads do not exist yet.
             let restored = super::snapshot::restore_hvf_snapshot_control(
-                &frame,
+                frame,
                 guest_ram.len(),
                 &mut snapshot_targets,
             )
@@ -2019,6 +1958,11 @@ unsafe fn run(
                             }
                         }
                     }
+                }
+                if bring_up.is_ok()
+                    && let Some(marker) = ready_marker.as_deref()
+                {
+                    bring_up = publish_ready_marker(marker);
                 }
                 if bring_up.is_err() {
                     shared.end();
@@ -2634,5 +2578,24 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("worker released");
         worker.join().expect("worker joins");
+    }
+
+    /// The ready marker is written whole, by rename, and replaces a stale one.
+    #[test]
+    fn the_ready_marker_is_published_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir
+            .path()
+            .join(mvm_vmm::host::hvf_supervisor::RESTORE_READY_FILE);
+        std::fs::write(&marker, b"stale").unwrap();
+        publish_ready_marker(&marker).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), b"ready\n");
+        // A parent that is a regular file cannot hold the marker.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        assert_eq!(
+            publish_ready_marker(&blocker.join("marker")),
+            Err(HvfError::SnapshotState("ready marker write failed"))
+        );
     }
 }

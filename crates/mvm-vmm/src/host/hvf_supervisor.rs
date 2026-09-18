@@ -101,6 +101,16 @@ pub fn shutdown_timing_path(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join(SHUTDOWN_TIMING_FILE)
 }
 
+/// Marker a restoring supervisor writes into its state directory once the
+/// saved state is adopted, mapped, validated and applied and its vCPUs are
+/// released. The launcher reports a restore as started only after it appears.
+pub const RESTORE_READY_FILE: &str = "restore.ready";
+
+/// Resolve the restore-ready marker within one canonical VM state directory.
+pub fn restore_ready_path(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join(RESTORE_READY_FILE)
+}
+
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,13 +176,20 @@ pub struct HvfSupervisorConfig {
     /// Fixed supervisor-owned vCPU/device frame output for a parent snapshot.
     #[serde(default)]
     pub snapshot_frame: Option<PathBuf>,
-    /// Raw guest RAM backing file for a restored child. It is mapped private so
-    /// child writes never modify the saved parent bytes.
+    /// The saved guest RAM a restored child is built from. Names the source for
+    /// diagnostics only: the supervisor maps [`Self::restore_fds`], never this
+    /// path, so the bytes it runs are the bytes the launcher verified.
     #[serde(default)]
     pub restore_ram: Option<PathBuf>,
-    /// Complete HVF frame containing vCPU and deterministic device state.
+    /// The saved vCPU and device frame, named for the same reason as
+    /// [`Self::restore_ram`].
     #[serde(default)]
     pub restore_frame: Option<PathBuf>,
+    /// Inherited descriptors of the verified, unlinked private copies of the
+    /// two files above. Set only by the launching process, immediately before
+    /// spawning, and meaningless anywhere else.
+    #[serde(default)]
+    pub restore_fds: Option<HvfRestoreFds>,
     /// Run budget in seconds — a booting kernel never exits on its own, so the
     /// guest is forced out after this long. `0` means no backstop.
     ///
@@ -280,6 +297,65 @@ pub struct HvfSupervisorConfig {
     pub quota_record: Option<PathBuf>,
 }
 
+/// Descriptor numbers of a restore's verified saved state, inherited by the
+/// supervisor from the process that verified it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfRestoreFds {
+    /// Guest RAM image.
+    pub ram: i32,
+    /// vCPU, GIC and device frame.
+    pub frame: i32,
+}
+
+/// Why a config's restore inputs are inconsistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreInputsError {
+    /// One of the two saved-state files is named without the other.
+    Incomplete,
+    /// Saved state is named but no verified descriptors were handed over, so
+    /// the only way to load it would be to reopen it by path.
+    Unverified,
+    /// Descriptors were handed over for a boot that restores nothing.
+    Unexpected,
+    /// Both files were handed over as one descriptor, which cannot have two
+    /// owners.
+    SharedDescriptor,
+}
+
+impl std::fmt::Display for RestoreInputsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Incomplete => "a restore needs both its RAM image and its frame",
+            Self::Unverified => {
+                "a restore was named without verified descriptors; refusing to load saved \
+                 state by path"
+            }
+            Self::Unexpected => "restore descriptors were passed to a boot that restores nothing",
+            Self::SharedDescriptor => "the restore RAM image and frame share one descriptor",
+        })
+    }
+}
+
+impl std::error::Error for RestoreInputsError {}
+
+impl HvfSupervisorConfig {
+    /// The verified descriptors this boot restores from, or `None` for a cold
+    /// boot.
+    pub fn restore_descriptors(&self) -> Result<Option<HvfRestoreFds>, RestoreInputsError> {
+        match (&self.restore_ram, &self.restore_frame, self.restore_fds) {
+            (None, None, None) => Ok(None),
+            (Some(_), Some(_), Some(fds)) if fds.ram == fds.frame => {
+                Err(RestoreInputsError::SharedDescriptor)
+            }
+            (Some(_), Some(_), Some(fds)) => Ok(Some(fds)),
+            (Some(_), Some(_), None) => Err(RestoreInputsError::Unverified),
+            (None, None, Some(_)) => Err(RestoreInputsError::Unexpected),
+            _ => Err(RestoreInputsError::Incomplete),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +392,7 @@ mod tests {
             snapshot_frame: Some("/state/snapshot.frame".into()),
             restore_ram: None,
             restore_frame: None,
+            restore_fds: None,
             timeout_secs: 30,
             plan: None,
             audit_dir: None,
@@ -442,6 +519,7 @@ mod tests {
             snapshot_frame: None,
             restore_ram: None,
             restore_frame: None,
+            restore_fds: None,
             timeout_secs: 30,
             plan: None,
             audit_dir: None,
@@ -495,5 +573,53 @@ mod tests {
         let other_channels = HvfHandoffRequest::signing_message(42, "child", 0b0111);
         assert_ne!(base, other_pid);
         assert_ne!(base, other_channels);
+    }
+
+    #[test]
+    fn a_cold_boot_names_no_restore_inputs() {
+        assert_eq!(full_config_fixture().restore_descriptors(), Ok(None));
+    }
+
+    #[test]
+    fn a_restore_loads_only_through_verified_descriptors() {
+        let mut cfg = full_config_fixture();
+        cfg.restore_ram = Some("/state/memory.bin".into());
+        cfg.restore_frame = Some("/state/memory.bin.hvf-frame".into());
+        assert_eq!(
+            cfg.restore_descriptors(),
+            Err(RestoreInputsError::Unverified)
+        );
+
+        cfg.restore_fds = Some(HvfRestoreFds { ram: 7, frame: 7 });
+        assert_eq!(
+            cfg.restore_descriptors(),
+            Err(RestoreInputsError::SharedDescriptor)
+        );
+
+        let fds = HvfRestoreFds { ram: 7, frame: 8 };
+        cfg.restore_fds = Some(fds);
+        assert_eq!(cfg.restore_descriptors(), Ok(Some(fds)));
+
+        cfg.restore_frame = None;
+        assert_eq!(
+            cfg.restore_descriptors(),
+            Err(RestoreInputsError::Incomplete)
+        );
+
+        cfg.restore_ram = None;
+        assert_eq!(
+            cfg.restore_descriptors(),
+            Err(RestoreInputsError::Unexpected)
+        );
+    }
+
+    #[test]
+    fn restore_descriptors_round_trip_and_refuse_unknown_fields() {
+        let fds = HvfRestoreFds { ram: 3, frame: 4 };
+        let json = serde_json::to_string(&fds).unwrap();
+        assert_eq!(serde_json::from_str::<HvfRestoreFds>(&json).unwrap(), fds);
+        assert!(
+            serde_json::from_str::<HvfRestoreFds>(r#"{"ram":3,"frame":4,"path":"/x"}"#).is_err()
+        );
     }
 }
