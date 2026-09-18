@@ -50,9 +50,9 @@ const BUDGETS: &[ClosureBudget] = &[
 /// dropping `hickory-proto`, `rand` 0.10, `rand_core` 0.10's `rand` edge,
 /// `chacha20` and `data-encoding`.
 ///
-/// Lower than the Linux budget because the Firecracker/KVM stack
-/// (`kvm-bindings`, `kvm-ioctls`, `vmm-sys-util`, `landlock`, `seccompiler`,
-/// the netlink family) does not enter the macOS graph.
+/// Lower than the Linux budget because the Linux-only confinement and
+/// networking stack (`landlock`, `seccompiler`, the netlink family) does not
+/// enter the macOS graph.
 ///
 /// 233 (was 232): `mvm-observability`, the same +1 the Linux budget took —
 /// a workspace crate holding subscriber assembly that `mvm-core` used to
@@ -210,7 +210,11 @@ const MACOS_CLOSURE_BUDGET: usize = 229;
 /// so a crate an earlier bump paid for is no longer reachable and the budget
 /// had stopped describing the binary. A budget with slack in it cannot catch
 /// the next crate that walks in.
-pub(crate) const CLOSURE_BUDGET: usize = 238;
+///
+/// 235 (was 238): the unused x86_64 KVM VMM in `mvm-runtime` is gone, and with
+/// it `kvm-ioctls`, `kvm-bindings` and the `vmm-sys-util` 0.12 they pinned. The
+/// in-house VMM's `vmm-sys-util` 0.15 stays.
+pub(crate) const CLOSURE_BUDGET: usize = 235;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

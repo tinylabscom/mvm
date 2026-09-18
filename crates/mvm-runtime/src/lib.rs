@@ -72,10 +72,6 @@ pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
 pub mod image_lineage;
-/// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
-/// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic
-/// (compiles + tests everywhere); the ioctl glue is Linux-only.
-pub mod kvm;
 /// Namespace-agnostic hash-linked lineage walk + read-only enumeration shared by
 /// [`checkpoint`] and [`image_lineage`]. The walk traits stay crate-private (the
 /// stores provide concrete wrappers); the enumeration result types

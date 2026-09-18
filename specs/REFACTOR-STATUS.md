@@ -28,6 +28,12 @@ Last updated: 2026-09-18
       warm-worker child paths. Linux regression and Firecracker/KVM validation
       pass; promotion is pending.
 
+- [x] **The unused x86_64 KVM VMM is deleted.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` B1.1 + G1, issue #3306.
+      1,125 lines with no production caller, its two examples, and the
+      `kvm-ioctls`/`kvm-bindings` dependencies. `vmm-sys-util` now resolves at
+      one major; the Linux closure budget drops 238 → 235.
+
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
       Persistent entrypoint sessions preserve `--name` and report both the

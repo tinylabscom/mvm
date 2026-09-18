@@ -54,11 +54,6 @@ const ALLOWLIST: &[&str] = &[
     // async-trait 0.1.92 requires syn 3 to stay compatible with current nightly
     // Clippy; other proc macros have not yet converged from syn 1 and 2.
     "syn",
-    // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
-    // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
-    // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
-    // majors until they converge.
-    "vmm-sys-util",
     // sysinfo remains on the Windows 0.52 family while Tokio and current
     // Windows support crates use the 0.53 target shims. These are host-only.
     "windows-core",
