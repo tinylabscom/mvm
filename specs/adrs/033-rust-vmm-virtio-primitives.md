@@ -213,6 +213,11 @@ targets, this 0.12/0.15 pair trips `multiple-versions = "deny"` on the
 Linux target regardless of the `virtio-vsock` version. It cannot be
 collapsed without `kvm-bindings`/`kvm-ioctls` tracking `vmm-sys-util 0.15`.
 
+*Resolved 2026-09-18 (#3306).* That KVM backend never had a production
+caller — it implemented no `VmmDriver` and was not a backend variant — and was
+deleted along with `kvm-bindings` and `kvm-ioctls`. `vmm-sys-util` now resolves
+at 0.15 only, and the `[bans].skip` entry below is gone.
+
 `deny.toml` edits required at land time:
 
 - `[licenses].allow` — **no change.** All five new crates are
@@ -294,7 +299,8 @@ fuzz target (landed before Slice 1) and a differential queue fuzzer
 (Slices 3–4) extend the existing frozen fuzz lane.
 
 **Negative.** +5 distinct crates on the default binary and one recorded
-`deny.toml` `vmm-sys-util` skip until `kvm-bindings` catches up; a second
+`deny.toml` `vmm-sys-util` skip until `kvm-bindings` catches up (removed
+with the KVM backend, see above); a second
 std-only dependency family to watch in the advisory gate; the migration
 must carry byte-identical behavior, which the per-slice golden-replay and
 differential tests enforce.

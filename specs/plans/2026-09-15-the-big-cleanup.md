@@ -278,14 +278,15 @@ family already in the lockfile covers the job.
 |---|---|---|
 | R1 | `FdtBuilder` — raw FDT token emission, string interning, 40-byte header (`crates/mvm-vmm/src/vmm/fdt.rs:9-151`) | `vm-fdt` |
 | R2 | `Arm64ImageHeader::parse` (`crates/mvm-vmm/src/vmm/kernel_image.rs:7-33`) | `linux-loader`'s PE loader |
-| R3 | `setup_boot` — GDT, 4-level page tables, e820, zero page, long-mode regs, 499 lines (`crates/mvm-runtime/src/kvm/x86_boot.rs:45-332`) | `linux-loader` `BzImage` + `LinuxBootConfigurator` |
-| R4 | `Serial16550` (`crates/mvm-runtime/src/kvm/serial.rs:14`) | `vm-superio::Serial` |
+| R3 | ~~`setup_boot` — GDT, 4-level page tables, e820, zero page, long-mode regs, 499 lines (`crates/mvm-runtime/src/kvm/x86_boot.rs:45-332`)~~ deleted with B1.1 | `linux-loader` `BzImage` + `LinuxBootConfigurator` |
+| R4 | ~~`Serial16550` (`crates/mvm-runtime/src/kvm/serial.rs:14`)~~ deleted with B1.1 | `vm-superio::Serial` |
 
-- [ ] **B1.1** Delete `crates/mvm-runtime/src/kvm/` — 1,125 lines of a second
+- [x] **B1.1** Delete `crates/mvm-runtime/src/kvm/` — 1,125 lines of a second
       in-house VMM with zero production callers, citing a `spikes/` directory
       that does not exist. #3306. **R3 and R4 live only in that tree, so this
       deletion removes two of the four reinventions for free.** Do it first,
-      then re-scope R1/R2 against what remains.
+      then re-scope R1/R2 against what remains. Done: the module, its two
+      examples and the `pub mod` are gone; R1/R2 remain as scoped.
 - [ ] **B1.2** Do **not** collapse the virtio-mmio transport, virtio-blk state
       machine or virtio-vsock. They already reuse `virtio-queue` and
       `virtio-vsock` for the hard parts; the state machines around them carry
@@ -410,9 +411,12 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
 
 ## G. Dependencies
 
-- [ ] **G1** Deleting `crates/mvm-runtime/src/kvm/` (#3306) may free
+- [x] **G1** Deleting `crates/mvm-runtime/src/kvm/` (#3306) may free
       `kvm-ioctls` and `kvm-bindings` (`crates/mvm-runtime/Cargo.toml:102-103`)
-      — check for other consumers before removing them.
+      — check for other consumers before removing them. Done: they had none.
+      Dropping them also removed `vmm-sys-util` 0.12, so the `vmm-sys-util`
+      duplicate-major exception is gone from `deny.toml` and
+      `check-duplicate-majors`, and the Linux closure budget ratchets 238 → 235.
 - [ ] **G2** ADR-032 says hickory is not pulled; three manifests pull it
       (#3309). Decide whether the dependency stays and record the budget
       rationale either way — this is a decision that was made in code and never

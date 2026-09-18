@@ -96,11 +96,7 @@ mvm-core = { workspace = true, features = ["test-support"] }
 mvm-fs = { workspace = true, features = ["test-support"] }
 mvm-vmm = { workspace = true, features = ["test-support"] }
 
-# KVM backend. Pre-generated bindings + safe ioctl wrappers;
-# the in-repo kvm::x86_boot logic is pure and platform-independent.
 [target.'cfg(target_os = "linux")'.dependencies]
-kvm-ioctls = "0.21"
-kvm-bindings = "0.11"
 nix = { version = "0.29", features = ["mount", "sched"] }
 
 [features]
