@@ -1108,15 +1108,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Pinned, not `latest`. Auto-tracking a moving release is how this lane
-      # would surprise-break on an unrelated image cut, and it would look like
-      # a latency regression when it is not.
-      # The boot image train, not the CLI train. `v0.18.0` was a workspace
-      # version bump, never a cut release, so this lane 404'd on an asset
-      # nobody had published. Boot images get their own tags precisely so
-      # this pin stops moving with the CLI's version — keep it in step with
-      # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
-      IMAGE_TAG: boot-image/v0.1.5
+      # `IMAGE_TAG` is resolved from images.lock by a step below, not written
+      # here. Pinned, not `latest`: auto-tracking a moving release is how this
+      # lane would surprise-break on an unrelated image cut, and it would look
+      # like a latency regression when it is not. And the boot image train, not
+      # the CLI train — `v0.18.0` was a workspace version bump, never a cut
+      # release, so this lane once 404'd on an asset nobody had published.
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
@@ -1166,6 +1163,14 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
+
+      - name: Resolve the locked boot image tag
+        # The one pin, read rather than copied. A literal here would be a
+        # second copy to keep in step by eye, which is what images.lock exists
+        # to end.
+        run: |
+          set -euo pipefail
+          echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)" >> "$GITHUB_ENV"
 
       - name: Fetch and verify the pinned bootable image
         # Signature-verified, then hash-verified against the release's own

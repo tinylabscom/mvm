@@ -148,7 +148,7 @@ Last updated: 2026-09-18
             rejected as stated; the SDK sidecar build is the remaining cost.
       - [x] W3a #3365: image-set manifest and lock types with pure validation.
       - [x] W3b #3365: offline signed verification and revocation.
-      - [ ] W3c #3365: checked-in lock and generated pins.
+      - [x] W3c #3365: checked-in lock and generated pins.
       - [x] W3d #3365: offline verifier command; `SignedManifest` family retired.
       - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
             Rust consumers W5 must replace.

@@ -1101,7 +1101,7 @@ fn the_two_release_trains_cannot_fire_each_other() {
     );
 
     let cli_tag = "v0.18.0";
-    let boot_tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let boot_tag = mvmctl::core::config::default_boot_image_tag();
     let prefix = |pattern: &str| pattern.split('*').next().unwrap_or_default().to_string();
     assert!(
         !boot_tag.starts_with(&prefix("v*")),
@@ -1259,31 +1259,51 @@ fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
     }
 }
 
+/// `gh` has no `-r` flag. Passing one consumes `--jq`'s value, demoting the
+/// real expression to a positional argument, and gh rejects the whole
+/// invocation with `unknown command "<the entire jq program>"`.
 #[test]
 fn release_lookups_pass_the_filter_directly_to_gh_jq() {
     let workflows = [
         ("workers.yml", website_deploy_workflow()),
         ("release.yml", release_workflow()),
     ];
-    let release_list_lookups = workflows
+    let jq_lookups = workflows
         .iter()
-        .filter(|(_, workflow)| workflow.contains("gh release list"))
+        .filter(|(_, workflow)| workflow.contains("--jq"))
         .collect::<Vec<_>>();
     assert!(
-        !release_list_lookups.is_empty(),
-        "the fixture must include at least one release-list lookup"
+        !jq_lookups.is_empty(),
+        "the fixture must include at least one gh --jq lookup"
     );
 
-    for (name, workflow) in release_list_lookups {
+    for (name, workflow) in jq_lookups {
         assert!(
-            workflow.contains("--json tagName --jq '"),
-            "{name} must pass its semantic-version filter directly to gh --jq"
+            workflow.contains("--jq '"),
+            "{name} must pass its filter expression directly to gh --jq"
         );
         assert!(
-            !workflow.contains("--json tagName --jq -r"),
+            !workflow.contains("--jq -r"),
             "{name} must pass the filter directly to gh --jq; -r is a standalone jq flag"
         );
     }
+}
+
+/// The deployed WebLinux pack must come from the tag `images.lock` pins, not
+/// from whichever image release happens to be newest when the job runs.
+#[test]
+fn the_website_deployment_takes_its_runtime_pack_from_the_locked_tag() {
+    let workflow = website_deploy_workflow();
+    assert!(
+        workflow.contains(r#"BOOT_TAG="$(./scripts/locked-image-tag.sh)""#),
+        "workers.yml must read the boot image tag from images.lock"
+    );
+    assert!(
+        !workflow.contains("gh release list"),
+        "enumerating published releases and taking the highest is a `latest` \
+         selection, which makes what the site deploys a property of whoever \
+         published last"
+    );
 }
 
 #[test]
@@ -1414,10 +1434,9 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
         "site deployment must verify the tag-built pack's release identity"
     );
     assert!(
-        workers.contains("gh release view \"${CANDIDATE}\"")
-            && workers.contains("HAS_SITE_PACK")
-            && workers.contains("| sort_by(.v) | reverse | .[].tag"),
-        "site deployment must select the newest semantic release that actually carries the pack"
+        workers.contains(r#"BOOT_TAG="$(./scripts/locked-image-tag.sh)""#)
+            && workers.contains("gh release view \"${BOOT_TAG}\""),
+        "site deployment must take the pack from the release images.lock pins"
     );
     assert!(
         workers.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),
@@ -1450,7 +1469,7 @@ fn weblinux_qemu_module_is_staged_below_the_cloudflare_asset_file_limit() {
 /// install's first boot, which is the worst place to discover it.
 #[test]
 fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
-    let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let tag = mvmctl::core::config::default_boot_image_tag();
     let workflow = boot_image_workflow();
 
     // The tag the workflow publishes under is its own ref name, so a tag push
@@ -1535,12 +1554,30 @@ fn a_prerelease_tag_is_not_published_as_the_latest_release() {
     );
 }
 
+/// The merge-queue boot witness must validate the bytes a fresh install
+/// requests. It reads the pin rather than carrying a copy, so what is asserted
+/// here is the read: a literal would be a second place to advance by hand, and
+/// advancing only one of two makes CI validate an image users never receive.
 #[test]
-fn the_ci_boot_witness_pins_the_compiled_boot_image_tag() {
-    let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+fn the_ci_boot_witness_resolves_the_locked_boot_image_tag() {
+    let workflow = ci_workflow();
+    let resolve = workflow
+        .find(r#"echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)" >> "$GITHUB_ENV""#)
+        .expect("the boot witness must resolve IMAGE_TAG from images.lock");
+    let fetch = workflow
+        .find("- name: Fetch and verify the pinned bootable image")
+        .expect("the boot witness must fetch the pinned image");
     assert!(
-        ci_workflow().contains(&format!("IMAGE_TAG: {tag}")),
-        "the merge-queue boot witness must validate the compiled default boot image tag {tag}"
+        resolve < fetch,
+        "IMAGE_TAG must be resolved before the step that splices it into a \
+         download URL, or the fetch runs against an empty tag"
+    );
+    assert!(
+        !workflow.contains(&format!(
+            "IMAGE_TAG: {}",
+            mvmctl::core::config::default_boot_image_tag()
+        )),
+        "the tag must be read from images.lock, not copied into the workflow"
     );
 }
 

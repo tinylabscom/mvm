@@ -7,8 +7,9 @@
 //! contract rather than the host's: nothing here is named after a host OS, so
 //! any backend that satisfies a member's contract can select it.
 //!
-//! This module holds the types and pure checks only. Signature verification,
-//! fetching and the checked-in lock file live with their callers.
+//! This module holds the types, the pure checks, and the checked-in
+//! [`ImageTrainLock`] over the pins that exist today. Signature verification
+//! and fetching live with their callers.
 
 use std::fmt;
 
@@ -23,6 +24,7 @@ use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionId
 mod error;
 mod identity;
 mod lock;
+mod train_lock;
 mod validate;
 mod verify;
 
@@ -32,6 +34,10 @@ pub use identity::{
     RepositorySlug, RevocationChannel, TagRef, WorkflowPath,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
+pub use train_lock::{
+    BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
+    PinnedArtifact, Stage0KernelPin, image_train_lock,
+};
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
     check_against_lock, check_protocol_compatibility, require_complete, select_member,

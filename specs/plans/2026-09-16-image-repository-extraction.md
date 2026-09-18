@@ -391,14 +391,18 @@ untrusted branch cannot mint the allow-listed release identity.
 
 ### W3 — Define the manifest, lock, and compatibility contract (#3365)
 
-- [ ] Add a versioned image-set manifest schema and round-trip/negative tests.
-- [ ] Model guest architecture, boot protocol, artifact format, and required
+- [x] Add a versioned image-set manifest schema and round-trip/negative tests.
+- [x] Model guest architecture, boot protocol, artifact format, and required
       capabilities independently of the host OS so Firecracker, HVF, and future
       Windows backends can select compatible packs without host-named images.
-- [ ] Add `mvm`'s single checked-in image lock and generate consumers from it.
+- [x] Add `mvm`'s single checked-in image lock and generate consumers from it.
+      It pins the trains that exist today; the image-set digest joins it when
+      the first set is published (W6).
 - [ ] Define guest/host protocol compatibility and refuse incompatible sets
-      before boot.
-- [ ] Include source commits, Nix inputs, SBOM references, sizes, and digests.
+      before boot. Defined and negatively tested, and `verify_image_set`
+      refuses a non-overlapping range when given the host's; no acquisition
+      path consumes an image set yet, so the before-boot refusal is wired in W6.
+- [x] Include source commits, Nix inputs, SBOM references, sizes, and digests.
 - [x] Add offline verification tooling that needs only the manifest, bundle,
       and artifacts (plus the lock that pins them): `mvmctl image boot verify`.
 
@@ -449,8 +453,13 @@ Delivery slices, one PR each:
       `mvm_core::image_set::verify_image_set`; the "try each accepted identity"
       loop the packs and revocation paths had each hand-rolled is now one
       function.
-- [ ] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
+- [x] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
       gate over workflow and script copies, and removal of "latest" selection.
+      `crates/mvm-core/images.lock` pins what exists today: the repository, the
+      boot-image tag, and the Stage 0 kernel tag and per-arch digests. It
+      carries no `manifest_sha256`, because no image set has been published;
+      `ImageLock` joins the file when one is. The signing identity is derived
+      from the locked tag rather than pinned separately.
 - [x] W3d — an offline verifier command over manifest, bundle and artifacts,
       and with it the retirement of `image_verify::SignedManifest` /
       `RevocationList`. That family looked dead, but
@@ -577,6 +586,8 @@ Acceptance:
 - [ ] Publish a complete candidate image set from the protected image workflow.
 - [ ] Update verifier identities and revocation URLs through an explicit
       old-plus-new trust window.
+- [ ] Refuse an image set whose protocol range does not overlap the host's
+      before acquisition, on every path that consumes one (carried from W3).
 - [ ] Update Stage 0 kernel acquisition, default-image resolution, image update
       commands, CI downloads, and WebLinux consumers to the lock file.
 - [ ] Boot every pack through its intended backend before advancing the pin.

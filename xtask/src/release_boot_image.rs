@@ -11,7 +11,7 @@ const SDK_LIBCS: [&str; 2] = ["glibc", "musl"];
 pub(crate) fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("tag") if args.len() == 1 => {
-            println!("{}", mvm_core::config::DEFAULT_BOOT_IMAGE_TAG);
+            println!("{}", mvm_core::config::default_boot_image_tag());
             Ok(())
         }
         Some("validate") if args.len() == 3 => validate_release(&args[1], Path::new(&args[2])),
@@ -22,7 +22,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
 }
 
 fn validate_release(tag: &str, artifact_dir: &Path) -> Result<()> {
-    let expected = mvm_core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let expected = mvm_core::config::default_boot_image_tag();
     if tag != expected {
         bail!(
             "release selected boot image tag {tag:?}, but the CLI embeds {expected:?}; refusing to validate different bytes"
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn accepts_the_compiled_tag_with_the_complete_asset_matrix() {
         let fixture = complete_fixture();
-        validate_release(mvm_core::config::DEFAULT_BOOT_IMAGE_TAG, fixture.path())
+        validate_release(mvm_core::config::default_boot_image_tag(), fixture.path())
             .expect("the compiled tag and complete matrix must validate");
     }
 
@@ -109,7 +109,7 @@ mod tests {
         let missing = "sdk-sidecar-x86_64-musl.tar.gz.sha256";
         fs::remove_file(fixture.path().join(missing)).expect("remove fixture asset");
 
-        let error = validate_release(mvm_core::config::DEFAULT_BOOT_IMAGE_TAG, fixture.path())
+        let error = validate_release(mvm_core::config::default_boot_image_tag(), fixture.path())
             .expect_err("an incomplete release must fail closed");
         assert!(
             error.to_string().contains(missing),
@@ -123,7 +123,7 @@ mod tests {
         let empty = "runtime-overlay-aarch64.tar.gz";
         fs::write(fixture.path().join(empty), b"").expect("empty fixture asset");
 
-        let error = validate_release(mvm_core::config::DEFAULT_BOOT_IMAGE_TAG, fixture.path())
+        let error = validate_release(mvm_core::config::default_boot_image_tag(), fixture.path())
             .expect_err("an empty release asset must fail closed");
         assert!(
             error.to_string().contains(empty),
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn nonexistent_artifact_directory_is_an_incomplete_release() {
         let path = PathBuf::from("this-release-directory-does-not-exist");
-        let error = validate_release(mvm_core::config::DEFAULT_BOOT_IMAGE_TAG, &path)
+        let error = validate_release(mvm_core::config::default_boot_image_tag(), &path)
             .expect_err("a missing release fixture must fail closed");
         assert!(
             error.to_string().contains("Missing:"),

@@ -413,7 +413,7 @@ jobs:
       # boot-image release's own bundles are provenance for that train and are
       # simply overwritten here.
       #
-      # The window closes when the download side reads DEFAULT_BOOT_IMAGE_TAG
+      # The window closes when the download side reads the boot-image pin
       # instead of the CLI version. Until then this step is the only reason a
       # fresh install still finds its boot image. A CLI release with no image
       # assets is therefore not a degraded release, it is a broken one: every

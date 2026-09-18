@@ -1030,10 +1030,9 @@ mod tests {
             "bounded bundle preparation must not boot a builder VM"
         );
         assert!(
-            build.contains(&format!(
-                "image boot update --tag {} --force",
-                mvm_core::config::DEFAULT_BOOT_IMAGE_TAG
-            )) && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+            build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
+                && build.contains(r#"image boot update --tag "$image_tag" --force"#)
+                && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
                 && bootstrap.contains("sudo chmod 0666 /dev/kvm")
                 && bootstrap.contains("sudo chmod a+r")
                 && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
