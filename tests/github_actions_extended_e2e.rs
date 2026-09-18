@@ -1135,9 +1135,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
 }
 
 /// The sidecar is still built through the unembedded binary, but after the
-/// builder image is acquired: the embedded binary fetches it with the release
-/// verifier compiled in, so the helper the unembedded binary re-executes —
-/// built without that verifier — finds it ready instead of refusing to fetch.
+/// builder image is acquired: the embedded binary fetches and verifies it once,
+/// so the helper the unembedded binary re-executes finds it ready instead of
+/// being compiled only to acquire it.
 #[test]
 fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
