@@ -388,9 +388,11 @@ echo "==> warming artifacts in $E2E_HOME"
 
 # The builder image comes first, from the binary that carries the host payload
 # and the release verifier. With `MVM_BOOT_IMAGE=fetch` that binary downloads
-# and verifies the pinned signed image in-process, and the sidecar build below
-# then finds it ready rather than asking a helper built without the verifier to
-# acquire it.
+# and verifies the pinned signed image in-process, once, and the sidecar build
+# below then finds it ready. The helper the unembedded binary re-executes is
+# built with that binary's own features and could acquire the image itself, but
+# only after compiling first; acquiring it here keeps the sidecar step to the
+# sidecar.
 #
 # A cold *source* bootstrap — Stage 0, and the unembedded command handing the
 # whole build to its helper — is not this lane's to prove. Doing it here made a
