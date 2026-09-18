@@ -21,6 +21,8 @@
 //!   so RSS grows. Used by the `max_rss_mb` recycle test.
 //! - `slow_secs=N`: sleep N seconds before responding (used by
 //!   timeout / queue saturation tests).
+//! - `fd_20_closed`: report whether a deliberately inherited descriptor 20
+//!   was closed before the wrapper execs.
 //!
 //! Lives under `tests/bin/` and is declared as `[[bin]] test = false`
 //! so it never ships in the production guest closure. The
@@ -53,6 +55,10 @@ enum Behavior {
     /// alongside a legitimate one. A hostile workload's attempt to mint an
     /// agent-authored record over the warm-worker wire.
     ForgeControl,
+    /// Report whether descriptor 20 survived the worker's exec boundary.
+    /// Linux-only integration coverage uses this to prove that a worker cannot
+    /// retain an agent descriptor deliberately duplicated above its contract.
+    Fd20Closed,
 }
 
 impl Behavior {
@@ -85,6 +91,9 @@ impl Behavior {
         }
         if raw == "forge_control" {
             return Behavior::ForgeControl;
+        }
+        if raw == "fd_20_closed" {
+            return Behavior::Fd20Closed;
         }
         panic!("unknown MVM_FAKE_RUNNER_BEHAVIOR={raw}");
     }
@@ -249,6 +258,22 @@ fn main() -> ExitCode {
                             payload: Vec::new(),
                         },
                     ],
+                    outcome: WorkerOutcome::Exit { code: 0 },
+                };
+                if write_pipe_frame(&mut stdout, &resp).is_err() {
+                    return ExitCode::from(2);
+                }
+            }
+            Behavior::Fd20Closed => {
+                let response_stdout = if std::path::Path::new("/proc/self/fd/20").exists() {
+                    b"present".to_vec()
+                } else {
+                    b"closed".to_vec()
+                };
+                let resp = WorkerCallResponse {
+                    stdout: response_stdout,
+                    stderr: Vec::new(),
+                    controls: Vec::new(),
                     outcome: WorkerOutcome::Exit { code: 0 },
                 };
                 if write_pipe_frame(&mut stdout, &resp).is_err() {

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 ## In progress
 
@@ -10,6 +10,11 @@ Last updated: 2026-09-17
       W1-W7 open: inventory, typed encrypted service, nonblocking guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.
+
+- [ ] **Agent child descriptor isolation — issue #3404.**
+      Close non-contract descriptors in the RPC, streaming-exec, and
+      warm-worker child paths. Linux regression and Firecracker/KVM validation
+      pass; promotion is pending.
 
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
@@ -34,6 +39,10 @@ Last updated: 2026-09-17
       immediate post-restore `getrandom(2)` divergence.
       W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
       the W3.6 live boot is still open.
+  - [x] W1a — issue #3404: every guest-agent child path uses the shared
+        descriptor-closing hook, shared vsock sockets are close-on-exec, and
+        real Linux cold-entrypoint and process-RPC witnesses pass. Public
+        release remains gated on clearance.
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.

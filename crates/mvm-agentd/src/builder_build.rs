@@ -80,13 +80,14 @@ pub fn run_nix_build(
 
     let timeout = req.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let build = nix_build_command(&req.flake_ref, &req.attr, timeout);
-    let output = match Command::new("sh")
+    let mut build_command = Command::new("sh");
+    build_command
         .arg("-c")
         .arg(&build)
         .current_dir(work)
-        .env("MVM_HOST_BIN_DIR", mvm_bins)
-        .output()
-    {
+        .env("MVM_HOST_BIN_DIR", mvm_bins);
+    crate::fd_hygiene::configure_close_fds(&mut build_command, 3, None);
+    let output = match build_command.output() {
         Ok(o) => o,
         Err(e) => return fail(logs, format!("spawn nix build: {e}")),
     };
@@ -102,7 +103,10 @@ pub fn run_nix_build(
     };
 
     let stage = stage_command(&store_path, &out_dir.to_string_lossy());
-    match Command::new("sh").arg("-c").arg(&stage).output() {
+    let mut stage_command = Command::new("sh");
+    stage_command.arg("-c").arg(&stage);
+    crate::fd_hygiene::configure_close_fds(&mut stage_command, 3, None);
+    match stage_command.output() {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
             capture_lines(&mut logs, &o.stderr);

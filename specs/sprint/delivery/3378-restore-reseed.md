@@ -102,13 +102,21 @@ comment says so.
 
 ## Workload descriptor inheritance (#3404)
 
-Confirmed while doing this: `entrypoint::execute_streaming` spawned workloads
-holding every descriptor the agent had open without close-on-exec, which
-included the control listener and the open host connection. The close-on-exec
-fix above removes those two, and the workload `pre_exec` now also closes every
-descriptor above 3 except the program descriptor it execs through. A Linux test
-spawns a workload while holding a descriptor without the flag and checks that
-the workload holds only its stdio, fd 3, and its own executable.
+Confirmed while doing this: the cold entrypoint, process RPC, warm workers,
+detached execution, stream forwarding, lifecycle hooks, health checks, init
+helpers, builder subprocesses, and nested runners could spawn children while
+the agent held control-plane descriptors. Shared vsock listeners and accepted
+connections now set close-on-exec at creation, and every child path applies one
+shared `pre_exec` hook that closes all descriptors above stderr. The one warm
+worker path that executes through an already-open program descriptor preserves
+only that validated descriptor.
+
+Two real Linux tests hold an intentionally inheritable socket while spawning a
+workload. The cold-entrypoint and process-RPC witnesses each prove the child
+sees only its declared standard streams and executable descriptor. The focused
+Linux suite also ran successfully inside the project builder VM, alongside host
+unit and integration tests, workspace clippy and check, gated-target checks,
+the serialized workspace suite, and all repository gates.
 
 ## Tests
 

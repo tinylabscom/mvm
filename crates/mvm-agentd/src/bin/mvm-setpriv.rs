@@ -328,9 +328,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let error = Command::new(&invocation.command)
-            .args(&invocation.command_args)
-            .exec();
+        let mut command = Command::new(&invocation.command);
+        command.args(&invocation.command_args);
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        let error = command.exec();
         eprintln!("mvm-setpriv: exec {:?} failed: {error}", invocation.command);
         std::process::exit(127);
     }

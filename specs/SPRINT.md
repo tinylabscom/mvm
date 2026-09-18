@@ -17,6 +17,13 @@
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 
+- [ ] **Prevent agent child processes from inheriting control-plane descriptors — issue #3404.**
+      The entrypoint path is already protected. The remaining RPC, streaming
+      exec, and warm-worker spawn paths now close inherited descriptors above
+      their explicit child contracts; Linux regression coverage holds an extra
+      descriptor open while spawning. Host and Linux validation, including a
+      real Firecracker/KVM boot smoke, pass; promotion is pending.
+
 - [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
       Persistent entrypoint runs now use the requested `--name` as the machine
       identity instead of replacing it with an internal invocation name. The
@@ -68,7 +75,12 @@
       signed bundles through image registries, and structured agent-facing
       errors. W1 is complete: a live Firecracker/KVM witness restores two
       siblings from one snapshot and proves their immediate `getrandom(2)`
-      outputs differ after authenticated reseed acknowledgements.
+      outputs differ after authenticated reseed acknowledgements. The
+      highest-priority follow-up, issue #3404, is implemented and
+      locally validated: shared agent sockets are close-on-exec and one
+      descriptor-closing hook covers every guest-agent child-process path.
+      Cold-entrypoint and process-RPC Linux witnesses prove children receive
+      only their declared descriptors.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
