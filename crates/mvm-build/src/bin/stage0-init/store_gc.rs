@@ -13,10 +13,11 @@
 //! from its `.reginfo` and rooted before any collection, and the build output
 //! is rooted so an unchanged next bootstrap is still a cache hit.
 
-use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use mvm_build::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, STAGE0_STORE_GC_KIB_CONF_KEY};
+use mvm_build::builder_vm_runtime::{
+    DEFAULT_BUILDER_STORE_GC_GIB, STAGE0_STORE_GC_KIB_CMDLINE_KEY,
+};
 
 /// Where Nix looks for roots; a symlink here pins its target's closure.
 pub(super) const GC_ROOTS_DIR: &str = "/nix/var/nix/gcroots";
@@ -25,12 +26,19 @@ pub(super) const GC_ROOTS_DIR: &str = "/nix/var/nix/gcroots";
 /// store is bound over `/nix` and hides it.
 pub(super) const SEED_REGINFO_STASH: &str = "/run/mvm-stage0-seed.reginfo";
 
-/// The collection threshold, in KiB of used space, from the host's build
-/// config. A config without the key — one written by an older host — gets the
-/// default that host would have applied to its steady-state store.
-pub(super) fn cap_kib(conf: &HashMap<String, String>) -> u64 {
-    conf.get(STAGE0_STORE_GC_KIB_CONF_KEY)
-        .and_then(|value| value.parse::<u64>().ok())
+/// The collection threshold, in KiB of used space, read off the kernel
+/// cmdline. A cmdline without the token — an older host, or a backend whose
+/// Stage 0 does not carry it — gets the default that host would have applied
+/// to its steady-state store.
+pub(super) fn cap_kib(cmdline: &str) -> u64 {
+    cmdline
+        .split_whitespace()
+        .find_map(|token| {
+            token
+                .strip_prefix(&format!("{STAGE0_STORE_GC_KIB_CMDLINE_KEY}="))?
+                .parse::<u64>()
+                .ok()
+        })
         .filter(|kib| *kib > 0)
         .unwrap_or(u64::from(DEFAULT_BUILDER_STORE_GC_GIB) * 1024 * 1024)
 }
@@ -125,24 +133,18 @@ fn plain_token(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn conf(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
     #[test]
     fn the_host_cap_governs_collection() {
         assert_eq!(
-            cap_kib(&conf(&[(STAGE0_STORE_GC_KIB_CONF_KEY, "1048576")])),
+            cap_kib("console=ttyS0 mvm.store_gc_kib=1048576 mvm.vsock_egress=1"),
             1_048_576
         );
     }
 
     #[test]
-    fn a_config_from_an_older_host_gets_the_steady_state_default() {
-        assert_eq!(cap_kib(&conf(&[])), 25_165_824);
+    fn a_cmdline_from_an_older_host_gets_the_steady_state_default() {
+        assert_eq!(cap_kib("console=ttyS0 root=/dev/vda rw"), 25_165_824);
+        assert_eq!(cap_kib(""), 25_165_824);
     }
 
     #[test]
@@ -150,11 +152,16 @@ mod tests {
         // Zero would collect on every run and throw away the warm cache.
         for bad in ["0", "", "lots", "-5"] {
             assert_eq!(
-                cap_kib(&conf(&[(STAGE0_STORE_GC_KIB_CONF_KEY, bad)])),
+                cap_kib(&format!("root=/dev/vda mvm.store_gc_kib={bad}")),
                 25_165_824,
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_token_that_merely_ends_in_the_key_is_not_the_cap() {
+        assert_eq!(cap_kib("other.mvm.store_gc_kib=99"), 25_165_824);
     }
 
     #[test]

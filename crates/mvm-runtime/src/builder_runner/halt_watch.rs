@@ -15,6 +15,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// What the kernel prints when a halt stands in for a power-off, or when a
 /// halt was asked for outright.
@@ -56,6 +57,35 @@ impl ConsoleHaltWatch {
         let halted = self.partial[..complete].lines().any(is_halt_banner);
         self.partial.drain(..complete);
         halted
+    }
+
+    /// Block until the console stops growing, so the guest's last lines are on
+    /// disk before its VMM is killed.
+    ///
+    /// The kernel prints the halt banner from inside `reboot(2)`, which can
+    /// interleave with a line userspace is still writing: a guest was seen
+    /// halting mid-`stage0-init: done; halting`, and killing on the banner
+    /// alone truncated the marker the host reads its result from — a finished
+    /// build reported as an unclean halt. Bounded, because a VMM that keeps
+    /// writing forever must not hold the run open.
+    pub(super) fn wait_for_console_to_settle(&self, quiet_for: Duration, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        let mut last_len = self.console_len();
+        let mut quiet_since = Instant::now();
+        while Instant::now() < deadline {
+            std::thread::sleep(quiet_for.min(Duration::from_millis(50)));
+            let len = self.console_len();
+            if len != last_len {
+                last_len = len;
+                quiet_since = Instant::now();
+            } else if quiet_since.elapsed() >= quiet_for {
+                return;
+            }
+        }
+    }
+
+    fn console_len(&self) -> u64 {
+        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
 
     fn read_appended(&mut self) -> Option<String> {
@@ -147,6 +177,72 @@ mod tests {
         append(&log, "grep 'reboot: System halted' kernel.log || true\n");
 
         assert!(!ConsoleHaltWatch::new(log).guest_halted());
+    }
+
+    #[test]
+    fn settling_returns_once_the_console_stops_growing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        append(&log, "reboot: System halted\n");
+        let watch = ConsoleHaltWatch::new(log);
+
+        let started = Instant::now();
+        watch.wait_for_console_to_settle(Duration::from_millis(100), Duration::from_secs(5));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a quiet console must not wait out the limit"
+        );
+    }
+
+    #[test]
+    fn a_console_still_being_written_holds_the_kill_until_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        append(&log, "stage0-init: don");
+        let watch = ConsoleHaltWatch::new(log.clone());
+
+        let writer = std::thread::spawn(move || {
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_millis(30));
+                append(&log, "e; halting\n");
+            }
+        });
+        let started = Instant::now();
+        watch.wait_for_console_to_settle(Duration::from_millis(100), Duration::from_secs(5));
+        writer.join().unwrap();
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "a console that keeps growing must not settle immediately"
+        );
+    }
+
+    #[test]
+    fn a_console_that_never_stops_is_bounded_by_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        append(&log, "noisy\n");
+        let watch = ConsoleHaltWatch::new(log.clone());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writer = std::thread::spawn(move || {
+            while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                append(&log, "more\n");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let started = Instant::now();
+        watch.wait_for_console_to_settle(Duration::from_millis(100), Duration::from_millis(400));
+        let waited = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+
+        assert!(
+            waited < Duration::from_secs(2),
+            "the limit bounds the wait: {waited:?}"
+        );
     }
 
     #[test]

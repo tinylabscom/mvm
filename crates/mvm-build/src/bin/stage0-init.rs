@@ -772,11 +772,8 @@ mod linux {
         {
             return;
         }
-        let conf = crate::build_config::read(&crate::build_config::locate(
-            Path::new(STAGE0_INPUT_STAGE),
-            Path::new("/out/stage0-build.conf"),
-        ));
-        let cap = crate::store_gc::cap_kib(&conf);
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let cap = crate::store_gc::cap_kib(&cmdline);
         let Some(used) = filesystem_used_kib(STAGE0_NIX_STORE_MOUNT) else {
             eprintln!("stage0-init: could not measure the Nix store; not collecting");
             return;
