@@ -10,6 +10,13 @@
 
 ## In progress
 
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      Design recorded; implementation and end-to-end certification remain open.
+      Typed encrypted guest telemetry, VM-lifetime host collection, bounded
+      non-waiting emission, explicit loss/coverage, and host-only export.
+
 - [ ] **Prevent agent child processes from inheriting control-plane descriptors — issue #3404.**
       The entrypoint path is already protected. The remaining RPC, streaming
       exec, and warm-worker spawn paths now close inherited descriptors above

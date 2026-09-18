@@ -1,8 +1,15 @@
 # Refactor status
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 ## In progress
+
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      W1-W7 open: inventory, typed encrypted service, nonblocking guest capture,
+      VM-lifetime host collector, host views/export, real-backend certification,
+      default-on rollout and merge-queue delivery. Design is not implementation.
 
 - [ ] **Agent child descriptor isolation — issue #3404.**
       Close non-contract descriptors in the RPC, streaming-exec, and
