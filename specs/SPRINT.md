@@ -61,7 +61,12 @@
       signed bundles through image registries, and structured agent-facing
       errors. W1 is complete: a live Firecracker/KVM witness restores two
       siblings from one snapshot and proves their immediate `getrandom(2)`
-      outputs differ after authenticated reseed acknowledgements.
+      outputs differ after authenticated reseed acknowledgements. The
+      highest-priority follow-up, issue #3404, is implemented and
+      locally validated: shared agent sockets are close-on-exec and one
+      descriptor-closing hook covers every guest-agent child-process path.
+      Cold-entrypoint and process-RPC Linux witnesses prove children receive
+      only their declared descriptors.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed

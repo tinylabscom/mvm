@@ -86,16 +86,18 @@ impl HookRunner for RealHookRunner {
     type Child = RealHookChild;
 
     fn status(&self, script_path: &Path) -> io::Result<HookExit> {
-        Command::new(script_path).status().map(HookExit::from)
+        let mut command = Command::new(script_path);
+        crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        command.status().map(HookExit::from)
     }
 
     fn spawn(&self, script_path: &Path) -> io::Result<Self::Child> {
-        Command::new(script_path)
-            .spawn()
-            .map(|child| RealHookChild {
-                _owned: crate::child_wait::OwnedChild::new(child.id()),
-                child,
-            })
+        let mut command = Command::new(script_path);
+        crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        command.spawn().map(|child| RealHookChild {
+            _owned: crate::child_wait::OwnedChild::new(child.id()),
+            child,
+        })
     }
 }
 

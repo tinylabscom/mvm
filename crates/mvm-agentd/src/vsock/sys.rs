@@ -19,6 +19,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use nix::sys::socket as sock;
 
+fn socket_flags() -> sock::SockFlag {
+    sock::SockFlag::SOCK_CLOEXEC
+}
+
 /// Bind CID that accepts connections from any peer (`VMADDR_CID_ANY`).
 /// Servers listen on this rather than a specific CID.
 pub const ANY_CID: u32 = libc::VMADDR_CID_ANY;
@@ -31,7 +35,7 @@ fn vsock_stream_socket() -> io::Result<OwnedFd> {
     sock::socket(
         sock::AddressFamily::Vsock,
         sock::SockType::Stream,
-        sock::SockFlag::empty(),
+        socket_flags(),
         protocol,
     )
     .map_err(io::Error::from)
@@ -61,8 +65,8 @@ pub fn bind_listen(cid: u32, port: u32, backlog: i32) -> io::Result<OwnedFd> {
 
 /// Accept one connection from a listening AF_VSOCK socket.
 pub fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
-    let raw = sock::accept(listener.as_raw_fd()).map_err(io::Error::from)?;
-    // SAFETY: `accept(2)` returns a fresh descriptor this process exclusively
+    let raw = sock::accept4(listener.as_raw_fd(), socket_flags()).map_err(io::Error::from)?;
+    // SAFETY: `accept4(2)` returns a fresh descriptor this process exclusively
     // owns; adopting it into an `OwnedFd` gives it RAII close-on-drop. nix's
     // `accept` returns a bare `RawFd`, so this is the one place the fresh fd
     // must be taken ownership of explicitly.
@@ -73,6 +77,11 @@ pub fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
 mod tests {
     use super::*;
     use nix::sys::socket::{AddressFamily, SockaddrLike, VsockAddr};
+
+    #[test]
+    fn every_vsock_is_created_close_on_exec() {
+        assert!(socket_flags().contains(sock::SockFlag::SOCK_CLOEXEC));
+    }
 
     #[test]
     fn vsock_addr_maps_family_cid_port() {

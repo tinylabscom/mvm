@@ -76,6 +76,10 @@ fn main() {
         .parse()
         .unwrap_or_else(|e| die(&format!("invalid tier {tier_str:?}: {e}")));
 
+    #[cfg(target_os = "linux")]
+    mvm_agentd::fd_hygiene::close_descriptors_from(3, None)
+        .unwrap_or_else(|e| die(&format!("close inherited descriptors: {e}")));
+
     if !tier.is_unrestricted() {
         apply_filter(tier).unwrap_or_else(|e| die(&format!("seccomp install failed: {e}")));
     }

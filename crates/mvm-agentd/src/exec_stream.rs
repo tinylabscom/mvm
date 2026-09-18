@@ -151,6 +151,7 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
         .stderr(Stdio::piped());
     #[cfg(unix)]
     builder.process_group(0);
+    crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
     let mut child = match builder.spawn() {
         Ok(c) => c,
         Err(e) => {

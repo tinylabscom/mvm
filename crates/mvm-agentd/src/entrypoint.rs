@@ -857,7 +857,7 @@ pub fn execute_streaming(
         cmd.pre_exec(move || {
             install_fd3_in_child(write_raw)?;
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::close_descriptors_from(4, Some(program_fd))?;
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(4, Some(program_fd))?;
             #[cfg(target_os = "linux")]
             if let Some(limits) = resource_limits {
                 apply_process_resource_limits(limits)?;
@@ -1107,6 +1107,24 @@ pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
     #[cfg(not(target_os = "linux"))]
     {
         entrypoint.resolved.clone()
+    }
+}
+
+/// Descriptor that must survive exec when [`spawn_path`] names the validated
+/// executable through `/proc/self/fd`. Warm workers do not install the cold
+/// path's fd-3 control channel, so they can retain the validation descriptor
+/// in place while closing every unrelated agent descriptor.
+pub(crate) fn spawn_fd_to_keep(entrypoint: &ValidatedEntrypoint) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        (!entrypoint.use_resolved_path).then_some(entrypoint.file.as_raw_fd() as u32)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = entrypoint;
+        None
     }
 }
 
