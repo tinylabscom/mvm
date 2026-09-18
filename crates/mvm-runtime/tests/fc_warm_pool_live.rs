@@ -12,14 +12,11 @@
 //!
 //! * `/dev/kvm`
 //! * `MVM_LIVE_KERNEL` pointing at an FC-loadable vmlinux
-//! * `MVM_LIVE_ROOTFS` pointing at an ext4 rootfs whose `/init` binds the guest
-//!   agent vsock port, because `FcDriver::boot` returns only once the agent
-//!   answers — that is what makes the captured memory a fully-booted guest.
-//!   That `/init` must also start the CRNG reseed helper
-//!   (`mvm-guest-agent --crng-reseed-helper --listen` under its own uid, as
-//!   mkGuest's init does). A rootfs built before the helper existed boots and
-//!   captures fine, but its child reports `reseeded: false` and the identity
-//!   assertion below fails; rebuild the rootfs rather than relaxing it.
+//! * `MVM_LIVE_ROOTFS` pointing at an ext4 rootfs. The harness builds the
+//!   source-matched universal initramfs and verity-sealed runtime overlay, then
+//!   activates that rootfs through the same protocol as a production launch.
+//!   The rootfs must provide `python3` so the witness can invoke `getrandom(2)`
+//!   explicitly after each restore.
 //!
 //! It is `#[ignore]` so CI never runs it; execute manually on a KVM box with
 //! `cargo test -p mvm-runtime --test fc_warm_pool_live -- --ignored --nocapture`.
@@ -28,10 +25,14 @@
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use mvm_agentd::vsock::connect_to;
-use mvm_core::checkpoint::CheckpointId;
+use mvm_agentd::vsock::{
+    ActivateEnvironment, ExecEvent, GUEST_AGENT_PORT, RootfsConfig, RuntimeOverlayConfig,
+    connect_to, connect_to_port_once, send_exec_streaming,
+};
+use mvm_core::arch::GuestArch;
+use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
@@ -43,23 +44,58 @@ use mvm_runtime::driver::{
 
 /// How long the child's agent gets to answer after the preloaded restore resumes it.
 const CHILD_AGENT_TIMEOUT_SECS: u64 = 5;
+/// Universal-initramfs boot readiness bound before activation.
+const PARENT_READY_TIMEOUT_SECS: u64 = 30;
 
 struct LiveImages {
     kernel: PathBuf,
     rootfs: PathBuf,
+    initramfs: PathBuf,
+    runtime_overlay: PathBuf,
+    runtime_verity: PathBuf,
+    runtime_roothash: String,
 }
 
-fn live_images() -> Option<LiveImages> {
+struct LiveImageInputs {
+    kernel: PathBuf,
+    rootfs: PathBuf,
+}
+
+fn live_image_inputs() -> Option<LiveImageInputs> {
     let kernel = std::env::var("MVM_LIVE_KERNEL").ok()?;
     let rootfs = std::env::var("MVM_LIVE_ROOTFS").ok()?;
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skip: /dev/kvm not present");
         return None;
     }
-    Some(LiveImages {
+    Some(LiveImageInputs {
         kernel: PathBuf::from(kernel),
         rootfs: PathBuf::from(rootfs),
     })
+}
+
+fn resolve_live_images(inputs: LiveImageInputs, cache_root: &Path) -> LiveImages {
+    let initramfs = mvm_build::initramfs::resolve_or_build_local_initramfs(
+        &mvm_runtime::build_env::RuntimeBuildEnv,
+        &cache_root.join("initramfs"),
+        env!("CARGO_PKG_VERSION"),
+        GuestArch::host(),
+    )
+    .expect("resolve source-matched universal initramfs");
+    let overlay = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+        &cache_root.join("runtime-overlay"),
+        env!("CARGO_PKG_VERSION"),
+        GuestArch::host(),
+    )
+    .expect("resolve source-matched runtime overlay");
+    LiveImages {
+        kernel: inputs.kernel,
+        rootfs: inputs.rootfs,
+        initramfs: initramfs.image_path,
+        runtime_overlay: overlay.overlay_ext4,
+        runtime_verity: overlay.sidecar,
+        runtime_roothash: overlay.roothash,
+    }
 }
 
 fn sha256(path: &Path) -> String {
@@ -86,21 +122,37 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         builder_egress_endpoint: None,
         name: name.to_string(),
         kernel: KernelImage::Path(images.kernel.clone()),
-        initramfs: None,
+        initramfs: Some(images.initramfs.clone()),
         cmdline: format!(
-            "console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda rw rootwait init=/init {}",
-            host_signer_pub_cmdline_token()
+            "console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda ro rootwait \
+             mvm.hostepoch={} {}",
+            mvm_core::time::now_unix_secs(),
+            host_signer_pub_cmdline_token(),
         ),
         vcpus: 2,
         cpu_grant: None,
         memory_mib: 512,
         mem_initial_mib: None,
-        blocks: vec![BlockDev {
-            source: images.rootfs.clone(),
-            read_only: false,
-            ephemeral: true,
-            slot: 0,
-        }],
+        blocks: vec![
+            BlockDev {
+                source: images.rootfs.clone(),
+                read_only: true,
+                ephemeral: true,
+                slot: 0,
+            },
+            BlockDev {
+                source: images.runtime_overlay.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 1,
+            },
+            BlockDev {
+                source: images.runtime_verity.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 2,
+            },
+        ],
         vsock: vec![],
         console: ConsoleCapture {
             log_path: state_dir.join("console.log"),
@@ -140,10 +192,284 @@ fn standby_spec(id: &str, images: &LiveImages, home: &Path) -> StandbySpec {
     }
 }
 
+fn activate_parent(vsock_path: &str, images: &LiveImages) {
+    let environment = ActivateEnvironment {
+        rootfs: RootfsConfig {
+            data_dev: "/dev/vda".to_string(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+            in_place: false,
+        },
+        runtime: Some(RuntimeOverlayConfig {
+            data_dev: "/dev/vdb".to_string(),
+            hash_dev: "/dev/vdc".to_string(),
+            roothash: images.runtime_roothash.clone(),
+        }),
+        volumes: Vec::new(),
+        extensions: Vec::new(),
+        verb_grant_envelope: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(PARENT_READY_TIMEOUT_SECS);
+    loop {
+        let result = connect_to_port_once(vsock_path, GUEST_AGENT_PORT, CHILD_AGENT_TIMEOUT_SECS)
+            .and_then(|mut stream| {
+                mvm_runtime::microvm::activate_over_stream(&mut stream, &environment)
+            });
+        match result {
+            Ok(()) => return,
+            Err(error) if Instant::now() < deadline => {
+                let retryable = error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<mvm_core::net::session::SessionError>()
+                        .is_some_and(mvm_core::net::session::SessionError::is_peer_hangup)
+                        || cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                            matches!(
+                                io.kind(),
+                                std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::ConnectionRefused
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::NotConnected
+                                    | std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::AddrNotAvailable
+                                    | std::io::ErrorKind::Interrupted
+                                    | std::io::ErrorKind::UnexpectedEof
+                                    | std::io::ErrorKind::BrokenPipe
+                            )
+                        })
+                });
+                assert!(retryable, "guest activation failed: {error:#}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!(
+                "guest activation did not complete within {PARENT_READY_TIMEOUT_SECS}s: {error:#}"
+            ),
+        }
+    }
+}
+
+fn copy_checkpoint_content(
+    store: &CheckpointStore,
+    checkpoint: &CheckpointId,
+    meta: &CheckpointMeta,
+    child_dir: &Path,
+) {
+    std::fs::create_dir_all(child_dir).expect("create child vm dir");
+    let content_dir = store.content_dir(checkpoint);
+    for blob in &meta.content {
+        let src = content_dir.join(&blob.name);
+        std::fs::copy(&src, child_dir.join(&blob.name))
+            .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
+    }
+}
+
+fn read_getrandom(vsock_path: &str) -> Vec<u8> {
+    let mut stream = connect_to(vsock_path, CHILD_AGENT_TIMEOUT_SECS)
+        .expect("connect to restored child for randomness witness");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let terminal = send_exec_streaming(
+        &mut stream,
+        "python3 -c 'import os;os.write(1,os.getrandom(32))'",
+        None,
+        Some(CHILD_AGENT_TIMEOUT_SECS),
+        |event| match event {
+            ExecEvent::Stdout { chunk } => stdout.extend_from_slice(chunk),
+            ExecEvent::Stderr { chunk } => stderr.extend_from_slice(chunk),
+            ExecEvent::Exit { .. } | ExecEvent::TimedOut => {}
+        },
+    )
+    .expect("read post-restore kernel randomness through the guest agent");
+    assert_eq!(
+        terminal,
+        ExecEvent::Exit { code: 0 },
+        "guest randomness command failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert_eq!(
+        stdout.len(),
+        32,
+        "guest randomness command returned {} bytes instead of 32: {}",
+        stdout.len(),
+        String::from_utf8_lossy(&stderr)
+    );
+    stdout
+}
+
+struct ChildObservation {
+    random: Vec<u8>,
+    generation_token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    preload_ms: u128,
+    resume_ms: u128,
+    identity_ms: u128,
+    claim_ms: u128,
+}
+
+struct SiblingWitness {
+    random: Vec<u8>,
+    generation_token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+}
+
+fn restore_child_and_read_random(
+    driver: &FcDriver,
+    store: &CheckpointStore,
+    checkpoint: &CheckpointId,
+    meta: &CheckpointMeta,
+    child_id: &str,
+) -> ChildObservation {
+    let child_dir = mvm_core::config::vm_state_dir(child_id);
+    copy_checkpoint_content(store, checkpoint, meta, &child_dir);
+
+    let t_preload = Instant::now();
+    let preloaded = driver
+        .preload_standby_child(&PreloadChildRequest {
+            child_vm_name: child_id,
+            child_dir: &child_dir,
+        })
+        .expect("preload Firecracker standby child");
+    let preload_ms = t_preload.elapsed().as_millis();
+    assert!(
+        preloaded.pid > 0,
+        "a preloaded child must expose its live pid"
+    );
+
+    let t_claim = Instant::now();
+    let genid = fresh_generation_token(checkpoint.as_str().to_string());
+    let generation_token = genid.token;
+    let t_resume = Instant::now();
+    let resume_result = driver.resume_preloaded_child(&ChildForkRequest {
+        child_vm_name: child_id,
+        child_dir: &child_dir,
+        parent_vm_name: None,
+        genid,
+        // This direct driver witness stands up no host-side gating or broker
+        // endpoints, so the child inherits the parent's empty channel set.
+        channels: &[],
+        cpu_grant: None,
+    });
+    if let Err(ref e) = resume_result {
+        eprintln!("preloaded child resume failed: {e:#}");
+        for name in ["firecracker.log", "console.log"] {
+            let path = child_dir.join(name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                eprintln!("--- {name} ---");
+                eprintln!("{}", String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+    resume_result.expect("resume preloaded Firecracker standby child");
+    let resume_ms = t_resume.elapsed().as_millis();
+
+    let t_identity = Instant::now();
+    let identity = driver
+        .deliver_child_identity(child_id, generation_token, None)
+        .expect("the restored child must complete the authenticated identity handshake");
+    let identity_ms = t_identity.elapsed().as_millis();
+    assert!(
+        identity.acknowledged,
+        "the guest agent must acknowledge the post-restore identity handshake"
+    );
+    assert!(
+        identity.reseeded,
+        "the guest must reseed its identity from the fresh generation token"
+    );
+    assert!(
+        identity.clock_resynced,
+        "the guest must resynchronize its wall clock before readiness"
+    );
+    let claim_ms = t_claim.elapsed().as_millis();
+
+    let child_vsock =
+        mvm_runtime::microvm::firecracker_vsock_uds_path(&child_dir.to_string_lossy());
+    let random = read_getrandom(&child_vsock);
+
+    let _ = mvm_runtime::microvm::stop_vm(child_id);
+
+    ChildObservation {
+        random,
+        generation_token,
+        preload_ms,
+        resume_ms,
+        identity_ms,
+        claim_ms,
+    }
+}
+
+fn run_restore_child_mode() -> bool {
+    let Ok(checkpoint) = std::env::var("MVM_LIVE_RESTORE_CHECKPOINT") else {
+        return false;
+    };
+    let child_id = std::env::var("MVM_LIVE_RESTORE_CHILD").expect("restore child id");
+    let witness_path = PathBuf::from(
+        std::env::var("MVM_LIVE_RESTORE_WITNESS").expect("restore witness output path"),
+    );
+    let store = CheckpointStore::open();
+    let checkpoint = CheckpointId::new(checkpoint);
+    let meta = store
+        .read_meta(&checkpoint)
+        .expect("read captured parent metadata in restore subprocess");
+    let observation =
+        restore_child_and_read_random(&FcDriver::new(), &store, &checkpoint, &meta, &child_id);
+    let mut witness = observation.generation_token.to_vec();
+    witness.extend_from_slice(&observation.random);
+    std::fs::write(&witness_path, witness).expect("write sibling restore witness");
+    let _ = std::fs::remove_dir_all(mvm_core::config::vm_state_dir(&child_id));
+
+    println!("FC_WARM_POOL_CLAIM_MS={}", observation.claim_ms);
+    println!("FC_WARM_POOL_PRELOAD_MS={}", observation.preload_ms);
+    println!("FC_WARM_POOL_RESUME_MS={}", observation.resume_ms);
+    println!("FC_WARM_POOL_IDENTITY_MS={}", observation.identity_ms);
+    true
+}
+
+fn restore_sibling_in_subprocess(
+    checkpoint: &CheckpointId,
+    child_id: &str,
+    witness_path: &Path,
+) -> SiblingWitness {
+    let status = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "fc_warm_pool_spawn_and_claim",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MVM_LIVE_RESTORE_CHECKPOINT", checkpoint.as_str())
+        .env("MVM_LIVE_RESTORE_CHILD", child_id)
+        .env("MVM_LIVE_RESTORE_WITNESS", witness_path)
+        .status()
+        .expect("run isolated sibling restore subprocess");
+    assert!(
+        status.success(),
+        "sibling restore subprocess failed: {status}"
+    );
+
+    let witness = std::fs::read(witness_path).expect("read sibling restore witness");
+    let token_len = mvm_core::crypto::vmgenid::GENID_BYTES;
+    assert_eq!(
+        witness.len(),
+        token_len + 32,
+        "sibling witness must contain one generation token and 32 random bytes"
+    );
+    let generation_token = witness[..token_len]
+        .try_into()
+        .expect("generation token witness has fixed length");
+    SiblingWitness {
+        generation_token,
+        random: witness[token_len..].to_vec(),
+    }
+}
+
 #[test]
-#[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS with /init listening on vsock agent port"]
+#[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS"]
 fn fc_warm_pool_spawn_and_claim() {
-    let Some(images) = live_images() else {
+    if run_restore_child_mode() {
+        return;
+    }
+    let Some(inputs) = live_image_inputs() else {
         eprintln!("skip: MVM_LIVE_KERNEL/ROOTFS not set or /dev/kvm missing");
         return;
     };
@@ -173,10 +499,12 @@ fn fc_warm_pool_spawn_and_claim() {
     // SAFETY: this harness is `#[ignore]` and runs single-threaded by hand, so
     // no other thread is reading the environment concurrently.
     unsafe { std::env::set_var("MVM_HOME", &home) };
+    let images = resolve_live_images(inputs, &home.join("cache"));
 
     let pid = std::process::id();
     let parent_id = format!("fc-warm-live-parent-{pid}");
-    let child_id = format!("fc-warm-live-child-{pid}");
+    let first_child_id = format!("fc-warm-live-child-a-{pid}");
+    let second_child_id = format!("fc-warm-live-child-b-{pid}");
 
     let driver = FcDriver::new();
     // The live harness exercises the same driver whose capability gates the
@@ -211,6 +539,7 @@ fn fc_warm_pool_spawn_and_claim() {
     let parent_vsock = mvm_runtime::microvm::firecracker_vsock_uds_path(
         &mvm_core::config::vm_state_dir(&parent_id).to_string_lossy(),
     );
+    activate_parent(&parent_vsock, &images);
     assert!(
         mvm_agentd::vsock::ping_at(&parent_vsock)
             .expect("the parent must complete an authenticated ping"),
@@ -224,7 +553,7 @@ fn fc_warm_pool_spawn_and_claim() {
         .expect("the FC driver supplies vm_full control");
     let store = CheckpointStore::open();
     let parent_checkpoint = CheckpointId::new(format!("standby-{parent_id}"));
-    let meta = capture_vm_full(
+    let _meta = capture_vm_full(
         &store,
         CaptureVmFullParams {
             id: parent_checkpoint.clone(),
@@ -248,91 +577,28 @@ fn fc_warm_pool_spawn_and_claim() {
     // paths or its pid marker.
     let _ = mvm_runtime::microvm::stop_vm(&parent_id);
 
-    let content_dir = store.content_dir(&parent_checkpoint);
-    let child_dir = mvm_core::config::vm_state_dir(&child_id);
-    std::fs::create_dir_all(&child_dir).expect("create child vm dir");
-    for blob in &meta.content {
-        let src = content_dir.join(&blob.name);
-        std::fs::copy(&src, child_dir.join(&blob.name))
-            .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
-    }
-
-    let t_preload = Instant::now();
-    let preloaded = driver
-        .preload_standby_child(&PreloadChildRequest {
-            child_vm_name: &child_id,
-            child_dir: &child_dir,
-        })
-        .expect("preload Firecracker standby child");
-    let preload_ms = t_preload.elapsed().as_millis();
-    assert!(
-        preloaded.pid > 0,
-        "a preloaded child must expose its live pid"
+    // Both children restore from the exact same captured memory. Their fresh
+    // generation tokens must drive an immediate kernel rekey before either
+    // child serves this first explicit randomness request.
+    let first = restore_sibling_in_subprocess(
+        &parent_checkpoint,
+        &first_child_id,
+        &home.join("sibling-a.witness"),
     );
-
-    let t_claim = Instant::now();
-    let genid = fresh_generation_token(parent_checkpoint.as_str().to_string());
-    let token = genid.token;
-    let t_resume = Instant::now();
-    let resume_result = driver.resume_preloaded_child(&ChildForkRequest {
-        child_vm_name: &child_id,
-        child_dir: &child_dir,
-        parent_vm_name: None,
-        genid,
-        // This harness drives the driver seam directly and stands up none of
-        // the host-side processes a claim wires channels to — no gating
-        // endpoint, no broker — so it hands down the empty set the parent
-        // itself booted with. This direct witness measures the resume seam, not
-        // the full runner's endpoint and broker wiring.
-        channels: &[],
-        cpu_grant: None,
-    });
-    if let Err(ref e) = resume_result {
-        eprintln!("preloaded child resume failed: {e:#}");
-        for name in ["firecracker.log", "console.log"] {
-            let path = child_dir.join(name);
-            if let Ok(bytes) = std::fs::read(&path) {
-                eprintln!("--- {name} ---");
-                eprintln!("{}", String::from_utf8_lossy(&bytes));
-            }
-        }
-    }
-    resume_result.expect("resume preloaded Firecracker standby child");
-    let resume_ms = t_resume.elapsed().as_millis();
-
-    let t_identity = Instant::now();
-    let identity = driver
-        .deliver_child_identity(&child_id, token, None)
-        .expect("the restored child must complete the authenticated identity handshake");
-    let identity_ms = t_identity.elapsed().as_millis();
-    assert!(
-        identity.acknowledged,
-        "the guest agent must acknowledge the post-restore identity handshake"
+    let second = restore_sibling_in_subprocess(
+        &parent_checkpoint,
+        &second_child_id,
+        &home.join("sibling-b.witness"),
     );
-    assert!(
-        identity.reseeded,
-        "the guest must reseed its identity from the fresh generation token"
+    assert_ne!(
+        first.generation_token, second.generation_token,
+        "sibling clones must receive distinct generation tokens"
     );
-    assert!(
-        identity.clock_resynced,
-        "the guest must resynchronize its wall clock before readiness"
+    assert_ne!(
+        first.random, second.random,
+        "sibling clones returned identical kernel randomness after acknowledged reseeds"
     );
-    let claim_ms = t_claim.elapsed().as_millis();
-
-    let child_vsock =
-        mvm_runtime::microvm::firecracker_vsock_uds_path(&child_dir.to_string_lossy());
-    assert!(
-        connect_to(&child_vsock, CHILD_AGENT_TIMEOUT_SECS).is_ok(),
-        "child VM must answer on its vsock agent port after the preloaded restore"
-    );
-
-    let _ = mvm_runtime::microvm::stop_vm(&child_id);
-    let _ = std::fs::remove_dir_all(&child_dir);
-
     println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
-    println!("FC_WARM_POOL_CLAIM_MS={claim_ms}");
-    println!("FC_WARM_POOL_PRELOAD_MS={preload_ms}");
-    println!("FC_WARM_POOL_RESUME_MS={resume_ms}");
-    println!("FC_WARM_POOL_IDENTITY_MS={identity_ms}");
     println!("FC_WARM_POOL_IDENTITY_HANDSHAKE=authenticated");
+    println!("FC_WARM_POOL_SIBLING_RANDOMNESS=distinct");
 }
