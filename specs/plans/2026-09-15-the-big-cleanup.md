@@ -186,10 +186,12 @@ rest being the secrets-substitution domain noun.
       `NoopChecker` itself, so gating it would have kept a double that tests
       nothing. The trait doc also named an `AlwaysFailingChecker` that never
       existed; it now names neither.
-- [ ] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
+- [x] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d and its body is a
       comment describing a harness plus `unimplemented!()`. A test that can
-      never pass. Write the harness or delete the test.
+      never pass. Write the harness or delete the test. Deleted: the refusal
+      test in the same file and the unit ladder cover the security logic, and a
+      live attach-and-boot harness is a feature, not a cleanup.
 - [ ] **A3.4** Stub clusters that ship as production behaviour: attestation boot
       measurement is 64 zero hex chars; `mvm-contract/src/policy/policies.rs`
       ships five fields as the literal string `Stub.`; addon signature
@@ -407,10 +409,10 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
       exists, never that production calls the code the witness tests. Audit
       every claim witness for a production caller, with `graft callers` on the
       subject rather than on the test.
-- [ ] **F2** `crates/mvm-hostd/tests/prelaunch_live.rs:143`
+- [x] **F2** `crates/mvm-hostd/tests/prelaunch_live.rs:143`
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d with a body of
       comment plus `unimplemented!()` — a test that can never pass. Write the
-      harness or delete it.
+      harness or delete it. Deleted with A3.3.
 
 ## G. Dependencies
 

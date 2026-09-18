@@ -26,7 +26,9 @@ Last updated: 2026-09-18
 - [x] **No always-accept integrity checker in the binary-integrity module.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A3.2, issue #3310.
       `NoopChecker` was `pub`, ungated and returned `Ok` for any binary; its
-      only caller was its own test. Deleted with that test.
+      only caller was its own test. Deleted with that test. A3.3/F2 ride along:
+      the `#[ignore]`d `unimplemented!()` live-attach test in
+      `prelaunch_live.rs` is deleted too.
 
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
