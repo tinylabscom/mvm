@@ -83,6 +83,37 @@ pub(super) fn store_path_of(path: &Path) -> Option<PathBuf> {
     Some(Path::new("/nix/store").join(entry))
 }
 
+/// The kernel's `struct fstrim_range`, the argument to [`FITRIM`].
+#[repr(C)]
+#[derive(Debug, Default)]
+pub(super) struct FstrimRange {
+    pub start: u64,
+    pub len: u64,
+    pub minlen: u64,
+}
+
+impl FstrimRange {
+    /// Trim every free block in the filesystem.
+    pub(super) fn whole_filesystem() -> Self {
+        Self {
+            start: 0,
+            len: u64::MAX,
+            minlen: 0,
+        }
+    }
+}
+
+/// `FITRIM`, which `libc` does not export: `_IOWR('X', 121, struct
+/// fstrim_range)`.
+pub(super) const FITRIM: u32 = ioctl_read_write(b'X', 121, std::mem::size_of::<FstrimRange>());
+
+/// Linux's `_IOWR` encoding: direction in the top two bits, then the argument
+/// size, the type byte, and the number.
+const fn ioctl_read_write(kind: u8, number: u8, size: usize) -> u32 {
+    const READ_WRITE: u32 = 3;
+    (READ_WRITE << 30) | ((size as u32) << 16) | ((kind as u32) << 8) | number as u32
+}
+
 fn plain_token(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -171,6 +202,19 @@ mod tests {
             )),
             Some(PathBuf::from("/nix/store/def456-nss-cacert-3.101"))
         );
+    }
+
+    #[test]
+    fn fitrim_matches_the_kernel_uapi() {
+        // linux/fs.h: #define FITRIM _IOWR('X', 121, struct fstrim_range)
+        assert_eq!(std::mem::size_of::<FstrimRange>(), 24);
+        assert_eq!(FITRIM, 0xC018_5879);
+    }
+
+    #[test]
+    fn a_whole_filesystem_trim_covers_every_block() {
+        let range = FstrimRange::whole_filesystem();
+        assert_eq!((range.start, range.len, range.minlen), (0, u64::MAX, 0));
     }
 
     #[test]

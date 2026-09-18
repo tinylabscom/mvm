@@ -729,7 +729,7 @@ mod linux {
     /// it just cannot register the seed, so it will not collect garbage.
     fn stash_seed_reginfo() {
         let seed_reginfo = Path::new(NIX_TARGET).join(".reginfo");
-        if let Err(e) = std::fs::copy(&seed_reginfo, store_gc::SEED_REGINFO_STASH) {
+        if let Err(e) = std::fs::copy(&seed_reginfo, crate::store_gc::SEED_REGINFO_STASH) {
             eprintln!(
                 "stage0-init: no seed registration at {} ({e}); store garbage collection is off for this run",
                 seed_reginfo.display()
@@ -741,7 +741,7 @@ mod linux {
     /// bootstrap is a cache hit. Best-effort: an unrooted output is only a
     /// colder next run.
     fn root_stage0_output(store_path: &Path, mode: &str) {
-        let Some(root) = store_gc::output_root(mode) else {
+        let Some(root) = crate::store_gc::output_root(mode) else {
             return;
         };
         if let Err(e) = replace_symlink(&root, store_path) {
@@ -776,12 +776,12 @@ mod linux {
             Path::new(STAGE0_INPUT_STAGE),
             Path::new("/out/stage0-build.conf"),
         ));
-        let cap = store_gc::cap_kib(&conf);
+        let cap = crate::store_gc::cap_kib(&conf);
         let Some(used) = filesystem_used_kib(STAGE0_NIX_STORE_MOUNT) else {
             eprintln!("stage0-init: could not measure the Nix store; not collecting");
             return;
         };
-        if !store_gc::over_cap(used, cap) {
+        if !crate::store_gc::over_cap(used, cap) {
             return;
         }
         eprintln!(
@@ -800,6 +800,7 @@ mod linux {
             }
             Err(e) => eprintln!("stage0-init: garbage collection failed (continuing): {e}"),
         }
+        trim_stage0_store();
         // A store that reuses its marker without a seed would boot with no
         // `nix`. Dropping the marker makes the next run reseed instead.
         if find_seed_bin("nix").is_err() || find_seed_cacert().is_err() {
@@ -815,8 +816,8 @@ mod linux {
     /// root that points at an unregistered path and collects unregistered
     /// paths, so without both steps the collection would take the seed.
     fn protect_seed_from_collection() -> Result<(), String> {
-        let reginfo = std::fs::File::open(store_gc::SEED_REGINFO_STASH)
-            .map_err(|e| format!("open {}: {e}", store_gc::SEED_REGINFO_STASH))?;
+        let reginfo = std::fs::File::open(crate::store_gc::SEED_REGINFO_STASH)
+            .map_err(|e| format!("open {}: {e}", crate::store_gc::SEED_REGINFO_STASH))?;
         let nix_store = find_seed_bin("nix-store")?;
         let status = Command::new(&nix_store)
             .arg("--load-db")
@@ -833,11 +834,54 @@ mod linux {
             ("nix", find_seed_bin("nix")?),
             ("cacert", find_seed_cacert()?),
         ] {
-            let store_path = store_gc::store_path_of(&path)
+            let store_path = crate::store_gc::store_path_of(&path)
                 .ok_or_else(|| format!("{} is not under /nix/store", path.display()))?;
-            replace_symlink(&store_gc::seed_root(component), &store_path)?;
+            replace_symlink(&crate::store_gc::seed_root(component), &store_path)?;
         }
         Ok(())
+    }
+
+    /// Tell the store's disk which blocks the collection freed. The host file
+    /// only shrinks when the block device honours the discard: a device
+    /// without discard answers EOPNOTSUPP, which is expected and not an error.
+    fn trim_stage0_store() {
+        let path = match std::ffi::CString::new(STAGE0_NIX_STORE_MOUNT) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        // SAFETY: `path` is NUL-terminated; the descriptor is checked before use
+        // and closed on every path out of this block.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        if fd < 0 {
+            eprintln!(
+                "stage0-init: could not open {STAGE0_NIX_STORE_MOUNT} to trim: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let mut range = crate::store_gc::FstrimRange::whole_filesystem();
+        // SAFETY: `fd` is an open directory on the store filesystem and `range`
+        // is a live `struct fstrim_range` the kernel reads and writes back. The
+        // request's type is `c_int` on musl and `c_ulong` on glibc; `as _` keeps
+        // the same bits for both.
+        let result = unsafe {
+            let rc = libc::ioctl(fd, crate::store_gc::FITRIM as _, &mut range);
+            let error = std::io::Error::last_os_error();
+            libc::close(fd);
+            if rc == 0 { Ok(()) } else { Err(error) }
+        };
+        match result {
+            Ok(()) => eprintln!(
+                "stage0-init: trimmed {} bytes of freed store blocks",
+                range.len
+            ),
+            Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => {
+                eprintln!(
+                    "stage0-init: the store disk does not support discard; freed blocks stay allocated on the host"
+                );
+            }
+            Err(e) => eprintln!("stage0-init: trimming the store failed (continuing): {e}"),
+        }
     }
 
     fn run_store_gc() -> Result<(), String> {
@@ -873,7 +917,7 @@ mod linux {
         // Both guest targets (aarch64 and x86_64 musl) use 64-bit counters.
         let (blocks, free, fragment): (u64, u64, u64) =
             (stats.f_blocks, stats.f_bfree, stats.f_frsize);
-        Some(store_gc::used_kib(blocks, free, fragment))
+        Some(crate::store_gc::used_kib(blocks, free, fragment))
     }
 
     /// Flush and cleanly unmount the persistent store before reporting Stage 0
