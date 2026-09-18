@@ -13,6 +13,7 @@
 use virtio_queue::{Queue as SplitQueue, QueueT};
 
 pub(crate) mod agent_bridge;
+mod blk_discard;
 pub mod device;
 pub mod device_state;
 pub(crate) mod host_dial_bridge;

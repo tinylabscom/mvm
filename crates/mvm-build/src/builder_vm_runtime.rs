@@ -694,6 +694,15 @@ store_kib=$(du -s -k /nix 2>/dev/null | cut -f1 || echo 0)
 if [ "$store_kib" -gt {gc_cap_kib} ]; then
   echo "mvm-builder: /nix store ${{store_kib}} KiB > cap {gc_cap_kib} KiB — nix-collect-garbage --delete-older-than 14d" >&2
   nix-collect-garbage --delete-older-than 14d >&2 2>&1 || echo "mvm-builder: nix-collect-garbage failed (continuing)" >&2
+  # Hand the blocks the GC freed back to the host. The store disk is a sparse
+  # file, so deleting store paths alone leaves it at its high-water mark: the
+  # guest filesystem stops using those blocks but the host still has them
+  # allocated. `fstrim` issues the discards that release them, which the device
+  # turns into holes. Best-effort: a device that does not offer discard reports
+  # the operation unsupported, and the build carries on either way.
+  # `/nix-store` is the ext4 store disk; `/nix` is the overlay over it, and an
+  # overlay has no FITRIM of its own.
+  fstrim /nix-store >&2 2>&1 || echo "mvm-builder: fstrim /nix-store failed (continuing)" >&2
 fi
 "#,
         flake_ref_assign = flake_ref_assign,
@@ -2008,6 +2017,16 @@ mod tests {
         assert!(
             body.contains("-gt 25165824 ]"),
             "missing default cap literal in:\n{body}"
+        );
+        // The trim follows the GC inside the same cap branch: it is what turns
+        // deleted store paths into host blocks, and running it when nothing was
+        // collected would walk the whole store for nothing.
+        let gc_idx = body.find("nix-collect-garbage").expect("gc present");
+        let trim_idx = body.find("fstrim /nix-store").expect("store trim present");
+        assert!(trim_idx > gc_idx, "the trim must follow the GC in:\n{body}");
+        assert!(
+            body[gc_idx..trim_idx].find("\nfi").is_none(),
+            "the trim must sit inside the cap branch in:\n{body}"
         );
         // GC must be POST-build — after the mvm-meta.json emission block.
         let meta_idx = body.find("mvm-meta.json").expect("meta block present");
