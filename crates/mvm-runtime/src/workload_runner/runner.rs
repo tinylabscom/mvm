@@ -3359,6 +3359,10 @@ mod tests {
     }
 
     impl CheckpointChainAnchor for ClaimTestAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(None)
+        }
+
         fn recorded_creation_digest(
             &self,
             meta: &CheckpointMeta,

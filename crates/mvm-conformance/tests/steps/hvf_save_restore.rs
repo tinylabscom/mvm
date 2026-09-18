@@ -27,6 +27,10 @@ use crate::world::CliWorld;
 struct FixedAnchor(Option<CheckpointDigest>);
 
 impl CheckpointChainAnchor for FixedAnchor {
+    fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> anyhow::Result<Option<String>> {
+        Ok(self.0.as_ref().map(|_| "local".to_string()))
+    }
+
     fn recorded_creation_digest(
         &self,
         _meta: &CheckpointMeta,
@@ -349,6 +353,7 @@ fn restore_is_refused(world: &mut CliWorld) {
                 RestoreParams {
                     checkpoint: meta.id.clone(),
                     target_vm: meta.vm_name.clone(),
+                    tenant: "local".into(),
                 },
                 &NeverReachedRestore,
                 &anchor,

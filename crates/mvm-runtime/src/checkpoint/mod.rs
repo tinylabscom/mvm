@@ -187,6 +187,42 @@ pub trait CheckpointChainAnchor {
     /// `checkpoint.forked`'s `child_digest`), or `None` if the chain carries no
     /// creation entry for it.
     fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>>;
+
+    /// The tenant whose signed audit chain recorded `meta`'s creation, or
+    /// `None` if no chain carries a creation entry for it.
+    fn recorded_creation_tenant(&self, meta: &CheckpointMeta) -> Result<Option<String>>;
+}
+
+/// Refuse to load `meta`'s saved machine state for any tenant but the one that
+/// created it.
+///
+/// A restore maps the saved memory into a new guest. Each restore maps a
+/// private copy, so no two guests share its pages, but the saved memory still
+/// holds everything the creating tenant's workload had in RAM; handing it to
+/// another tenant's guest would be a disclosure, not a restore.
+///
+/// The owner side is authenticated: it is the tenant the creation entry was
+/// signed under. The `tenant` side is whatever the caller says it is running
+/// as, so this is a policy guard against restoring into the wrong tenant, not
+/// an authenticated boundary between tenants that share a host user.
+fn ensure_same_tenant(
+    anchor: &dyn CheckpointChainAnchor,
+    meta: &CheckpointMeta,
+    tenant: &str,
+) -> Result<()> {
+    match anchor.recorded_creation_tenant(meta)? {
+        Some(owner) if owner == tenant => Ok(()),
+        Some(owner) => anyhow::bail!(
+            "checkpoint '{}' belongs to tenant '{owner}'; refusing to restore its saved memory \
+             for tenant '{tenant}'",
+            meta.id
+        ),
+        None => anyhow::bail!(
+            "checkpoint '{}' has no signed creation entry naming its tenant; refusing to \
+             restore its saved memory",
+            meta.id
+        ),
+    }
 }
 
 /// A checkpoint record participates in the shared, namespace-agnostic lineage
@@ -446,6 +482,12 @@ pub fn fork_vm_full(
     }
 
     let child_grants = validate_child_fork_plan(&params, parent.grants.as_ref())?;
+    // `validate_child_fork_plan` has already refused a missing or blank tenant.
+    ensure_same_tenant(
+        anchor,
+        &parent,
+        params.child_tenant_id.as_deref().unwrap_or_default(),
+    )?;
 
     // Clone the captured triple into the child's state dir, then boot the child
     // from its OWN copies — never the parent's live blobs.
@@ -959,6 +1001,9 @@ pub struct RestoreParams {
     pub checkpoint: CheckpointId,
     /// Name of the VM to restore into (must match the supervisor-config shape).
     pub target_vm: String,
+    /// The tenant restoring it, which must be the tenant that created it.
+    /// Supplied by the caller and not authenticated; see `ensure_same_tenant`.
+    pub tenant: String,
 }
 
 /// Resume a VM from a vm_full checkpoint (same identity). Verifies the manifest
@@ -986,6 +1031,7 @@ pub fn restore_checkpoint(
     }
     verify_content(store, &meta)?;
     verify_checkpoint_against_chain(anchor, &meta)?;
+    ensure_same_tenant(anchor, &meta, &params.tenant)?;
     let dir = store.content_dir(&meta.id);
 
     // The checkpoint carries the launch config (for checkpoints captured after
@@ -1246,6 +1292,10 @@ mod tests {
     /// chain agrees with what's on disk — the honest case.
     struct AgreeingAnchor;
     impl CheckpointChainAnchor for AgreeingAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(Some("local".to_string()))
+        }
+
         fn recorded_creation_digest(
             &self,
             meta: &CheckpointMeta,
@@ -1258,6 +1308,10 @@ mod tests {
     /// signed chain that disagrees with the on-disk record (post-audit edit).
     struct DisagreeingAnchor(CheckpointDigest);
     impl CheckpointChainAnchor for DisagreeingAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(Some("local".to_string()))
+        }
+
         fn recorded_creation_digest(
             &self,
             _meta: &CheckpointMeta,
@@ -1270,11 +1324,31 @@ mod tests {
     /// checkpoint, which chain-anchored verification must refuse.
     struct UnauditedAnchor;
     impl CheckpointChainAnchor for UnauditedAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(None)
+        }
+
         fn recorded_creation_digest(
             &self,
             _meta: &CheckpointMeta,
         ) -> Result<Option<CheckpointDigest>> {
             Ok(None)
+        }
+    }
+
+    /// Anchor that agrees on every digest but records the checkpoint's
+    /// creation under `self.0`'s tenant (or under none).
+    struct TenantAnchor(Option<&'static str>);
+    impl CheckpointChainAnchor for TenantAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(self.0.map(str::to_string))
+        }
+
+        fn recorded_creation_digest(
+            &self,
+            meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            Ok(Some(meta.compute_meta_digest()))
         }
     }
 
@@ -2000,6 +2074,7 @@ mod tests {
             RestoreParams {
                 checkpoint: ckpt.id.clone(),
                 target_vm: "origin".into(),
+                tenant: "local".into(),
             },
             &restore,
             &AgreeingAnchor,
@@ -2020,6 +2095,36 @@ mod tests {
     }
 
     #[test]
+    fn restore_checkpoint_refuses_a_tenant_that_did_not_create_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v-tenant");
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
+        };
+        let error = restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: ckpt.id,
+                target_vm: "origin".into(),
+                tenant: "local".into(),
+            },
+            &restore,
+            &TenantAnchor(Some("acme")),
+        )
+        .expect_err("another tenant's saved memory must not be restored");
+        assert!(
+            error.to_string().contains("belongs to tenant 'acme'"),
+            "{error}"
+        );
+        assert!(
+            restore.seen.borrow().is_none(),
+            "the restore seam never ran"
+        );
+    }
+
+    #[test]
     fn restore_checkpoint_refuses_fs_quick() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
@@ -2033,6 +2138,7 @@ mod tests {
             RestoreParams {
                 checkpoint: fsq.id,
                 target_vm: "origin".into(),
+                tenant: "local".into(),
             },
             &restore,
             &AgreeingAnchor,
@@ -2061,6 +2167,7 @@ mod tests {
             RestoreParams {
                 checkpoint: ckpt.id,
                 target_vm: "origin".into(),
+                tenant: "local".into(),
             },
             &restore,
             &AgreeingAnchor,
@@ -2665,6 +2772,47 @@ mod tests {
                 *self.cpu_grant.borrow_mut() = child.cpu_grant;
                 Ok(())
             }
+        }
+    }
+
+    /// Saved guest memory is the creating tenant's data. A fork for any other
+    /// tenant is refused before a byte is cloned or a VMM started, so two
+    /// tenants never map one checkpoint's memory.
+    #[test]
+    fn fork_vm_full_refuses_a_child_of_another_tenant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-tenant");
+        let dest = tmp.path().join("other-tenant-child");
+
+        for (anchor, expected) in [
+            (TenantAnchor(Some("acme")), "belongs to tenant 'acme'"),
+            (
+                TenantAnchor(None),
+                "no signed creation entry naming its tenant",
+            ),
+        ] {
+            let (child_plan_json, child_tenant_id) = admitted_child_plan();
+            let restorer = RecordedRestore::default();
+            let error = fork_vm_full(
+                &store,
+                ForkParams {
+                    checkpoint: parent.id.clone(),
+                    child_id: CheckpointId::new("fcf-tenant"),
+                    child_vm_name: "fc-childvm-tenant".into(),
+                    dest_dir: dest.clone(),
+                    created_unix: 2,
+                    parent_liveness: ForkParentLiveness::MustBeStopped,
+                    child_plan_json: Some(child_plan_json),
+                    child_tenant_id: Some(child_tenant_id),
+                },
+                &restorer.restore(),
+                &anchor,
+            )
+            .expect_err("a fork for another tenant must be refused");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(restorer.seen.borrow().is_none(), "no VMM was started");
+            assert!(!dest.exists(), "no saved state was cloned");
         }
     }
 
