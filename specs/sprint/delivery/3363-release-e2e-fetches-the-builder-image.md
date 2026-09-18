@@ -83,9 +83,17 @@ from-source builder image bootstrap, not the sidecar.
 
 ## What to expect from the measurement
 
-The release-lane speedup is not claimed here. It is measured against the
-2026-09-15 baseline on two post-merge runs and recorded on #3363. Two things
-are already known:
+**Measured (2026-09-17 dispatch and the 2026-09-18 nightly), 313 scenarios
+passing in both:** the job went from 118 minutes to 92 and 106. Image
+preparation fell from 37 minutes to 30.0 and 34.2, of which the fetched builder
+image is 6.6 and 7.7 and the source-matched SDK sidecar is 23.4 and 26.5. The
+25-minute target is met by one run and missed by the other, so the hypothesis
+is rejected as stated and the sidecar build is what remains.
+
+The prediction below held.
+
+The release-lane speedup was not claimed in advance. Two things were known
+before the measurement:
 
 - The failure it prevents is the larger effect: a Stage 0 hang cost the whole
   180-minute budget and a release dry run, and the lane no longer runs one.

@@ -72,8 +72,9 @@ Last updated: 2026-09-18
       - [x] W1 #3363: release E2E fetches the signed builder image; cold source
             bootstrap is the nightly `source-bootstrap-linux` witness; phase
             timings emitted; fetch staged atomically with arch refusals.
-      - [ ] W1 #3363: two post-merge runs compared against the 2026-09-15
-            baseline.
+      - [x] W1 #3363: two post-merge runs compared against the 2026-09-15
+            baseline: 118 min → 92 and 106 min. The 25-minute hypothesis is
+            rejected as stated; the SDK sidecar build is the remaining cost.
       - [x] W3a #3365: image-set manifest and lock types with pure validation.
       - [ ] W3b #3365: offline signed verification and revocation.
       - [ ] W3c #3365: checked-in lock and generated pins.

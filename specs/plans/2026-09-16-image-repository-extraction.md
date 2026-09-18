@@ -303,9 +303,37 @@ may combine the trust-root switch with deletion of the old producer.
 - [x] Retain a live flake build through the fetched builder so the release gate
       still exercises user-visible build behavior.
 - [x] Record phase timings in the suite output.
-- [ ] Compare two post-merge runs against the 2026-09-15 baseline (10 minutes
+- [x] Compare two post-merge runs against the 2026-09-15 baseline (10 minutes
       of build, 37 minutes of source image preparation, 67 minutes of
       scenarios; 118-minute job) and record the result on #3363.
+
+**Measured, and the 25-minute hypothesis is rejected as stated.** The Linux
+documented-surface job, all 313 scenarios passing in each run:
+
+| | baseline 2026-09-15 | 2026-09-17 | 2026-09-18 nightly |
+|---|---:|---:|---:|
+| job wall clock | 118 min | 92 min | 106 min |
+| build | ~10 min | 8.8 min | 10.4 min |
+| builder image | (in preparation) | 6.6 min | 7.7 min |
+| SDK sidecar | (in preparation) | 23.4 min | 26.5 min |
+| image preparation total | 37 min | 30.0 min | 34.2 min |
+| scenarios | 67 min | 50.2 min | 57.8 min |
+
+The saving is 26 and 12 minutes, so one of the two runs misses the 25-minute
+bar. Fetching the builder image did what it was meant to: preparation that was
+a from-source Stage 0 is now a 7-minute verified download. What remains is the
+source-matched SDK sidecar, which the baseline had already been paying inside
+the same 37 minutes and which is now the single largest preparation cost.
+
+The larger effect is not in the table: on 2026-09-16 this lane twice spent its
+entire 180-minute budget on a Stage 0 that hung, and was cancelled before the
+suite ran. Release evidence went from unobtainable to obtained.
+
+Next lever, deliberately not taken here: acquire the published signed SDK
+sidecar when its source fingerprint matches the tree. That changes what the
+release gate covers — a released CLI consumes the published sidecar, so it is
+arguably closer to the shipped artifact — and it is a decision of its own
+rather than a speedup to fold in.
 
 Delivered so far: `specs/sprint/delivery/3363-release-e2e-fetches-the-builder-image.md`.
 The published-image fetch now stages and swaps atomically, refuses a foreign
