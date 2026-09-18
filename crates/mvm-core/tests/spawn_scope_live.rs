@@ -235,18 +235,27 @@ struct ManagerFrozen(String);
 
 impl ManagerFrozen {
     fn freeze() -> Self {
+        // Asked of the system manager by unit rather than found by process
+        // name: for root, `pgrep -u 0 -x systemd` finds PID 1 first, which the
+        // kernel will not stop, and the witness then passes a launch through a
+        // manager that was never frozen.
         let uid = String::from_utf8(Command::new("id").arg("-u").output().expect("id -u").stdout)
             .expect("utf8 uid");
-        let out = Command::new("pgrep")
-            .args(["-u", uid.trim(), "-x", "systemd"])
+        let out = Command::new("systemctl")
+            .args([
+                "show",
+                &format!("user@{}.service", uid.trim()),
+                "-p",
+                "MainPID",
+                "--value",
+            ])
             .output()
-            .expect("pgrep the user manager");
-        let pid = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .expect("this user runs a systemd manager")
-            .trim()
-            .to_string();
+            .expect("ask the system manager for this user's manager");
+        let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            !pid.is_empty() && pid != "0" && pid != "1",
+            "this user runs no separate systemd manager (MainPID {pid:?})"
+        );
         let stopped = Command::new("kill")
             .args(["-STOP", &pid])
             .status()
