@@ -13,7 +13,11 @@
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.
       Epic #3419; workstreams #3420–#3426.
-      Design recorded; implementation and end-to-end certification remain open.
+      W1a Rust binary inventory and CI drift gate tested; 17 focused tests,
+      repository gates and clippy pass. Queued promotion is pending. The inventory
+      records 28 runtime gaps and 17 non-runtime exclusions, not capture coverage.
+      Remaining W1 sources/harness/measurements and runtime certification are open.
+      Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 
