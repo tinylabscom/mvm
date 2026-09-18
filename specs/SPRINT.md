@@ -59,7 +59,9 @@
       free-page memory return, copy-on-write HVF restore, spawn-time memory and
       task limits, chunked durable checkpoints, measured guest flush cost,
       signed bundles through image registries, and structured agent-facing
-      errors.
+      errors. W1 is complete: a live Firecracker/KVM witness restores two
+      siblings from one snapshot and proves their immediate `getrandom(2)`
+      outputs differ after authenticated reseed acknowledgements.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
