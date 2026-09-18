@@ -145,6 +145,13 @@
       against the lock before the bytes are parsed, the detached signature under
       the locked identity next, then structure, lock fields, on-disk artifact
       size and digest, and revocation keyed on the locked signer.
+      Slice W3d puts that verifier behind `mvmctl image boot verify`, which
+      reads the manifest, bundle, lock and artifact directory, names the stage
+      that refused and exits nonzero on refusal. The older
+      `image_verify::SignedManifest` / `RevocationList` model and its example
+      are removed; the pack-signing smoke now signs a real image set and runs
+      the command — the full round-trip on a release tag, a signature-stage
+      refusal of the branch-minted bundle nightly.
       W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
       pack move; the guest binary recipes stay in `mvm` and are consumed from a
       pinned `mvm` flake input, so nothing is copied between the repositories.

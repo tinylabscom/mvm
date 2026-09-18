@@ -990,3 +990,95 @@ fn machine_run_output_is_advertised_and_refused_before_boot() {
     assert_eq!(std::fs::read(populated.join("keep")).unwrap(), b"mine");
     assert!(!tmp.path().join("fresh").exists());
 }
+
+#[test]
+fn image_boot_verify_help_lists_every_input() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["image", "boot", "verify", "--help"])
+        .output()
+        .expect("run mvmctl image boot verify --help");
+    assert!(
+        out.status.success(),
+        "verify help must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--manifest",
+        "--bundle",
+        "--lock",
+        "--artifacts",
+        "--require-complete",
+        "--json",
+    ] {
+        assert!(help.contains(flag), "help must list {flag}: {help}");
+    }
+}
+
+#[test]
+fn image_boot_verify_requires_every_input() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["image", "boot", "verify", "--manifest", "m.json"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "missing inputs must be a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--bundle"), "stderr: {stderr}");
+}
+
+/// A manifest the lock does not pin is refused at the digest, before its bytes
+/// are parsed or its signature is checked — so this holds in a build without
+/// the signature verifier too, and the JSON form still exits nonzero.
+#[test]
+fn image_boot_verify_refuses_a_manifest_the_lock_does_not_pin() {
+    use sha2::Digest as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = |name: &str| tmp.path().join(name);
+    std::fs::write(path("image-set.json"), b"{\"not\":\"the pinned bytes\"}").unwrap();
+    std::fs::write(path("image-set.json.bundle"), b"{}").unwrap();
+    std::fs::create_dir(path("artifacts")).unwrap();
+    let lock = format!(
+        "schema_version = 1\n\
+         repository = \"tinylabscom/mvm\"\n\
+         release_tag = \"v0.0.0-smoke\"\n\
+         manifest_asset = \"image-set.json\"\n\
+         manifest_sha256 = \"{}\"\n\
+         \n\
+         [signing_identity]\n\
+         workflow = \".github/workflows/release.yml\"\n\
+         tag_ref = \"refs/tags/v0.0.0-smoke\"\n",
+        hex::encode(sha2::Sha256::digest(b"the pinned bytes"))
+    );
+    std::fs::write(path("images.lock"), lock).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", tmp.path())
+        .env("MVM_HOME", tmp.path().join("state"))
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["image", "boot", "verify", "--json"])
+        .arg("--manifest")
+        .arg(path("image-set.json"))
+        .arg("--bundle")
+        .arg(path("image-set.json.bundle"))
+        .arg("--lock")
+        .arg(path("images.lock"))
+        .arg("--artifacts")
+        .arg(path("artifacts"))
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "a refused set must exit nonzero");
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json prints the refusal on stdout");
+    assert_eq!(report["verified"], false);
+    assert_eq!(report["stage"], "manifest-digest");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refused at the manifest-digest stage"),
+        "stderr: {stderr}"
+    );
+}

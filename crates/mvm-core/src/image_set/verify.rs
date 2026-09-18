@@ -276,9 +276,8 @@ fn artifact_size(
     }
 }
 
-/// Hashed with `sha256_file` rather than `crypto::image_verify::verify_artifact`
-/// because that helper deletes the file on mismatch; an image set is verified
-/// out of a shared cache a concurrent run may also be reading.
+/// Hashed and compared here rather than deleted on mismatch: an image set is
+/// verified out of a shared cache a concurrent run may also be reading.
 fn artifact_digest(
     member: &ImageSetMember,
     artifact: &MemberArtifact,

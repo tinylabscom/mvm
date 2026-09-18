@@ -1,12 +1,16 @@
 name: Pack signing smoke
 
-# Nightly gate that proves the keyless pack signing round-trip works
+# Nightly gate that checks the keyless pack signing round-trip works
 # against a REAL cosign bundle, not just the offline fixtures the unit
 # suite exercises. It produces a throwaway keyless manifest over dummy
 # artifacts, signs it with `cosign sign-blob` using this job's own GitHub
 # Actions OIDC identity, then feeds the real bundle through the Rust
 # sigstore-verify stack the pack verifier uses in production. Signs nothing
 # a real user consumes and publishes no artifacts.
+#
+# It also runs on release-tag pushes, because that is the only run whose
+# signing identity is tag-bound — and an image lock can name nothing else.
+# See the image-set step below.
 
 on:
   # Ran zero times between being written and 2026-08-21, because
@@ -17,6 +21,8 @@ on:
   # nightly is not mistaken for a missing one.
   schedule:
     - cron: "43 4 * * *"
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -116,37 +122,122 @@ jobs:
             --manifest smoke/runtime-pack-manifest.json --bundle smoke/runtime-pack-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
-      - name: Round-trip an image manifest through the dev-image verifier
-        # The same Rust stack backs the dev-image download signature check
-        # (image_verify::verify_manifest), which hard-fails on a bundle it
-        # cannot parse. Sign a real image manifest and verify it through that
-        # exact entrypoint, so this smoke also guards the dev-image trust path.
+      - name: Round-trip an image set through the offline verifier
+        # `mvmctl image boot verify` checks a published image set with no
+        # network: the manifest bytes against the digest the lock pins, the
+        # detached cosign bundle against the identity the lock names, then the
+        # manifest's structure and producer, then every artifact's size and
+        # digest. Produce a one-member set over the dummy kernel, sign its
+        # manifest with the same real `cosign sign-blob --new-bundle-format`,
+        # write a lock pinning the digest of the bytes that were signed, and
+        # verify through that command.
+        #
+        # A lock names a signing identity at a tag ref and cannot name a
+        # branch: a signature minted on a branch is not a release. So the full
+        # round-trip — exit 0, then a tampered artifact refused at the
+        # artifacts stage — runs on a release-tag push, where this job's own
+        # identity is tag-bound. The nightly run signs on a branch; there the
+        # real bundle is checked against a lock naming this workflow at a tag
+        # and must be refused at the signature stage, after the digest stage
+        # has accepted the bytes.
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          cat > smoke/image-manifest.json <<'JSON'
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            tag="${REF_NAME}"
+            expected_stage="none"
+          else
+            tag="v0.0.0-smoke"
+            expected_stage="signature"
+          fi
+          workflow=".github/workflows/pack-signing-smoke.yml"
+          mkdir -p smoke/image-set
+          cp smoke/vmlinux smoke/image-set/vmlinux
+          kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
+          kernel_size="$(stat -c %s smoke/image-set/vmlinux)"
+          cat > smoke/image-set.json <<JSON
           {
             "schema_version": 1,
-            "version": "0.0.0-smoke",
-            "arch": "x86_64",
-            "variant": "dev",
-            "rootfs_format": "ext4",
-            "artifacts": [{"name": "dev-rootfs-x86_64.ext4", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
-            "nix_store_hash": "smoke",
-            "source_git_sha": "smoke",
-            "flake_locks": {},
-            "addressed_advisories": [],
-            "built_at": "2026-01-01T00:00:00Z",
-            "not_after": "2099-01-01T00:00:00Z"
+            "set_version": "${tag#v}",
+            "issued_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "producer": {
+              "repository": "${REPOSITORY}",
+              "workflow": "${workflow}",
+              "release_tag": "${tag}",
+              "source_commit": "${GITHUB_SHA}"
+            },
+            "mvm_source_commit": "${GITHUB_SHA}",
+            "compatibility": {"guest_agent_protocol": {"min": 1, "max": 1}, "builder_cache_contract": 1},
+            "nix_inputs": {
+              "flake_locks": [{"reference": "smoke", "lock_hash": "${kernel_sha}"}],
+              "source_revisions": []
+            },
+            "revocation_channel": "https://example.test/revocations.json",
+            "members": [{
+              "role": "workload_kernel",
+              "target": {"arch": "x86_64"},
+              "boot_protocol": "linux_direct",
+              "artifacts": [{
+                "name": "vmlinux",
+                "format": {"kernel": "elf"},
+                "sha256": "${kernel_sha}",
+                "size": ${kernel_size}
+              }],
+              "required_capabilities": ["virtio_vsock"],
+              "pack_hash": "${kernel_sha}",
+              "sbom": {"uri": "https://example.test/sbom.txt", "sha256": "${kernel_sha}"}
+            }]
           }
           JSON
           cosign sign-blob \
             --yes \
             --new-bundle-format \
-            --bundle smoke/image-manifest.json.bundle \
-            smoke/image-manifest.json
-          cargo run --release -p mvm-core --example verify-signed-manifest --features manifest-verify -- \
-            --manifest smoke/image-manifest.json --bundle smoke/image-manifest.json.bundle \
-            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+            --bundle smoke/image-set.json.bundle \
+            smoke/image-set.json
+          # The lock pins the digest of exactly the bytes cosign signed.
+          manifest_sha="$(sha256sum smoke/image-set.json | cut -d' ' -f1)"
+          cat > smoke/images.lock <<TOML
+          schema_version = 1
+          repository = "${REPOSITORY}"
+          release_tag = "${tag}"
+          manifest_asset = "image-set.json"
+          manifest_sha256 = "${manifest_sha}"
+
+          [signing_identity]
+          workflow = "${workflow}"
+          tag_ref = "refs/tags/${tag}"
+          TOML
+
+          verify() {
+            cargo run --quiet --release -p mvmctl --features user -- image boot verify --json \
+              --manifest smoke/image-set.json --bundle smoke/image-set.json.bundle \
+              --lock smoke/images.lock --artifacts smoke/image-set
+          }
+          # Asserts the verdict the command printed, so a crash or a build
+          # failure cannot pass as the expected refusal.
+          expect() {
+            local want="$1" verdict status
+            set +e
+            verdict="$(verify)"
+            status=$?
+            set -e
+            echo "${verdict}"
+            if [ "${want}" = "none" ]; then
+              [ "${status}" -eq 0 ] && jq -e '.verified == true' <<<"${verdict}" >/dev/null
+            else
+              [ "${status}" -ne 0 ] && jq -e --arg stage "${want}" \
+                '.verified == false and .stage == $stage' <<<"${verdict}" >/dev/null
+            fi
+          }
+
+          expect "${expected_stage}"
+          if [ "${expected_stage}" = "none" ]; then
+            printf 'x' >> smoke/image-set/vmlinux
+            expect "artifacts"
+          fi
 
       - name: Round-trip a pack revocation list through its verifier
         # The revocation list is signed + verified through the same Rust stack.

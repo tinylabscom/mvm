@@ -399,8 +399,8 @@ untrusted branch cannot mint the allow-listed release identity.
 - [ ] Define guest/host protocol compatibility and refuse incompatible sets
       before boot.
 - [ ] Include source commits, Nix inputs, SBOM references, sizes, and digests.
-- [ ] Add offline verification tooling that needs only the manifest, bundle,
-      and artifacts.
+- [x] Add offline verification tooling that needs only the manifest, bundle,
+      and artifacts (plus the lock that pins them): `mvmctl image boot verify`.
 
 Acceptance: tampering, wrong repository/workflow identity, wrong architecture,
 partial sets, incompatible protocol ranges, replayed superseded metadata, and
@@ -411,9 +411,10 @@ Design constraints found while scoping (inventory taken 2026-09-17):
 - **Reuse the pack model; do not add a third manifest.** `mvm_core::packs::PackManifest`
   is already strict (`deny_unknown_fields`), arch-typed, content-hashed, signed
   (ed25519 or keyless) and carries inputs, SBOM references and trust metadata.
-  `crypto::image_verify::SignedManifest` and its `RevocationList` are a second,
-  string-typed model whose only caller is an example binary — which
-  `pack-signing-smoke.yml` runs, so it is a live witness rather than dead code. The image set is a
+  `crypto::image_verify::SignedManifest` and its `RevocationList` were a second,
+  string-typed model whose only caller was an example binary — which
+  `pack-signing-smoke.yml` ran, so it was a live witness rather than dead code
+  (retired in W3d). The image set is a
   signed index over member packs — each member names its role, guest
   architecture, boot protocol and `pack_hash` — and the unused model is removed
   rather than kept beside it.
@@ -450,13 +451,16 @@ Delivery slices, one PR each:
       function.
 - [ ] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
       gate over workflow and script copies, and removal of "latest" selection.
-- [ ] W3d — an offline verifier command over manifest, bundle and artifacts,
+- [x] W3d — an offline verifier command over manifest, bundle and artifacts,
       and with it the retirement of `image_verify::SignedManifest` /
       `RevocationList`. That family looked dead, but
       `.github/workflows/pack-signing-smoke.yml` runs the
       `verify-signed-manifest` example against a real cosign bundle as a live
       witness, so retiring it means moving that lane onto the new verifier
-      rather than deleting an unused type.
+      rather than deleting an unused type. Landed as `mvmctl image boot
+      verify`; the smoke lane signs a real image set and runs it, fully on a
+      release-tag push and as a signature-stage refusal nightly, because a lock
+      cannot name the branch identity a nightly run signs under.
 
 ### W4 — Move image sources and reproduce current bytes (#3362)
 

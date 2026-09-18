@@ -195,6 +195,109 @@ pub enum ImageSetError {
     },
 }
 
+/// The verification stage a refusal belongs to.
+///
+/// [`super::verify_image_set`] runs its stages in a fixed order and stops at the
+/// first that fails, so the stage alone tells an operator how far a set got:
+/// a signature refusal means the bytes were the pinned ones, and an artifact
+/// refusal means the manifest itself was accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageSetStage {
+    /// The lock cannot be used at all.
+    Lock,
+    /// The manifest bytes are not the ones the lock pins.
+    ManifestDigest,
+    /// No accepted identity signed the manifest bytes.
+    Signature,
+    /// The signed bytes are not a manifest this build understands.
+    Parse,
+    /// The manifest is internally inconsistent.
+    Structure,
+    /// The manifest names a different producer, tag or version than the lock.
+    LockMatch,
+    /// A member the caller requires is absent.
+    Completeness,
+    /// The set declares protocols the host cannot speak.
+    ProtocolCompatibility,
+    /// An artifact on disk is missing or differs from its declaration.
+    Artifacts,
+    /// The set or one of its members is revoked.
+    Revocation,
+    /// A backend cannot run any member the set offers for a role.
+    Selection,
+}
+
+impl ImageSetStage {
+    /// A stable, lowercase name for scripts and machine-readable output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::ManifestDigest => "manifest-digest",
+            Self::Signature => "signature",
+            Self::Parse => "parse",
+            Self::Structure => "structure",
+            Self::LockMatch => "lock-match",
+            Self::Completeness => "completeness",
+            Self::ProtocolCompatibility => "protocol-compatibility",
+            Self::Artifacts => "artifacts",
+            Self::Revocation => "revocation",
+            Self::Selection => "selection",
+        }
+    }
+}
+
+impl std::fmt::Display for ImageSetStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl ImageSetError {
+    /// Which stage refused. Exhaustive rather than defaulted, so a new refusal
+    /// cannot be added without deciding where it belongs.
+    pub fn stage(&self) -> ImageSetStage {
+        match self {
+            Self::UnsupportedLockSchemaVersion { .. } => ImageSetStage::Lock,
+            Self::ManifestDigestMismatch { .. } => ImageSetStage::ManifestDigest,
+            Self::SignatureInvalid { .. } => ImageSetStage::Signature,
+            Self::UnparseableManifest { .. } => ImageSetStage::Parse,
+            Self::UnsupportedSchemaVersion { .. }
+            | Self::NoMembers
+            | Self::DuplicateMember { .. }
+            | Self::DuplicateArtifactName { .. }
+            | Self::MemberHasNoArtifacts { .. }
+            | Self::ZeroSizeArtifact { .. }
+            | Self::MissingBootProtocol { .. }
+            | Self::UnexpectedBootProtocol { .. }
+            | Self::TargetNotAllowedForRole { .. }
+            | Self::UnknownSidecarLibc { .. }
+            | Self::ReleaseTagVersionMismatch { .. }
+            | Self::SupersedesNotOlder { .. }
+            | Self::MissingNixLock => ImageSetStage::Structure,
+            Self::RepositoryMismatch { .. }
+            | Self::WorkflowMismatch { .. }
+            | Self::ReleaseTagMismatch { .. }
+            | Self::SigningRefMismatch { .. }
+            | Self::SetVersionMismatch { .. } => ImageSetStage::LockMatch,
+            Self::Incomplete { .. } => ImageSetStage::Completeness,
+            Self::GuestAgentProtocolDisjoint { .. } | Self::BuilderCacheContractMismatch { .. } => {
+                ImageSetStage::ProtocolCompatibility
+            }
+            Self::ArtifactMissing { .. }
+            | Self::ArtifactUnreadable { .. }
+            | Self::ArtifactSizeMismatch { .. }
+            | Self::ArtifactDigestMismatch { .. } => ImageSetStage::Artifacts,
+            Self::MemberRevoked { .. } | Self::SetRevoked { .. } => ImageSetStage::Revocation,
+            Self::ArchitectureUnsupportedByBackend { .. }
+            | Self::WrongArchitecture { .. }
+            | Self::MemberNotFound { .. }
+            | Self::UnsupportedBootProtocol { .. }
+            | Self::UnsupportedArtifactFormat { .. }
+            | Self::MissingDeviceCapability { .. } => ImageSetStage::Selection,
+        }
+    }
+}
+
 fn join<T: std::fmt::Display>(items: &[T]) -> String {
     items
         .iter()

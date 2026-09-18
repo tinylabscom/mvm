@@ -26,7 +26,7 @@ mod lock;
 mod validate;
 mod verify;
 
-pub use error::ImageSetError;
+pub use error::{ImageSetError, ImageSetStage};
 pub use identity::{
     ArtifactName, GitCommit, ImageSetIdentityError, ImageSetVersion, ProtocolRange, ReleaseTag,
     RepositorySlug, RevocationChannel, TagRef, WorkflowPath,

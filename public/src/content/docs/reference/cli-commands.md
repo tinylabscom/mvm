@@ -323,6 +323,7 @@ admission until their transports are wired.
 | `mvmctl image boot status [--json]`              | Report each cached default boot image variant (`dev`, `prod`): tag, source (`built-local` / `fetched`), acquisition time, protocol version, on-disk size, and whether the next run would use it. Cache only, no network              |
 | `mvmctl image boot check [--json]`               | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code                                                             |
 | `mvmctl image boot update [--tag <t>] [--force]` | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative            |
+| `mvmctl image boot verify --manifest <f> --bundle <f> --lock <f> --artifacts <dir> [--require-complete] [--json]` | Verify a published image set offline: the manifest digest against the lock, the cosign signature against the lock's signing identity, the manifest's structure and producer, and every member artifact's size and digest. No network and no cache writes; a refusal names the stage that refused and exits nonzero |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted

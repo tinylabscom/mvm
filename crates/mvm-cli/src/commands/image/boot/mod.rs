@@ -1,10 +1,13 @@
-//! `mvmctl image boot` — inspect, compare, and replace the cached boot image.
+//! `mvmctl image boot` — inspect, compare, replace, and verify boot images.
 //!
 //! Three verbs over one cache: `status` says what is on disk, `check` says
 //! whether it is behind the published line, and `update` replaces it. They are
 //! separated by what they touch — `status` reads disk, `check` adds the
 //! network, `update` adds a write — so a script can use exactly as much as it
-//! needs.
+//! needs. `verify` touches none of them: it checks a published image set that
+//! is already on disk against the lock that pins it, offline.
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -13,6 +16,7 @@ pub(crate) mod cache;
 mod check;
 mod status;
 mod update;
+mod verify;
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum BootAction {
@@ -38,6 +42,27 @@ pub(in crate::commands) enum BootAction {
         #[arg(long)]
         force: bool,
     },
+    /// Verify a published image set offline against the lock that pins it
+    Verify {
+        /// The image set manifest, exactly as published
+        #[arg(long, value_name = "FILE")]
+        manifest: PathBuf,
+        /// The detached cosign bundle published beside the manifest
+        #[arg(long, value_name = "FILE")]
+        bundle: PathBuf,
+        /// The image lock naming the manifest digest and signing identity
+        #[arg(long, value_name = "FILE")]
+        lock: PathBuf,
+        /// Directory holding every member artifact under its declared name
+        #[arg(long, value_name = "DIR")]
+        artifacts: PathBuf,
+        /// Also refuse a set missing any member the current release train needs
+        #[arg(long)]
+        require_complete: bool,
+        /// Output as JSON (printed for a refusal too; the exit code still fails)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
@@ -45,6 +70,21 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
         BootAction::Status { json } => status::run(json),
         BootAction::Check { json } => check::run(json),
         BootAction::Update { tag, force } => update::run(&update::UpdateRequest { tag, force }),
+        BootAction::Verify {
+            manifest,
+            bundle,
+            lock,
+            artifacts,
+            require_complete,
+            json,
+        } => verify::run(&verify::VerifyRequest {
+            manifest,
+            bundle,
+            lock,
+            artifacts,
+            require_complete,
+            json,
+        }),
     }
 }
 

@@ -18,8 +18,7 @@
 //! - `vmlinux` — the kernel image.
 //! - `rootfs.ext4` — the ext4 root filesystem.
 //! - `checksums-sha256.txt` — SHA-256 of both files, in the same
-//!   `<hash>  <name>` format that `sha256sum` and
-//!   `mvm-security::image_verify::verify_unsigned_checksums` parse.
+//!   `<hash>  <name>` format `sha256sum` writes.
 //!
 //! That contract is consumed by
 //! `mvm_cli::commands::env::apple_container::find_vendored_dev_image`,
