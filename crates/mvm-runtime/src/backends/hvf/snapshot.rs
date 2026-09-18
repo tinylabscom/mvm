@@ -7,15 +7,12 @@
 //! until the live pause/serialize/restore loop owns all of those sections.
 
 use super::HvfError;
-use super::guest_ram::GuestRam;
-use super::hv_impl::HvfVcpu;
+use super::guest_ram::{GuestRam, HVF_PAGE_SIZE};
 use super::sys::{
     HV_SUCCESS, hv_gic_icc_reg_t, hv_gic_set_state, hv_gic_state_create, hv_gic_state_get_data,
     hv_gic_state_get_size, hv_gic_state_t, os_release,
 };
-use crate::vmm::device_state::{
-    DeviceStateError, SnapshotDeviceState, capture_device_states, restore_device_states,
-};
+use crate::vmm::device_state::{DeviceStateError, SnapshotDeviceState, restore_device_states};
 use crate::vmm::hv::SysReg;
 use mvm_core::arch::GuestArch;
 use mvm_core::snapshot_frame::{
@@ -82,6 +79,136 @@ pub const HVF_SNAPSHOT_BACKEND_KIND: u8 = 1;
 /// Backend-private section kind carrying Hypervisor.framework's opaque,
 /// versioned GIC distributor and redistributor state.
 pub const HVF_GIC_STATE_SECTION_KIND: u16 = 5;
+/// Backend-private section kind describing where guest RAM sits in the RAM
+/// image file saved beside the frame.
+pub const HVF_RAM_LAYOUT_SECTION_KIND: u16 = 6;
+/// Encoded length of [`RamLayout`]: file offset (8) + length (8) + page size (4).
+pub const RAM_LAYOUT_LEN: usize = 20;
+
+/// Where guest RAM sits in its image file.
+///
+/// A restore maps this range of the file over the guest's RAM reservation, so
+/// both ends must fall on a hypervisor page boundary: the mapping replaces whole
+/// pages, and a range that started or ended mid-page could not be mapped
+/// without either dropping guest bytes or exposing bytes that are not guest RAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamLayout {
+    /// Byte offset of guest RAM within the image file.
+    pub file_offset: u64,
+    /// Length of guest RAM in bytes.
+    pub len: u64,
+    /// The page size the producer aligned the range to.
+    pub page_size: u32,
+}
+
+/// Why a [`RamLayout`] cannot be mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamLayoutError {
+    /// The section is not exactly [`RAM_LAYOUT_LEN`] bytes.
+    Encoding { len: usize },
+    /// The producer aligned to a page size this hypervisor does not use.
+    PageSize { expected: u32, actual: u32 },
+    /// The RAM does not start on a page boundary.
+    MisalignedOffset { offset: u64 },
+    /// The RAM does not end on a page boundary.
+    MisalignedLength { len: u64 },
+    /// Offset plus length does not fit in a file offset.
+    Overflow,
+}
+
+impl std::fmt::Display for RamLayoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encoding { len } => write!(f, "RAM layout section is {len} bytes"),
+            Self::PageSize { expected, actual } => {
+                write!(f, "RAM aligned to page size {actual}, expected {expected}")
+            }
+            Self::MisalignedOffset { offset } => {
+                write!(f, "RAM file offset {offset} is not page-aligned")
+            }
+            Self::MisalignedLength { len } => write!(f, "RAM length {len} is not page-aligned"),
+            Self::Overflow => write!(f, "RAM file range overflows"),
+        }
+    }
+}
+
+impl RamLayout {
+    /// Guest RAM stored as a whole file of `len` bytes, starting at offset 0.
+    #[must_use]
+    pub fn whole_file(len: usize) -> Self {
+        Self {
+            file_offset: 0,
+            len: len as u64,
+            page_size: HVF_PAGE_SIZE as u32,
+        }
+    }
+
+    /// Little-endian encoding: offset, length, page size.
+    #[must_use]
+    pub fn encode(&self) -> [u8; RAM_LAYOUT_LEN] {
+        let mut bytes = [0_u8; RAM_LAYOUT_LEN];
+        bytes[..8].copy_from_slice(&self.file_offset.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.len.to_le_bytes());
+        bytes[16..].copy_from_slice(&self.page_size.to_le_bytes());
+        bytes
+    }
+
+    /// Decode the fixed-width encoding produced by [`RamLayout::encode`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, RamLayoutError> {
+        let bytes: &[u8; RAM_LAYOUT_LEN] = bytes
+            .try_into()
+            .map_err(|_| RamLayoutError::Encoding { len: bytes.len() })?;
+        let mut offset = [0_u8; 8];
+        offset.copy_from_slice(&bytes[..8]);
+        let mut len = [0_u8; 8];
+        len.copy_from_slice(&bytes[8..16]);
+        let mut page = [0_u8; 4];
+        page.copy_from_slice(&bytes[16..]);
+        Ok(Self {
+            file_offset: u64::from_le_bytes(offset),
+            len: u64::from_le_bytes(len),
+            page_size: u32::from_le_bytes(page),
+        })
+    }
+
+    /// Check the range can be mapped over a reservation of `expected_ram_len`
+    /// bytes on this hypervisor.
+    pub fn validate(&self, expected_ram_len: usize) -> Result<(), HvfSnapshotError> {
+        let page = HVF_PAGE_SIZE as u64;
+        if u64::from(self.page_size) != page {
+            return Err(RamLayoutError::PageSize {
+                expected: HVF_PAGE_SIZE as u32,
+                actual: self.page_size,
+            }
+            .into());
+        }
+        if !self.file_offset.is_multiple_of(page) {
+            return Err(RamLayoutError::MisalignedOffset {
+                offset: self.file_offset,
+            }
+            .into());
+        }
+        if !self.len.is_multiple_of(page) {
+            return Err(RamLayoutError::MisalignedLength { len: self.len }.into());
+        }
+        self.file_end()?;
+        if self.len != expected_ram_len as u64 {
+            return Err(HvfSnapshotError::RamLength {
+                expected: expected_ram_len,
+                actual: usize::try_from(self.len).unwrap_or(usize::MAX),
+            });
+        }
+        Ok(())
+    }
+
+    /// The first file offset past guest RAM.
+    pub fn file_end(&self) -> Result<u64, RamLayoutError> {
+        self.file_offset
+            .checked_add(self.len)
+            .filter(|end| i64::try_from(*end).is_ok())
+            .ok_or(RamLayoutError::Overflow)
+    }
+}
 
 /// Errors raised while assembling or validating one complete HVF snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +229,10 @@ pub enum HvfSnapshotError {
     DuplicateSection(SectionKind),
     /// The RAM section did not match the target mapping exactly.
     RamLength { expected: usize, actual: usize },
+    /// The RAM layout cannot be mapped.
+    RamLayout(RamLayoutError),
+    /// The frame carries guest RAM inline, a layout this build does not restore.
+    InlineRam,
 }
 
 impl std::fmt::Display for HvfSnapshotError {
@@ -129,6 +260,12 @@ impl std::fmt::Display for HvfSnapshotError {
                     "HVF snapshot RAM length {actual} does not match {expected}"
                 )
             }
+            Self::RamLayout(error) => write!(f, "HVF snapshot RAM layout: {error}"),
+            Self::InlineRam => write!(
+                f,
+                "HVF snapshot carries guest RAM inside its frame, a format this build no \
+                 longer restores; capture the checkpoint again"
+            ),
         }
     }
 }
@@ -141,6 +278,12 @@ impl From<FrameError> for HvfSnapshotError {
     }
 }
 
+impl From<RamLayoutError> for HvfSnapshotError {
+    fn from(error: RamLayoutError) -> Self {
+        Self::RamLayout(error)
+    }
+}
+
 impl From<DeviceStateError> for HvfSnapshotError {
     fn from(error: DeviceStateError) -> Self {
         Self::Devices(error)
@@ -150,8 +293,8 @@ impl From<DeviceStateError> for HvfSnapshotError {
 /// The validated sections of one AArch64 HVF snapshot frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHvfSnapshot<'a> {
-    /// Complete guest RAM contents.
-    pub ram: &'a [u8],
+    /// Where guest RAM sits in the image file saved beside the frame.
+    pub ram: RamLayout,
     /// Versioned device-state container.
     pub devices: &'a [u8],
     /// Opaque, versioned GIC distributor and redistributor state.
@@ -330,13 +473,19 @@ pub fn restore_gic_device_state(bytes: &[u8]) -> Result<(), HvfError> {
     }
 }
 
-/// Assemble the four sections owned by an HVF snapshot producer. The device
-/// and artifact payloads are supplied by their respective serializers; this
+/// Assemble the sections owned by an HVF snapshot producer. The device and
+/// artifact payloads are supplied by their respective serializers; this
 /// function only makes their placement and frame metadata unambiguous.
+///
+/// Guest RAM is not a section of the frame. It lives in its own file, described
+/// here by `ram`, so a restore can map it instead of reading it: a frame that
+/// carried the RAM inline would have to be read whole — a second copy of the
+/// guest's memory — just to reach the few kilobytes of CPU and device state
+/// beside it.
 pub fn encode_hvf_snapshot_frame(
     backend_kind: u8,
     flags: u32,
-    ram: &[u8],
+    ram: RamLayout,
     devices: &[u8],
     gic: &[u8],
     vcpus: &[HvfVcpuState],
@@ -346,14 +495,15 @@ pub fn encode_hvf_snapshot_frame(
     // count is the section length over the record length and no separate field
     // can disagree with the payload.
     let vcpu_bytes: Vec<u8> = vcpus.iter().flat_map(|state| state.encode()).collect();
+    let layout = ram.encode();
     mvm_core::snapshot_frame::encode_frame(
         GuestArch::Aarch64,
         backend_kind,
         flags,
         &[
             SnapshotSection {
-                kind: SectionKind::Ram,
-                data: ram,
+                kind: SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND),
+                data: &layout,
             },
             SnapshotSection {
                 kind: SectionKind::Devices,
@@ -375,32 +525,19 @@ pub fn encode_hvf_snapshot_frame(
     )
 }
 
-/// Capture all state owned by the in-process HVF VMM into one bounded frame.
+/// Write the paused guest's RAM to `path` straight from the live mapping and
+/// return the layout a frame records for it.
 ///
-/// The caller must already have paused guest execution. This function does not
-/// claim or infer a pause boundary; it only combines the individual state
-/// codecs and leaves capability admission to the backend owner.
-pub fn capture_hvf_snapshot_frame(
-    backend_kind: u8,
-    flags: u32,
-    ram: &GuestRam,
-    vcpu: &HvfVcpu,
-    devices: &[&dyn SnapshotDeviceState],
-    artifact_digests: &[u8],
-) -> Result<Vec<u8>, HvfSnapshotError> {
-    let vcpu_state = vcpu.capture_state().map_err(HvfSnapshotError::Vcpu)?;
-    let device_state = capture_device_states(devices)?;
-    let gic_state = capture_gic_device_state().map_err(HvfSnapshotError::Vcpu)?;
-    encode_hvf_snapshot_frame(
-        backend_kind,
-        flags,
-        &ram.snapshot_bytes(),
-        &device_state,
-        &gic_state,
-        std::slice::from_ref(&vcpu_state),
-        artifact_digests,
-    )
-    .map_err(HvfSnapshotError::Frame)
+/// Streams in bounded chunks rather than collecting the image first, so a
+/// capture holds no second copy of guest memory in the supervisor. The bytes
+/// come from the mapping, never from a file a restore mapped it from: pages the
+/// guest wrote since its own restore are private copies, and those are the
+/// bytes the new snapshot has to carry.
+pub fn write_ram_image(ram: &GuestRam, path: &std::path::Path) -> std::io::Result<RamLayout> {
+    let mut file = std::fs::File::create(path)?;
+    ram.write_to(&mut file)?;
+    file.sync_all()?;
+    Ok(RamLayout::whole_file(ram.len()))
 }
 
 /// Parse and validate a complete HVF snapshot before any target is mutated.
@@ -427,7 +564,11 @@ pub fn parse_hvf_snapshot_frame<'a>(
     let mut artifact_digests = None;
     for entry in parse_sections(frame)? {
         let slot = match entry.kind {
-            SectionKind::Ram => &mut ram,
+            // A frame from before RAM moved out of it. Refused by name rather
+            // than skipped as unknown: skipping would report a missing layout,
+            // which reads as corruption instead of as an old capture.
+            SectionKind::Ram => return Err(HvfSnapshotError::InlineRam),
+            SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND) => &mut ram,
             SectionKind::Devices => &mut devices,
             SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND) => &mut gic,
             SectionKind::Vcpu => &mut vcpu,
@@ -440,13 +581,11 @@ pub fn parse_hvf_snapshot_frame<'a>(
         *slot = Some(entry.data(frame));
     }
 
-    let ram = ram.ok_or(HvfSnapshotError::MissingSection(SectionKind::Ram))?;
-    if ram.len() != expected_ram_len {
-        return Err(HvfSnapshotError::RamLength {
-            expected: expected_ram_len,
-            actual: ram.len(),
-        });
-    }
+    let ram = ram.ok_or(HvfSnapshotError::MissingSection(SectionKind::Unknown(
+        HVF_RAM_LAYOUT_SECTION_KIND,
+    )))?;
+    let ram = RamLayout::decode(ram)?;
+    ram.validate(expected_ram_len)?;
     let devices = devices.ok_or(HvfSnapshotError::MissingSection(SectionKind::Devices))?;
     let gic = gic.ok_or(HvfSnapshotError::MissingSection(SectionKind::Unknown(
         HVF_GIC_STATE_SECTION_KIND,
@@ -495,55 +634,46 @@ fn decode_vcpu_states(bytes: &[u8]) -> Result<Vec<HvfVcpuState>, HvfSnapshotErro
         .collect()
 }
 
-/// Restore a validated frame into an already-paused HVF target.
+/// The verified saved state a restored supervisor boots from, as descriptors.
 ///
-/// Frame parsing and vCPU decoding happen before RAM or device mutation. The
-/// target remains paused; the caller owns the final resume decision and any
-/// host-channel rebind required by the restored device topology.
-/// Restores the boot CPU and returns every secondary's state for its own
-/// thread to apply.
-///
-/// The secondaries are not restored here because HVF only lets a vCPU's
-/// registers be written from the thread that created it. This call runs on the
-/// boot CPU's thread, so it restores CPU 0 and hands the rest back for the
-/// threads that own them.
-pub fn restore_hvf_snapshot_frame(
-    frame: &[u8],
-    expected_backend_kind: u8,
-    ram: &mut GuestRam,
-    vcpu: &HvfVcpu,
-    devices: &mut [&mut dyn SnapshotDeviceState],
-) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
-    let parsed = parse_hvf_snapshot_frame(frame, expected_backend_kind, ram.len())?;
-    let mut targets = devices
-        .iter_mut()
-        .map(|device| &mut **device as &mut dyn SnapshotDeviceState)
-        .collect::<Vec<_>>();
-    // Validate the device container and all record-to-device matches before
-    // copying RAM. Individual device codecs validate their payload before
-    // mutating their own registers.
-    restore_device_states(&mut targets, parsed.devices)?;
-    ram.restore_bytes(parsed.ram)
-        .map_err(HvfSnapshotError::Vcpu)?;
-    restore_gic_device_state(parsed.gic).map_err(HvfSnapshotError::Vcpu)?;
-    restore_boot_cpu_and_split(vcpu, parsed.vcpus)
+/// Both files are the private, unlinked copies the launching process verified
+/// against the checkpoint's recorded digests. Nothing here holds a path: a
+/// restore that could reopen its inputs by name could be handed different
+/// bytes than the ones that were checked.
+#[derive(Debug)]
+pub struct RestoreImage {
+    /// Guest RAM, mapped copy-on-write at the layout the frame records.
+    pub ram: std::fs::File,
+    /// The frame carrying vCPU, GIC and device state.
+    pub frame: std::fs::File,
 }
 
-/// Apply the boot CPU's state and return the secondaries' in CPU order.
-fn restore_boot_cpu_and_split(
-    vcpu: &HvfVcpu,
-    mut states: Vec<HvfVcpuState>,
-) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
-    // `decode_vcpu_states` refuses an empty section, so there is always a boot
-    // CPU here.
-    let secondaries = states.split_off(1);
-    let boot = states.remove(0);
-    vcpu.restore_state(&boot).map_err(HvfSnapshotError::Vcpu)?;
-    Ok(secondaries)
+/// Validate the frame in `image` and map its RAM over `guest_ram`.
+///
+/// Returns the frame bytes for the device and vCPU restore that follows once
+/// the machine exists. The mapping has to be in place before the reservation is
+/// registered with the hypervisor, which registers whatever backs the range at
+/// that moment.
+pub fn map_restore_image(
+    image: &RestoreImage,
+    guest_ram: &mut GuestRam,
+) -> Result<Vec<u8>, HvfError> {
+    use std::io::Read as _;
+    let mut frame = Vec::new();
+    (&image.frame)
+        .read_to_end(&mut frame)
+        .map_err(|_| HvfError::SnapshotState("restore frame read failed"))?;
+    let parsed = parse_hvf_snapshot_frame(&frame, HVF_SNAPSHOT_BACKEND_KIND, guest_ram.len())
+        .map_err(|error| {
+            eprintln!("HVF restore frame refused: {error}");
+            HvfError::SnapshotState("restore frame validation failed")
+        })?;
+    guest_ram.map_snapshot_ram(&image.ram, parsed.ram)?;
+    Ok(frame)
 }
 
 /// Restore only vCPU and deterministic device state from a frame whose RAM is
-/// already privately mapped from the sibling raw-RAM file.
+/// already privately mapped by [`map_restore_image`].
 pub fn restore_hvf_snapshot_control(
     frame: &[u8],
     expected_ram_len: usize,
@@ -584,6 +714,12 @@ fn read_word(bytes: &[u8], index: usize) -> Result<u64, HvfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_RAM_LEN: usize = HVF_PAGE_SIZE * 2;
+
+    fn test_layout() -> RamLayout {
+        RamLayout::whole_file(TEST_RAM_LEN)
+    }
 
     #[test]
     fn state_codec_roundtrips_all_registers() {
@@ -641,7 +777,7 @@ mod tests {
         let frame = encode_hvf_snapshot_frame(
             9,
             0x20,
-            b"ram",
+            test_layout(),
             b"devices",
             b"gic",
             std::slice::from_ref(&state),
@@ -653,7 +789,7 @@ mod tests {
         assert_eq!(header.backend_kind, 9);
         assert_eq!(header.flags, 0x20);
         let entries = mvm_core::snapshot_frame::parse_sections(&frame).unwrap();
-        assert_eq!(entries[0].data(&frame), b"ram");
+        assert_eq!(entries[0].data(&frame), test_layout().encode());
         assert_eq!(entries[1].data(&frame), b"devices");
         assert_eq!(entries[2].data(&frame), b"gic");
         assert_eq!(
@@ -679,32 +815,32 @@ mod tests {
         let frame = encode_hvf_snapshot_frame(
             9,
             0x20,
-            b"ram",
+            test_layout(),
             b"devices",
             b"gic",
             std::slice::from_ref(&state),
             b"digest",
         )
         .unwrap();
-        let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
-        assert_eq!(parsed.ram, b"ram");
+        let parsed = parse_hvf_snapshot_frame(&frame, 9, TEST_RAM_LEN).unwrap();
+        assert_eq!(parsed.ram, test_layout());
         assert_eq!(parsed.devices, b"devices");
         assert_eq!(parsed.gic, b"gic");
         assert_eq!(parsed.vcpus, vec![state]);
         assert_eq!(parsed.artifact_digests, b"digest");
         assert!(matches!(
-            parse_hvf_snapshot_frame(&frame, 8, 3),
+            parse_hvf_snapshot_frame(&frame, 8, TEST_RAM_LEN),
             Err(HvfSnapshotError::BackendMismatch {
                 expected: 8,
                 actual: 9
             })
         ));
         assert!(matches!(
-            parse_hvf_snapshot_frame(&frame, 9, 4),
+            parse_hvf_snapshot_frame(&frame, 9, TEST_RAM_LEN + HVF_PAGE_SIZE),
             Err(HvfSnapshotError::RamLength {
-                expected: 4,
-                actual: 3
-            })
+                expected,
+                actual: TEST_RAM_LEN,
+            }) if expected == TEST_RAM_LEN + HVF_PAGE_SIZE
         ));
     }
 
@@ -740,10 +876,17 @@ mod tests {
             })
             .collect();
 
-        let frame =
-            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", b"gic", &states, b"digest")
-                .unwrap();
-        let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
+        let frame = encode_hvf_snapshot_frame(
+            9,
+            0x20,
+            test_layout(),
+            b"devices",
+            b"gic",
+            &states,
+            b"digest",
+        )
+        .unwrap();
+        let parsed = parse_hvf_snapshot_frame(&frame, 9, TEST_RAM_LEN).unwrap();
 
         assert_eq!(parsed.vcpus, states);
     }
@@ -754,7 +897,7 @@ mod tests {
         let frame = encode_hvf_snapshot_frame(
             HVF_SNAPSHOT_BACKEND_KIND,
             0,
-            b"ram",
+            test_layout(),
             b"devices",
             b"gic",
             &states,
@@ -762,7 +905,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(hvf_snapshot_vcpu_count(&frame, 3).unwrap(), 2);
+        assert_eq!(hvf_snapshot_vcpu_count(&frame, TEST_RAM_LEN).unwrap(), 2);
     }
 
     /// A vCPU section that is not a whole number of records is refused.
@@ -808,18 +951,19 @@ mod tests {
             simd: [[0; 16]; VCPU_SIMD_REGS],
         };
         let vcpu = state.encode();
+        let layout = test_layout().encode();
         let frame = mvm_core::snapshot_frame::encode_frame(
             GuestArch::Aarch64,
             9,
             0,
             &[
                 SnapshotSection {
-                    kind: SectionKind::Ram,
-                    data: b"ram",
+                    kind: SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND),
+                    data: &layout,
                 },
                 SnapshotSection {
-                    kind: SectionKind::Ram,
-                    data: b"ram",
+                    kind: SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND),
+                    data: &layout,
                 },
                 SnapshotSection {
                     kind: SectionKind::Devices,
@@ -841,22 +985,25 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            parse_hvf_snapshot_frame(&frame, 9, 3),
-            Err(HvfSnapshotError::DuplicateSection(SectionKind::Ram))
+            parse_hvf_snapshot_frame(&frame, 9, TEST_RAM_LEN),
+            Err(HvfSnapshotError::DuplicateSection(SectionKind::Unknown(
+                HVF_RAM_LAYOUT_SECTION_KIND
+            )))
         ));
     }
 
     #[test]
     fn complete_frame_parser_requires_gic_state() {
         let state = sample_state().encode();
+        let layout = test_layout().encode();
         let frame = mvm_core::snapshot_frame::encode_frame(
             GuestArch::Aarch64,
             9,
             0,
             &[
                 SnapshotSection {
-                    kind: SectionKind::Ram,
-                    data: b"ram",
+                    kind: SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND),
+                    data: &layout,
                 },
                 SnapshotSection {
                     kind: SectionKind::Devices,
@@ -875,10 +1022,264 @@ mod tests {
         .expect("encode frame");
 
         assert!(matches!(
-            parse_hvf_snapshot_frame(&frame, 9, 3),
+            parse_hvf_snapshot_frame(&frame, 9, TEST_RAM_LEN),
             Err(HvfSnapshotError::MissingSection(SectionKind::Unknown(
                 HVF_GIC_STATE_SECTION_KIND
             )))
         ));
+    }
+
+    #[test]
+    fn ram_layout_round_trips_through_its_encoding() {
+        let layout = RamLayout {
+            file_offset: HVF_PAGE_SIZE as u64 * 3,
+            len: HVF_PAGE_SIZE as u64 * 64,
+            page_size: HVF_PAGE_SIZE as u32,
+        };
+        assert_eq!(RamLayout::decode(&layout.encode()).unwrap(), layout);
+        assert_eq!(
+            RamLayout::decode(&layout.encode()[..RAM_LAYOUT_LEN - 1]),
+            Err(RamLayoutError::Encoding {
+                len: RAM_LAYOUT_LEN - 1
+            })
+        );
+    }
+
+    #[test]
+    fn a_whole_file_layout_starts_at_zero_on_a_page_boundary() {
+        let layout = RamLayout::whole_file(TEST_RAM_LEN);
+        assert_eq!(layout.file_offset, 0);
+        assert_eq!(layout.len, TEST_RAM_LEN as u64);
+        assert_eq!(layout.file_end().unwrap(), TEST_RAM_LEN as u64);
+        layout.validate(TEST_RAM_LEN).unwrap();
+    }
+
+    /// Every edge that would make the mapping replace a partial page, or read
+    /// past a representable file offset, is refused before anything is mapped.
+    #[test]
+    fn ram_layout_refuses_ranges_that_cannot_be_mapped_whole() {
+        let page = HVF_PAGE_SIZE as u64;
+        let base = test_layout();
+        let refused = |layout: RamLayout| layout.validate(TEST_RAM_LEN).unwrap_err();
+
+        assert_eq!(
+            refused(RamLayout {
+                page_size: 4096,
+                ..base
+            }),
+            HvfSnapshotError::RamLayout(RamLayoutError::PageSize {
+                expected: HVF_PAGE_SIZE as u32,
+                actual: 4096
+            })
+        );
+        assert_eq!(
+            refused(RamLayout {
+                file_offset: page + 1,
+                ..base
+            }),
+            HvfSnapshotError::RamLayout(RamLayoutError::MisalignedOffset { offset: page + 1 })
+        );
+        assert_eq!(
+            refused(RamLayout {
+                len: base.len - 1,
+                ..base
+            }),
+            HvfSnapshotError::RamLayout(RamLayoutError::MisalignedLength { len: base.len - 1 })
+        );
+        assert_eq!(
+            refused(RamLayout {
+                file_offset: (u64::MAX / page) * page,
+                ..base
+            }),
+            HvfSnapshotError::RamLayout(RamLayoutError::Overflow)
+        );
+        assert!(matches!(
+            refused(RamLayout {
+                len: base.len + page,
+                ..base
+            }),
+            HvfSnapshotError::RamLength { .. }
+        ));
+    }
+
+    /// A frame captured before RAM moved out of it is refused by name, so an old
+    /// checkpoint reads as old rather than as corrupt.
+    #[test]
+    fn a_frame_carrying_inline_ram_is_refused_as_the_old_format() {
+        let state = sample_state().encode();
+        let frame = mvm_core::snapshot_frame::encode_frame(
+            GuestArch::Aarch64,
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            &[
+                SnapshotSection {
+                    kind: SectionKind::Ram,
+                    data: &[0_u8; TEST_RAM_LEN],
+                },
+                SnapshotSection {
+                    kind: SectionKind::Devices,
+                    data: b"devices",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND),
+                    data: b"gic",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Vcpu,
+                    data: &state,
+                },
+                SnapshotSection {
+                    kind: SectionKind::ArtifactDigests,
+                    data: b"digest",
+                },
+            ],
+        )
+        .unwrap();
+
+        let error =
+            parse_hvf_snapshot_frame(&frame, HVF_SNAPSHOT_BACKEND_KIND, TEST_RAM_LEN).unwrap_err();
+        assert_eq!(error, HvfSnapshotError::InlineRam);
+        assert!(error.to_string().contains("capture the checkpoint again"));
+    }
+
+    /// The frame no longer grows with guest memory: a 4 GiB machine's frame is
+    /// the same size as a two-page one.
+    #[test]
+    fn the_frame_size_does_not_depend_on_guest_ram() {
+        let states = [sample_state()];
+        let small = encode_hvf_snapshot_frame(
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            test_layout(),
+            b"devices",
+            b"gic",
+            &states,
+            b"",
+        )
+        .unwrap();
+        let large = encode_hvf_snapshot_frame(
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            RamLayout::whole_file(4 << 30),
+            b"devices",
+            b"gic",
+            &states,
+            b"",
+        )
+        .unwrap();
+        assert_eq!(small.len(), large.len());
+    }
+
+    #[test]
+    fn a_frame_without_a_ram_layout_is_refused() {
+        let state = sample_state().encode();
+        let frame = mvm_core::snapshot_frame::encode_frame(
+            GuestArch::Aarch64,
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            &[
+                SnapshotSection {
+                    kind: SectionKind::Devices,
+                    data: b"devices",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND),
+                    data: b"gic",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Vcpu,
+                    data: &state,
+                },
+                SnapshotSection {
+                    kind: SectionKind::ArtifactDigests,
+                    data: b"digest",
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            parse_hvf_snapshot_frame(&frame, HVF_SNAPSHOT_BACKEND_KIND, TEST_RAM_LEN).unwrap_err(),
+            HvfSnapshotError::MissingSection(SectionKind::Unknown(HVF_RAM_LAYOUT_SECTION_KIND))
+        );
+    }
+
+    /// Capture, verify, map: a restored guest sees exactly the bytes the
+    /// capture wrote, even when the checkpoint file is edited between
+    /// verification and mapping — because what is mapped is the unlinked
+    /// clone, a different file from the checkpoint.
+    ///
+    /// It deliberately asserts nothing about an edit made *after* mapping. On
+    /// macOS a private mapping has not been observed to pick up later writes
+    /// to its file, so such an assertion would pass with or without the clone
+    /// and prove nothing; the file identity checked here is what protects.
+    #[test]
+    fn a_captured_image_round_trips_through_verification_into_a_private_mapping() {
+        use mvm_vmm::host::restore_image::VerifiedRestoreFile;
+        use std::os::unix::fs::{FileExt, MetadataExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut captured = GuestRam::new(TEST_RAM_LEN).unwrap();
+        captured.copy_at(0, b"first page").unwrap();
+        captured.copy_at(HVF_PAGE_SIZE, b"second page").unwrap();
+        let expected = captured.snapshot_bytes();
+
+        let ram_path = dir.path().join("memory.bin");
+        let layout = write_ram_image(&captured, &ram_path).unwrap();
+        assert_eq!(layout, RamLayout::whole_file(TEST_RAM_LEN));
+        let frame = encode_hvf_snapshot_frame(
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            layout,
+            b"devices",
+            b"gic",
+            &[sample_state()],
+            b"",
+        )
+        .unwrap();
+        let frame_path = dir.path().join("memory.bin.hvf-frame");
+        std::fs::write(&frame_path, &frame).unwrap();
+
+        let verified = |path: &std::path::Path| {
+            let digest = mvm_core::crypto::image_verify::sha256_file(path).unwrap();
+            VerifiedRestoreFile::prepare(path, dir.path(), &digest)
+                .unwrap()
+                .into_file()
+        };
+        let image = RestoreImage {
+            ram: verified(&ram_path),
+            frame: verified(&frame_path),
+        };
+
+        let tamper = |byte: u8| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&ram_path)
+                .unwrap()
+                .write_all_at(&vec![byte; HVF_PAGE_SIZE], 0)
+                .unwrap();
+        };
+        let source = std::fs::metadata(&ram_path).unwrap();
+        let mapped = image.ram.metadata().unwrap();
+        assert_eq!(mapped.nlink(), 0, "the mapped file has no name left");
+        assert_ne!(
+            (mapped.dev(), mapped.ino()),
+            (source.dev(), source.ino()),
+            "the mapped file is the clone, not the checkpoint"
+        );
+
+        tamper(0xee);
+        let mut restored = GuestRam::new(TEST_RAM_LEN).unwrap();
+        assert_eq!(map_restore_image(&image, &mut restored).unwrap(), frame);
+        let regions = restored.backing_regions(0);
+        assert_eq!(regions.len(), 1, "{regions:?}");
+        assert_eq!(
+            regions[0].backing,
+            mvm_vmm::vmm::virtio_balloon::RamBacking::PrivateFile
+        );
+        assert_eq!(
+            restored.snapshot_bytes(),
+            expected,
+            "an edit to the checkpoint after verification must not reach the guest"
+        );
     }
 }

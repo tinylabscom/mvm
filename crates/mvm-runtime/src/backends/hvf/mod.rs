@@ -6,6 +6,7 @@
 mod boot_smoke;
 mod console_smoke;
 mod guest_ram;
+mod host_channels;
 mod hv_impl;
 mod kernel_boot;
 mod mmio_layout;

@@ -7,6 +7,13 @@
 //! materialized into a state directory and starts a supervisor that maps that
 //! RAM privately and restores the frame instead of loading a kernel.
 //!
+//! The saved RAM and frame are never handed over by path. Each is cloned into a
+//! private, unlinked file, verified against the digest the checkpoint's signed
+//! record carries, and passed to the supervisor as an inherited descriptor —
+//! see [`mvm_vmm::host::restore_image`]. The RAM is then mapped copy-on-write
+//! rather than read, so a restore costs one digest pass over the saved RAM and
+//! no copy of it.
+//!
 //! Two properties make the rewrite load-bearing rather than cosmetic:
 //!
 //! * **Every per-VM host path is re-derived from the child's own state dir.**
@@ -19,20 +26,20 @@
 //!   when its plan admits no egress.
 
 use std::io::Write;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::checkpoint::{
-    DEVICE_ANCHORS_BLOB, DeviceAnchors, HVF_FRAME_BLOB, MEMORY_BLOB, ROOTFS_BLOB,
+    ContentBlob, DEVICE_ANCHORS_BLOB, DeviceAnchors, HVF_FRAME_BLOB, MEMORY_BLOB, ROOTFS_BLOB,
     ROOTFS_VERITY_BLOB, SUPERVISOR_CONFIG_BLOB,
 };
-use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
+use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfRestoreFds, HvfSupervisorConfig};
+use mvm_vmm::host::restore_image::{PrivateCopy, VerifiedRestoreFile, inherit_descriptors};
 
-use crate::driver::hvf_process::{
-    PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path_verified,
-};
+use crate::driver::hvf_process::{PID_FILE_NAME, read_pid, resolve_supervisor_path_verified};
 
 /// A materialized HVF checkpoint about to be booted under a fresh identity.
 ///
@@ -48,6 +55,63 @@ pub struct HvfRestoreRequest<'a> {
     /// the restored machine runs inside. `None` means the admitted plan granted
     /// none, which is unbounded — the same answer a cold boot gives.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+    /// The checkpoint's content manifest, already bound to the signed audit
+    /// chain. The saved RAM and frame are verified against it on the exact
+    /// bytes the supervisor loads, which is why the checkpoint layer does not
+    /// hash those two blobs itself.
+    pub content: &'a [ContentBlob],
+}
+
+/// The blobs [`restore_hvf_vm`] verifies itself, on the bytes it loads.
+pub const VERIFIED_ON_LOAD: &[&str] = &[MEMORY_BLOB, HVF_FRAME_BLOB];
+
+/// The saved state a restore boots from, verified and private.
+struct VerifiedSavedState {
+    ram: VerifiedRestoreFile,
+    frame: VerifiedRestoreFile,
+}
+
+impl VerifiedSavedState {
+    fn prepare(cfg: &HvfSupervisorConfig, req: &HvfRestoreRequest<'_>) -> Result<Self> {
+        let prepare = |path: &Option<PathBuf>, blob: &str| -> Result<VerifiedRestoreFile> {
+            let path = path
+                .as_deref()
+                .ok_or_else(|| anyhow!("HVF restore config names no {blob}"))?;
+            let expected = recorded_digest(req.content, blob)?;
+            let verified = VerifiedRestoreFile::prepare(path, req.state_dir, expected)
+                .with_context(|| format!("verifying saved machine state {blob}"))?;
+            if verified.copy() == PrivateCopy::Copied {
+                tracing::warn!(
+                    vm = req.vm_name,
+                    blob,
+                    bytes = verified.len(),
+                    "the state directory's filesystem cannot clone; the saved {blob} was copied \
+                     byte for byte, which costs a full write of it on every restore"
+                );
+            }
+            Ok(verified)
+        };
+        Ok(Self {
+            ram: prepare(&cfg.restore_ram, MEMORY_BLOB)?,
+            frame: prepare(&cfg.restore_frame, HVF_FRAME_BLOB)?,
+        })
+    }
+
+    fn fds(&self) -> HvfRestoreFds {
+        HvfRestoreFds {
+            ram: self.ram.file().as_raw_fd(),
+            frame: self.frame.file().as_raw_fd(),
+        }
+    }
+}
+
+/// The digest the checkpoint recorded for `blob`.
+fn recorded_digest<'a>(content: &'a [ContentBlob], blob: &str) -> Result<&'a str> {
+    content
+        .iter()
+        .find(|entry| entry.name == blob)
+        .map(|entry| entry.sha256.as_str())
+        .ok_or_else(|| anyhow!("checkpoint records no digest for {blob}; refusing to load it"))
 }
 
 /// The live supervisor a restore produced.
@@ -178,6 +242,7 @@ pub fn hvf_child_restore_config(
         snapshot_frame: Some(req.state_dir.join("snapshot.frame")),
         restore_ram: Some(restore_ram),
         restore_frame: Some(restore_frame),
+        restore_fds: None,
         timeout_secs: parent.timeout_secs,
         // A restored child does not re-arm the wall-clock timer. Inheriting the
         // parent's plan would audit the child's kill against the parent's
@@ -230,18 +295,38 @@ pub fn hvf_child_restore_config(
 ///
 /// The guest's memory is the parent's: a restore maps the saved RAM back at the
 /// size it was captured with.
+///
+/// `inherited` are the verified saved-state descriptors the supervisor maps.
+/// They are marked for inheritance on the supervisor command itself, so a
+/// scope launcher, which runs as its own command, would not pass them on. HVF
+/// hosts have no scope mechanism, so this never wraps in practice; if it ever
+/// did, the restore is refused here by name rather than left to fail inside
+/// the supervisor on a descriptor that never arrived.
 fn bounded_restore_command(
     supervisor: &Path,
     req: &HvfRestoreRequest<'_>,
     guest_memory_mib: u32,
-) -> mvm_core::spawn_scope::BoundCommand {
-    mvm_core::spawn_scope::bind_spawn(
-        Command::new(supervisor),
+    inherited: &[RawFd],
+) -> Result<mvm_core::spawn_scope::BoundCommand> {
+    let mut command = Command::new(supervisor);
+    inherit_descriptors(&mut command, inherited.to_vec());
+    let bound = mvm_core::spawn_scope::bind_spawn(
+        command,
         req.vm_name,
         req.state_dir,
         &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(guest_memory_mib)
             .with_cpu_grant(req.cpu_grant),
-    )
+    );
+    if !inherited.is_empty()
+        && let Some(unit) = bound.unit()
+    {
+        bail!(
+            "HVF restore of '{}': the spawn scope {unit} would not pass the verified saved \
+             state to the supervisor; refusing to restore",
+            req.vm_name
+        );
+    }
+    Ok(bound)
 }
 
 /// Persist the child's own launch config, and clear the state the run this
@@ -266,13 +351,69 @@ fn prepare_child_state_dir(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfi
     .with_context(|| format!("writing {}", config_path.display()))?;
     mvm_core::run_sidecars::clear_prior_run(req.state_dir);
     let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
+    let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::restore_ready_path(
+        req.state_dir,
+    ));
     Ok(())
 }
 
+/// How long a restoring supervisor has, from spawn, to adopt, map, validate
+/// and apply the saved state and release its vCPUs.
+///
+/// Longer than a cold boot's pid-file wait because more happens before the
+/// signal: the frame is read and checked and every device and CPU is restored.
+/// None of it scales with guest RAM — the RAM is mapped, not read.
+pub const RESTORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How a restore starts its supervisor.
+///
+/// A seam so the verify-before-spawn order and the readiness handshake are
+/// testable without the real, codesigned supervisor binary.
+pub(crate) trait SpawnSupervisor {
+    /// Start the supervisor for `req`, inheriting `inherited`, with stdin
+    /// piped for the config and stderr captured in the state directory.
+    fn spawn(
+        &self,
+        req: &HvfRestoreRequest<'_>,
+        cfg: &HvfSupervisorConfig,
+        inherited: &[RawFd],
+    ) -> Result<std::process::Child>;
+}
+
+/// The installed `mvm-hvf-supervisor`, resolved and contract-checked.
+struct InstalledSupervisor;
+
+impl SpawnSupervisor for InstalledSupervisor {
+    fn spawn(
+        &self,
+        req: &HvfRestoreRequest<'_>,
+        cfg: &HvfSupervisorConfig,
+        inherited: &[RawFd],
+    ) -> Result<std::process::Child> {
+        let supervisor = resolve_supervisor_path_verified()?;
+        bounded_restore_command(&supervisor, req, cfg.memory_mib, inherited)?
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+                req.state_dir,
+            ))
+            .spawn()
+            .with_context(|| format!("spawning {}", supervisor.display()))
+    }
+}
+
 /// Start a supervisor that loads `req`'s materialized saved state instead of
-/// booting a kernel, and wait for it to confirm the VM is live.
+/// booting a kernel, and wait until it reports the machine running.
 #[tracing::instrument(name = "hvf.restore", skip_all, fields(vm = %req.vm_name))]
 pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
+    restore_hvf_vm_with(req, &InstalledSupervisor, RESTORE_READY_TIMEOUT)
+}
+
+fn restore_hvf_vm_with(
+    req: &HvfRestoreRequest<'_>,
+    spawner: &dyn SpawnSupervisor,
+    ready_timeout: std::time::Duration,
+) -> Result<RestoredHvfVm> {
     if !req.state_dir.is_dir() {
         bail!(
             "HVF restore of '{}': state dir {} is missing",
@@ -282,60 +423,95 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
     }
     let parent = read_parent_config(req.state_dir)?;
     let anchors = read_anchors(req.state_dir)?;
-    let cfg = hvf_child_restore_config(&parent, &anchors, req)?;
+    let mut cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
     prepare_child_state_dir(req, &cfg)?;
+    // Verification comes before anything that could map: the supervisor is
+    // handed only descriptors of private copies that already matched the
+    // checkpoint's recorded digests, and it refuses a restore named by path.
+    let saved = VerifiedSavedState::prepare(&cfg, req)?;
+    let fds = saved.fds();
+    cfg.restore_fds = Some(fds);
 
-    let supervisor = resolve_supervisor_path_verified()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
-    let mut child = bounded_restore_command(&supervisor, req, cfg.memory_mib)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-            req.state_dir,
-        ))
-        .spawn()
-        .with_context(|| format!("spawning {}", supervisor.display()))?;
-    child
+    let mut child = spawner.spawn(req, &cfg, &[fds.ram, fds.frame])?;
+    // The supervisor holds its own copies now; ours close here.
+    drop(saved);
+    let piped = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-        .write_all(json.as_bytes())
-        .context("piping HvfSupervisorConfig to the supervisor")?;
+        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(json.as_bytes())
+                .context("piping HvfSupervisorConfig to the supervisor")
+        });
+    if let Err(error) = piped {
+        // A supervisor that died before reading its config says why on stderr.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.context(restore_failure(req, &cfg, "could not be configured")));
+    }
+    await_restored(&mut child, req, &cfg, ready_timeout)
+}
 
-    let deadline = Instant::now() + PID_FILE_TIMEOUT;
+/// Wait for the supervisor to announce the restored machine running.
+///
+/// The pid file alone is not enough: the supervisor publishes it before it
+/// adopts, maps or validates anything, so a refusal of the saved state would
+/// otherwise be reported as a successful restore of a VM that is already gone.
+/// Readiness is the marker the supervisor writes only once the state is
+/// applied; its exit before then is a failed restore, reported with its
+/// stderr.
+fn await_restored(
+    child: &mut std::process::Child,
+    req: &HvfRestoreRequest<'_>,
+    cfg: &HvfSupervisorConfig,
+    timeout: std::time::Duration,
+) -> Result<RestoredHvfVm> {
+    let marker = mvm_vmm::host::hvf_supervisor::restore_ready_path(req.state_dir);
+    let deadline = Instant::now() + timeout;
     loop {
-        if let Some(pid) = read_pid(&cfg.pid_file) {
+        if marker.is_file()
+            && let Some(pid) = read_pid(&cfg.pid_file)
+        {
             let pid = u32::try_from(pid).map_err(|_| {
                 anyhow!("restored HVF VM '{}' published a negative pid", req.vm_name)
             })?;
-            return Ok(RestoredHvfVm {
-                pid,
-                agent_socket: cfg
-                    .agent_socket
-                    .clone()
-                    .expect("the restored config always binds an agent socket"),
-            });
+            let agent_socket = cfg
+                .agent_socket
+                .clone()
+                .ok_or_else(|| anyhow!("restored HVF VM '{}' has no agent socket", req.vm_name))?;
+            return Ok(RestoredHvfVm { pid, agent_socket });
         }
         if let Some(status) = child.try_wait().context("polling the HVF supervisor")? {
-            bail!(
-                "HVF restore of '{}' exited before publishing its pid (status: {status}); see {}{}",
-                req.vm_name,
-                cfg.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
-            );
+            bail!(restore_failure(
+                req,
+                cfg,
+                &format!("exited before the restored machine was running ({status})")
+            ));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            bail!(
-                "HVF restore of '{}' did not confirm within {PID_FILE_TIMEOUT:?}; see {}{}",
-                req.vm_name,
-                cfg.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
-            );
+            let _ = child.wait();
+            bail!(restore_failure(
+                req,
+                cfg,
+                &format!("did not report the restored machine running within {timeout:?}")
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// A failed restore, with the supervisor's own account of why.
+fn restore_failure(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfig, what: &str) -> String {
+    format!(
+        "HVF restore of '{}': the supervisor {what}; see {}{}",
+        req.vm_name,
+        cfg.console_log.display(),
+        mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
+    )
 }
 
 #[cfg(test)]
@@ -362,6 +538,7 @@ mod tests {
             snapshot_frame: Some(PathBuf::from("/parent/snapshot.frame")),
             restore_ram: None,
             restore_frame: None,
+            restore_fds: None,
             display_socket: None,
             timeout_secs: 0,
             plan: None,
@@ -406,6 +583,7 @@ mod tests {
             vm_name,
             state_dir: dir,
             cpu_grant: None,
+            content: &[],
         }
     }
 
@@ -690,9 +868,12 @@ mod tests {
                 vm_name: "restored-child",
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+                content: &[],
             },
             1024,
-        );
+            &[],
+        )
+        .expect("no descriptors to inherit");
 
         let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
         assert_eq!(
@@ -730,9 +911,12 @@ mod tests {
                 vm_name: "restored-child",
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+                content: &[],
             },
             1024,
-        );
+            &[],
+        )
+        .expect("no descriptors to inherit");
 
         // Rewrite the recorded name to the one the fake systemctl answers for:
         // the real name carries a per-boot suffix that cannot be reconstructed.
@@ -770,9 +954,12 @@ mod tests {
                 vm_name: "restored-child",
                 state_dir: &state,
                 cpu_grant: None,
+                content: &[],
             },
             1024,
-        );
+            &[],
+        )
+        .expect("no descriptors to inherit");
 
         assert_eq!(
             mvm_core::spawn_scope::rendered_argv(cmd.as_command()),
@@ -783,6 +970,290 @@ mod tests {
             mvm_core::spawn_scope::enforced_grants_for_vm(&state),
             mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared()
         );
+    }
+
+    /// Verified saved state is inherited by the supervisor command itself, so
+    /// a scope launcher wrapping it would drop the descriptors. That is
+    /// refused by name before anything is spawned, and an unscoped launch runs
+    /// the supervisor directly.
+    #[test]
+    fn inherited_saved_state_is_never_routed_through_a_scope_launcher() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let state = scratch.path().join("child-state");
+        std::fs::create_dir_all(&state).unwrap();
+        let req = HvfRestoreRequest {
+            vm_name: "restored-child",
+            state_dir: &state,
+            cpu_grant: None,
+            content: &[],
+        };
+        let supervisor = Path::new("/usr/bin/mvm-hvf-supervisor");
+
+        {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+                .expect("fake mechanism");
+            let refused = bounded_restore_command(supervisor, &req, 1024, &[7, 8])
+                .err()
+                .expect("a scoped launch cannot carry the descriptors");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("would not pass the verified saved state"),
+                "{refused:#}"
+            );
+        }
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty_path = scratch.path().join("empty-path");
+        std::fs::create_dir_all(&empty_path).unwrap();
+        env.set("PATH", &empty_path);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let direct = bounded_restore_command(supervisor, &req, 1024, &[7, 8])
+            .expect("an unscoped launch inherits the descriptors directly");
+        assert_eq!(
+            mvm_core::spawn_scope::rendered_argv(direct.as_command()),
+            vec!["/usr/bin/mvm-hvf-supervisor".to_string()]
+        );
+    }
+
+    /// A state dir a restore can reach verification in: the parent's launch
+    /// config and anchors on disk beside the saved state `materialized` lays
+    /// down.
+    fn restorable(dir: &Path) {
+        let anchors = materialized(dir);
+        let parent = parent_config(
+            dir,
+            vec![HvfDisk {
+                path: anchors.rootfs.clone(),
+                read_only: true,
+                ephemeral: false,
+            }],
+        );
+        std::fs::write(
+            dir.join(SUPERVISOR_CONFIG_BLOB),
+            serde_json::to_vec(&parent).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(DEVICE_ANCHORS_BLOB),
+            serde_json::to_vec(&anchors).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn blob(name: &str, bytes: &[u8]) -> ContentBlob {
+        ContentBlob {
+            name: name.into(),
+            sha256: mvm_core::crypto::image_verify::sha256_reader(bytes).unwrap(),
+        }
+    }
+
+    /// A spawner that records every launch and starts `/bin/sh -c script` in
+    /// place of the supervisor, with `PID_FILE` and `READY` naming the files
+    /// the real one publishes.
+    struct ScriptedSupervisor {
+        script: &'static str,
+        spawned: std::cell::Cell<usize>,
+    }
+
+    impl ScriptedSupervisor {
+        fn new(script: &'static str) -> Self {
+            Self {
+                script,
+                spawned: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl SpawnSupervisor for ScriptedSupervisor {
+        fn spawn(
+            &self,
+            req: &HvfRestoreRequest<'_>,
+            cfg: &HvfSupervisorConfig,
+            inherited: &[RawFd],
+        ) -> Result<std::process::Child> {
+            self.spawned.set(self.spawned.get() + 1);
+            assert_eq!(inherited.len(), 2, "RAM and frame are both handed over");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", self.script])
+                .env("PID_FILE", &cfg.pid_file)
+                .env(
+                    "READY",
+                    mvm_vmm::host::hvf_supervisor::restore_ready_path(req.state_dir),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+                    req.state_dir,
+                ));
+            Ok(command.spawn()?)
+        }
+    }
+
+    /// The digests of the saved state `materialized` lays down.
+    fn matching_content() -> Vec<ContentBlob> {
+        vec![blob(MEMORY_BLOB, b"ram"), blob(HVF_FRAME_BLOB, b"frame")]
+    }
+
+    fn restore_request<'a>(dir: &'a Path, content: &'a [ContentBlob]) -> HvfRestoreRequest<'a> {
+        HvfRestoreRequest {
+            vm_name: "restored",
+            state_dir: dir,
+            cpu_grant: None,
+            content,
+        }
+    }
+
+    /// Saved state that does not match the digest the checkpoint recorded is
+    /// refused before a supervisor is spawned, so there is never a moment in
+    /// which unverified bytes are mapped as guest memory. The matching case is
+    /// the control: the same fixture does reach the spawner.
+    #[test]
+    fn saved_state_is_verified_before_any_supervisor_is_spawned() {
+        let cases: [(&str, Vec<ContentBlob>, &str); 3] = [
+            (
+                "ram",
+                vec![blob(MEMORY_BLOB, b"other"), blob(HVF_FRAME_BLOB, b"frame")],
+                "failed integrity",
+            ),
+            (
+                "frame",
+                vec![blob(MEMORY_BLOB, b"ram"), blob(HVF_FRAME_BLOB, b"other")],
+                "failed integrity",
+            ),
+            (
+                "unrecorded",
+                vec![blob(HVF_FRAME_BLOB, b"frame")],
+                "records no digest",
+            ),
+        ];
+        for (case, content, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            restorable(dir);
+            let spawner = ScriptedSupervisor::new("exit 99");
+
+            let error = restore_hvf_vm_with(
+                &restore_request(dir, &content),
+                &spawner,
+                std::time::Duration::from_secs(5),
+            )
+            .expect_err("mismatched saved state must be refused");
+
+            assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
+            assert_eq!(
+                spawner.spawned.get(),
+                0,
+                "{case}: no supervisor was spawned"
+            );
+            let leftovers: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".restore-"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "{case}: no private copy is left named"
+            );
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        restorable(tmp.path());
+        let spawner = ScriptedSupervisor::new("cat >/dev/null; exit 99");
+        let content = matching_content();
+        let _ = restore_hvf_vm_with(
+            &restore_request(tmp.path(), &content),
+            &spawner,
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(
+            spawner.spawned.get(),
+            1,
+            "verified state reaches the spawner"
+        );
+    }
+
+    /// The supervisor publishes its pid before it adopts, maps or validates
+    /// the saved state, so a refusal after that point must still fail the
+    /// restore — with the supervisor's own reason — instead of reporting a
+    /// VM that is already gone.
+    #[test]
+    fn a_supervisor_refusal_after_its_pid_is_published_fails_the_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        restorable(tmp.path());
+        let spawner = ScriptedSupervisor::new(
+            "cat >/dev/null; echo $$ > \"$PID_FILE\"; \
+             echo 'Error: inherited restore descriptor 7 is not an unlinked, read-only regular file' >&2; \
+             exit 1",
+        );
+        let content = matching_content();
+
+        let error = restore_hvf_vm_with(
+            &restore_request(tmp.path(), &content),
+            &spawner,
+            std::time::Duration::from_secs(20),
+        )
+        .expect_err("a refused restore is not a running VM");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("exited before the restored machine was running"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("not an unlinked, read-only regular file"),
+            "the supervisor's reason is carried: {rendered}"
+        );
+    }
+
+    /// A supervisor that never reports the machine running is killed at the
+    /// deadline and the restore fails; a live pid is not enough.
+    #[test]
+    fn a_restore_that_never_reports_ready_times_out_and_is_killed() {
+        let tmp = tempfile::tempdir().unwrap();
+        restorable(tmp.path());
+        let spawner =
+            ScriptedSupervisor::new("cat >/dev/null; echo $$ > \"$PID_FILE\"; exec sleep 60");
+        let content = matching_content();
+
+        let error = restore_hvf_vm_with(
+            &restore_request(tmp.path(), &content),
+            &spawner,
+            std::time::Duration::from_millis(500),
+        )
+        .expect_err("no readiness, no restore");
+        assert!(
+            format!("{error:#}").contains("did not report the restored machine running"),
+            "{error:#}"
+        );
+        let pid = read_pid(&tmp.path().join(PID_FILE_NAME)).expect("the fake published a pid");
+        // SAFETY: signal 0 only probes whether the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "the unresponsive supervisor was killed and reaped");
+    }
+
+    /// Readiness is the marker, published after the state is applied.
+    #[test]
+    fn a_restore_is_reported_once_the_supervisor_marks_it_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        restorable(tmp.path());
+        let spawner = ScriptedSupervisor::new(
+            "cat >/dev/null; echo $$ > \"$PID_FILE\"; sleep 0.2; echo ready > \"$READY\"; exec sleep 60",
+        );
+        let content = matching_content();
+
+        let restored = restore_hvf_vm_with(
+            &restore_request(tmp.path(), &content),
+            &spawner,
+            std::time::Duration::from_secs(20),
+        )
+        .expect("a supervisor that reports ready is a restored VM");
+        // SAFETY: terminating the fake supervisor this test started.
+        unsafe { libc::kill(restored.pid as libc::pid_t, libc::SIGKILL) };
+        assert!(restored.pid > 0);
     }
 
     #[test]

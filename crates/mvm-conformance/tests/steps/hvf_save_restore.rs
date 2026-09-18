@@ -51,6 +51,7 @@ impl mvm_runtime::checkpoint::VmFullRestore for NeverReachedRestore {
         _memory: &std::path::Path,
         _machine_id: &std::path::Path,
         _config_src: Option<&std::path::Path>,
+        _content: &[mvm_core::checkpoint::ContentBlob],
     ) -> anyhow::Result<()> {
         panic!("the VMM must not be started for a checkpoint that failed its gate");
     }
@@ -84,6 +85,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         snapshot_frame: Some(PathBuf::from("/parent/state/snapshot.frame")),
         restore_ram: None,
         restore_frame: None,
+        restore_fds: None,
         timeout_secs: 0,
         plan: None,
         audit_dir: None,
@@ -159,6 +161,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
             vm_name: "restored-child",
             state_dir: &dir,
             cpu_grant: None,
+            content: &[],
         },
     )
     .expect("rewrite the captured config for a restored child");
