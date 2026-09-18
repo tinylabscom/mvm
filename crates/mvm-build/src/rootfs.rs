@@ -337,6 +337,39 @@ pub struct MaterializedExt4 {
     pub verity_root_hash: Option<String>,
 }
 
+/// How a materialization reached the builder-VM writer.
+///
+/// The builder VM copies the host tree, so it cannot place a path the host
+/// filesystem refused or an owner an unprivileged unpack could not apply. What
+/// to do about that depends entirely on how the run got here, and naming the
+/// wrong one sends a reader after a setting nobody set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderVmRoute {
+    /// Asked for outright, so the in-process writer was never tried and is
+    /// still available.
+    Selected,
+    /// Reached automatically after the in-process writer could not emit this
+    /// image, carrying the failure that sent it here. Nothing was configured;
+    /// the image itself is what has to change.
+    PureFallback { because: String },
+}
+
+impl BuilderVmRoute {
+    /// The half of a refusal that tells a reader what to do about it.
+    fn remedy(&self) -> String {
+        match self {
+            Self::Selected => {
+                "use the in-process materializer (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+                    .to_string()
+            }
+            Self::PureFallback { because } => format!(
+                "the in-process materializer, which can, was tried first and could not emit this \
+                 image ({because}), so no materializer can build it faithfully"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RootfsError {
     #[error("unpacked root is not a directory: {0}")]
@@ -359,18 +392,16 @@ pub enum RootfsError {
     VerityFeatureDisabled,
 
     #[error(
-        "the builder-VM materializer copies the host tree, so it cannot supply the {0} \
-         path(s) the host filesystem could not hold; use the in-process materializer \
-         (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+        "the builder-VM materializer copies the host tree, so it cannot supply the {count} \
+         path(s) the host filesystem could not hold; {}", route.remedy()
     )]
-    DeferredNodesUnsupported(usize),
+    DeferredNodesUnsupported { count: usize, route: BuilderVmRoute },
 
     #[error(
-        "the builder-VM materializer copies the host tree, so it cannot give the {0} \
-         path(s) the image layers assign to a non-root account their owners; use the \
-         in-process materializer (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+        "the builder-VM materializer copies the host tree, so it cannot give the {count} \
+         path(s) the image layers assign to a non-root account their owners; {}", route.remedy()
     )]
-    LayerOwnershipUnsupported(usize),
+    LayerOwnershipUnsupported { count: usize, route: BuilderVmRoute },
 
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
@@ -472,9 +503,14 @@ pub fn estimate_ext4_size(
 /// `mkfs.ext4` inside the guest. Default builds return
 /// [`RootfsError::BuilderVmFeatureDisabled`] because they do not link
 /// the libkrun builder launcher.
+///
+/// `route` is how the caller got here, and is only ever read to explain a
+/// refusal. It is a parameter rather than a default so a caller cannot reach
+/// this writer without saying which it is.
 pub fn materialize_ext4(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
+    route: &BuilderVmRoute,
 ) -> Result<MaterializedExt4, RootfsError> {
     if !input.unpacked_root.is_dir() {
         return Err(RootfsError::UnpackedRootNotDirectory(
@@ -482,7 +518,7 @@ pub fn materialize_ext4(
         ));
     }
 
-    refuse_tree_only_materialization_loss(input)?;
+    refuse_tree_only_materialization_loss(input, route)?;
     let size_bytes = estimate_ext4_size(input.uncompressed_size_bytes, options)?;
 
     #[cfg(not(feature = "builder-vm"))]
@@ -515,15 +551,26 @@ pub fn materialize_ext4(
 /// refused, and an owner an unprivileged unpack could not apply. Fail closed
 /// rather than emit an image that is quietly missing paths or has a service's
 /// files owned by root.
-fn refuse_tree_only_materialization_loss(input: &MaterializeExt4Input) -> Result<(), RootfsError> {
+///
+/// The refusal carries `route` because the two ways to be here have different
+/// causes: an operator who asked for this writer can stop asking, while an
+/// automatic fallback was reached without anyone configuring anything.
+fn refuse_tree_only_materialization_loss(
+    input: &MaterializeExt4Input,
+    route: &BuilderVmRoute,
+) -> Result<(), RootfsError> {
     if !input.deferred_nodes.is_empty() {
-        return Err(RootfsError::DeferredNodesUnsupported(
-            input.deferred_nodes.len(),
-        ));
+        return Err(RootfsError::DeferredNodesUnsupported {
+            count: input.deferred_nodes.len(),
+            route: route.clone(),
+        });
     }
     let non_root = input.owners.non_root_count();
     if non_root > 0 {
-        return Err(RootfsError::LayerOwnershipUnsupported(non_root));
+        return Err(RootfsError::LayerOwnershipUnsupported {
+            count: non_root,
+            route: route.clone(),
+        });
     }
     Ok(())
 }
@@ -677,6 +724,32 @@ pub fn materialize_ext4_pure(
     materialize_ext4_pure_with_walk_options(input, mvm_fs::rootfs::WalkOptions::default())
 }
 
+/// The writer options every in-process materialization runs under.
+///
+/// One function so the ownership guarantee cannot be lost by adding a second
+/// entry point: the paths the runtime injects are claimed here, on every tree
+/// rather than only on trees built from image layers. A tree carrying no
+/// declared owners loses nothing by it, and no caller has to remember to ask.
+///
+/// Stage-0 `/work` is mounted by label; every other caller leaves
+/// `volume_label` unset and gets the unchanged default-options image.
+#[cfg(feature = "pure-mkfs")]
+fn pure_materialize_options(
+    input: &MaterializeExt4Input,
+    walk: mvm_fs::rootfs::WalkOptions,
+) -> mvm_fs::rootfs::MaterializeOptions {
+    let options = mvm_fs::rootfs::MaterializeOptions::builder()
+        .walk(walk)
+        .extra_nodes(input.deferred_nodes.clone())
+        .owners(input.owners.clone())
+        .root_owned(crate::oci_runtime_inject::injected_root_owned_paths())
+        .build();
+    match &input.volume_label {
+        Some(label) => options.with_volume_label(label.as_bytes()),
+        None => options,
+    }
+}
+
 /// Materialize with caller-selected source-walk behavior.
 ///
 /// Immutable OCI roots use [`mvm_fs::rootfs::WalkOptions::default`]. Live
@@ -692,16 +765,7 @@ pub fn materialize_ext4_pure_with_walk_options(
             input.unpacked_root.clone(),
         ));
     }
-    // Stage-0 /work is mounted by label; every other caller leaves
-    // volume_label None and gets the unchanged default-options image.
-    let mut options = mvm_fs::rootfs::MaterializeOptions::builder()
-        .walk(walk)
-        .extra_nodes(input.deferred_nodes.clone())
-        .owners(input.owners.clone())
-        .build();
-    if let Some(label) = &input.volume_label {
-        options = options.with_volume_label(label.as_bytes());
-    }
+    let options = pure_materialize_options(input, walk);
     if !input.emit_verity {
         let materialized =
             mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
@@ -1132,9 +1196,108 @@ mod tests {
         let output = output_dir.path().join("rootfs.ext4");
         let input = MaterializeExt4Input::new(unpacked.path().to_path_buf(), output.clone(), 1);
 
-        let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
+        let err = materialize_ext4(
+            &input,
+            &MaterializeExt4Options::default(),
+            &BuilderVmRoute::Selected,
+        )
+        .unwrap_err();
         assert!(matches!(err, RootfsError::BuilderVmFeatureDisabled));
         assert!(!output.exists());
+    }
+}
+
+#[cfg(all(test, feature = "pure-mkfs"))]
+mod injected_ownership_tests {
+    use super::*;
+    use mvm_fs::ext4::Owner;
+
+    const HOSTILE: Owner = Owner::new(1000, 1000);
+
+    /// An image layer that names the paths mvm injects, with an owner of its
+    /// own choosing — the shape a hostile image takes to get `/etc/passwd`
+    /// away from root.
+    fn hostile_owners() -> mvm_fs::ownership::OwnerTable {
+        let tree = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in [
+            "etc/passwd",
+            "etc/group",
+            "etc/mvm/verb-trust.json",
+            "usr/lib/mvm/wrappers/oci-entrypoint",
+            "srv/app.conf",
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_uid(HOSTILE.uid.into());
+            header.set_gid(HOSTILE.gid.into());
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+        }
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            tree.path(),
+            &mvm_fs::oci::unpack::UnpackOptions::default(),
+        )
+        .unwrap();
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+        owners
+    }
+
+    fn owner_in_image(nodes: &[mvm_fs::ext4::Node], path: &str) -> Owner {
+        nodes
+            .iter()
+            .find(|node| node.path() == path)
+            .unwrap_or_else(|| panic!("{path} must be in the image"))
+            .owner()
+    }
+
+    /// The in-process materializer's options claim the injected paths on every
+    /// tree, so the image a hostile layer table is applied to still has mvm's
+    /// files owned by root — and only those.
+    #[test]
+    fn an_injected_path_is_root_owned_and_the_image_keeps_the_rest() {
+        let tree = tempfile::tempdir().unwrap();
+        for dir in ["etc/mvm", "usr/lib/mvm/wrappers", "srv"] {
+            std::fs::create_dir_all(tree.path().join(dir)).unwrap();
+        }
+        for file in [
+            "etc/passwd",
+            "etc/group",
+            "etc/mvm/verb-trust.json",
+            "usr/lib/mvm/wrappers/oci-entrypoint",
+            "srv/app.conf",
+        ] {
+            std::fs::write(tree.path().join(file), b"x").unwrap();
+        }
+        let input =
+            MaterializeExt4Input::new(tree.path().to_path_buf(), tree.path().join("out.ext4"), 0)
+                .with_owners(hostile_owners());
+
+        let options = pure_materialize_options(&input, mvm_fs::rootfs::WalkOptions::default());
+        let nodes = mvm_fs::rootfs::image_nodes(tree.path(), &options).unwrap();
+
+        for injected in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/mvm/verb-trust.json",
+            "/usr/lib/mvm/wrappers/oci-entrypoint",
+        ] {
+            assert_eq!(
+                owner_in_image(&nodes, injected),
+                Owner::ROOT,
+                "{injected} is mvm's, whatever the layer declared"
+            );
+        }
+        assert_eq!(
+            owner_in_image(&nodes, "/srv/app.conf"),
+            HOSTILE,
+            "a path mvm does not inject keeps the owner its layer declared"
+        );
     }
 }
 
@@ -1206,9 +1369,14 @@ mod tree_only_materialization_loss_tests {
     fn non_root_layer_owners_refuse_the_tree_copy_materializer() {
         let dir = tempfile::tempdir().unwrap();
         let input = input_in(&dir).with_owners(owners_from_layer(999));
-        let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
+        let err = materialize_ext4(
+            &input,
+            &MaterializeExt4Options::default(),
+            &BuilderVmRoute::Selected,
+        )
+        .unwrap_err();
         assert!(
-            matches!(err, RootfsError::LayerOwnershipUnsupported(1)),
+            matches!(err, RootfsError::LayerOwnershipUnsupported { count: 1, .. }),
             "got {err:?}"
         );
         assert!(!input.output.exists(), "refused before allocating an image");
@@ -1219,7 +1387,10 @@ mod tree_only_materialization_loss_tests {
     fn root_only_layer_owners_are_not_a_loss() {
         let dir = tempfile::tempdir().unwrap();
         let input = input_in(&dir).with_owners(owners_from_layer(0));
-        assert!(refuse_tree_only_materialization_loss(&input).is_ok());
+        assert!(
+            refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected).is_ok(),
+            "root-only owners survive a tree copy"
+        );
     }
 
     #[test]
@@ -1231,8 +1402,42 @@ mod tree_only_materialization_loss_tests {
             owner: mvm_fs::ext4::Owner::ROOT,
         }]);
         assert!(matches!(
-            refuse_tree_only_materialization_loss(&input),
-            Err(RootfsError::DeferredNodesUnsupported(1))
+            refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected),
+            Err(RootfsError::DeferredNodesUnsupported { count: 1, .. })
         ));
+    }
+
+    fn refusal_message(route: &BuilderVmRoute) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_from_layer(999));
+        refuse_tree_only_materialization_loss(&input, route)
+            .expect_err("a non-root owner is a loss on either route")
+            .to_string()
+    }
+
+    /// An operator who asked for the builder VM can stop asking, and the
+    /// refusal says so.
+    #[test]
+    fn a_requested_builder_vm_refusal_names_the_setting_that_selected_it() {
+        let message = refusal_message(&BuilderVmRoute::Selected);
+        assert!(
+            message.contains("unset MVM_MATERIALIZE_BUILDER_VM"),
+            "got {message}"
+        );
+    }
+
+    /// On the automatic fallback nobody set that variable, so naming it sends
+    /// a reader after a setting that is not there. Name the failure that
+    /// caused the fallback instead.
+    #[test]
+    fn a_fallback_refusal_names_the_failure_that_caused_it_and_no_setting() {
+        let message = refusal_message(&BuilderVmRoute::PureFallback {
+            because: "file too fragmented".to_string(),
+        });
+        assert!(
+            !message.contains("MVM_MATERIALIZE_BUILDER_VM"),
+            "the fallback path set nothing to unset; got {message}"
+        );
+        assert!(message.contains("file too fragmented"), "got {message}");
     }
 }

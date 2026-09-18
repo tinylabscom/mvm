@@ -203,6 +203,42 @@ const INJECT_DESTS: &[&str] = &[
     "etc/group",
 ];
 
+/// Directory trees that exist only to hold injected files, so everything
+/// beneath them belongs to the runtime rather than to the image.
+///
+/// [`INJECT_DESTS`] names the files written today; these cover the names a
+/// later one will use, and the parent directories the writes create along the
+/// way — `/etc/mvm` is made by `create_dir_all` and so appears in neither
+/// table above.
+const INJECT_TREES: &[&str] = &["etc/mvm", "mvm", "usr/lib/mvm"];
+
+/// The guest paths this module owns in a materialized image: every injected
+/// file and mount point, plus the trees that hold nothing else.
+///
+/// An OCI layer may name any of them in its tar headers — `/etc/passwd` most
+/// of all — and the owner it declares is otherwise applied to the built
+/// image's inodes. The account databases a guest resolves uids through, the
+/// wrapper it boots and the trust policy it enforces are the runtime's, not
+/// the image's, so the materializer hands this set to the ext4 writer and a
+/// declared owner never reaches them.
+///
+/// Derived from the same tables the injection itself walks, so a destination
+/// added there is claimed here without a second edit.
+#[must_use]
+pub fn injected_root_owned_paths() -> mvm_fs::ownership::RootOwnedPaths {
+    let mut claimed = mvm_fs::ownership::RootOwnedPaths::none();
+    for tree in INJECT_TREES {
+        claimed = claimed.with_tree(tree);
+    }
+    for (rel, _mode) in INJECT_DIRS {
+        claimed = claimed.with_path(rel);
+    }
+    for dest in INJECT_DESTS {
+        claimed = claimed.with_path(dest);
+    }
+    claimed
+}
+
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
 /// Idempotent: re-running overwrites the injected files. Returns the paths
@@ -347,6 +383,49 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), io::Error> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// The claim set is derived from the tables the injection itself walks, so
+    /// a destination added to either is claimed without a second edit. This
+    /// asserts the derivation rather than restating the list, which a second
+    /// copy of the list would not.
+    #[test]
+    fn every_injected_destination_and_directory_is_claimed() {
+        let claimed = injected_root_owned_paths();
+        for dest in INJECT_DESTS {
+            assert!(
+                claimed.claims(&format!("/{dest}")),
+                "{dest} must be claimed"
+            );
+        }
+        for (dir, _mode) in INJECT_DIRS {
+            assert!(claimed.claims(&format!("/{dir}")), "{dir} must be claimed");
+        }
+        for tree in INJECT_TREES {
+            assert!(
+                claimed.claims(&format!("/{tree}/anything-beneath-it")),
+                "{tree} must be claimed to its leaves"
+            );
+        }
+    }
+
+    /// The account databases a guest resolves its uid through are the whole
+    /// point: a layer that names them must not get to own them.
+    #[test]
+    fn the_account_databases_and_trust_policy_are_claimed() {
+        let claimed = injected_root_owned_paths();
+        for path in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/mvm/verb-trust.json",
+            "/usr/lib/mvm/wrappers/oci-entrypoint",
+        ] {
+            assert!(claimed.claims(path), "{path} must be claimed");
+        }
+        assert!(
+            !claimed.claims("/etc/hosts"),
+            "a path the injection never writes stays the image's own"
+        );
+    }
 
     /// The identity must come from the artifacts' bytes, not their paths.
     /// A rebuilt binary at an unchanged path is exactly the case the old

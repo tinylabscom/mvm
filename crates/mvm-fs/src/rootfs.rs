@@ -23,7 +23,7 @@ use thiserror::Error;
 use crate::parallel::par_map;
 
 use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Owner, Xattr};
-use crate::ownership::OwnerTable;
+use crate::ownership::{OwnerTable, RootOwnedPaths};
 
 /// Version of the deterministic ext4 materializer's output contract.
 ///
@@ -727,6 +727,11 @@ pub struct MaterializeOptions {
     /// so a caller building from container image layers supplies the owners
     /// the layers declared. Empty (the default) leaves every node root-owned.
     pub owners: OwnerTable,
+    /// Paths the image builder owns, whose nodes are root-owned however
+    /// `owners` names them. A caller that injects files into the tree after
+    /// the layers are stacked claims them here; claiming nothing (the default)
+    /// lets every declared owner through.
+    pub root_owned: RootOwnedPaths,
 }
 
 impl MaterializeOptions {
@@ -783,6 +788,13 @@ impl MaterializeOptionsBuilder {
         self
     }
 
+    /// Set `root_owned`.
+    #[must_use]
+    pub fn root_owned(mut self, root_owned: RootOwnedPaths) -> Self {
+        self.inner.root_owned = root_owned;
+        self
+    }
+
     /// Finish.
     #[must_use]
     pub fn build(self) -> MaterializeOptions {
@@ -828,10 +840,30 @@ impl MaterializeOptions {
         self.owners = owners;
         self
     }
+
+    /// Claim the paths the image builder owns, so no declared owner reaches
+    /// them.
+    pub fn with_root_owned(mut self, root_owned: RootOwnedPaths) -> Self {
+        self.root_owned = root_owned;
+        self
+    }
+}
+
+/// The node list [`build_ext4_pure`] would write, without writing it.
+///
+/// Exposed so a caller can assert what its own options produce — which paths
+/// the image carries and who owns them — against the list the image is built
+/// from, rather than against a second derivation of it.
+pub fn image_nodes(
+    root: &Path,
+    options: &MaterializeOptions,
+) -> Result<Vec<Node>, MaterializeError> {
+    collect_image_nodes(root, options)
 }
 
 /// The node list a whole-tree materialization builds from: the walk of `root`,
-/// the caller's extra nodes merged over it, and the caller's owners applied.
+/// the caller's extra nodes merged over it, and the caller's owners applied to
+/// everything the caller did not claim as its own.
 fn collect_image_nodes(
     root: &Path,
     options: &MaterializeOptions,
@@ -840,7 +872,7 @@ fn collect_image_nodes(
         collect_nodes(root, options.walk)?,
         options.extra_nodes.clone(),
     );
-    options.owners.apply(&mut nodes);
+    options.owners.apply(&mut nodes, &options.root_owned);
     Ok(nodes)
 }
 

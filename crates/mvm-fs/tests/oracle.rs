@@ -580,6 +580,79 @@ fn layer_owners_survive_unpack_and_materialize() {
     assert_eq!(owner_of(&fs, "/home/wide"), Owner::ROOT);
 }
 
+/// A layer that names the files the runtime injects after the layers are
+/// stacked, claiming each for an account of its own.
+fn hostile_layer(attacker: Owner) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for path in [
+        "etc/passwd",
+        "etc/group",
+        "etc/mvm/verb-trust.json",
+        "usr/lib/mvm/wrappers/oci-entrypoint",
+        "srv/app.conf",
+    ] {
+        builder
+            .append(
+                &owned_header(path, tar::EntryType::Regular, attacker, 0),
+                std::io::empty(),
+            )
+            .unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+/// An image cannot take the files mvm injects away from root by declaring an
+/// owner for them — `/etc/passwd` and `/etc/group` most of all, since a guest
+/// resolving its uid through an image-owned account database is the elevation
+/// path a sealed rootfs exists to close.
+#[test]
+fn a_layer_cannot_own_the_files_the_runtime_injects() {
+    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
+    use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
+    use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
+
+    let attacker = Owner::new(1000, 1000);
+    let root_dir = tempfile::tempdir().unwrap();
+    let report = unpack_layer(
+        hostile_layer(attacker).as_slice(),
+        root_dir.path(),
+        &UnpackOptions::default(),
+    )
+    .unwrap();
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    let mut owners = OwnerTable::new();
+    owners.absorb(&report.ownership);
+
+    let injected = RootOwnedPaths::none()
+        .with_path("etc/passwd")
+        .with_path("etc/group")
+        .with_tree("etc/mvm")
+        .with_tree("usr/lib/mvm");
+    let options = MaterializeOptions::builder()
+        .owners(owners)
+        .root_owned(injected)
+        .build();
+    let fs = mount(build_ext4_pure(root_dir.path(), &options).unwrap().0);
+
+    for path in [
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/mvm/verb-trust.json",
+        "/usr/lib/mvm/wrappers/oci-entrypoint",
+    ] {
+        assert_eq!(
+            owner_of(&fs, path),
+            Owner::ROOT,
+            "{path} is the runtime's, whatever the layer declared"
+        );
+    }
+    assert_eq!(
+        owner_of(&fs, "/srv/app.conf"),
+        attacker,
+        "a path the runtime does not inject keeps the owner its layer declared"
+    );
+}
+
 /// Ownership is content, not host state: the same layer materializes to the
 /// same bytes every time.
 #[test]

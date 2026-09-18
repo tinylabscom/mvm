@@ -193,20 +193,46 @@ pub(super) fn write_deferred_nodes(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec_pretty(nodes).context("serialize deferred unpack nodes")?;
-    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+    mvm_core::util::atomic_io::atomic_write(&path, &body)
 }
 
-/// Read back what [`write_deferred_nodes`] stored. A missing sidecar is
-/// the normal case (nothing was deferred) and reads as empty.
+/// Read back what [`write_deferred_nodes`] stored.
+///
+/// A missing sidecar is the normal case — nothing was deferred — and reads as
+/// an empty list. A sidecar that exists and cannot be parsed is a different
+/// answer: it means nodes were deferred and we no longer know which, so it
+/// reads as `None` and the tree has to be unpacked again. Reading it as empty
+/// would build an image quietly missing paths.
 pub(super) fn read_deferred_nodes(
     cache_root: &Path,
     resolved_digest: &str,
-) -> Result<Vec<mvm_fs::ext4::Node>> {
+) -> Result<Option<Vec<mvm_fs::ext4::Node>>> {
     let path = deferred_nodes_sidecar(cache_root, resolved_digest)?;
     let Ok(body) = fs::read(&path) else {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     };
-    serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))
+    Ok(parse_sidecar(&path, &body))
+}
+
+/// Decode a sidecar, treating a corrupt one as absent.
+///
+/// A sidecar is a cache, and the tree it sits beside can always be unpacked
+/// again. A write interrupted by a crash or a full disk left a truncated file
+/// that returned a hard error on every later read, so the image stayed
+/// unusable until someone deleted the file by hand — a worse outcome than the
+/// re-unpack the cache was built to allow.
+fn parse_sidecar<T: serde::de::DeserializeOwned>(path: &Path, body: &[u8]) -> Option<T> {
+    match serde_json::from_slice(body) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "unreadable OCI cache sidecar; unpacking the layers again"
+            );
+            None
+        }
+    }
 }
 
 /// Sidecar holding the owners the image's layers declared, beside the
@@ -234,11 +260,12 @@ pub(super) fn write_layer_owners(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec(owners).context("serialize layer owners")?;
-    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+    mvm_core::util::atomic_io::atomic_write(&path, &body)
 }
 
 /// Read back what [`write_layer_owners`] stored, or `None` when the unpacked
-/// tree predates owner recording and must be unpacked again.
+/// tree predates owner recording, or records owners we can no longer read, and
+/// must be unpacked again.
 pub(super) fn read_layer_owners(
     cache_root: &Path,
     resolved_digest: &str,
@@ -249,9 +276,41 @@ pub(super) fn read_layer_owners(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
-    serde_json::from_slice(&body)
-        .map(Some)
-        .with_context(|| format!("parse {}", path.display()))
+    Ok(parse_sidecar(&path, &body))
+}
+
+/// An unpacked tree and everything a faithful image rebuild needs beside it.
+///
+/// The three are read together because they are only usable together: a tree
+/// whose owners or deferred nodes are missing rebuilds an image that is wrong
+/// rather than one that fails, so a caller that has the tree must not proceed
+/// without the rest.
+pub(super) struct CachedUnpack {
+    pub(super) root: PathBuf,
+    pub(super) owners: mvm_fs::ownership::OwnerTable,
+    pub(super) deferred_nodes: Vec<mvm_fs::ext4::Node>,
+}
+
+/// Read a cached unpacked tree, or `None` when it is gone or incomplete and
+/// the layers have to be unpacked again.
+pub(super) fn read_cached_unpack(
+    cache_root: &Path,
+    resolved_digest: &str,
+) -> Result<Option<CachedUnpack>> {
+    let Some(root) = unpacked_dir_if_present(cache_root, resolved_digest) else {
+        return Ok(None);
+    };
+    let Some(owners) = read_layer_owners(cache_root, resolved_digest)? else {
+        return Ok(None);
+    };
+    let Some(deferred_nodes) = read_deferred_nodes(cache_root, resolved_digest)? else {
+        return Ok(None);
+    };
+    Ok(Some(CachedUnpack {
+        root,
+        owners,
+        deferred_nodes,
+    }))
 }
 
 pub(super) fn sha256_hex(digest: &str) -> Result<String> {
@@ -743,7 +802,7 @@ mod tests {
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
         assert_eq!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("read"),
-            nodes
+            Some(nodes)
         );
     }
 
@@ -753,7 +812,7 @@ mod tests {
         assert!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
                 .expect("read")
-                .is_empty(),
+                .is_some_and(|nodes| nodes.is_empty()),
             "a case-sensitive host writes no sidecar, and that is not an error"
         );
     }
@@ -771,7 +830,7 @@ mod tests {
         assert!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
                 .expect("read")
-                .is_empty(),
+                .is_some_and(|nodes| nodes.is_empty()),
             "a re-pull that defers nothing must not inherit the old sidecar"
         );
     }
@@ -828,6 +887,128 @@ mod tests {
             read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("read"),
             Some(mvm_fs::ownership::OwnerTable::new()),
             "an image whose layers declare only root is still recorded"
+        );
+    }
+
+    /// Overwrite a sidecar with `body`, as a crash mid-write or a stray edit
+    /// would leave it.
+    fn clobber(tmp: &Path, suffix: &str, body: &[u8]) {
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let path = tmp.join("unpacked").join(format!("{hex}.{suffix}"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn owner_table_json() -> Vec<u8> {
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        let tree = tempfile::tempdir().unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("srv/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(999);
+        header.set_gid(999);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            tree.path(),
+            &mvm_fs::oci::unpack::UnpackOptions::default(),
+        )
+        .unwrap();
+        owners.absorb(&report.ownership);
+        serde_json::to_vec(&owners).unwrap()
+    }
+
+    /// A write cut short leaves a prefix of valid JSON. That used to be a hard
+    /// error on every read, wedging the image until the file was deleted by
+    /// hand; it now reads as unrecorded, which sends the caller to unpack again.
+    #[test]
+    fn a_truncated_owner_sidecar_reads_as_unrecorded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let full = owner_table_json();
+        clobber(tmp.path(), "owners.json", &full[..full.len() / 2]);
+        assert_eq!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_garbage_owner_sidecar_reads_as_unrecorded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        clobber(tmp.path(), "owners.json", b"\x00\xffnot json");
+        assert_eq!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    /// An unreadable deferred-node sidecar is not "nothing deferred": nodes
+    /// were deferred and we no longer know which, so an image rebuilt as if
+    /// the list were empty would be quietly missing paths.
+    #[test]
+    fn a_truncated_deferred_sidecar_reads_as_unknown_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nodes = vec![mvm_fs::ext4::Node::Symlink {
+            path: "/a".to_string(),
+            target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
+        }];
+        let full = serde_json::to_vec_pretty(&nodes).unwrap();
+        clobber(tmp.path(), "deferred-nodes.json", &full[..full.len() - 3]);
+        assert_eq!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_garbage_deferred_sidecar_reads_as_unknown_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        clobber(tmp.path(), "deferred-nodes.json", b"}{");
+        assert_eq!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    /// The tree survives, but either sidecar is unreadable: the cached unpack
+    /// is unusable as a whole, so the caller unpacks again rather than
+    /// building an image with the wrong owners or missing paths.
+    #[test]
+    fn a_cached_unpack_with_a_corrupt_sidecar_is_not_offered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        std::fs::create_dir_all(tmp.path().join("unpacked").join(&hex)).unwrap();
+        write_layer_owners(
+            tmp.path(),
+            SAMPLE_DIGEST,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .unwrap();
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_some(),
+            "a complete cached unpack is offered"
+        );
+
+        clobber(tmp.path(), "deferred-nodes.json", b"{");
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_none()
+        );
+
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &[]).unwrap();
+        clobber(tmp.path(), "owners.json", b"{\"/srv\":");
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_none()
         );
     }
 

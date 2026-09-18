@@ -442,42 +442,87 @@ pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
 /// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
     let input = input.clone().with_verity();
+    match run_in_process_materializer(&input)? {
+        InProcessOutcome::Materialized => Ok(()),
+        InProcessOutcome::UseBuilderVm(route) => materialize_run_rootfs_builder_vm(&input, &route),
+    }
+}
 
-    #[cfg(feature = "pure-mkfs")]
-    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        match crate::rootfs::materialize_ext4_pure(&input) {
-            Ok(_) => return Ok(()),
-            // Auto-fallback: the in-process writer structurally can't emit a
-            // faithful image — too large / too fragmented / a directory over one
-            // block, or the tree carries an xattr the writer can't represent — so
-            // retry via the builder VM, which has no such limits and whose
-            // `cp -a` preserves xattrs. Logged, never silent.
-            Err(e) if e.pure_should_fall_back() => {
-                tracing::warn!(
-                    error = %e,
-                    "in-process rootfs materialize needs the builder VM; falling back"
-                );
-                // fall through to the builder-VM path below
-            }
-            // A malformed tree or I/O failure is genuine — surface it, no retry.
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("materialize {} in-process", input.output.display()));
-            }
+/// What the in-process attempt settled: either the image is written, or the
+/// builder VM runs next and this is why.
+enum InProcessOutcome {
+    // Unreachable without the in-process writer compiled in, where the builder
+    // VM is the only materializer there is.
+    #[cfg_attr(not(feature = "pure-mkfs"), allow(dead_code))]
+    Materialized,
+    UseBuilderVm(crate::rootfs::BuilderVmRoute),
+}
+
+/// Run the in-process writer unless the builder VM was asked for outright.
+///
+/// A genuine failure — a malformed tree, an I/O error — surfaces here and is
+/// never retried. Only a structural limit of the in-process writer routes on,
+/// and it carries its own message so the refusal that may follow can name the
+/// real cause instead of a setting nobody touched.
+#[cfg(feature = "pure-mkfs")]
+fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
+    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_some() {
+        return Ok(InProcessOutcome::UseBuilderVm(
+            crate::rootfs::BuilderVmRoute::Selected,
+        ));
+    }
+    match crate::rootfs::materialize_ext4_pure(input) {
+        Ok(_) => Ok(InProcessOutcome::Materialized),
+        // The in-process writer structurally can't emit a faithful image —
+        // too large / too fragmented / a directory over one block, or the tree
+        // carries an xattr the writer can't represent — so retry via the
+        // builder VM, which has no such limits and whose `cp -a` preserves
+        // xattrs. Logged, never silent.
+        Err(e) if e.pure_should_fall_back() => {
+            tracing::warn!(
+                error = %e,
+                "in-process rootfs materialize needs the builder VM; falling back"
+            );
+            Ok(InProcessOutcome::UseBuilderVm(
+                crate::rootfs::BuilderVmRoute::PureFallback {
+                    because: e.to_string(),
+                },
+            ))
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("materialize {} in-process", input.output.display()))
         }
     }
-    materialize_run_rootfs_builder_vm(&input)
+}
+
+/// Without the in-process writer compiled in, the builder VM is the only
+/// materializer there is.
+#[cfg(not(feature = "pure-mkfs"))]
+fn run_in_process_materializer(_input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
+    Ok(InProcessOutcome::UseBuilderVm(
+        crate::rootfs::BuilderVmRoute::Selected,
+    ))
 }
 
 #[cfg(feature = "builder-vm")]
-fn materialize_run_rootfs_builder_vm(input: &MaterializeExt4Input) -> Result<()> {
-    crate::rootfs::materialize_ext4(input, &crate::rootfs::MaterializeExt4Options::default())
-        .map(|_| ())
-        .with_context(|| format!("materialize {} via builder VM", input.output.display()))
+fn materialize_run_rootfs_builder_vm(
+    input: &MaterializeExt4Input,
+    route: &crate::rootfs::BuilderVmRoute,
+) -> Result<()> {
+    crate::rootfs::materialize_ext4(
+        input,
+        &crate::rootfs::MaterializeExt4Options::default(),
+        route,
+    )
+    .map(|_| ())
+    .with_context(|| format!("materialize {} via builder VM", input.output.display()))
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn materialize_run_rootfs_builder_vm(_input: &MaterializeExt4Input) -> Result<()> {
+fn materialize_run_rootfs_builder_vm(
+    _input: &MaterializeExt4Input,
+    _route: &crate::rootfs::BuilderVmRoute,
+) -> Result<()> {
     anyhow::bail!(
         "no rootfs materializer compiled in: enable the `pure-mkfs` or `builder-vm` feature"
     )

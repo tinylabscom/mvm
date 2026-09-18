@@ -161,13 +161,11 @@ pub(super) fn resolve_or_pull_run_image_with(
         // seal `image pull` performs — network-free, from the cached layers —
         // rather than failing the run. Only when the unpacked tree is gone too
         // is this a genuine cache loss the user must re-pull.
-        // A tree unpacked before owners were recorded counts as gone: rebuilding
-        // from it would boot every file owned by root.
-        let recorded = unpacked_dir_if_present(cache_root, &image.resolved_digest).zip(
-            super::cache::read_layer_owners(cache_root, &image.resolved_digest)?,
-        );
-        match recorded {
-            Some((unpacked_root, owners)) => {
+        // A tree whose recorded owners are missing or unreadable counts as
+        // gone: rebuilding from it would boot every file owned by root.
+        match super::cache::read_cached_unpack(cache_root, &image.resolved_digest)? {
+            Some(cached) => {
+                let unpacked_root = cached.root;
                 sweep_before_builder_vm();
                 let signer;
                 let evidence = if prod {
@@ -193,11 +191,8 @@ pub(super) fn resolve_or_pull_run_image_with(
                     )?
                     .as_ref(),
                     sealed: prod,
-                    deferred_nodes: super::cache::read_deferred_nodes(
-                        cache_root,
-                        &image.resolved_digest,
-                    )?,
-                    owners,
+                    deferred_nodes: cached.deferred_nodes,
+                    owners: cached.owners,
                     evidence,
                 })
                 .with_context(|| {

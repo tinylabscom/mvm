@@ -180,16 +180,12 @@ pub(super) fn rematerialize_cached_image(
     materialize: RuntimeMaterializer,
     prod: bool,
 ) -> Result<Option<super::oci_types::CachedOciImage>> {
-    let Some(unpacked_root) =
-        super::cache::unpacked_dir_if_present(cache_root, &image.resolved_digest)
-    else {
+    // A tree whose owners were never recorded, or can no longer be read, would
+    // rebuild an image with every file owned by root. Unpack it again instead.
+    let Some(cached) = super::cache::read_cached_unpack(cache_root, &image.resolved_digest)? else {
         return Ok(None);
     };
-    // A tree unpacked before owners were recorded would rebuild an image with
-    // every file owned by root. Unpack it again instead.
-    let Some(owners) = super::cache::read_layer_owners(cache_root, &image.resolved_digest)? else {
-        return Ok(None);
-    };
+    let unpacked_root = cached.root;
     let rootfs_path = match (
         image.rootfs_path.as_deref(),
         image.runtime_tag.as_deref() == Some(runtime_tag),
@@ -223,8 +219,8 @@ pub(super) fn rematerialize_cached_image(
             entrypoint: oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
                 .as_ref(),
             sealed: prod,
-            deferred_nodes: super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
-            owners,
+            deferred_nodes: cached.deferred_nodes,
+            owners: cached.owners,
             evidence,
         })
         .with_context(|| {
