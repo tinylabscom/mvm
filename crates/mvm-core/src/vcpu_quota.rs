@@ -1,6 +1,6 @@
 //! Read-back of the HVF vCPU quota record written by the supervisor.
 //!
-//! Mirrors [`crate::cpu_scope`] in shape: the enforced tier is derived from
+//! Mirrors [`crate::spawn_scope`] in shape: the enforced tier is derived from
 //! reading the record back, not from the value that was written.
 
 use std::path::{Path, PathBuf};
