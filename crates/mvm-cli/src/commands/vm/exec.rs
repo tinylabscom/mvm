@@ -605,14 +605,14 @@ pub(in crate::commands) fn run_transient(
     mut args: TransientRunArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
+    // Before SDK dispatch too: there argv[0] is the script path, which a
+    // flag-shaped word never is.
+    detect::refuse_run_flag_after_double_dash(&args.run.argv)?;
     if let Some(mode) = resolve_run_mode(&args.sdk, &args.run)? {
         return super::run_plan::dispatch_sdk_mode(mode, &args.run, &args.sdk);
     }
-    // `argv` used to be `required_unless_present_any` over `launch_plan` /
-    // `mode` / `dev` / `prod`. It cannot stay a clap attribute now that the
-    // field is shared: `machine run -d` legitimately boots with no command, and
-    // naming `mode`/`dev` from the shared struct would reference args that do
-    // not exist on the `machine` side. So the one verb that needs it checks it.
+    // The command is required here rather than by clap: the field is shared
+    // with `machine run`, where `-d` boots with no command.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
     if args.run.argv.is_empty() && args.run.launch_plan.is_none() {

@@ -6,7 +6,7 @@ evidence required before its checkbox may be ticked.
 
 **Issues:** #3378 (W1) · #3379 (W2) · #3380 (W3) · #3381 (W4) · #3382 (W5) ·
 #3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10) ·
-#3404 (W1a)
+#3404 (W1a) · #3432 (W10a)
 
 ## Outcome
 
@@ -400,6 +400,30 @@ the command, with no hint.
   - [x] one tool server test per `MvmError` variant;
   - [x] CLI tests for both refusals;
   - [x] a colon-bearing command still runs when an image source is given.
+
+## W10a — Review fixes for W10 (#3432)
+
+**Problem.** The review of W10 asked for six changes that did not land with
+it: the image-reference refusal ran after project detection, so detection
+could win; `capabilities()` discarded the typed error; two tool-error paths
+had no code; the flag-after-`--` check matched one spelling of one struct's
+long flags; a real `app.d/run` path read as a registry host; and the code tests
+compared the mapping against itself.
+
+- [x] W10a.1 Run the image-reference refusal before any inference, with a
+      test for the case where detection would have succeeded.
+- [x] W10a.2 Carry the `code` and `retryable` flag through `capabilities()`
+      into the JSON-RPC error's `data`, on both `tools/list` and `tools/call`.
+- [x] W10a.3 Give the serialization and output-too-large paths their own codes
+      (`INTERNAL`, `OUTPUT_TOO_LARGE`), and delete the uncoded builder, so
+      `tool_error` now always takes a code and a retryable flag.
+- [x] W10a.4 Split the flag token on `=`, include visible aliases, short
+      flags, short clusters, attached short values and the global flags, and
+      read the list from the command actually being run.
+- [x] W10a.5 Do not treat a word as an image reference when it names an
+      existing path, whether it carries a registry-host or a tag marker.
+- [x] W10a.6 Assert literal code strings in the tool-server tests, and pin the
+      `MvmError` code and retryable values in a wildcard-free `match`.
 
 ## Definition of done for each workstream
 

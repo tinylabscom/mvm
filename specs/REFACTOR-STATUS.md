@@ -125,6 +125,11 @@ Last updated: 2026-09-18
         because it is not material, and W8.4's checkpoint test does not apply
         because HVF capture refuses writable disks. The refusal is pinned by
         a test instead.
+  - [x] W10a — issue #3432: the six W10 review fixes. The image-reference
+        refusal runs before inference, capability-discovery failures carry
+        `code`/`retryable` in the JSON-RPC error `data`, every tool error is
+        coded, and the flag-after-`--` check reads every spelling from the
+        verb being run.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`

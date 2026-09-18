@@ -156,7 +156,7 @@ impl McpServer {
         }
     }
 
-    async fn capabilities(&self) -> Result<&BackendCapabilityReport, String> {
+    async fn capabilities(&self) -> Result<&BackendCapabilityReport, CapabilitiesFailure> {
         if let Some(report) = self.capabilities.get() {
             return Ok(report);
         }
@@ -164,11 +164,11 @@ impl McpServer {
             .client
             .backend_capabilities()
             .await
-            .map_err(|_| "client capability discovery failed".to_string())?;
+            .map_err(CapabilitiesFailure::Backend)?;
         let _ = self.capabilities.set(report);
-        self.capabilities
-            .get()
-            .ok_or_else(|| "client capability discovery did not persist".to_string())
+        self.capabilities.get().ok_or(CapabilitiesFailure::Internal(
+            "client capability discovery did not persist",
+        ))
     }
 
     async fn dispatch(&self, id: Value, method: String, mut params: Map<String, Value>) -> String {
@@ -196,7 +196,7 @@ impl McpServer {
             "tools/list" => match parse_params::<ListParams>(params) {
                 Ok(list) if list.cursor.is_none() => match self.capabilities().await {
                     Ok(report) => response_result(id, tools_result(&report.operations)),
-                    Err(message) => response_error(id, -32603, &message),
+                    Err(failure) => response_error_classified(id, -32603, &failure),
                 },
                 Ok(_) => response_error(id, -32602, "tool catalog has no further page"),
                 Err(message) => response_error(id, -32602, &message),
@@ -208,24 +208,14 @@ impl McpServer {
                 };
                 let report = match self.capabilities().await {
                     Ok(report) => report,
-                    Err(message) => return response_error(id, -32603, &message),
+                    Err(failure) => return response_error_classified(id, -32603, &failure),
                 };
                 if !tool_enabled(&call.name, &report.operations) {
                     return response_error(id, -32602, "unknown or unavailable tool");
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
                     Ok(value) => response_result(id, self.tool_success(value)),
-                    Err(ToolFailure::Input(message)) => response_result(
-                        id,
-                        tool_error_classified(&message, GENERIC_INPUT_ERROR_CODE, false),
-                    ),
-                    Err(ToolFailure::Backend(error)) => {
-                        let message = format!("MvmClient operation failed: {error}");
-                        response_result(
-                            id,
-                            tool_error_classified(&message, error.code(), error.retryable()),
-                        )
-                    }
+                    Err(failure) => response_result(id, failure.into_tool_result()),
                 }
             }
             _ => response_error(id, -32601, "method not found"),
@@ -404,7 +394,13 @@ impl McpServer {
     fn tool_success(&self, value: Value) -> Value {
         let text = match serde_json::to_string(&value) {
             Ok(text) => text,
-            Err(_) => return tool_error("tool output could not be serialized"),
+            Err(_) => {
+                return tool_error(
+                    "tool output could not be serialized",
+                    INTERNAL_ERROR_CODE,
+                    false,
+                );
+            }
         };
         let result = json!({
             "resultType": "complete",
@@ -418,7 +414,11 @@ impl McpServer {
         {
             result
         } else {
-            tool_error("tool output exceeds configured limit")
+            tool_error(
+                "tool output exceeds configured limit",
+                OUTPUT_TOO_LARGE_ERROR_CODE,
+                false,
+            )
         }
     }
 }
@@ -785,27 +785,80 @@ fn response_error(id: Value, code: i64, message: &str) -> String {
     .expect("JSON-RPC error values are serializable")
 }
 
+/// Why capability discovery failed, kept typed long enough to classify the
+/// JSON-RPC error's `data` field the same way a tool result's `_meta` is
+/// classified — capability discovery is not itself a tool call, so it
+/// surfaces as a protocol-level error rather than an `isError` tool result,
+/// but a caller deciding whether to retry needs the same `code`/`retryable`
+/// pair either way.
+#[derive(Debug)]
+enum CapabilitiesFailure {
+    Backend(MvmError),
+    /// The `OnceLock` slot came back empty immediately after a successful
+    /// `set` — an invariant violation in this process, not a backend
+    /// condition, so it gets the generic internal code rather than any
+    /// `MvmError` variant's.
+    Internal(&'static str),
+}
+
+impl CapabilitiesFailure {
+    /// A fixed message: the backend's own error text can carry internal
+    /// detail, and the caller already gets its classification in `data`.
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Backend(_) => "client capability discovery failed",
+            Self::Internal(message) => message,
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Backend(error) => error.code(),
+            Self::Internal(_) => INTERNAL_ERROR_CODE,
+        }
+    }
+
+    fn retryable(&self) -> bool {
+        match self {
+            Self::Backend(error) => error.retryable(),
+            Self::Internal(_) => false,
+        }
+    }
+}
+
+/// A JSON-RPC protocol error carrying the same `code`/`retryable`
+/// classification a tool result's `_meta` carries, in the `data` field
+/// JSON-RPC 2.0 reserves for exactly this: implementation-defined detail
+/// alongside the standard `code`/`message`.
+fn response_error_classified(id: Value, code: i64, failure: &CapabilitiesFailure) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc":"2.0",
+        "id":id,
+        "error":{
+            "code":code,
+            "message":failure.message(),
+            "data":{"code":failure.code(), "retryable":failure.retryable()}
+        }
+    }))
+    .expect("JSON-RPC error values are serializable")
+}
+
 /// The `code` a tool error carries when it did not originate from an
 /// [`MvmError`] (bad tool arguments, an unknown tool name). It is deliberately
 /// generic and non-retryable: these are properties of the request the caller
 /// sent, not of backend state, so retrying unchanged can never help.
 const GENERIC_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+/// The tool server's own output pipeline failed (serialization) rather than
+/// the backend or the caller's request.
+const INTERNAL_ERROR_CODE: &str = "INTERNAL";
+/// A successful result exceeded the server's configured output-size limit.
+const OUTPUT_TOO_LARGE_ERROR_CODE: &str = "OUTPUT_TOO_LARGE";
 
-fn tool_error(message: &str) -> Value {
-    let message: String = message.chars().take(512).collect();
-    json!({
-        "resultType":"complete",
-        "content":[{"type":"text", "text":message}],
-        "isError":true,
-        "_meta":server_meta()
-    })
-}
-
-/// Like [`tool_error`], but with a stable machine-readable `code` and a
-/// `retryable` flag folded into `_meta` alongside the existing server keys —
-/// so an automated caller can branch on the failure instead of parsing the
-/// message text.
-fn tool_error_classified(message: &str, code: &str, retryable: bool) -> Value {
+/// Build a failed tool result. `_meta` always carries a stable, machine-
+/// readable `code` and a `retryable` flag alongside the existing server
+/// keys, so an automated caller can branch on the failure instead of parsing
+/// the message text. The one builder every failed tool result goes through.
+fn tool_error(message: &str, code: &str, retryable: bool) -> Value {
     let message: String = message.chars().take(512).collect();
     let mut meta = server_meta_object();
     meta.insert("code".to_string(), json!(code));
@@ -840,6 +893,9 @@ enum ToolFailure {
     /// so the dispatch site can still classify it by variant when building
     /// the tool result's `_meta`.
     Backend(MvmError),
+    /// The client call succeeded but this server could not turn its result
+    /// into JSON: a fault in the tool server, not the backend.
+    Internal(&'static str),
 }
 
 impl ToolFailure {
@@ -848,9 +904,21 @@ impl ToolFailure {
     }
 
     fn serialization(_: impl std::fmt::Display) -> Self {
-        Self::Backend(MvmError::Backend {
-            reason: "MvmClient result could not be serialized".into(),
-        })
+        Self::Internal("MvmClient result could not be serialized")
+    }
+
+    /// The failed tool result for this failure. A backend failure keeps the
+    /// backend's own message, which is often what the caller needs (which
+    /// machine was not found), capped by [`tool_error`] like every other.
+    fn into_tool_result(self) -> Value {
+        match self {
+            Self::Input(message) => tool_error(&message, GENERIC_INPUT_ERROR_CODE, false),
+            Self::Backend(error) => {
+                let message = format!("MvmClient operation failed: {error}");
+                tool_error(&message, error.code(), error.retryable())
+            }
+            Self::Internal(message) => tool_error(message, INTERNAL_ERROR_CODE, false),
+        }
     }
 }
 
@@ -1113,5 +1181,15 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    /// No client DTO can fail to serialize today, so this path is not
+    /// reachable through a client double; the mapping is pinned here.
+    #[test]
+    fn a_serialization_failure_is_internal_and_not_retryable() {
+        let result = ToolFailure::serialization("boom").into_tool_result();
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["_meta"]["code"], "INTERNAL");
+        assert_eq!(result["_meta"]["retryable"], false);
     }
 }

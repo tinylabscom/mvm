@@ -121,7 +121,9 @@
       locally validated: shared agent sockets are close-on-exec and one
       descriptor-closing hook covers every guest-agent child-process path.
       Cold-entrypoint and process-RPC Linux witnesses prove children receive
-      only their declared descriptors.
+      only their declared descriptors. The W10 review follow-ups (issue
+      #3432) are implemented: detection can no longer outrun the misplaced
+      image-reference refusal, and every agent-facing failure carries a code.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed

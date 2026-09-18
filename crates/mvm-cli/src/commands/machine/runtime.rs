@@ -439,6 +439,10 @@ fn resolve_entrypoint_stdin_with(
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    // Read from `machine run`'s own full command, not `RunArgs` alone, so a
+    // flag that only exists on this verb (`--name`, `-d`/`--detach`, …) is
+    // still caught when placed right after `--`.
+    crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.

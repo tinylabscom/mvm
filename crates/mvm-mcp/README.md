@@ -20,10 +20,25 @@ stdout. Discovery metadata is generated from the client's capability report,
 so unsupported operations are not advertised as available.
 
 `ServerLimits` caps incoming frames, outgoing payloads, and related resource
-use. Protocol errors, invalid parameters, unsupported capabilities, and client
-failures are mapped to stable JSON-RPC errors without exposing secrets or
-internal debug data. The adapter opens no network listener; any remote traffic
-belongs to the selected client backend.
+use. Protocol errors, invalid parameters and unsupported capabilities are
+mapped to JSON-RPC errors with fixed messages. A failed client operation is
+reported with its typed code, its retryable flag, and the backend's own error
+message, capped at 512 characters: that message is the backend's to choose, so
+what it names (a machine id, a path) reaches the caller. The adapter opens no
+network listener; any remote traffic belongs to the selected client backend.
+
+Tool failures and capability-discovery failures carry a stable `code` and a
+`retryable` flag, so a caller can branch without parsing message text. The
+other protocol errors (`-32700`, `-32600`, `-32601`, `-32602`, including an
+unknown tool) carry only the JSON-RPC code and message. A failed tool call is
+a tool result with `isError: true` and the pair in `_meta`: the `MvmError` variant's own code
+(`NOT_FOUND`, `INVALID_SPEC`, `BACKEND_ERROR`, `UNAUTHORIZED`, `CONFLICT`,
+`REJECTED`, or `UNAVAILABLE`, the only retryable one), `INVALID_INPUT` for bad
+arguments, `OUTPUT_TOO_LARGE` when a result exceeds the output limit, and
+`INTERNAL` when the server cannot serialize a result. A failed capability
+discovery has no tool result to attach it to, so `tools/list` and `tools/call`
+return a JSON-RPC `-32603` error with the same pair in its `data` field and a
+fixed message that leaves out the backend's error text.
 
 ## Owned surface
 
