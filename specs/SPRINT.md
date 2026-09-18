@@ -22,7 +22,12 @@
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:
       `specs/sprint/delivery/3422-bounded-capture-handoff.md`.
-      The independent telemetry service and VM-lifetime collector remain open.
+      W2a transport foundation is tested: bounded typed records,
+      encrypted worker sessions with peer pinning and a dedicated semantic port.
+      Twenty-one focused tests, host workspace tests, clippy, Linux cross-check,
+      seeded fuzz smoke and all 69 repository gates pass; queued delivery is pending.
+      Evidence: `specs/sprint/delivery/3421-telemetry-transport.md`.
+      Runtime endpoint provisioning and the VM-lifetime collector remain open.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 

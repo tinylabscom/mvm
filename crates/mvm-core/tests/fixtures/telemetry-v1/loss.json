@@ -1,0 +1,1 @@
+{"format":"mvm.telemetry.v1","epoch":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"producer":7,"sequence":1,"monotonic_ns":42,"source":"guest_agent","body":{"kind":"loss","stage":"capture","reason":"capacity","records":10,"bytes":200,"tail":"known"}}
