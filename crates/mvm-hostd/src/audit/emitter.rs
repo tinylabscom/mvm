@@ -664,53 +664,6 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `plan.grants_enforced` — records what actually bounded this
-    /// workload, as read back off the live controls after the backend started
-    /// it.
-    ///
-    /// Deliberately a separate entry from `plan.admitted`, which records the
-    /// bounds that were *requested*. A reader who only ever sees the request
-    /// cannot tell a run that was bounded from one that declared a bound
-    /// nothing implemented — and those two are the whole point of the
-    /// distinction.
-    pub fn emit_grants_enforced(
-        &self,
-        plan: &ExecutionPlan,
-        enforced: &mvm_contract::protocol::resource_controls::EnforcedGrants,
-    ) -> Result<()> {
-        self.emit(
-            plan,
-            "plan.grants_enforced",
-            grants_audit::enforced_grants_labels(enforced),
-        )
-    }
-
-    /// Emit `plan.memory_limit_exceeded` — records that the kernel killed this
-    /// workload's VMM for crossing the memory ceiling its scope carried.
-    ///
-    /// Without it, a VMM stopped by its ceiling and one that crashed look the
-    /// same from the chain, and a bound nobody can observe firing is a
-    /// declaration again.
-    pub fn emit_memory_limit_exceeded(
-        &self,
-        plan: &ExecutionPlan,
-        exceeded: &mvm_core::spawn_scope::MemoryLimitExceeded,
-    ) -> Result<()> {
-        let mut labels = vec![(
-            grants_audit::LABEL_ENFORCED_BY.to_string(),
-            mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2MemoryMax
-                .label()
-                .to_string(),
-        )];
-        if let Some(bytes) = exceeded.memory_max_bytes {
-            labels.push((
-                grants_audit::LABEL_KILLED_AT_BYTES.to_string(),
-                bytes.to_string(),
-            ));
-        }
-        self.emit(plan, grants_audit::MEMORY_LIMIT_EXCEEDED_EVENT, labels)
-    }
-
     /// Emit `plan.wall_clock_expired` — records that a supervisor timer fired
     /// and killed this workload for outrunning its wall-clock grant.
     ///

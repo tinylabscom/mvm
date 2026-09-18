@@ -74,6 +74,7 @@ use mvm_core::plan::{
     check_window, sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
+use mvm_core::spawn_scope;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
@@ -953,9 +954,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // user session to delegate from. Without this second question a sealed run
     // on a Linux host with no session bus is admitted, boots unbounded, and
     // reports `declared`: refused in prose and permitted in code.
-    if let Some(detail) =
-        host_cpu_mechanism_gap(grants, kind, mvm_core::spawn_scope::mechanism_gap())
-    {
+    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, spawn_scope::mechanism_gap()) {
         return refuse_or_warn(posture.variant, detail);
     }
     Ok(())
@@ -970,7 +969,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
 fn host_cpu_mechanism_gap(
     grants: &Grants,
     kind: BackendKind,
-    gap: Option<mvm_core::spawn_scope::MechanismGap>,
+    gap: Option<spawn_scope::MechanismGap>,
 ) -> Option<String> {
     // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
     // absent CPU grant has nothing to enforce.

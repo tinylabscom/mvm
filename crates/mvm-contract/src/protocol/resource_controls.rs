@@ -469,6 +469,18 @@ pub struct EnforcedGrants {
 }
 
 impl EnforcedGrants {
+    /// CPU and wall-clock tiers for a tier with no VMM process of its own for
+    /// a spawn scope to hold, so both ceilings are declared.
+    #[must_use]
+    pub const fn without_spawn_ceilings(cpu: EnforcedTier, wall_clock: EnforcedTier) -> Self {
+        Self {
+            cpu,
+            wall_clock,
+            memory: EnforcedCeiling::declared(),
+            tasks: EnforcedCeiling::declared(),
+        }
+    }
+
     /// The honest answer for a backend that enforces nothing.
     #[must_use]
     pub const fn all_declared() -> Self {

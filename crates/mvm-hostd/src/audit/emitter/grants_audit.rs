@@ -4,7 +4,11 @@
 //! Shared so the launch path, the supervisor and any reader asserting on an
 //! entry cannot drift on a string.
 
-use mvm_contract::protocol::resource_controls::{EnforcedCeiling, EnforcedGrants};
+use anyhow::Result;
+use mvm_contract::protocol::resource_controls::{EnforcedCeiling, EnforcedGrants, EnforcedTier};
+use mvm_core::plan::ExecutionPlan;
+
+use super::AuditEmitter;
 
 /// Label: the mechanism that bounded CPU.
 pub const LABEL_CPU_TIER: &str = "grants_cpu_tier";
@@ -26,6 +30,50 @@ pub const MEMORY_LIMIT_EXCEEDED_EVENT: &str = "plan.memory_limit_exceeded";
 pub const LABEL_KILLED_AT_BYTES: &str = "memory_max_bytes";
 /// Label: which mechanism killed it.
 pub const LABEL_ENFORCED_BY: &str = "enforced_by";
+
+impl AuditEmitter {
+    /// Emit `plan.grants_enforced` — records what actually bounded this
+    /// workload, as read back off the live controls after the backend started
+    /// it.
+    ///
+    /// Deliberately a separate entry from `plan.admitted`, which records the
+    /// bounds that were *requested*. A reader who only ever sees the request
+    /// cannot tell a run that was bounded from one that declared a bound
+    /// nothing implemented — and those two are the whole point of the
+    /// distinction.
+    pub fn emit_grants_enforced(
+        &self,
+        plan: &ExecutionPlan,
+        enforced: &EnforcedGrants,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.grants_enforced",
+            enforced_grants_labels(enforced),
+        )
+    }
+
+    /// Emit `plan.memory_limit_exceeded` — records that the kernel killed this
+    /// workload's VMM for crossing the memory ceiling its scope carried.
+    ///
+    /// Without it, a VMM stopped by its ceiling and one that crashed look the
+    /// same from the chain, and a bound nobody can observe firing is a
+    /// declaration again.
+    pub fn emit_memory_limit_exceeded(
+        &self,
+        plan: &ExecutionPlan,
+        exceeded: &mvm_core::spawn_scope::MemoryLimitExceeded,
+    ) -> Result<()> {
+        let mut labels = vec![(
+            LABEL_ENFORCED_BY.to_string(),
+            EnforcedTier::Cgroup2MemoryMax.label().to_string(),
+        )];
+        if let Some(bytes) = exceeded.memory_max_bytes {
+            labels.push((LABEL_KILLED_AT_BYTES.to_string(), bytes.to_string()));
+        }
+        self.emit(plan, MEMORY_LIMIT_EXCEEDED_EVENT, labels)
+    }
+}
 
 /// The labels naming what bounded each dimension, and the ceiling values read
 /// back where a ceiling holds.
@@ -72,7 +120,6 @@ fn push_ceiling(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_contract::protocol::resource_controls::EnforcedTier;
 
     fn label<'a>(labels: &'a [(String, String)], key: &str) -> Option<&'a str> {
         labels
