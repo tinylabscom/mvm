@@ -7,8 +7,8 @@ use super::SubstitutionService;
 use super::prepare::{PreparedFlow, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
-    emit_rewrite_proof, emit_secret_flow_refused, emit_secret_placeholder_dropped,
-    emit_secret_redacted, emit_secret_substituted,
+    ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
+    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_substituted,
 };
 
 /// The sorted, de-duplicated category list a `secret.redacted` entry carries.
@@ -63,13 +63,39 @@ impl SubstitutionService {
         self.audit_fail_closed(destination.as_deref(), reason).await;
     }
 
+    /// Record that the flow's credentials are being handed to the forward leg.
+    ///
+    /// Called immediately before the forward, not after the response: from
+    /// here on the destination may receive the credential whether or not a
+    /// response ever arrives, so this is the point the chain must say so. It
+    /// over-reports a connect or DNS failure as a substitution and never
+    /// under-reports a send. How the forward ended is
+    /// [`Self::audit_forward_outcome`].
+    pub(super) async fn audit_handoff(&self, flow: &PreparedFlow) {
+        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
+            .await;
+    }
+
+    /// Record how a forward that carried a substituted credential ended. A
+    /// flow that substituted nothing records nothing: without a credential
+    /// there is no hand-off for the outcome to complete.
+    pub(super) async fn audit_forward_outcome(&self, flow: &PreparedFlow, outcome: ForwardOutcome) {
+        if flow.substituted.is_empty() {
+            return;
+        }
+        let (Some(recorder), Some(dest)) = (&self.recorder, flow.destination.as_deref()) else {
+            return;
+        };
+        if let Err(e) = emit_secret_forward_outcome(recorder, dest, outcome).await {
+            tracing::warn!(error = %e, "secret.forward_outcome audit emit failed");
+        }
+    }
+
     pub(super) async fn audit_completed_flow(
         &self,
         flow: &PreparedFlow,
         reinject_proofs: &[mvm_core::policy::RewriteProofRecord],
     ) {
-        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
-            .await;
         self.audit_rewrite_proofs(
             "replace",
             &flow.replacement_proofs,
@@ -249,6 +275,18 @@ mod server_tests {
         dir: &std::path::Path,
         gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
     ) -> (Arc<SubstitutionService>, String, std::path::PathBuf) {
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        recorded_service_with(dir, gate, forwarder)
+    }
+
+    /// [`recorded_service`] over a caller-chosen forward leg.
+    fn recorded_service_with(
+        dir: &std::path::Path,
+        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+        forwarder: Arc<dyn crate::supervisor::network_endpoint_proxy::Forwarder>,
+    ) -> (Arc<SubstitutionService>, String, std::path::PathBuf) {
         use crate::supervisor::audit_file::FileAuditSigner;
         use crate::supervisor::audit_recorder::Recorder;
         use ed25519_dalek::SigningKey;
@@ -273,14 +311,121 @@ mod server_tests {
         let signer =
             FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
         let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
-        let forwarder = Arc::new(MockForwarder {
-            seen: Mutex::new(None),
-        });
         let service = Arc::new(
             SubstitutionService::new(Arc::new(reg), resolver, forwarder, gate)
                 .with_recorder(recorder),
         );
         (service, ph, chain)
+    }
+
+    /// Answers with a response head and then fails partway through the body,
+    /// which is an upstream that reset after it had started replying.
+    struct MidBodyFailure;
+
+    #[async_trait::async_trait]
+    impl crate::supervisor::network_endpoint_proxy::Forwarder for MidBodyFailure {
+        async fn forward(
+            &self,
+            _req: crate::supervisor::network_endpoint_proxy::PreparedRequest,
+        ) -> Result<
+            crate::supervisor::network_endpoint_proxy::ForwardResponse,
+            crate::supervisor::network_endpoint_proxy::ForwardError,
+        > {
+            Err(
+                crate::supervisor::network_endpoint_proxy::ForwardError::Failed(
+                    "only the streaming leg is exercised".into(),
+                ),
+            )
+        }
+
+        async fn forward_stream(
+            &self,
+            _req: crate::supervisor::network_endpoint_proxy::PreparedRequest,
+        ) -> Result<
+            crate::supervisor::network_endpoint_proxy::ForwardStreamResponse,
+            crate::supervisor::network_endpoint_proxy::ForwardError,
+        > {
+            let (sender, receiver) = tokio::sync::mpsc::channel(2);
+            sender.send(Ok(b"partial".to_vec())).await.unwrap();
+            sender
+                .send(Err(
+                    crate::supervisor::network_endpoint_proxy::ForwardError::Failed(
+                        "connection reset".into(),
+                    ),
+                ))
+                .await
+                .unwrap();
+            Ok(
+                crate::supervisor::network_endpoint_proxy::ForwardStreamResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body_len: None,
+                    body: receiver,
+                },
+            )
+        }
+    }
+
+    /// A response that fails partway leaves both facts on the chain: the
+    /// credential was sent, and the response did not arrive whole.
+    #[tokio::test]
+    async fn a_response_that_fails_partway_is_recorded_after_the_substitution() {
+        let dir = tempdir().unwrap();
+        let (service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::new(MidBodyFailure),
+        );
+
+        let mut response = service
+            .process_stream(WireRequest {
+                method: "POST".into(),
+                url: "https://api.openai.com/v1".into(),
+                headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                body_b64: String::new(),
+            })
+            .await
+            .expect("the response head arrived");
+        // The relay task records the outcome before it drops its sender, so
+        // the channel closing means the entry is on disk.
+        let mut failed = false;
+        while let Some(chunk) = response.body.recv().await {
+            failed |= chunk.is_err();
+        }
+        assert!(failed, "the guest sees the failure");
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        let substituted = logged.find("secret.substituted").expect("hand-off entry");
+        let outcome = logged
+            .find("secret.forward_outcome")
+            .unwrap_or_else(|| panic!("no outcome entry: {logged}"));
+        assert!(substituted < outcome, "{logged}");
+        assert!(logged[outcome..].contains("response_failed"), "{logged}");
+        assert!(!logged.contains("connection reset"), "{logged}");
+        assert!(!logged.contains("sk-live-zzz"), "{logged}");
+    }
+
+    /// A request that carried no placeholder hands no credential over, so it
+    /// records neither a substitution nor an outcome.
+    #[tokio::test]
+    async fn a_forward_without_a_substitution_records_no_outcome() {
+        let dir = tempdir().unwrap();
+        let (service, _ph, chain) =
+            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+
+        let resp = service
+            .process(WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/v1/models".into(),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+
+        let logged = std::fs::read_to_string(&chain).unwrap_or_default();
+        assert!(!logged.contains("secret.substituted"), "{logged}");
+        assert!(!logged.contains("secret.forward_outcome"), "{logged}");
     }
 
     /// A claim-10 refusal lands one chain-signed entry naming the refused

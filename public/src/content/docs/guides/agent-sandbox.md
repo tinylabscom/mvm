@@ -59,17 +59,19 @@ in the clear.
 4. **The endpoint originates the request itself**, including the TLS
    connection to the destination, validated against the host's system roots.
    The guest's TLS session is with the host, never with the model provider.
-5. **When the upstream response completes**, the endpoint appends a
+5. **When it hands the request to the forward leg**, the endpoint appends a
    `secret.substituted` entry for each secret it substituted into that request
-   to the host's chain-signed audit log.
+   to the host's chain-signed audit log. When the forward ends, it appends one
+   `secret.forward_outcome` entry saying how.
 
-The entry is written after the exchange finishes, not when the credential is
-sent. If the forward fails after the request has gone out (an upstream reset,
-a timeout, a response over the size cap), the destination may already have
-received the real key, while the guest gets a refusal and the log has no
-`secret.substituted` entry for that request. Some of those failures are
-recorded instead as `secret.redacted` carrying the failure reason; some leave
-no entry.
+The substitution is recorded before the request is sent, not after the response
+arrives, because from that point the destination may have the key whether or
+not a response ever comes back. A forward that fails after sending (an upstream
+reset, a timeout, a response over the size cap) therefore still leaves a
+`secret.substituted` entry, followed by an outcome naming the failure. The
+entry also appears for a forward that failed before anything was sent, such as
+a connection refused, so the log can over-report a send but does not
+under-report one.
 
 A placeholder that the endpoint did not mint, or a request to a host the
 secret is not bound to, is refused before any value is read, and the guest gets
@@ -249,7 +251,8 @@ tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
 | --- | --- | --- |
 | `plan.admitted` | The signed plan, including its secret bindings, was admitted | plan identity |
 | `plan.launched` / `plan.failed` | The VM started, or failed to | plan identity |
-| `secret.substituted` | A request carrying a substituted secret completed, including its upstream response. Not written when the forward fails in flight, even if the key was already sent | `name`, `destination`, `auth_type` |
+| `secret.substituted` | A request carrying a substituted secret was handed to the forward leg, before any response | `name`, `destination`, `auth_type` |
+| `secret.forward_outcome` | A forward that carried a substituted secret ended: `completed`, `upstream_failed`, `request_failed`, `response_failed`, `response_refused` (a fail-closed transform refused the response) or `canceled` (the workload stopped reading) | `destination`, `outcome` |
 | `secret.redacted` | Secret-shaped or PII content was masked out of an outbound request, or a request failed or was refused fail-closed | `destination`, rule categories or reason |
 | `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
 | `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), or, on a connection the host intercepted, it was addressed to a different host than the connection or could not be framed | `destination`, `reason` |

@@ -264,6 +264,7 @@ witnesses = [
     "fn:handed_placeholders_never_contain_the_secret_value",
     "fn:network_endpoint_refuses_unbound_destination",
     "fn:audit_chain_carries_no_secret_value",
+    "fn:substitution_is_audited_when_upstream_fails_after_send",
 ]
 
 [[claim]]

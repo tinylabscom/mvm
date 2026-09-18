@@ -155,7 +155,9 @@ Last updated: 2026-09-18
       T0-T4), and the per-VM CA that turns it on is in review. The claim-10
       gate is now a required constructor argument, and an endpoint with no
       policy denies everything in every egress mode (T15, #3301, #3302),
-      and every refusal it makes is chain-signed (T16, #3300). Open: the
+      and every refusal it makes is chain-signed (T16, #3300). A substitution is
+      audited when it is handed to the forward leg, with the outcome recorded
+      separately (T9, #3286). Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
       transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
       by a checked-in contract fixture, so the new tools land as reviewed
