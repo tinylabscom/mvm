@@ -23,6 +23,8 @@ Last updated: 2026-09-17
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
       measure-first and sequenced with #3360.
+      W1 is complete: the live Firecracker/KVM sibling-restore witness proves
+      immediate post-restore `getrandom(2)` divergence.
       W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
       the W3.6 live boot is still open.
   - [x] W1a — issue #3404: every guest-agent child path uses the shared

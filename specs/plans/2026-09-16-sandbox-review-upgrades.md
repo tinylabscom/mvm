@@ -72,7 +72,7 @@ can run in parallel with it. Among the upgrades:
 
 - [x] W1.1 Make `on_genid` return whether the reseed happened, and report
       `reseeded` only on success.
-- [ ] W1.2 Force an immediate reseed. Decide between:
+- [x] W1.2 Force an immediate reseed. Decide between:
   - [ ] a generation-ID device node from each backend, with `VMGENID` confirmed
         in the built guest kernel (`nix/images/kernel/base.nix`), or
   - [x] a privileged helper that calls `RNDADDENTROPY` and then
@@ -89,8 +89,11 @@ can run in parallel with it. Among the upgrades:
       diverge.
 - [x] W1.4 Unit test: a failed reseed reports `reseeded: false`, and the host
       gate refuses the child.
-- [ ] W1.5 Live test: two clones of one snapshot return different `getrandom`
-      output immediately after restore.
+- [x] W1.5 Live test: two clones of one snapshot return different `getrandom`
+      output immediately after restore. The Firecracker/KVM witness captures
+      one parent, restores each sibling in an isolated mount-namespace
+      subprocess, requires the authenticated reseed acknowledgement, and
+      compares the first 32 bytes returned by `getrandom(2)`.
 
 ## W1a — Keep agent descriptors out of every child process (#3404)
 
