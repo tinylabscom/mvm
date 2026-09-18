@@ -33,11 +33,6 @@ const INPUT_DISK_MIN: u64 = 16 << 20;
 /// supervisor that never drops its PID file. A `nix build` can take many minutes.
 const BUILD_WAIT_TIMEOUT: Duration = Duration::from_secs(120 * 60);
 
-/// How long a halted guest's console must be quiet before its VMM is killed,
-/// and the longest the wait for that quiet may take.
-const CONSOLE_SETTLE_QUIET: Duration = Duration::from_millis(300);
-const CONSOLE_SETTLE_LIMIT: Duration = Duration::from_secs(5);
-
 /// Resolved inputs for one builder run. The caller (the builder-selection layer)
 /// resolves the builder VM image + the persistent nix-store disk and stages the
 /// job dir (`cmd.sh`); this runner owns the disk transport + the VM lifecycle.
@@ -257,9 +252,6 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             }
             if halt_watch.guest_halted() {
                 tracing::info!(vm = %transport.name, "builder guest halted; stopping its VMM");
-                // The guest's result marker can still be in flight: the kernel
-                // prints its banner from inside `reboot(2)`, mid-line.
-                halt_watch.wait_for_console_to_settle(CONSOLE_SETTLE_QUIET, CONSOLE_SETTLE_LIMIT);
                 vm.kill().context("stopping a halted builder VM")?;
                 stopped = true;
                 break;

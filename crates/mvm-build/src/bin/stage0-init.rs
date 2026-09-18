@@ -770,6 +770,7 @@ mod linux {
     fn collect_stage0_store_garbage() {
         if !persistent_store_finalization_required(is_qemu(), is_mountpoint(STAGE0_NIX_STORE_MOUNT))
         {
+            eprintln!("stage0-init: no persistent Nix store mounted; not collecting garbage");
             return;
         }
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
@@ -779,6 +780,7 @@ mod linux {
             return;
         };
         if !crate::store_gc::over_cap(used, cap) {
+            eprintln!("stage0-init: Nix store uses {used} KiB, within the {cap} KiB cap");
             return;
         }
         eprintln!(
@@ -1684,8 +1686,16 @@ mod linux {
 
     fn power_off() -> ExitCode {
         use nix::sys::reboot::{RebootMode, reboot};
-        // SAFETY: sync() takes no args and cannot fail.
+        // Let the console finish sending what was written to it. The kernel
+        // halts from inside reboot(2) without draining the tty, so the last
+        // line — the result marker the host reads — was being cut off
+        // mid-word (`stage0-init: don`) and a finished build read as an
+        // unclean halt. tcdrain on a non-tty fails harmlessly.
+        // SAFETY: tcdrain and sync take no pointers; tcdrain only blocks until
+        // the descriptor's queued output is transmitted.
         unsafe {
+            libc::tcdrain(libc::STDERR_FILENO);
+            libc::tcdrain(libc::STDOUT_FILENO);
             libc::sync();
         }
         match reboot(RebootMode::RB_POWER_OFF) {
