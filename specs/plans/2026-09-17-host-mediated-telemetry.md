@@ -1,12 +1,12 @@
 # Every-VM host-mediated tracing
 
 Backing: preview
-Validation: none — design only; the acceptance matrix below is not yet implemented.
+Validation: check-telemetry-inventory covers Rust binary inventory only; runtime acceptance remains open.
 
 **Tracking:** #3419 (epic); #3420 (W1), #3421 (W2), #3422 (W3), #3423 (W4),
 #3424 (W5), #3425 (W6), #3426 (W7).
 
-**Status: DESIGNED; IMPLEMENTATION OPEN.** Baseline inspected:
+**Status: W1 IN PROGRESS; RUNTIME IMPLEMENTATION OPEN.** Baseline inspected:
 `2555ef935abb6aff8354f7c9001f4bcd42c52572`. Component tests from the preceding
 baseline `a424c1a8728b1d98654d471ae9f5a67a35d3aed4` are not an end-to-end witness.
 
@@ -171,7 +171,7 @@ apple-container, QEMU, builder-tier guests and the separate wasm adapter.
 
 ## Delivery workstreams
 
-Implementation checkboxes remain open. Each workstream has a product issue and
+Runtime implementation checkboxes remain open. Each workstream has a product issue and
 focused PRs; update this plan, SPRINT and REFACTOR-STATUS in the same change as
 tested progress. A documentation PR must not close the implementation epic.
 
@@ -179,6 +179,21 @@ tested progress. A documentation PR must not close the implementation epic.
 
 - [ ] Enumerate binaries, source/capture initialization, runtime owner, backend
       channel and expected witness. Add the static gate for unregistered producers.
+  - [x] W1a — Rust binary inventory and CI drift gate: explicit and implicit
+        workspace targets, including disabled features, with source/feature drift,
+        required signal families, owner roles, capture gaps and non-runtime
+        exclusions. Seventeen focused tests and the live inventory gate pass;
+        workspace and xtask all-target clippy are warning-free. See the
+        [validation record](../sprint/delivery/3420-telemetry-binary-inventory.md)
+        for broader checks and host-test limitations.
+  - [ ] W1b — Extend discovery to library producers, SDK/dispatch scripts and
+        guest init/early-boot sources; map actual initialization, image/launcher
+        membership and backend service endpoints. Add startup witness checking.
+
+The current [binary inventory](../telemetry/README.md) classifies 45 targets:
+28 runtime gaps and 17 non-runtime tools/fixtures. Passing its static gate is not
+runtime coverage, a startup witness, or evidence of nonblocking delivery.
+
 - [ ] Add tests proving current outside-span, detached-lifetime and capture gaps.
       Tests for not-yet-enabled features stay in an explicit conformance harness,
       not silently ignored tests presented as product support.
