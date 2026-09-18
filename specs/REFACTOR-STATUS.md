@@ -8,7 +8,7 @@ Last updated: 2026-09-18
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.
       Epic #3419; workstreams #3420–#3426.
       W1a Rust binary inventory gate tested (17 focused tests, repository gates
-      and clippy pass); queued promotion is pending. All 28 runtime entries
+      and clippy pass). All 28 runtime entries
       remain explicit capture gaps; 17 tools/fixtures carry no coverage credit.
       Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,

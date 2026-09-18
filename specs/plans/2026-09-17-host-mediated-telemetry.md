@@ -185,7 +185,7 @@ tested progress. A documentation PR must not close the implementation epic.
         exclusions. Seventeen focused tests and the live inventory gate pass;
         workspace and xtask all-target clippy are warning-free. See the
         [validation record](../sprint/delivery/3420-telemetry-binary-inventory.md)
-        for broader checks and host-test limitations. Queued promotion is pending.
+        for broader checks and host-test limitations.
   - [ ] W1b — Extend discovery to library producers, SDK/dispatch scripts and
         guest init/early-boot sources; map actual initialization, image/launcher
         membership and backend service endpoints. Add startup witness checking.
