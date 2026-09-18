@@ -1,5 +1,8 @@
 # Agent spawn descriptor isolation
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Issue #3404
 
 - [x] Audit agent-owned child spawn paths after the entrypoint-path hardening.

@@ -638,7 +638,7 @@ fn spawn_worker(
     unsafe {
         cmd.pre_exec(move || {
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::close_descriptors_from(3, Some(program_fd))?;
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
             Ok(())
         });
     }

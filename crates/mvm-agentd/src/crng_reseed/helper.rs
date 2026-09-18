@@ -380,7 +380,10 @@ mod linux {
             unsafe {
                 cmd.pre_exec(move || {
                     expose_helper_fd(helper_fd)?;
-                    crate::fd_hygiene::close_descriptors_from(HELPER_FD as u32 + 1, None)?;
+                    crate::fd_hygiene::mark_descriptors_close_on_exec_from(
+                        HELPER_FD as u32 + 1,
+                        None,
+                    )?;
                     match identity {
                         Some((uid, gid)) => crate::guest_mount::assume_identity_retaining(
                             uid,

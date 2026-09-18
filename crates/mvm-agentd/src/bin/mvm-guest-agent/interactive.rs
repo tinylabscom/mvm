@@ -142,7 +142,7 @@ fn do_run_detached_with(
     unsafe {
         cmd.pre_exec(|| {
             #[cfg(target_os = "linux")]
-            mvm_agentd::fd_hygiene::close_descriptors_from(3, None)?;
+            mvm_agentd::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }

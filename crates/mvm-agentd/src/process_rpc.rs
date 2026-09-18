@@ -452,7 +452,7 @@ fn build_command(
     unsafe {
         cmd.pre_exec(|| {
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::close_descriptors_from(3, None)?;
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
             let lim = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,

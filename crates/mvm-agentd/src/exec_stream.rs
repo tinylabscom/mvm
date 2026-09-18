@@ -158,7 +158,7 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
     unsafe {
         builder.pre_exec(|| {
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::close_descriptors_from(3, None)?;
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, None)?;
             Ok(())
         });
     }
