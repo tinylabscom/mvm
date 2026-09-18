@@ -17,6 +17,11 @@ use std::sync::OnceLock;
 use virtio_queue::desc::split::Descriptor;
 use virtio_queue::{QueueOwnedT, QueueT};
 
+use super::blk_discard::{
+    DISCARD_SECTOR_ALIGNMENT, DiscardRange, DiscardRefusal, MAX_DISCARD_PAYLOAD,
+    MAX_DISCARD_SECTORS, MAX_DISCARD_SEG, VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_T_DISCARD,
+    parse_discard_ranges, punch_hole,
+};
 use super::device_state::{
     DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
 };
@@ -62,13 +67,14 @@ const R_QUEUE_DEVICE_HI: u64 = 0x0a4;
 const R_CONFIG: u64 = 0x100; // block config: capacity (u64 sectors) at +0
 
 const MMIO_LEN: u64 = 0x200;
-const SECTOR: u64 = 512;
+pub(super) const SECTOR: u64 = 512;
 
 const VIRTIO_BLK_T_IN: u32 = 0; // read
 const VIRTIO_BLK_T_OUT: u32 = 1; // write
 const VIRTIO_BLK_T_FLUSH: u32 = 4; // flush the write-back cache
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_BLK_S_IOERR: u8 = 1;
+const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 /// virtio-blk feature bit 5 (low feature word): the device is read-only. Offered
 /// for a read-only backing so the guest mounts it `ro`; writes are also rejected
 /// at the device (below), so RO is hypervisor-enforced, not guest-honour-system.
@@ -79,6 +85,11 @@ const VIRTIO_BLK_F_RO: u32 = 1 << 5;
 /// issues a barrier, so ext4's journal ordering rests on an assumption nothing
 /// enforces — and a host that dies with dirty page cache loses the filesystem.
 const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
+/// Block config offsets of the three discard limits, as `struct
+/// virtio_blk_config` lays them out.
+const CONFIG_MAX_DISCARD_SECTORS: u64 = R_CONFIG + 0x24;
+const CONFIG_MAX_DISCARD_SEG: u64 = R_CONFIG + 0x28;
+const CONFIG_DISCARD_SECTOR_ALIGNMENT: u64 = R_CONFIG + 0x2c;
 
 /// Backing store for a virtio-blk device.
 ///
@@ -135,6 +146,24 @@ impl DiskImage {
                 read_only: true, ..
             } => true,
             Self::File { file, .. } => file.sync_data().is_ok(),
+        }
+    }
+
+    /// Release validated `ranges` of the image. A RAM image zeroes them, which
+    /// is what a reader of a punched file sees. A read-only image refuses, as it
+    /// refuses writes.
+    fn discard(&mut self, ranges: &[DiscardRange]) -> bool {
+        match self {
+            Self::Mem(v) => {
+                for r in ranges {
+                    v[r.offset as usize..(r.offset + r.len) as usize].fill(0);
+                }
+                true
+            }
+            Self::File {
+                read_only: true, ..
+            } => false,
+            Self::File { file, .. } => ranges.iter().all(|&r| punch_hole(file, r).is_ok()),
         }
     }
 
@@ -207,6 +236,15 @@ impl DiskImage {
                 true
             }
         }
+    }
+}
+
+/// The status byte for a request that either completed or failed.
+fn status_of(ok: bool) -> u8 {
+    if ok {
+        VIRTIO_BLK_S_OK
+    } else {
+        VIRTIO_BLK_S_IOERR
     }
 }
 
@@ -295,10 +333,10 @@ impl VirtioBlk {
             R_VENDOR_ID => VIRTIO_VENDOR,
             // High word (bit 32): VIRTIO_F_VERSION_1. Low word: VIRTIO_BLK_F_RO
             // for a read-only backing, which takes no writes and so has nothing
-            // to flush; VIRTIO_BLK_F_FLUSH for a writable one.
+            // to flush or discard; FLUSH and DISCARD for a writable one.
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
             R_DEVICE_FEATURES if self.disk.read_only() => VIRTIO_BLK_F_RO,
-            R_DEVICE_FEATURES => VIRTIO_BLK_F_FLUSH,
+            R_DEVICE_FEATURES => VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD,
             R_QUEUE_NUM_MAX => super::QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.queue_ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
@@ -306,6 +344,9 @@ impl VirtioBlk {
             // block config: capacity in 512-byte sectors (u64 at +0/+4).
             R_CONFIG => (self.disk.len() / SECTOR) as u32,
             o if o == R_CONFIG + 4 => ((self.disk.len() / SECTOR) >> 32) as u32,
+            CONFIG_MAX_DISCARD_SECTORS => MAX_DISCARD_SECTORS,
+            CONFIG_MAX_DISCARD_SEG => MAX_DISCARD_SEG,
+            CONFIG_DISCARD_SECTOR_ALIGNMENT => DISCARD_SECTOR_ALIGNMENT,
             _ => 0,
         })
     }
@@ -483,27 +524,51 @@ impl VirtioBlk {
             io_ok &= self.transfer(req_type, sector, addr, len, &mut written);
             sector += u64::from(len) / SECTOR;
         }
-        // A flush carries no data descriptors, so it is serviced here rather
-        // than in `transfer`.
-        let flushed = req_type != VIRTIO_BLK_T_FLUSH || self.disk.flush();
-        let ok = io_ok
-            && flushed
-            && matches!(
-                req_type,
-                VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT | VIRTIO_BLK_T_FLUSH
-            );
+        // Flush and discard carry no payload `transfer` moves, so they are
+        // serviced here.
+        let status = match req_type {
+            VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => status_of(io_ok),
+            VIRTIO_BLK_T_FLUSH => status_of(io_ok && self.disk.flush()),
+            VIRTIO_BLK_T_DISCARD => self.discard(&readable[1..]),
+            _ => VIRTIO_BLK_S_IOERR,
+        };
         if let Some(s) = status_addr {
-            self.wr_u8(
-                s,
-                if ok {
-                    VIRTIO_BLK_S_OK
-                } else {
-                    VIRTIO_BLK_S_IOERR
-                },
-            );
+            self.wr_u8(s, status);
             written += 1;
         }
         written
+    }
+
+    /// Service a discard whose range list spans the `payload` descriptors.
+    /// Nothing is released unless every range is valid.
+    fn discard(&mut self, payload: &[Descriptor]) -> u8 {
+        let Some(bytes) = self.read_discard_payload(payload) else {
+            return VIRTIO_BLK_S_IOERR;
+        };
+        match parse_discard_ranges(&bytes, self.disk.len() / SECTOR) {
+            Ok(ranges) => status_of(self.disk.discard(&ranges)),
+            Err(DiscardRefusal::UnsupportedFlags) => VIRTIO_BLK_S_UNSUPP,
+            Err(DiscardRefusal::Malformed) => VIRTIO_BLK_S_IOERR,
+        }
+    }
+
+    /// Concatenate a discard request's payload descriptors. `None` when the
+    /// total exceeds the largest well-formed payload — checked before anything
+    /// is allocated — or when a descriptor lies outside guest RAM.
+    fn read_discard_payload(&self, payload: &[Descriptor]) -> Option<Vec<u8>> {
+        let total = payload
+            .iter()
+            .try_fold(0usize, |sum, d| sum.checked_add(d.len() as usize))
+            .filter(|&total| total <= MAX_DISCARD_PAYLOAD)?;
+        let mut bytes = Vec::with_capacity(total);
+        for desc in payload {
+            let chunk = self.mem.read_bytes(desc.addr().0, desc.len() as usize);
+            if chunk.len() != desc.len() as usize {
+                return None;
+            }
+            bytes.extend(chunk);
+        }
+        Some(bytes)
     }
 
     /// Copy one data descriptor between the disk and guest memory. Returns whether
@@ -687,8 +752,11 @@ mod tests {
     fn offers_version_1_feature_in_high_word() {
         let mut d = dev(vec![0u8; 4096]);
         d.write(R_DEVICE_FEATURES_SEL, 0);
-        // Writable, so the low word carries FLUSH.
-        assert_eq!(d.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_FLUSH);
+        // Writable, so the low word carries FLUSH and DISCARD.
+        assert_eq!(
+            d.read(R_DEVICE_FEATURES) as u32,
+            VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD
+        );
         d.write(R_DEVICE_FEATURES_SEL, 1);
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 1); // VIRTIO_F_VERSION_1 (bit 32)
     }
@@ -858,10 +926,190 @@ mod tests {
         d.write(R_DEVICE_FEATURES_SEL, 1);
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 1);
         // A writable backing offers FLUSH instead, so the guest can force its
-        // journal to stable storage.
+        // journal to stable storage, and DISCARD, so it can hand space back.
         let mut w = dev(vec![0u8; 512]);
         w.write(R_DEVICE_FEATURES_SEL, 0);
-        assert_eq!(w.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_FLUSH);
+        assert_eq!(
+            w.read(R_DEVICE_FEATURES) as u32,
+            VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD
+        );
+        // Neither word offers DISCARD on the read-only backing, which is what
+        // keeps a guest from asking a read-only image to release blocks.
+        assert_eq!(d.read(R_DEVICE_FEATURES) as u32 & VIRTIO_BLK_F_DISCARD, 0);
+    }
+
+    #[test]
+    fn discard_limits_are_readable_from_config_space() {
+        let d = dev(vec![0u8; 4096]);
+        assert_eq!(
+            d.read(CONFIG_MAX_DISCARD_SECTORS) as u32,
+            MAX_DISCARD_SECTORS
+        );
+        assert_eq!(d.read(CONFIG_MAX_DISCARD_SEG) as u32, MAX_DISCARD_SEG);
+        assert_eq!(
+            d.read(CONFIG_DISCARD_SECTOR_ALIGNMENT) as u32,
+            DISCARD_SECTOR_ALIGNMENT
+        );
+    }
+
+    /// One `virtio_blk_discard_write_zeroes` segment, as a guest lays it out.
+    fn discard_segment(sector: u64, num_sectors: u32, flags: u32) -> Vec<u8> {
+        let mut bytes = sector.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&num_sectors.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes
+    }
+
+    /// Program one discard request carrying `payload` into `d`'s ring, notify the
+    /// device, and return the status byte it wrote.
+    fn submit_discard(d: &mut VirtioBlk, payload: &[u8]) -> u8 {
+        const QSZ: u16 = 8;
+        let desc = BLK_BASE + 0x1000;
+        let avail = BLK_BASE + 0x4000;
+        let used = BLK_BASE + 0x8000;
+        let (hdr, data, status) = (BLK_BASE + 0xc000, BLK_BASE + 0xd000, BLK_BASE + 0xf000);
+
+        // request header: type u32 @0, reserved u32 @4, sector u64 @8. A discard
+        // carries its ranges in the payload, so the header sector is unused.
+        d.mem.write_bytes(hdr, &VIRTIO_BLK_T_DISCARD.to_le_bytes());
+        d.mem.write_bytes(data, payload);
+        // A byte the device never writes is a status it never set.
+        d.mem.wr_u8(status, 0xff);
+
+        write_desc(&d.mem, desc, hdr, 16, DESC_F_NEXT, 1);
+        write_desc(
+            &d.mem,
+            desc + 16,
+            data,
+            payload.len() as u32,
+            DESC_F_NEXT,
+            2,
+        );
+        write_desc(&d.mem, desc + 32, status, 1, DESC_F_WRITE, 0);
+        d.mem.wr_u16(avail + 4, 0); // available ring slot 0 -> descriptor head 0
+
+        d.queue_num = u32::from(QSZ);
+        d.desc = desc;
+        d.avail = avail;
+        d.used = used;
+        d.queue_ready = 1;
+        d.mem.wr_u16(avail + 2, 1); // publish one chain
+        assert!(
+            d.write(R_QUEUE_NOTIFY, 0),
+            "the device must service the published chain"
+        );
+        d.mem.read_bytes(status, 1)[0]
+    }
+
+    /// Disk contents that make a released range obvious against its neighbours.
+    fn patterned_disk(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i as u8) | 1).collect()
+    }
+
+    #[test]
+    fn a_discard_releases_exactly_the_named_range() {
+        let mut d = dev(patterned_disk(8192));
+        let status = submit_discard(&mut d, &discard_segment(2, 2, 0));
+        assert_eq!(status, VIRTIO_BLK_S_OK);
+
+        let mut released = vec![0u8; 2 * SECTOR as usize];
+        d.disk.read_at(2 * SECTOR, &mut released);
+        assert!(
+            released.iter().all(|&b| b == 0),
+            "the named range must be released"
+        );
+        let mut before = vec![0u8; SECTOR as usize];
+        let mut after = vec![0u8; SECTOR as usize];
+        d.disk.read_at(SECTOR, &mut before);
+        d.disk.read_at(4 * SECTOR, &mut after);
+        assert!(
+            before.iter().chain(&after).all(|&b| b != 0),
+            "sectors either side of the range must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_discard_running_past_the_disk_is_refused_and_releases_nothing() {
+        let mut d = dev(patterned_disk(8192)); // 16 sectors
+        let status = submit_discard(&mut d, &discard_segment(15, 2, 0));
+        assert_eq!(status, VIRTIO_BLK_S_IOERR);
+        let mut last = vec![0u8; SECTOR as usize];
+        d.disk.read_at(15 * SECTOR, &mut last);
+        assert!(
+            last.iter().all(|&b| b != 0),
+            "a refused discard must not release the part that did fit"
+        );
+    }
+
+    #[test]
+    fn a_batch_with_one_bad_range_releases_none_of_them() {
+        let mut d = dev(patterned_disk(8192));
+        let mut payload = discard_segment(2, 2, 0);
+        payload.extend(discard_segment(15, 2, 0)); // past the end
+        assert_eq!(submit_discard(&mut d, &payload), VIRTIO_BLK_S_IOERR);
+
+        let mut first = vec![0u8; 2 * SECTOR as usize];
+        d.disk.read_at(2 * SECTOR, &mut first);
+        assert!(
+            first.iter().all(|&b| b != 0),
+            "the valid range must not be released when a later one is refused"
+        );
+    }
+
+    #[test]
+    fn a_discard_carrying_a_flag_reports_unsupported_rather_than_an_error() {
+        let mut d = dev(patterned_disk(8192));
+        // The unmap flag belongs to write-zeroes; this device implements neither.
+        let status = submit_discard(&mut d, &discard_segment(2, 2, 1));
+        assert_eq!(status, VIRTIO_BLK_S_UNSUPP);
+    }
+
+    #[test]
+    fn a_discard_payload_that_is_not_whole_segments_is_refused() {
+        let mut d = dev(patterned_disk(8192));
+        assert_eq!(submit_discard(&mut d, &[0u8; 8]), VIRTIO_BLK_S_IOERR);
+    }
+
+    #[test]
+    fn a_read_only_backing_refuses_a_discard_and_leaves_the_file_alone() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(8192).unwrap();
+        std::fs::write(f.path(), patterned_disk(8192)).unwrap();
+        let mut d = blk_dev(DiskImage::open(f.path(), true).unwrap());
+
+        assert_eq!(
+            submit_discard(&mut d, &discard_segment(2, 2, 0)),
+            VIRTIO_BLK_S_IOERR
+        );
+        let raw = std::fs::read(f.path()).unwrap();
+        assert!(
+            raw.iter().all(|&b| b != 0),
+            "a read-only image must keep every byte"
+        );
+    }
+
+    #[test]
+    fn a_file_backed_discard_completes_without_resizing_the_image() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), patterned_disk(1024 * 1024)).unwrap();
+        let mut d = blk_dev(DiskImage::open(f.path(), false).unwrap());
+
+        // A 4 KiB-aligned range, which is what the advertised alignment asks the
+        // guest for and what a host filesystem can release whole.
+        assert_eq!(
+            submit_discard(&mut d, &discard_segment(8, 8, 0)),
+            VIRTIO_BLK_S_OK
+        );
+        assert_eq!(
+            f.as_file().metadata().unwrap().len(),
+            1024 * 1024,
+            "releasing blocks must not resize the image"
+        );
+        let raw = std::fs::read(f.path()).unwrap();
+        assert!(
+            raw[..4096].iter().all(|&b| b != 0) && raw[8192..].iter().all(|&b| b != 0),
+            "bytes outside the range must survive"
+        );
     }
 
     /// Queue sizes a hostile guest can program that are illegal geometry: zero,

@@ -102,3 +102,16 @@ helper it compiles. Without a caller the helper is built with \
 configured to fetch the builder image gets a helper that can only build it \
 from source — a silent cold Stage 0 on a lane that asked to avoid one. Every \
 unit test of the feature mirror passes whether or not anything declares."""
+
+[[control]]
+symbol = "parse_discard_ranges"
+file = "crates/mvm-vmm/src/vmm/blk_discard.rs"
+dormant = false
+why = """
+The only bound on a guest-named discard range. The device now offers \
+VIRTIO_BLK_F_DISCARD on every writable backing, so the guest hands it a \
+sector and a length and the host punches a hole where they point. Losing this \
+call would leave the sector arithmetic unchecked against the image's own \
+capacity, and the workload tier shares this device model with the builder. Its \
+unit tests pass whether or not the device calls it, which is what this file \
+exists to catch."""
