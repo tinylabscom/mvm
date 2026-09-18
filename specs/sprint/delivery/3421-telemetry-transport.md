@@ -47,6 +47,13 @@ runtime security certification. Final workspace all-target clippy and
 BDD-feature all-target clippy passed with warnings denied; all 69 repository
 gates passed. Required PR checks and actual merge-queue delivery remain pending.
 
+The first PR invariant run passed those 69 gates, then the separate
+`check-declared-backing` gate rejected a negated phrase in the preview plan.
+The limitation was reworded without promoting the plan's backing status;
+`check-declared-backing` and `check-doc-links` then passed locally. After rebasing
+onto current main, all eight contract tests, nine transport tests and workspace
+all-target clippy also passed again.
+
 Host validation uses isolated MVM_HOME/CARGO_HOME/CARGO_TARGET_DIR and Rust
 1.97.1. Full host tests exclude `run_build_surfaces_environment_gaps` (two
 builder-boot probes) and `mk_guest_eval_assertions_all_pass_when_nix_available`

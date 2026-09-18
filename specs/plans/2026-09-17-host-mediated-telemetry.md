@@ -282,8 +282,8 @@ Dependencies: W1 -> W2; W2 -> W3 and W4; W3+W4 -> W5; W1-W5 -> W6 -> W7.
 Telemetry is not blocked on mailbox storage or functional-stream reliability.
 W2a prepares a worker-side wire API without enabling any runtime source or
 collector. It does not bypass W1 coverage/acceptance requirements. A pinned peer
-key and fresh cryptographic session are not proof that the runtime registered
-the right VM generation; that integration and its witnesses remain W2b/W4 work.
+key and fresh cryptographic session leave runtime VM-generation registration
+unverified; that integration and its witnesses remain W2b/W4 work.
 W3a is an independent repair to existing invocation capture, not activation of the
 new telemetry feature ahead of W1/W2. It does not establish every-source coverage,
 strict wait-free queue internals, emission latency budgets, detached collection,
