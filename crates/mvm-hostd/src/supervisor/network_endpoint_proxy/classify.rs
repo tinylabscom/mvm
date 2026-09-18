@@ -100,7 +100,7 @@ mod server_tests {
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
     use crate::supervisor::network_endpoint_proxy::SubstitutionService;
     use crate::supervisor::network_endpoint_proxy::test_support::{
-        MockForwarder, bearer_ref, service_with, service_with_policies,
+        MockForwarder, bearer_ref, gate_admitting, service_with, service_with_policies,
     };
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use secrecy::SecretBox;
@@ -141,7 +141,13 @@ mod server_tests {
         let forwarder = Arc::new(MockForwarder {
             seen: Mutex::new(None),
         });
-        let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder);
+        let admitted: Vec<(&str, u16)> = hosts.iter().map(|host| (*host, 443)).collect();
+        let mut service = SubstitutionService::new(
+            Arc::new(reg),
+            resolver,
+            forwarder,
+            gate_admitting(&admitted),
+        );
         if attach_intermediate {
             let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::mint(hosts)
                 .expect("mint the per-VM egress ca");

@@ -958,9 +958,9 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         });
     }
     if let Some(policy) = params.network_policy {
-        // `EndpointConfig.network_policy`: present ⇒ the endpoint gates every
-        // destination itself. Omitted when `None` so legacy configs are
-        // byte-identical to before (the in-loop gate stays the enforcer).
+        // `EndpointConfig.network_policy`: the policy the endpoint gates every
+        // destination against. Omitted when `None`, and an endpoint whose
+        // config carries no policy denies every destination.
         cfg["network_policy"] =
             serde_json::to_value(policy).expect("NetworkPolicy serializes to JSON");
     }

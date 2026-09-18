@@ -26,6 +26,11 @@ use secrecy::SecretBox;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-network-endpoint");
 
+/// A public address the network policy admits and no secret is bound to. It
+/// must sit outside the mandatory-deny ranges, which refuse loopback under any
+/// policy, or the gate rather than the binding would refuse it.
+const UNBOUND_ADDR: &str = "93.184.216.34";
+
 fn write_frame<W: Write>(w: &mut W, value: &impl serde::Serialize) {
     let body = serde_json::to_vec(value).unwrap();
     w.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
@@ -142,7 +147,15 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
         tls_intermediate: None,
-        network_policy: None,
+        // The policy admits the unbound destination, so the refusal below can
+        // only be the binding check's. It is a literal address because the
+        // endpoint resolves a policy's host names when it starts.
+        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
+            vec![mvm_core::policy::network_policy::HostPort::new(
+                UNBOUND_ADDR,
+                443,
+            )],
+        )),
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::Wire,
@@ -182,7 +195,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         method: "POST".into(),
         // NOT in allowed_hosts — claim-12 bind-check refuses before forwarding,
         // so this asserts substitution wiring with zero network egress.
-        url: "https://evil.example.com/v1".into(),
+        url: format!("https://{UNBOUND_ADDR}/v1"),
         headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
         body_b64: String::new(),
     };
@@ -191,7 +204,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     match resp {
         WireResponse::Refused { message } => {
             assert!(
-                message.contains("evil.example.com") || message.to_lowercase().contains("bound"),
+                message.contains(UNBOUND_ADDR) && message.contains("allowed_hosts"),
                 "expected a binding refusal, got: {message}"
             );
         }

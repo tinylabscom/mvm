@@ -126,7 +126,9 @@ Last updated: 2026-09-18
       states the mechanism's limits alongside it. WS-S, added after
       documenting the path turned up six gaps, is underway — the host now
       terminates a CONNECT flow to a host carrying a bound secret (#3283
-      T0-T4), and the per-VM CA that turns it on is in review. Open: the
+      T0-T4), and the per-VM CA that turns it on is in review. The claim-10
+      gate is now a required constructor argument, and an endpoint with no
+      policy denies everything in every egress mode (T15, #3301, #3302). Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
       transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
       by a checked-in contract fixture, so the new tools land as reviewed

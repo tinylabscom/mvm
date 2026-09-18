@@ -230,7 +230,9 @@ mod redaction_category_tests {
 mod server_tests {
     use crate::framing::{read_json_frame, write_json_frame};
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
-    use crate::supervisor::network_endpoint_proxy::test_support::{MockForwarder, bearer_ref};
+    use crate::supervisor::network_endpoint_proxy::test_support::{
+        MockForwarder, bearer_ref, gate_admitting,
+    };
     use crate::supervisor::network_endpoint_proxy::{MAX_FRAME_BYTES, SubstitutionService};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
@@ -292,9 +294,14 @@ mod server_tests {
         let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
 
         let service = Arc::new(
-            SubstitutionService::new(Arc::new(reg), resolver, Arc::clone(&forwarder) as _)
-                .with_redaction_policy(policy)
-                .with_recorder(recorder),
+            SubstitutionService::new(
+                Arc::new(reg),
+                resolver,
+                Arc::clone(&forwarder) as _,
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_redaction_policy(policy)
+            .with_recorder(recorder),
         );
         let sock = dir.path().join("subst.sock");
         let listener = UnixListener::bind(&sock).unwrap();
@@ -315,7 +322,7 @@ mod server_tests {
         write_json_frame(&mut client, &wire).await.unwrap();
         let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
         assert!(
-            matches!(resp, WireResponse::Refused { .. }),
+            matches!(&resp, WireResponse::Refused { message } if message.contains("fail-closed")),
             "compressed body must fail closed: {resp:?}"
         );
         // The unscannable request never reached the forward leg.
@@ -371,7 +378,13 @@ mod server_tests {
         let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
 
         let service = Arc::new(
-            SubstitutionService::new(Arc::new(reg), resolver, forwarder).with_recorder(recorder),
+            SubstitutionService::new(
+                Arc::new(reg),
+                resolver,
+                forwarder,
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_recorder(recorder),
         );
         let sock = dir.path().join("subst.sock");
         let listener = UnixListener::bind(&sock).unwrap();
@@ -434,9 +447,15 @@ mod server_tests {
             FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
         let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
 
+        // The gate admits the unbound host, so only the binding can refuse it.
         let service = Arc::new(
-            SubstitutionService::new(Arc::new(reg), resolver, Arc::clone(&forwarder) as _)
-                .with_recorder(recorder),
+            SubstitutionService::new(
+                Arc::new(reg),
+                resolver,
+                Arc::clone(&forwarder) as _,
+                gate_admitting(&[("api.openai.com", 443), ("evil.example.com", 443)]),
+            )
+            .with_recorder(recorder),
         );
         let sock = dir.path().join("subst.sock");
         let listener = UnixListener::bind(&sock).unwrap();
@@ -452,7 +471,11 @@ mod server_tests {
         };
         write_json_frame(&mut client, &wire).await.unwrap();
         let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
-        assert!(matches!(resp, WireResponse::Refused { .. }));
+        assert!(
+            matches!(&resp, WireResponse::Refused { message }
+                if message.contains("not in the secret's allowed_hosts")),
+            "expected the binding refusal, got {resp:?}"
+        );
         // claim 12: the unbound destination never reached the forward leg.
         assert!(forwarder.seen.lock().unwrap().is_none());
 

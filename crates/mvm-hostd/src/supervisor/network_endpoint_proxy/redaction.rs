@@ -282,7 +282,9 @@ mod fail_closed_gate_tests {
 mod server_tests {
     use crate::framing::{read_json_frame, write_json_frame};
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
-    use crate::supervisor::network_endpoint_proxy::test_support::{bearer_ref, service_with};
+    use crate::supervisor::network_endpoint_proxy::test_support::{
+        bearer_ref, gate_admitting, service_with,
+    };
     use crate::supervisor::network_endpoint_proxy::{
         ForwardError, ForwardResponse, Forwarder, MAX_FRAME_BYTES, PreparedRequest,
         SubstitutionService,
@@ -412,8 +414,13 @@ mod server_tests {
             }],
         };
         let service = Arc::new(
-            SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone())
-                .with_reversible_replacement_policy(policy),
+            SubstitutionService::new(
+                Arc::new(reg),
+                resolver,
+                forwarder.clone(),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_reversible_replacement_policy(policy),
         );
 
         let wire = WireRequest {
@@ -520,8 +527,13 @@ mod server_tests {
             }],
         };
         let service = Arc::new(
-            SubstitutionService::new(Arc::new(reg), resolver, Arc::new(RephrasingForwarder))
-                .with_reversible_replacement_policy(policy),
+            SubstitutionService::new(
+                Arc::new(reg),
+                resolver,
+                Arc::new(RephrasingForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_reversible_replacement_policy(policy),
         );
         let wire = WireRequest {
             method: "POST".into(),
@@ -559,7 +571,7 @@ mod server_tests {
         write_json_frame(&mut client, &wire).await.unwrap();
         let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
         assert!(
-            matches!(resp, WireResponse::Refused { .. }),
+            matches!(&resp, WireResponse::Refused { message } if message.contains("fail-closed")),
             "compressed body must fail closed: {resp:?}"
         );
         // The unscannable request never reached the forward leg.
