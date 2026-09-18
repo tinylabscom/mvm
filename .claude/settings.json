@@ -80,6 +80,7 @@
   ],
   "permissions": {
     "allow": [
+      "mcp__graft",
       "Bash(graft:*)",
       "Bash(npx graft:*)",
       "Bash(graft-dev:*)",
