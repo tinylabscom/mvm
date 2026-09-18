@@ -14,6 +14,11 @@ Last updated: 2026-09-18
       W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
       `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
       and limits. This does not enable the independent telemetry service.
+      W2a typed contract and peer-pinned worker transport pass 21 focused tests,
+      host workspace tests, clippy, Linux cross-check, seeded fuzz smoke and all
+      69 repository gates; queued delivery is pending.
+      `specs/sprint/delivery/3421-telemetry-transport.md` records the scope.
+      No runtime listener, source capture or VM-generation binding is enabled.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.

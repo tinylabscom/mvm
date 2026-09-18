@@ -103,3 +103,10 @@ path = "fuzz_targets/fuzz_input_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_telemetry_record"
+path = "fuzz_targets/fuzz_telemetry_record.rs"
+test = false
+doc = false
+bench = false

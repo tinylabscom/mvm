@@ -6,7 +6,7 @@ Validation: check-telemetry-inventory covers Rust binary inventory only; runtime
 **Tracking:** #3419 (epic); #3420 (W1), #3421 (W2), #3422 (W3), #3423 (W4),
 #3424 (W5), #3425 (W6), #3426 (W7).
 
-**Status: W1 AND PREPARATORY W3 CAPTURE WORK IN PROGRESS.** Baseline inspected:
+**Status: W1, W2 TRANSPORT FOUNDATION AND PREPARATORY W3 CAPTURE WORK IN PROGRESS.** Baseline inspected:
 `2555ef935abb6aff8354f7c9001f4bcd42c52572`. Component tests from the preceding
 baseline `a424c1a8728b1d98654d471ae9f5a67a35d3aed4` are not an end-to-end witness.
 
@@ -45,7 +45,8 @@ does not implement guest telemetry.
 | Existing code | Why it does not prove the requirement |
 |---|---|
 | `mvm-agentd/src/vsock/framing.rs`, `AuthenticatedSession` | Provides reusable encrypted framing, not an always-on telemetry service. |
-| `mvm-net/src/channel.rs`, `GuestService` | No dedicated telemetry service. |
+| `mvm-net/src/channel.rs`, `GuestService` | Telemetry semantic role reserved; runtime endpoints not provisioned yet. |
+| `mvm-core/src/protocol/telemetry/`, `mvm-core/src/net/telemetry.rs` | Bounded typed contract and encrypted worker transport; not producer capture or a VM-lifetime collector. |
 | `mvm-agentd/src/entrypoint_stream.rs`, shared `stream_handoff::Handoff` | Bounded live handoff and owned completion tail; still invocation-scoped, not an independent telemetry producer. |
 | `mvm-agentd/src/stream_pump.rs`, `Pump::run` | Bounded reader queues/tails with stage-specific losses; synchronous sinks and pipe EOF/reaping are not a VM-lifetime telemetry supervisor. |
 | `mvm-cli/src/commands/vm/invoke.rs`, `write_entrypoint_event` | Invocation-scoped; only fd3 header is captured, payload is omitted; synchronous terminal writes/flushes may stall the consumer. |
@@ -206,6 +207,16 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 - [ ] Add the validated closed shared contract and semantic service, using existing
       ID/framing/backend helpers. Roundtrip every variant and pin wire encoding.
+  - [x] W2a — Bounded record contract and worker transport foundation: eight
+        record families, validated trace context, dedicated semantic port, shared
+        session crypto, pinned peer keys, no application ACKs, terminal connection
+        failures and payload-free diagnostics. Twenty-one focused tests, host
+        workspace tests, clippy, Linux cross-compilation, seeded fuzz smoke and
+        all 69 repository gates pass. Scope and delivery evidence are recorded in
+        [the validation record](../sprint/delivery/3421-telemetry-transport.md).
+  - [ ] W2b — Provision backend endpoints and bind each connection's expected
+        guest key to authoritative VM/boot/generation registration. Prove actual
+        service routing and restore isolation before enabling collection.
 - [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export
@@ -269,6 +280,10 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 Dependencies: W1 -> W2; W2 -> W3 and W4; W3+W4 -> W5; W1-W5 -> W6 -> W7.
 Telemetry is not blocked on mailbox storage or functional-stream reliability.
+W2a prepares a worker-side wire API without enabling any runtime source or
+collector. It does not bypass W1 coverage/acceptance requirements. A pinned peer
+key and fresh cryptographic session leave runtime VM-generation registration
+unverified; that integration and its witnesses remain W2b/W4 work.
 W3a is an independent repair to existing invocation capture, not activation of the
 new telemetry feature ahead of W1/W2. It does not establish every-source coverage,
 strict wait-free queue internals, emission latency budgets, detached collection,

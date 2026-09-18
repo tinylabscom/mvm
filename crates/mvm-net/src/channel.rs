@@ -28,6 +28,8 @@ pub enum GuestService {
     Broker,
     /// The one flow-aware networking endpoint.
     NetworkFlow,
+    /// One-way observations on a dedicated authenticated connection.
+    Telemetry,
     /// One dev-only interactive console data stream.
     ///
     /// The guest allocates these ports from its console session range. The
@@ -57,6 +59,7 @@ impl GuestService {
             Self::WorkloadExit => 5251,
             Self::MachineControl => 5252,
             Self::NetworkFlow => mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
+            Self::Telemetry => mvm_core::protocol::telemetry::TELEMETRY_PORT,
             Self::Broker => 5300,
             Self::ConsoleData { port } => port,
             // Pinned literals, mirroring `mvm_agentd::builder_agent`'s
@@ -74,6 +77,7 @@ impl GuestService {
             Self::WorkloadExit => "workload-exit",
             Self::Broker => "broker",
             Self::NetworkFlow => "network-flow",
+            Self::Telemetry => "telemetry",
             Self::ConsoleData { .. } => "console-data",
             Self::BuilderDispatch => "builder-dispatch",
             Self::BuilderdControl => "builderd-control",
@@ -118,6 +122,7 @@ mod tests {
             "the service mapping and the shared contract constant must not drift"
         );
         assert_eq!(GuestService::Broker.port(), 5300);
+        assert_eq!(GuestService::Telemetry.port(), 5254);
         // Both ends of the builder control plane pin these literals: the guest
         // side in `mvm_agentd::builder_agent`, which this crate sits below.
         assert_eq!(GuestService::BuilderDispatch.port(), 21471);
@@ -131,6 +136,9 @@ mod tests {
             GuestService::WorkloadExit.port(),
             GuestService::Broker.port(),
             GuestService::NetworkFlow.port(),
+            GuestService::Telemetry.port(),
+            GuestService::BuilderDispatch.port(),
+            GuestService::BuilderdControl.port(),
         ];
         let mut sorted = ports.to_vec();
         sorted.sort_unstable();
@@ -145,6 +153,7 @@ mod tests {
     #[test]
     fn service_display_names_the_service() {
         assert_eq!(GuestService::MachineControl.to_string(), "machine-control");
+        assert_eq!(GuestService::Telemetry.to_string(), "telemetry");
         assert_eq!(
             GuestService::BuilderDispatch.to_string(),
             "builder-dispatch"
@@ -162,6 +171,7 @@ mod tests {
             GuestService::WorkloadExit,
             GuestService::Broker,
             GuestService::NetworkFlow,
+            GuestService::Telemetry,
             GuestService::ConsoleData { port: 20001 },
         ] {
             assert!(!service.is_builder_tier(), "{service} is not builder-tier");

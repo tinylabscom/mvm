@@ -53,6 +53,32 @@ and version-pinned for the life of a running VM.
 
 ## Protocol
 
+### Telemetry transport foundation (not enabled)
+
+The shared libraries define a separate `Telemetry` service on reserved vsock
+port **5254**. It is not yet installed as a guest listener or supervised host
+collector: this does **not** provide detached tracing today.
+
+Its `mvm.telemetry.v1` records cover span open/update/close, standalone or
+span-associated events, logs, binary stdout/stderr chunks, producer coverage,
+and explicit guest loss summaries. Records reuse the existing authenticated,
+encrypted session machinery. The host receiver requires a registered guest
+public key; guest-authored VM/tenant/boot identity fields are rejected.
+
+The worker protocol has no per-record ACK. Socket I/O still belongs on a
+dedicated worker, never a tracing callback. The current library is an
+allocation-conscious wire boundary, not the nonblocking producer queue.
+Records are capped at 32 KiB encoded, with eight JSON nesting levels, 16
+primitive attributes, eight span links, 128-byte labels, 2 KiB text fields,
+and 4 KiB stdio chunks. Malformed input terminates the connection without
+quoting payloads in its error. A partial write has unknown delivery, not a
+claim of successful collection.
+
+All-source subscriber wiring, source/host redaction policy, VM-generation
+registration, backend endpoint provisioning, lifetime collection, bounded
+retention, and detached retrieval remain under implementation. Structural
+validation alone does not make workload text safe to retain.
+
 The agent communicates using a **binary protocol with length-prefixed JSON frames** over vsock on every supported microVM backend.
 
 ### Frame Structure
