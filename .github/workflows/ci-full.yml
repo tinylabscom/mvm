@@ -208,6 +208,14 @@ jobs:
       # Hosted runners protect their distro kernel under /boot; the workload
       # kernel is not what this lane proves.
       MVM_KERNEL_SOURCE: download
+      # QEMU, named rather than auto-detected. Stage 0 on a hosted runner has
+      # only ever worked under QEMU: until helpers began inheriting their
+      # caller's backend, the helper this lane re-executes forced QEMU, and
+      # that is the path the nightly bootstrapped through for months. With the
+      # inherited backend it auto-detects Firecracker here and the Stage 0 VM's
+      # API socket never appears, which is a Firecracker-on-hosted-runner
+      # problem and not something the cold source path should be red for.
+      MVM_BUILDER_BACKEND: qemu
     steps:
       - uses: actions/checkout@v6
 

@@ -688,6 +688,21 @@ fn the_source_bootstrap_job_grants_stage0_vhost_vsock_access() {
     );
 }
 
+/// Stage 0 on a hosted runner has only ever worked under QEMU. Auto-detect
+/// answers Firecracker there, whose Stage 0 VM never opens its API socket.
+#[test]
+fn the_source_bootstrap_job_names_the_backend_its_stage0_can_use() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert_eq!(
+        field_after(job, "MVM_BUILDER_BACKEND:").as_deref(),
+        Some("qemu"),
+        "the cold source witness must name QEMU rather than auto-detecting a \
+         backend whose Stage 0 cannot boot on a hosted runner"
+    );
+}
+
 #[test]
 fn the_source_bootstrap_job_installs_qemu_for_stage0() {
     let workflow = ci_full();

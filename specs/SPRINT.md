@@ -129,8 +129,9 @@
       inside it, the cold source bootstrap runs as the nightly
       `source-bootstrap-linux` witness, both harnesses emit phase timings, and
       the fetch is staged atomically with architecture and manifest-pin
-      refusals. Open: the two post-merge timing runs against the 2026-09-15
-      baseline.
+      refusals. Measured: 118 minutes to 92 and 106, all 313 scenarios passing;
+      the 25-minute hypothesis is rejected as stated, and the source-matched SDK
+      sidecar build is the cost that remains.
       W3 (#3365) slice W3a: `mvm_core::image_set` defines the signed image-set
       manifest and lock with pure completeness, architecture, boot-protocol,
       capability, protocol-range, supersession and lock checks; the updater and
