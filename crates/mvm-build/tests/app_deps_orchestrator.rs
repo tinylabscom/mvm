@@ -473,6 +473,9 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
         BuilderVmError::RuntimeOverlayUnavailable(s) => {
             BuilderVmError::RuntimeOverlayUnavailable(s.clone())
         }
+        BuilderVmError::CliSpawnRefused(refused) => {
+            BuilderVmError::CliSpawnRefused(refused.clone())
+        }
     }
 }
 

@@ -5,12 +5,14 @@
 //! build` into `target/<profile>/`.
 //!
 //! Path resolution (first existing file wins) is [`resolve`]:
-//! `$<ENV_VAR>` override → `$MVM_AUX_BIN_DIR` → alongside the current exe →
-//! workspace `target/{release,debug}`. That order spans build profiles on
-//! purpose, and cargo never rebuilds a helper because the other profile's
-//! binary is about to run it — so a release `mvmctl` with no release helper
-//! beside it is answered by whichever debug helper was built last, at
-//! whatever revision. When the config contract has moved since, the helper
+//! `$<ENV_VAR>` override → `$MVM_AUX_BIN_DIR` → the host binary directory →
+//! workspace `target/{release,debug}`. The host binary directory is the one a
+//! library embedder declared through [`declare_host_binary_dir`], or else the
+//! running executable's own ([`HostProcess::binary_dir`]). That order spans
+//! build profiles on purpose, and cargo never rebuilds a helper because the
+//! other profile's binary is about to run it — so a release `mvmctl` with no
+//! release helper beside it is answered by whichever debug helper was built
+//! last, at whatever revision. When the config contract has moved since, the helper
 //! refuses to start with a JSON parse error deep into a `machine run`.
 //!
 //! [`resolve_verified`] closes that hole. Every helper compiled from this
@@ -33,6 +35,13 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::host::helper_contract;
 
+mod host_process;
+
+pub use host_process::{
+    CLI_BIN, CliSpawn, CliSpawnRefused, HostBinaryDirError, HostProcess, declare_host_binary_dir,
+    declare_library_embedder,
+};
+
 /// A per-VM helper binary, its path-override env var, and the cargo package
 /// that builds it (used when an automatic rebuild is required).
 pub struct AuxBin<'a> {
@@ -49,13 +58,23 @@ pub struct AuxBin<'a> {
 /// selection) use this; everything that is about to *spawn* the helper must
 /// use [`resolve_verified`].
 pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
-    resolve_from(spec, &lookup_from_env(spec))
+    resolve_for(spec, &HostProcess::current())
+}
+
+/// [`resolve`] on behalf of an explicitly described process.
+pub fn resolve_for(spec: &AuxBin, host: &HostProcess) -> Result<PathBuf> {
+    resolve_from(spec, &lookup_for(spec, host)?)
 }
 
 /// Resolve `spec` and refuse to return a helper that does not provably speak
 /// this build's config contract. See the module doc.
 pub fn resolve_verified(spec: &AuxBin) -> Result<PathBuf> {
-    resolve_verified_in(spec, &lookup_from_env(spec), &VerifyEnv::from_process())
+    resolve_verified_for(spec, &HostProcess::current())
+}
+
+/// [`resolve_verified`] on behalf of an explicitly described process.
+pub fn resolve_verified_for(spec: &AuxBin, host: &HostProcess) -> Result<PathBuf> {
+    resolve_verified_in(spec, &lookup_for(spec, host)?, &VerifyEnv::for_host(host))
 }
 
 pub(crate) fn resolve_verified_in(
@@ -184,15 +203,12 @@ pub(crate) struct VerifyEnv {
 }
 
 impl VerifyEnv {
-    fn from_process() -> Self {
+    fn for_host(host: &HostProcess) -> Self {
         let workspace_root =
             workspace_root_from_manifest_dir().filter(|root| root.join("Cargo.toml").is_file());
         Self {
             workspace_root,
-            exe_profile: std::env::current_exe()
-                .ok()
-                .as_deref()
-                .and_then(build_profile_of),
+            exe_profile: host.build_profile(),
             cargo: PathBuf::from("cargo"),
             probe_timeout: PROBE_TIMEOUT,
         }
@@ -362,15 +378,23 @@ pub(crate) struct Lookup {
     pub(crate) dirs: Vec<PathBuf>,
 }
 
-fn lookup_from_env(spec: &AuxBin) -> Lookup {
-    Lookup {
+/// The lookup for `spec` on behalf of `host`. A library embedder is refused
+/// before anything is searched when the helper is `mvmctl` itself: whatever
+/// path resolution found, the caller would run it.
+fn lookup_for(spec: &AuxBin, host: &HostProcess) -> Result<Lookup> {
+    if spec.bin == CLI_BIN {
+        host.refuse_cli_spawn(CliSpawn::HostHelper {
+            env_var: spec.env_var.to_string(),
+        })?;
+    }
+    Ok(Lookup {
         override_path: std::env::var_os(spec.env_var).map(PathBuf::from),
         dirs: assemble_candidate_dirs(
-            current_exe_dir(),
+            host.binary_dir(),
             aux_bin_dir_from_env(),
             workspace_target_dirs(),
         ),
-    }
+    })
 }
 
 fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
@@ -425,12 +449,6 @@ fn missing_hint(bin: &str) -> &'static str {
     } else {
         ""
     }
-}
-
-fn current_exe_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
 }
 
 fn aux_bin_dir_from_env() -> Option<PathBuf> {
@@ -518,7 +536,12 @@ impl BuildProfile {
 
 /// Which profile a binary sits under, read from its parent directory name.
 pub fn build_profile_of(path: &Path) -> Option<BuildProfile> {
-    match path.parent()?.file_name()?.to_str()? {
+    build_profile_of_dir(path.parent()?)
+}
+
+/// Which profile a directory of binaries is, read from its own name.
+pub fn build_profile_of_dir(dir: &Path) -> Option<BuildProfile> {
+    match dir.file_name()?.to_str()? {
         "debug" => Some(BuildProfile::Debug),
         "release" => Some(BuildProfile::Release),
         _ => None,
@@ -1122,6 +1145,90 @@ mod tests {
         assert_eq!(
             cargo_target_dir_from_env(root, Some(OsString::from("build/target"))),
             root.join("build/target")
+        );
+    }
+
+    /// A helper name and override variable no real environment sets, so the
+    /// lookup's answer depends only on the process description.
+    fn declared_only_spec() -> AuxBin<'static> {
+        AuxBin {
+            bin: "mvm-declared-dir-probe-helper",
+            env_var: "MVM_DECLARED_DIR_PROBE_HELPER_PATH",
+            rebuild_package: "mvm-hostd",
+        }
+    }
+
+    #[test]
+    fn a_declared_host_binary_dir_is_searched_in_place_of_the_exe_dir() {
+        let declared = tempfile::tempdir().unwrap();
+        std::fs::write(declared.path().join(declared_only_spec().bin), b"bin").unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+
+        let lookup = lookup_for(&declared_only_spec(), &host).unwrap();
+
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(lookup.dirs.contains(&declared.path().to_path_buf()));
+        assert!(!lookup.dirs.contains(&exe_dir), "{:?}", lookup.dirs);
+        assert_eq!(
+            resolve_from(&declared_only_spec(), &lookup).unwrap(),
+            declared.path().join(declared_only_spec().bin)
+        );
+    }
+
+    #[test]
+    fn an_undeclared_process_searches_beside_its_own_executable() {
+        let lookup = lookup_for(&declared_only_spec(), &HostProcess::undeclared()).unwrap();
+
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(lookup.dirs.contains(&exe_dir), "{:?}", lookup.dirs);
+    }
+
+    #[test]
+    fn a_library_embedder_is_refused_mvmctl_as_a_helper() {
+        let spec = AuxBin {
+            bin: CLI_BIN,
+            env_var: "MVM_QEMU_BRIDGE_PATH",
+            rebuild_package: "mvmctl",
+        };
+        let host = HostProcess::undeclared().as_library_embedder();
+
+        let err = lookup_for(&spec, &host)
+            .err()
+            .expect("mvmctl is never resolved for an embedder");
+        let refused = err
+            .downcast_ref::<CliSpawnRefused>()
+            .expect("refusal is typed");
+        assert_eq!(
+            refused.spawn(),
+            &CliSpawn::HostHelper {
+                env_var: "MVM_QEMU_BRIDGE_PATH".to_string()
+            }
+        );
+        assert!(resolve_verified_for(&spec, &host).is_err());
+    }
+
+    #[test]
+    fn mvmctl_is_still_a_helper_for_mvmctl_and_other_helpers_for_an_embedder() {
+        let mvmctl = AuxBin {
+            bin: CLI_BIN,
+            env_var: "MVM_DECLARED_DIR_PROBE_CLI_PATH",
+            rebuild_package: "mvmctl",
+        };
+        assert!(lookup_for(&mvmctl, &HostProcess::undeclared()).is_ok());
+        assert!(
+            lookup_for(
+                &declared_only_spec(),
+                &HostProcess::undeclared().as_library_embedder()
+            )
+            .is_ok()
         );
     }
 }

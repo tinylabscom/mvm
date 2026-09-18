@@ -509,13 +509,23 @@ pub(crate) fn cleanup_vsock_bridge_sockets(state_dir: &Path) {
 }
 
 pub fn resolve_bridge_executable() -> Result<PathBuf> {
+    resolve_bridge_executable_for(&mvm_vmm::host::aux_bin::HostProcess::current())
+}
+
+/// Resolve the bridge on behalf of `host`. The bridge is a re-exec of
+/// `mvmctl`, so a library embedder is refused before anything is searched.
+fn resolve_bridge_executable_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> Result<PathBuf> {
     // Verified even though the bridge is a re-exec of mvmctl itself: the
     // resolved copy can be the other profile's binary, built whenever.
-    mvm_vmm::host::aux_bin::resolve_verified(&mvm_vmm::host::aux_bin::AuxBin {
-        bin: "mvmctl",
+    mvm_vmm::host::aux_bin::resolve_verified_for(&bridge_spec(), host)
+}
+
+fn bridge_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
+    mvm_vmm::host::aux_bin::AuxBin {
+        bin: mvm_vmm::host::aux_bin::CLI_BIN,
         env_var: "MVM_QEMU_BRIDGE_PATH",
         rebuild_package: "mvmctl",
-    })
+    }
 }
 
 /// Read a [`QemuBridgeSpec`] JSON file and run the bridge — the body of the
@@ -821,4 +831,35 @@ pub fn tail(s: &str, n: usize) -> String {
     }
     let lines: Vec<&str> = s.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+#[cfg(test)]
+mod bridge_executable_tests {
+    use super::*;
+    use mvm_vmm::host::aux_bin::{CliSpawn, CliSpawnRefused, HostProcess};
+
+    #[test]
+    fn a_library_embedder_never_resolves_the_bridge() {
+        let err = resolve_bridge_executable_for(&HostProcess::undeclared().as_library_embedder())
+            .expect_err("the bridge is mvmctl, which an embedder never runs");
+
+        let refused = err
+            .downcast_ref::<CliSpawnRefused>()
+            .expect("refusal is typed");
+        assert_eq!(
+            refused.spawn(),
+            &CliSpawn::HostHelper {
+                env_var: "MVM_QEMU_BRIDGE_PATH".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_bridge_is_mvmctl_under_its_override() {
+        let spec = bridge_spec();
+
+        assert_eq!(spec.bin, "mvmctl");
+        assert_eq!(spec.env_var, "MVM_QEMU_BRIDGE_PATH");
+        assert_eq!(spec.rebuild_package, "mvmctl");
+    }
 }

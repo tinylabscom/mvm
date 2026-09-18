@@ -6,9 +6,15 @@ use std::path::{Path, PathBuf};
 use mvm_core::build_env::BuildEnvironment;
 use mvm_core::config::{ARCH, fc_version, fc_version_short};
 use mvm_core::pool::pool_artifacts_dir;
+use mvm_vmm::host::aux_bin::HostProcess;
 
 use crate::build::{BUILDER_AGENT_GUEST_BIN, BUILDER_AGENT_SERVICE, BUILDER_DIR};
 use crate::scripts::render_script;
+
+/// `mvm-builder-agent` in `host`'s host binary directory, when it is there.
+fn builder_agent_in_host_binary_dir(host: &HostProcess) -> Option<std::path::PathBuf> {
+    host.binary_named("mvm-builder-agent")
+}
 
 #[cfg(test)]
 fn resolve_builder_agent_binary(_env: &dyn BuildEnvironment) -> Result<String> {
@@ -24,13 +30,8 @@ fn resolve_builder_agent_binary(env: &dyn BuildEnvironment) -> Result<String> {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(bin_dir) = exe.parent()
-    {
-        let sibling = bin_dir.join("mvm-builder-agent");
-        if sibling.is_file() {
-            return Ok(sibling.to_string_lossy().to_string());
-        }
+    if let Some(sibling) = builder_agent_in_host_binary_dir(&HostProcess::current()) {
+        return Ok(sibling.to_string_lossy().to_string());
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -172,4 +173,23 @@ pub(crate) fn extract_artifacts_from_output_disk(
     ctx.insert("rev", rev_dir);
     env.shell_exec_visible(&render_script("extract_artifacts_vsock_disk", &ctx)?)?;
     Ok(revision_hash)
+}
+
+#[cfg(test)]
+mod host_binary_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_builder_agent_is_found_in_a_declared_host_binary_dir() {
+        let declared = tempfile::tempdir().unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+        assert_eq!(builder_agent_in_host_binary_dir(&host), None);
+
+        std::fs::write(declared.path().join("mvm-builder-agent"), b"bin").unwrap();
+
+        assert_eq!(
+            builder_agent_in_host_binary_dir(&host),
+            Some(declared.path().join("mvm-builder-agent"))
+        );
+    }
 }

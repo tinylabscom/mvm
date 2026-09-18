@@ -266,6 +266,16 @@ pending. The cycle is real today: `mvm-client` depends on `mvm-hostd`
 So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 `mvm-sdk` as the host-side driver at all.
 
+- [x] Make the runtime say what process it is running in before the crate
+      exists. Sibling-binary resolution and every self-re-exec used
+      `current_exe()` directly, which is `mvmctl` for the CLI and the host
+      interpreter for a loaded library. `HostProcess`
+      (`crates/mvm-vmm/src/host/aux_bin/host_process.rs`) carries the two facts
+      those paths need — a declared helper directory and whether the process is
+      a library embedder — and `refuse_cli_spawn` is the single refusal every
+      would-be CLI spawn goes through. Declarations are set-once process
+      globals rather than environment variables, because mutating the
+      environment of a multithreaded host is unsound.
 - [ ] Add `crates/mvm-hostlib` at the top of the dependency graph, beside
       `mvm-cli`: it links `mvm-client` and exposes one versioned C ABI over the
       `MvmClient` trait plus the drive verbs. Nothing depends on it, so no cycle
