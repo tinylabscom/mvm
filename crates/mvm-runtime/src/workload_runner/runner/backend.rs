@@ -111,9 +111,9 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         id: &VmId,
         _grants: &mvm_contract::grants::Grants,
     ) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
-        Ok(mvm_core::cpu_scope::enforced_grants_for_vm(&vm_state_dir(
-            &id.0,
-        )))
+        Ok(mvm_core::spawn_scope::enforced_grants_for_vm(
+            &vm_state_dir(&id.0),
+        ))
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {

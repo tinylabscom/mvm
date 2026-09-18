@@ -1388,7 +1388,7 @@ mod engine {
             engine,
             linker,
             store,
-            enforced: EnforcedGrants { cpu, wall_clock },
+            enforced: EnforcedGrants::without_spawn_ceilings(cpu, wall_clock),
             _ticker: ticker,
         })
     }

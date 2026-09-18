@@ -72,6 +72,11 @@ mod tests {
         let enforced = EnforcedGrants {
             cpu: EnforcedTier::Cgroup2CpuMax,
             wall_clock: EnforcedTier::Declared,
+            memory: mvm_contract::protocol::resource_controls::EnforcedCeiling::enforced(
+                EnforcedTier::Cgroup2MemoryMax,
+                805_306_368,
+            ),
+            tasks: mvm_contract::protocol::resource_controls::EnforcedCeiling::declared(),
         };
         record_enforced_grants("vm-a", &enforced);
         assert_eq!(enforced_grants_of("vm-a"), Some(enforced));
@@ -97,6 +102,7 @@ mod tests {
             &EnforcedGrants {
                 cpu: EnforcedTier::Cgroup2CpuMax,
                 wall_clock: EnforcedTier::Declared,
+                ..EnforcedGrants::all_declared()
             },
         );
         record_enforced_grants("vm-b", &EnforcedGrants::all_declared());

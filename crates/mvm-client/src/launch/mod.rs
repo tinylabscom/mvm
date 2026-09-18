@@ -1022,7 +1022,20 @@ impl LocalBackend {
         if let Some(span) = outcome.launched_at.map(|at| at.elapsed()) {
             usage.wall_ms = mvm_core::usage_capture::wall_ms(span);
         }
+        // Read before cleanup: a transient's state dir, which names the scope,
+        // is removed below.
+        let memory_limit_exceeded =
+            mvm_core::spawn_scope::ScopeProbe::default().memory_limit_exceeded(&state_dir);
         if let Some(emitter) = build_audit_emitter() {
+            if let Some(exceeded) = &memory_limit_exceeded
+                && let Err(e) = emitter.emit_memory_limit_exceeded(&outcome.plan, exceeded)
+            {
+                tracing::warn!(
+                    error = %e,
+                    machine = name,
+                    "audit emit_memory_limit_exceeded failed (non-fatal)"
+                );
+            }
             if let Err(e) = emitter.emit_exited_with_capture(
                 &outcome.plan,
                 ExitRecord {

@@ -198,15 +198,18 @@ already mapped `MAP_PRIVATE | MAP_FIXED` from its file in the same module.
 task ceiling, so the admission budget's memory charge is bookkeeping, not
 enforcement.
 
-- [ ] W6.1 Put every VMM spawn in a scope carrying `MemoryMax=` (guest RAM plus
-      a fixed overhead) and `TasksMax=`.
-- [ ] W6.2 Bound scope creation with a timeout.
-- [ ] W6.3 Read back the limits actually applied and audit them like the CPU
+- [x] W6.1 Put every VMM spawn in a scope carrying `MemoryMax=` (guest RAM plus
+      a fixed overhead) and `TasksMax=`. Two spawns stay unscoped and are
+      named in ADR-001's limit 6: the plan-less Firecracker harness entry and
+      the macOS-only HVF rootfs-inject helper.
+- [x] W6.2 Bound scope creation with a timeout.
+- [x] W6.3 Read back the limits actually applied and audit them like the CPU
       tier. Record `declared` where the host has no scope mechanism.
-- [ ] W6.4 Update Preview claim 18's limits note in ADR-001 in the same change.
-- [ ] W6.5 Unit tests on the scope argv.
-- [ ] W6.6 Live test on a KVM host: a VMM pushed past its memory limit is killed
-      and audited.
+- [x] W6.4 Update Preview claim 18's limits note in ADR-001 in the same change.
+- [x] W6.5 Unit tests on the scope argv.
+- [x] W6.6 Live test on a KVM host: a VMM pushed past its memory limit is killed
+      and audited. Run against QEMU on an x86_64 KVM host; the probe and the
+      emitter were driven directly, not through a full `mvmctl` launch.
 
 ## W7 — Chunked, parallel, durable checkpoints (#3384)
 

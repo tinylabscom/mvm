@@ -21,48 +21,59 @@ use mvm_vmm::snapshot::SnapshotIO;
 pub struct FirecrackerIO {
     /// Absolute path to the live Firecracker control socket.
     pub socket_path: PathBuf,
-    /// The bound the *fresh* VMM a snapshot load starts is born inside. `None`
-    /// on a handle that only talks to an already-running Firecracker, and on a
-    /// restore whose admitted plan granted no CPU share.
-    cpu_bound: Option<RestoreCpuBound>,
+    /// Who the *fresh* VMM a snapshot load starts is scoped as, and the CPU
+    /// share it is born under. `None` on a handle that only talks to an
+    /// already-running Firecracker, and on a same-identity restore, which
+    /// scopes the VMM by its directory instead.
+    restore_bound: Option<RestoreBound>,
 }
 
-/// The CPU share a restore-launched Firecracker is born inside, and the machine
-/// id its transient scope is named for.
+/// The admitted child a restore-launched Firecracker is scoped as, and the CPU
+/// share its plan granted.
 ///
-/// One value rather than two optional fields: a share with no machine to name
-/// its scope cannot be recorded, and a machine id with no share bounds nothing,
-/// so neither half means anything alone.
+/// The machine id names the scope whether or not a share was granted: the
+/// memory and task ceilings apply to every snapshot load, so a restored child
+/// is scoped under its own name even when its plan grants no CPU.
 #[derive(Clone, Debug)]
-pub struct RestoreCpuBound {
+pub struct RestoreBound {
     pub machine_id: String,
-    pub grant: mvm_contract::grants::CpuGrant,
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
 }
 
 impl FirecrackerIO {
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
-            cpu_bound: None,
+            restore_bound: None,
         }
     }
 
-    /// Carry the CPU bound the restored child's plan was admitted under.
+    /// Carry the identity and CPU bound the restored child's plan was admitted
+    /// under.
     #[must_use]
-    pub fn bounded_by(mut self, bound: Option<RestoreCpuBound>) -> Self {
-        self.cpu_bound = bound;
+    pub fn bounded_by(mut self, bound: RestoreBound) -> Self {
+        self.restore_bound = Some(bound);
         self
     }
 
     /// The scope prefix the fresh VMM's launch line carries, or empty when
-    /// nothing is to be bound. The launch uses this exact value, so reading it
-    /// back is reading what the restored guest actually runs inside.
-    pub(crate) fn restore_scope_prefix(&self, state_dir: &Path) -> String {
-        match &self.cpu_bound {
-            Some(bound) => {
-                super::cpu_scope_prefix(&bound.machine_id, state_dir, Some(&bound.grant))
+    /// this host cannot scope it. The launch uses this exact value, so reading
+    /// it back is reading what the restored guest actually runs inside.
+    pub(crate) fn restore_scope_prefix(&self, state_dir: &Path, guest_memory_mib: u32) -> String {
+        let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(guest_memory_mib);
+        match &self.restore_bound {
+            Some(bound) => super::spawn_scope_prefix(
+                &bound.machine_id,
+                state_dir,
+                &bounds.with_cpu_grant(bound.cpu_grant),
+            ),
+            None => {
+                let machine_id = state_dir
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                super::spawn_scope_prefix(&machine_id, state_dir, &bounds)
             }
-            None => String::new(),
         }
     }
 
@@ -105,7 +116,7 @@ impl FirecrackerIO {
             &vm_dir.to_string_lossy(),
             &socket_str,
             clean_vsock,
-            &self.restore_scope_prefix(vm_dir),
+            &self.restore_scope_prefix(vm_dir, snapshot_guest_memory_mib(dir)),
         )
         .with_context(|| "starting fresh Firecracker for snapshot restore")?;
 
@@ -125,6 +136,21 @@ impl FirecrackerIO {
             .with_context(|| "PUT /snapshot/load")?;
         Ok(())
     }
+}
+
+/// The guest RAM a snapshot restores, in MiB, read off the size of its memory
+/// file.
+///
+/// The memory file is the guest's RAM byte for byte, so its length is the
+/// guest size the restored VMM will map — whatever any record says. Zero when
+/// it cannot be read, which leaves the VMM without a memory ceiling rather than
+/// with one sized from nothing.
+pub(crate) fn snapshot_guest_memory_mib(dir: &Path) -> u32 {
+    const BYTES_PER_MIB: u64 = 1024 * 1024;
+    std::fs::metadata(dir.join(MEM_FILENAME))
+        .ok()
+        .and_then(|meta| u32::try_from(meta.len().div_ceil(BYTES_PER_MIB)).ok())
+        .unwrap_or(0)
 }
 
 impl SnapshotIO for FirecrackerIO {

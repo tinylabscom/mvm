@@ -326,7 +326,7 @@ id = "MVM-SEC-18"
 level = "build"
 witness_kinds = ["fn"]
 suite = "admission_budget"
-statement = "A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism"
+statement = "A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism"
 # Preview, not shipped, and the three controls have sharply different
 # strengths. Admission is strong and host-independent: an operator-configured
 # per-workload ceiling plus a host-wide budget that sums each live machine's
@@ -340,7 +340,10 @@ statement = "A workload's resource consumption is bounded at admission — per w
 # likewise declared but unwired; and a warm-claimed child is bounded at
 # admission by the host-wide ceiling — the weakest bound available, since a
 # shared standby parent carries no grant of its own — with its host-side CPU
-# control re-armed on only one of the three claim paths.
+# control re-armed on only one of the three claim paths. Memory and task
+# ceilings ride the same scope for every VMM spawn, granted or not, but only on
+# a Linux host with a systemd user session; elsewhere they read back `declared`
+# and refuse nothing.
 # The limits are stated in full, marked open or closed individually, in the
 # ADR-001 ledger's "Preview 18 limits" note; do not read this row as enforced
 # without it.
@@ -360,11 +363,17 @@ witnesses = [
     "fn:relay_config_threads_cpu_share_to_quota_scheduler",
     "fn:apply_grants_reads_quota_record_from_state_dir",
     "fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present",
+    "fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings",
     "fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error",
+    "fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement",
+    "fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it",
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
+    "fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
     "fn:a_signed_plan_from_the_launch_path_arms_the_timer",
     "fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota",
+    "fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded",
+    "fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited",
     "fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant",
     "fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant",
     "fn:a_claimed_child_over_the_host_ceiling_is_refused",

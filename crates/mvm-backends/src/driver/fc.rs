@@ -936,7 +936,13 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker_bounded(&abs_dir, &socket, &spec.name, spec.cpu_grant.as_ref())?;
+        start_vm_firecracker_bounded(
+            &abs_dir,
+            &socket,
+            &spec.name,
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                .with_cpu_grant(spec.cpu_grant),
+        )?;
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,

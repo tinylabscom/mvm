@@ -53,6 +53,8 @@ Last updated: 2026-09-18
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.
+  - [x] W6 (#3383): every VMM spawn is scoped with memory and task ceilings,
+        scope creation is bounded, and the ceilings are read back and audited.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`

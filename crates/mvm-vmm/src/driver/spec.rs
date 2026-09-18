@@ -102,8 +102,8 @@ pub struct VmmSpec {
     pub vcpus: u32,
     /// The share of host CPU time the per-VM process may consume, if this
     /// launch was admitted under one. Distinct from `vcpus`, which is how many
-    /// processors the guest sees. Drivers hand it to
-    /// `mvm_core::cpu_scope::bind_cpu_grant` at spawn, so the process is born
+    /// processors the guest sees. Drivers hand it, with `memory_mib`, to
+    /// `mvm_core::spawn_scope::bind_spawn` at spawn, so the process is born
     /// bounded rather than bounded shortly afterwards.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     pub memory_mib: u32,

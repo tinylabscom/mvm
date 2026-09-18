@@ -155,7 +155,7 @@ per the threat model above.
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the universal agent's console and DevOnly handlers require the runtime profile and signed grant |
 | 16 | *(Preview)* Egress substitution keeps a raw secret off the guest, bound-only, with no value in the audit log | data containment | Preview status; the limits are stated on this claim's row in the ledger below and are not restated here |
 | 17 | *(Preview)* Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal audited | data containment | Preview status; the scan is a length-and-hash fingerprint match, not an identity, and the ledger row states what that does and does not catch |
-| 18 | *(Preview)* A workload's resource consumption is bounded at admission, and bound at spawn where the host has a mechanism | cross-cutting | Preview status; admission bounding holds everywhere, spawn-time CPU control is partial and backend-dependent, and the ledger row enumerates which backends are covered |
+| 18 | *(Preview)* A workload's resource consumption is bounded at admission, and bound at spawn where the host has a mechanism | cross-cutting | Preview status; admission bounding holds everywhere, spawn-time CPU control is partial and backend-dependent, spawn-time memory and task ceilings hold only on a Linux host with a systemd user session, and the ledger row enumerates which backends are covered |
 | 19 | Every dataset, model, prompt, agent, policy, and compute environment named by a workload carries a content-derived identity in the signed plan, and a pinned host share that drifts after admission fails closed | cross-cutting | `--asset KIND:PATH` hashes the asset through the canonical `hash_source` tree walk into `AssetIdentity` records inside the signed `ExecutionPlan`; admission also pins each directory share's content digest, re-verified at mount enforcement, so a post-admission edit of the host directory is refused; synthesis auto-derives the compute-environment identity from the measured image/kernel/verity state; a `plan.asset_identities` chain-signed entry carries kind, locator, and digest labels; `mvmctl trust audit asset id <path>` recomputes the same digest offline for comparison |
 | 20 | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | supply chain | `release.yml` signs archives and checksum manifests keyless through GitHub OIDC, publishing bundles that carry the Fulcio certificate and Rekor inclusion proof; raw kernels, root filesystems, and metadata are covered by the signed manifests rather than individual bundles; the `verify-release` job re-downloads the published set, verifies the signatures against an identity regexp pinned to this workflow at a tag, and checks the covered blobs against their authenticated digests; the build gate refuses a missing or malformed bundle, and the fetch gate refuses an unsigned manifest before parsing it, with the hash-skip hatch explicitly not waiving the signature. The self-update path is weaker by design and warns rather than refusing when cosign is absent |
 
@@ -251,6 +251,21 @@ four-CPU guest sees a quarter of what it is consuming and never throttles. The
 achieved tier is read back from the scheduler's own measured record. In both
 cases the receipt records what was measured rather than what was asked for.
 libkrun has no in-process vCPU control and stays declared-only.
+
+*Memory and tasks* are bounded at spawn on the same mechanism, for every VMM
+spawn rather than only a granted one. On a Linux host with a systemd user
+session, the scope every VMM process is born into carries `MemoryMax=` (guest
+RAM plus a fixed overhead margin), `MemorySwapMax=0`, `TasksMax=` and
+`OOMPolicy=stop`, whether or not the plan granted a CPU share. These are not
+grants — nothing in a plan asks for them — and they exist to stop a VMM whose
+device emulation leaks or whose helper threads run away from exhausting the
+host, which the admission budget, being bookkeeping, cannot do. `memory.max` and
+`pids.max` are read back off the live scope, with their values, into the same
+`plan.grants_enforced` entry the CPU tier is written to, and a scope the OOM
+killer ended is recorded as `plan.memory_limit_exceeded` when the run's exit is
+reported. Scope creation is bounded: a service manager that never creates the
+scope fails the launch after a fixed deadline instead of hanging it. Limit 6
+below states where none of this holds.
 
 *Wall clock* is enforced on the tiers with a per-VM supervisor process of
 ours — libkrun, HVF, and the AppleContainer tier that runs the same driver and
@@ -351,7 +366,7 @@ not paraphrase this row without them.
    Firecracker's preloaded child was started before the claim arrived, and the
    HVF resident handoff resumes the parent's own supervisor by signal — a
    process born grant-less as shared pool capacity, which binding now would
-   bind the pool rather than the claim. `bind_cpu_grant` wraps a `Command` and
+   bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach, so on those two paths a claimed child's
    CPU bound is a ledger entry and not a `cpu.max`. Wall clock is likewise not
    re-armed on a restored or claimed child, per limit 2.
@@ -365,6 +380,50 @@ not paraphrase this row without them.
    (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`). Each is a
    deliberate choice of the undercount failure over the lockout failure, which
    is the same judgement limit 4's counting rule makes.
+6. **Memory and task ceilings at spawn hold only on a Linux host with a systemd
+   user session. (PARTIAL, by host.)** Where they hold, every VMM spawn —
+   Firecracker cold boots and every Firecracker snapshot load (fork, pool
+   preload, same-identity warm restore), QEMU, and the libkrun and HVF
+   supervisors, cold or restored — is born inside a scope carrying
+   `MemoryMax=` of guest RAM plus `VMM_MEMORY_OVERHEAD_MIB`, `MemorySwapMax=0`,
+   `TasksMax=VMM_TASKS_MAX` and `OOMPolicy=stop`
+   (`fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings`). The
+   overhead margin is 256 MiB against a measured charge beyond guest RAM of
+   about 2 MiB for Firecracker and 34 MiB (38 MiB at peak) for QEMU with its RAM
+   preallocated, on a 512 MiB, 2-vCPU guest; the libkrun supervisor was not
+   measured. The ceilings are read back off `memory.max` and `pids.max` with
+   their values
+   (`fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement`) and
+   audited beside the CPU tier. A live run measured the kill: a payload growing
+   past its ceiling was OOM-killed and its unit reported "oom-kill" at the
+   ceiling read back
+   (`fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded`,
+   `#[ignore]`d for the same reason as the CPU witness). What stays open:
+   - **No mechanism, no ceiling.** macOS (HVF and libkrun), and a Linux host
+     without `systemd-run` or a user session bus, record both dimensions as
+     `declared`. This is **not** an admission requirement, under `--prod` or
+     otherwise: the ceilings are host protection that nobody asked for, and
+     refusing every sealed run on such a host is a different decision from the
+     CPU path's refusal of a share the plan did ask for. A sealed run there
+     boots, and its `plan.grants_enforced` entry says `declared`.
+   - **A present but unresponsive manager fails the launch.** Measured: a
+     stopped user manager held `systemd-run` for 90 s before it gave up. A
+     spawn now kills its launcher and fails after `SCOPE_CREATION_TIMEOUT`
+     (`fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it`), in
+     dev and prod alike.
+   - **The kill is audited only where an exit is reported.**
+     `plan.memory_limit_exceeded` is written by the waited exit report of a
+     launch that admitted a plan. A persistent machine nobody waits on is
+     killed just the same, and the only record is its unit's "oom-kill"
+     result.
+   - **The budget does not count the margin.** Limit 5's budget charges each
+     machine its configured guest memory, so the sum of the enforced ceilings
+     can exceed the budget by the overhead margin per live machine.
+   - **Two spawns are not scoped.** The unbounded Firecracker entry used only
+     by a live snapshot harness that admits no plan, and the macOS-only HVF
+     rootfs-inject helper VM, spawn without a scope.
+   - **Wasm has no VMM process to scope** and reports both dimensions as
+     `declared`; its store limits are not reported here.
 
 ### Explicit out of scope
 
@@ -805,7 +864,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:following_the_console_never_writes_to_it | runtime profile + signed VerbGrant + host accessible-gate + console policy (ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:network_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
-| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_signed_plan_from_the_launch_path_arms_the_timer, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log. CPU is declared-only for libkrun, wall clock is enforced on the tiers whose supervisor holds the admitted plan (libkrun, HVF, AppleContainer), wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
+| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement, fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_signed_plan_from_the_launch_path_arms_the_timer, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded, fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited, fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log + cgroup v2 `memory.max` (guest RAM plus a fixed overhead margin, swap excluded) and `pids.max` on that same scope for every VMM spawn on a Linux host with a systemd user session, read back with their values and audited, with an OOM kill recorded as `plan.memory_limit_exceeded` on the waited exit-report path. CPU is declared-only for libkrun, wall clock is enforced on the tiers whose supervisor holds the admitted plan (libkrun, HVF, AppleContainer), wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 | 19 | Every workload asset and pinned host share is content-identified in the signed plan, and share drift after admission fails closed | fn:admitted_share_digest_refuses_directory_changed_after_admission, fn:synthesized_plan_records_share_and_caller_asset_identities, fn:asset_identities_event_carries_kind_name_digest_labels, fn:asset_identity_rejects_malformed_digests, fn:test_audit_asset_id_parses | content-derived AssetIdentity records inside the signed ExecutionPlan (digest validated as 64-hex at the type boundary) + admission-time share digest pins re-verified by `enforce_admitted_shares` at mount time + synthesis auto-derivation of the compute environment + chain-signed `plan.asset_identities` emission + offline digest recomputation via `trust audit asset id` | Shipped |
 | 20 | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | ci:verify-release, ci:release-provenance, fn:accepted_identities_are_the_versioned_release_workflow, fn:a_missing_bundle_refuses_and_names_the_asset, fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing, fn:skip_hash_verify_does_not_waive_the_manifest_signature | keyless cosign over release archives and checksum manifests with Fulcio + Rekor bundles; raw kernels, root filesystems, and metadata are authenticated by digest entries in those signed manifests. The `verify-release` job re-verifies the signatures after publication and checks each covered blob; the build gate refuses a missing or malformed bundle and the fetch gate refuses an unsigned manifest before parsing (ADR-001 §W5). Limit: the self-update path warns rather than refusing when cosign is absent — see "Claim 20 limits" | Shipped |
 

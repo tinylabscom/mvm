@@ -168,13 +168,6 @@
       ]
     },
     {
-      "path": "crates/mvm-core/src/cpu_scope.rs",
-      "package": "mvm-core",
-      "claims": [
-        18
-      ]
-    },
-    {
       "path": "crates/mvm-core/src/crypto/policy/mount.rs",
       "package": "mvm-core",
       "claims": [
@@ -197,6 +190,13 @@
       ]
     },
     {
+      "path": "crates/mvm-core/src/spawn_scope.rs",
+      "package": "mvm-core",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-core/src/vcpu_quota.rs",
       "package": "mvm-core",
       "claims": [
@@ -214,6 +214,7 @@
       "path": "crates/mvm-hostd/src/audit/emitter.rs",
       "package": "mvm-hostd",
       "claims": [
+        18,
         19
       ]
     },

@@ -120,7 +120,7 @@ pub struct VmStartConfig {
     ///
     /// Carried on the launch config rather than applied after `start` because a
     /// backend has to wrap its own spawn for the per-VM process to be *born*
-    /// bounded — see [`crate::cpu_scope`]. `None` is uncapped.
+    /// bounded — see [`crate::spawn_scope`]. `None` is uncapped.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     /// Memory cap in MiB. The guest may not allocate beyond this. When
     /// [`mem_initial_mib`](Self::mem_initial_mib) is `None`, this is

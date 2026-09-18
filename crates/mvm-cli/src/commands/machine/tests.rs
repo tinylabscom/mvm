@@ -3433,6 +3433,7 @@ fn machine_inspect_shows_the_enforced_tier_not_only_the_request() {
         &mvm_contract::protocol::resource_controls::EnforcedGrants {
             cpu: mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2CpuMax,
             wall_clock: mvm_contract::protocol::resource_controls::EnforcedTier::Declared,
+            ..mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared()
         },
     );
 
