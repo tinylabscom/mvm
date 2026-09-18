@@ -1,6 +1,10 @@
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
+use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
+
+use crate::builder_vm::BuilderVmError;
+
 /// Whether an owned builder endpoint received the teardown signal.
 ///
 /// The endpoint is deliberately terminated after its builder VM exits. That
@@ -18,6 +22,25 @@ pub(super) fn builder_egress_endpoint_was_terminated(status: &ExitStatus) -> boo
         let _ = status;
         false
     }
+}
+
+/// The egress supervisor command for `host`: the current executable re-run as
+/// `mvmctl`. A library embedder's executable is not `mvmctl`, so it is refused
+/// before any command exists.
+pub(super) fn builder_egress_supervisor_command_for(
+    host: &HostProcess,
+    endpoint_path: &Path,
+) -> Result<Command, BuilderVmError> {
+    host.refuse_cli_spawn(CliSpawn::BuilderEgressSupervisor)?;
+    let mvmctl_path = std::env::current_exe().map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "resolve mvmctl for persistent builder egress supervisor: {e}"
+        ))
+    })?;
+    Ok(builder_egress_supervisor_command(
+        &mvmctl_path,
+        endpoint_path,
+    ))
 }
 
 pub(super) fn builder_egress_supervisor_command(
@@ -53,5 +76,35 @@ mod tests {
 
         assert!(builder_egress_endpoint_was_terminated(&terminated));
         assert!(!builder_egress_endpoint_was_terminated(&failed));
+    }
+
+    #[test]
+    fn mvmctl_runs_its_own_executable_as_the_egress_supervisor() {
+        let command = builder_egress_supervisor_command_for(
+            &HostProcess::undeclared(),
+            Path::new("/opt/mvm-network-endpoint"),
+        )
+        .expect("mvmctl may re-run itself");
+
+        assert_eq!(
+            command.get_program(),
+            std::env::current_exe().unwrap().as_os_str()
+        );
+    }
+
+    #[test]
+    fn a_library_embedder_constructs_no_egress_supervisor_command() {
+        let err = builder_egress_supervisor_command_for(
+            &HostProcess::undeclared().as_library_embedder(),
+            Path::new("/opt/mvm-network-endpoint"),
+        )
+        .expect_err("an embedder never re-runs its executable as mvmctl");
+
+        match err {
+            BuilderVmError::CliSpawnRefused(refused) => {
+                assert_eq!(refused.spawn(), &CliSpawn::BuilderEgressSupervisor);
+            }
+            other => panic!("expected a typed refusal, got {other}"),
+        }
     }
 }

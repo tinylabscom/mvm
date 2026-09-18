@@ -10,14 +10,29 @@
 //! The build is last on purpose. It costs minutes and needs the pinned
 //! cross-compile toolchain, so it is preflighted and every refusal names all
 //! three ways past it.
+//!
+//! None of that applies to a library embedding the runtime. It is not `mvmctl`
+//! and must never run or build one, so once [`declare_library_embedder`] has
+//! been called every rung of the ladder refuses with
+//! [`BuilderVmError::CliSpawnRefused`] instead.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 
+use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
+
 use crate::builder_vm::BuilderVmError;
 use crate::libkrun_builder::builder_vm_source_checkout_root;
+
+/// Declare that this process is a library embedding the runtime, not `mvmctl`.
+///
+/// Set-once and irreversible. Afterwards builder-VM bootstrap, the cargo build
+/// of a bootstrap helper, and the builder egress supervisor all refuse rather
+/// than run the current executable or an `mvmctl`; the host has to have been
+/// bootstrapped with `mvmctl bootstrap` beforehand.
+pub use mvm_vmm::host::aux_bin::declare_library_embedder;
 
 pub(crate) const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
@@ -59,6 +74,13 @@ fn current_exe_as_bootstrap_helper() -> Option<PathBuf> {
 /// one ran. `Ok(false)` is a decline, not a failure: the caller falls back to
 /// its own missing-image error, which says what the cache needs.
 pub(crate) fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmError> {
+    auto_bootstrap_builder_vm_image_for(arch_dir, &HostProcess::current())
+}
+
+fn auto_bootstrap_builder_vm_image_for(
+    arch_dir: &Path,
+    host: &HostProcess,
+) -> Result<bool, BuilderVmError> {
     if std::env::var_os(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV).is_some() {
         return Ok(false);
     }
@@ -69,6 +91,10 @@ pub(crate) fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, B
         return Ok(false);
     }
 
+    // Refused before the checkout test, so a cold cache reads the same to an
+    // embedder whether or not it was built from a source checkout.
+    host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
+
     #[cfg(test)]
     if std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).is_none() {
         return Ok(false);
@@ -78,24 +104,13 @@ pub(crate) fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, B
         return Ok(false);
     };
 
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap")
-        .env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        // Source-checkout auto-bootstrap on Linux should follow the Linux
-        // builder path, not the libkrun-default host path. The runtime-overlay
-        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
-        // aligned so a cold builder-image cache does not fall into a libkrun
-        // networking prerequisite that the Linux builder path itself does not
-        // require.
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
+    let bootstrap_bin = resolve_builder_vm_bootstrap_bin_for(&workspace_root, host)?;
+    let mut cmd = builder_vm_helper_command(
+        host,
+        &bootstrap_bin,
+        &workspace_root,
+        BuilderVmHelperCommand::Bootstrap,
+    )?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn builder VM bootstrap helper {}: {e}",
@@ -142,27 +157,31 @@ impl BuilderVmHelperCommand {
 }
 
 fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<bool, BuilderVmError> {
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
+    maybe_reexec_builder_vm_helper_for(
+        command,
+        &HostProcess::current(),
+        builder_vm_source_checkout_root(),
+    )
+}
+
+fn maybe_reexec_builder_vm_helper_for(
+    command: BuilderVmHelperCommand,
+    host: &HostProcess,
+    source_checkout_root: Option<PathBuf>,
+) -> Result<bool, BuilderVmError> {
+    // Refused before the checkout test, for the same reason auto-bootstrap is:
+    // a decline would read to an embedder as permission to proceed in-process.
+    host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
+    let Some(workspace_root) = source_checkout_root else {
         return Ok(false);
     };
 
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
+    let bootstrap_bin = resolve_builder_vm_bootstrap_bin_for(&workspace_root, host)?;
     if current_exe_matches(&bootstrap_bin) {
         return Ok(false);
     }
 
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root).args(command.args());
-    if command == BuilderVmHelperCommand::Bootstrap {
-        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
-    }
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
+    let mut cmd = builder_vm_helper_command(host, &bootstrap_bin, &workspace_root, command)?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn embedded builder VM helper {}: {e}",
@@ -179,6 +198,41 @@ fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<boo
     Ok(true)
 }
 
+/// The command that runs the `mvmctl` at `helper` for `command` from
+/// `workspace_root`, refused for a library embedder.
+///
+/// The resolver has refused an embedder already; refusing here as well keeps
+/// the one place a helper `Command` is built from depending on every caller
+/// having gone through it.
+fn builder_vm_helper_command(
+    host: &HostProcess,
+    helper: &Path,
+    workspace_root: &Path,
+    command: BuilderVmHelperCommand,
+) -> Result<Command, BuilderVmError> {
+    host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
+    let mut cmd = Command::new(helper);
+    cmd.current_dir(workspace_root).args(command.args());
+    if command == BuilderVmHelperCommand::Bootstrap {
+        // Marks the child as a bootstrap so it never spawns one of its own.
+        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
+        // Source-checkout bootstrap on Linux should follow the Linux builder
+        // path, not the libkrun-default host path. The runtime-overlay
+        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
+        // aligned so a cold builder-image cache does not fall into a libkrun
+        // networking prerequisite that the Linux builder path itself does not
+        // require.
+        cmd.env(
+            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
+            "qemu",
+        );
+    }
+    Ok(cmd)
+}
+
 fn current_exe_matches(path: &Path) -> bool {
     let Ok(current_exe) = std::env::current_exe() else {
         return false;
@@ -188,9 +242,23 @@ fn current_exe_matches(path: &Path) -> bool {
     current == expected
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_builder_vm_bootstrap_bin(
     workspace_root: &Path,
 ) -> Result<PathBuf, BuilderVmError> {
+    resolve_builder_vm_bootstrap_bin_for(workspace_root, &HostProcess::current())
+}
+
+/// Resolve the bootstrap helper on behalf of `host`.
+///
+/// Every rung yields an `mvmctl` — a named one, the current executable, a
+/// cached build, or a fresh `cargo build --bin mvmctl` — so a library embedder
+/// is refused before the first rung, an explicit override included.
+fn resolve_builder_vm_bootstrap_bin_for(
+    workspace_root: &Path,
+    host: &HostProcess,
+) -> Result<PathBuf, BuilderVmError> {
+    host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
     if let Some(path) = std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).map(PathBuf::from) {
         if path.is_file() {
             return Ok(path);
@@ -228,8 +296,12 @@ pub(crate) fn resolve_builder_vm_bootstrap_bin(
     })?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd =
-        builder_vm_bootstrap_helper_build_command(&cargo, workspace_root, &helper_target_dir);
+    let mut cmd = builder_vm_bootstrap_helper_build_command(
+        host,
+        &cargo,
+        workspace_root,
+        &helper_target_dir,
+    )?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn cargo to build mvmctl bootstrap helper: {e}"
@@ -289,11 +361,15 @@ fn bootstrap_helper_toolchain_refusal(reason: &str) -> String {
     )
 }
 
+/// The `cargo build --bin mvmctl` that produces a bootstrap helper, refused for
+/// a library embedder.
 fn builder_vm_bootstrap_helper_build_command(
+    host: &HostProcess,
     cargo: &std::ffi::OsStr,
     workspace_root: &Path,
     helper_target_dir: &Path,
-) -> Command {
+) -> Result<Command, BuilderVmError> {
+    host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelperBuild)?;
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace_root)
         .env("CARGO_TARGET_DIR", helper_target_dir)
@@ -305,7 +381,7 @@ fn builder_vm_bootstrap_helper_build_command(
             "--features",
             "embed-host-bins",
         ]);
-    cmd
+    Ok(cmd)
 }
 
 fn bootstrap_helper_needs_rebuild(helper_bin: &Path, workspace_root: &Path) -> bool {
@@ -579,10 +655,12 @@ mod tests {
     #[test]
     fn bootstrap_helper_build_command_uses_isolated_target_dir() {
         let cmd = builder_vm_bootstrap_helper_build_command(
+            &HostProcess::undeclared(),
             std::ffi::OsStr::new("cargo"),
             Path::new("/workspace"),
             Path::new("/tmp/helper-target"),
-        );
+        )
+        .expect("mvmctl may build its helper");
 
         let args = cmd
             .get_args()
@@ -747,6 +825,209 @@ mod tests {
         set_mtime(&helper, newer);
 
         assert!(!bootstrap_helper_needs_rebuild(&helper, workspace.path()));
+    }
+
+    fn assert_refused(err: BuilderVmError, expected: CliSpawn) {
+        match err {
+            BuilderVmError::CliSpawnRefused(refused) => {
+                assert_eq!(refused.spawn(), &expected);
+                assert!(
+                    refused.to_string().contains("mvmctl bootstrap"),
+                    "{refused}"
+                );
+            }
+            other => panic!("expected a typed refusal, got {other}"),
+        }
+    }
+
+    fn embedder() -> HostProcess {
+        HostProcess::undeclared().as_library_embedder()
+    }
+
+    /// Every rung of the ladder yields an `mvmctl`, the explicitly named one
+    /// included, so an embedder is refused before any of them is consulted.
+    #[test]
+    fn a_library_embedder_resolves_no_bootstrap_helper_even_when_one_is_named() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        let explicit = scratch.path().join("mvmctl");
+        std::fs::write(&explicit, b"helper").unwrap();
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &explicit);
+        let _declared = DeclaredPayload::set(true);
+
+        let err = resolve_builder_vm_bootstrap_bin_for(scratch.path(), &embedder())
+            .expect_err("an embedder never resolves an mvmctl");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+    }
+
+    /// The seam that constructs `cargo build --bin mvmctl` refuses on its own,
+    /// so no caller can reach the command by skipping the resolver.
+    #[test]
+    fn a_library_embedder_constructs_no_helper_build_command() {
+        let err = builder_vm_bootstrap_helper_build_command(
+            &embedder(),
+            std::ffi::OsStr::new("cargo"),
+            Path::new("/workspace"),
+            Path::new("/tmp/helper-target"),
+        )
+        .expect_err("an embedder never builds mvmctl");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelperBuild);
+    }
+
+    /// A cold cache is reported to an embedder as the refusal, never answered
+    /// by spawning a helper — here one that would record that it ran.
+    #[test]
+    fn a_library_embedder_never_auto_bootstraps() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.remove(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
+        let ran = scratch.path().join("ran");
+        let script = executable_script(
+            scratch.path(),
+            &format!("#!/bin/sh\ntouch {}\n", ran.display()),
+        );
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
+
+        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder())
+            .expect_err("an embedder is refused, not declined");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+        assert!(!ran.exists(), "the helper must not have run");
+    }
+
+    /// The refusal precedes every quiet decline that follows it — no named
+    /// helper, no source checkout — so an embedder learns why a cold cache
+    /// cannot be filled rather than getting a bare missing-image error.
+    #[test]
+    fn a_library_embedder_is_refused_before_auto_bootstrap_can_decline() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.remove(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_BIN_ENV);
+
+        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder())
+            .expect_err("an embedder is refused, not declined");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+    }
+
+    /// With nothing declared the named helper is still the one resolved.
+    #[test]
+    fn an_undeclared_process_still_resolves_the_named_helper() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        let explicit = scratch.path().join("mvmctl");
+        std::fs::write(&explicit, b"helper").unwrap();
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &explicit);
+
+        assert_eq!(
+            resolve_builder_vm_bootstrap_bin_for(scratch.path(), &HostProcess::undeclared())
+                .unwrap(),
+            explicit
+        );
+    }
+
+    /// The seam that constructs the `mvmctl` helper command refuses on its own,
+    /// for both helper verbs.
+    #[test]
+    fn a_library_embedder_constructs_no_helper_command() {
+        for command in [
+            BuilderVmHelperCommand::Bootstrap,
+            BuilderVmHelperCommand::SdkSidecarBuild { force: true },
+        ] {
+            let err = builder_vm_helper_command(
+                &embedder(),
+                Path::new("/opt/mvmctl"),
+                Path::new("/workspace"),
+                command,
+            )
+            .expect_err("an embedder never runs mvmctl");
+
+            assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+        }
+    }
+
+    /// The re-exec entry points refuse before the source-checkout test, so an
+    /// embedder outside a checkout never reads a decline as leave to bootstrap
+    /// in-process.
+    #[test]
+    fn a_library_embedder_outside_a_checkout_is_refused_the_helper_reexec() {
+        let err = maybe_reexec_builder_vm_helper_for(
+            BuilderVmHelperCommand::SdkSidecarBuild { force: false },
+            &embedder(),
+            None,
+        )
+        .expect_err("an embedder is refused, not declined");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+    }
+
+    /// Inside a checkout, with a helper named and ready to run, an embedder
+    /// still runs nothing.
+    #[test]
+    fn a_library_embedder_inside_a_checkout_runs_no_reexec_helper() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        let ran = scratch.path().join("ran");
+        let script = executable_script(
+            scratch.path(),
+            &format!("#!/bin/sh\ntouch {}\n", ran.display()),
+        );
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
+
+        let err = maybe_reexec_builder_vm_helper_for(
+            BuilderVmHelperCommand::SdkSidecarBuild { force: false },
+            &embedder(),
+            Some(scratch.path().to_path_buf()),
+        )
+        .expect_err("an embedder is refused, not declined");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+        assert!(!ran.exists(), "the helper must not have run");
+    }
+
+    #[test]
+    fn helper_commands_carry_the_bootstrap_marker_only_for_a_bootstrap() {
+        let marker = |command| {
+            builder_vm_helper_command(
+                &HostProcess::undeclared(),
+                Path::new("/opt/mvmctl"),
+                Path::new("/workspace"),
+                command,
+            )
+            .expect("mvmctl may run its helper")
+            .get_envs()
+            .any(|(key, value)| {
+                key == BUILDER_VM_BOOTSTRAP_ACTIVE_ENV && value.is_some_and(|v| v == "1")
+            })
+        };
+
+        assert!(marker(BuilderVmHelperCommand::Bootstrap));
+        assert!(!marker(BuilderVmHelperCommand::SdkSidecarBuild {
+            force: false
+        }));
+    }
+
+    fn executable_script(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join("helper.sh");
+        std::fs::write(&script, body).unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
     }
 
     #[test]

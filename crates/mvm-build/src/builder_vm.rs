@@ -630,6 +630,11 @@ pub enum BuilderVmError {
     #[error("extracting artifacts from builder sandbox: {0}")]
     ExtractionFailed(String),
 
+    /// A library embedding the runtime reached a path that would run or build
+    /// `mvmctl`. The host has to be bootstrapped with `mvmctl bootstrap` first.
+    #[error(transparent)]
+    CliSpawnRefused(#[from] mvm_vmm::host::aux_bin::CliSpawnRefused),
+
     /// Kernel-panic detected on the supervisor's console log.
     /// `Child::wait()` would otherwise block forever (libkrun's
     /// `krun_start_enter` doesn't notice a panicked guest), so a

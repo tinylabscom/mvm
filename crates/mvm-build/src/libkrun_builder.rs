@@ -79,6 +79,7 @@ use crate::builder_vm::{
 };
 
 mod egress_process;
+mod host_binaries;
 
 use crate::stage0_host::{
     materialize_stage0_root_disk, read_console_tail, stage0_guest_halt_completed_successfully,
@@ -88,7 +89,13 @@ use crate::stage0_host::{
 // `stage0_host` when Stage 0 stopped being libkrun-only.
 #[cfg(test)]
 use crate::stage0_host::{Stage0HaltOutcome, stage0_console_halt_outcome, stage0_root_mount_nodes};
-use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supervisor_command};
+use egress_process::{
+    builder_egress_endpoint_was_terminated, builder_egress_supervisor_command_for,
+};
+use host_binaries::{
+    endpoint_in_host_binary_dir, endpoint_predates_running_exe, supervisor_target_roots,
+};
+use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
 // Moved to `builder_vm` (nothing about them is libkrun-shaped); re-exported
 // here so existing callers keep compiling while they migrate.
 pub use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob, BuilderShellResult};
@@ -385,6 +392,9 @@ impl BuilderVsockEgressEndpoint {
         transport: BuilderEndpointTransport,
         identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
     ) -> Result<Self, BuilderVmError> {
+        // Refused before the endpoint is resolved, which may build it.
+        let host = HostProcess::current();
+        host.refuse_cli_spawn(CliSpawn::BuilderEgressSupervisor)?;
         let endpoint_path = resolve_network_endpoint_path()?;
         let config = serde_json::json!({
             "tenant_id": "builder",
@@ -402,11 +412,7 @@ impl BuilderVsockEgressEndpoint {
             },
         });
 
-        let mvmctl_path = std::env::current_exe().map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "resolve mvmctl for persistent builder egress supervisor: {e}"
-            ))
-        })?;
+        let mut endpoint_command = builder_egress_supervisor_command_for(&host, &endpoint_path)?;
         let stderr_log_path = state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE);
         let stderr_log = std::fs::OpenOptions::new()
             .create(true)
@@ -418,7 +424,6 @@ impl BuilderVsockEgressEndpoint {
                     stderr_log_path.display()
                 ))
             })?;
-        let mut endpoint_command = builder_egress_supervisor_command(&mvmctl_path, &endpoint_path);
         let child = endpoint_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -517,30 +522,6 @@ impl Drop for BuilderVsockEgressEndpoint {
     }
 }
 
-/// Whether `candidate` predates the running executable.
-///
-/// The endpoint is a separate binary that `machine run` does not build, so a
-/// copy left by an older checkout sits on disk and is picked up in preference
-/// to building a current one. A guest and a host from different builds then
-/// speak different protocols, and the only symptom is a framing error whose
-/// length field decodes to ASCII from the wrong wire format.
-///
-/// Modification time is the cheap comparison that catches it: both binaries
-/// come out of the same workspace, so an endpoint older than the `mvmctl`
-/// running it cannot have been built from this source. Unknowable times mean
-/// no opinion — rebuild rather than refuse, since a false stale reading costs
-/// a build and a false fresh one costs a mystery.
-fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool {
-    let modified = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
-    let Some(exe) = std::env::current_exe().ok().as_deref().and_then(modified) else {
-        return false;
-    };
-    let Some(cand) = modified(candidate) else {
-        return true;
-    };
-    cand < exe
-}
-
 fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
         if path.is_file() {
@@ -552,13 +533,8 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
         )));
     }
 
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(dir) = current_exe.parent()
-    {
-        let candidate = dir.join("mvm-network-endpoint");
-        if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
-            return Ok(candidate);
-        }
+    if let Some(candidate) = endpoint_in_host_binary_dir(&HostProcess::current()) {
+        return Ok(candidate);
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2890,8 +2866,8 @@ const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
 /// `mvm-runtime::libkrun::resolve_supervisor_path` (kept local rather than
-/// re-exported to keep the dep graph flat). Order: env override → next to
-/// current_exe → current source checkout build → PATH.
+/// re-exported to keep the dep graph flat). Order: env override → the host
+/// binary directory → current source checkout build → PATH.
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
 /// matters because a PATH hit is an installed copy (`cargo install`) that a
 /// source-checkout `cargo build` never refreshes — so it can silently lag the
@@ -3213,33 +3189,6 @@ fn supervisor_path_in_target_dir(target_dir: &Path, profile: &str) -> PathBuf {
     target_dir.join(profile).join(LIBKRUN_SUPERVISOR_BIN)
 }
 
-fn supervisor_target_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
-        roots.push(if target_dir.is_absolute() {
-            target_dir
-        } else {
-            workspace_root.join(target_dir)
-        });
-    }
-    roots.push(workspace_root.join("target"));
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-        && let Some(target_dir) = exe_dir.parent()
-        && target_dir.file_name().is_some_and(|name| name == "target")
-    {
-        roots.push(target_dir.to_path_buf());
-    }
-    let mut deduped = Vec::new();
-    for root in roots {
-        let normalized = root.canonicalize().unwrap_or(root);
-        if !deduped.iter().any(|existing| existing == &normalized) {
-            deduped.push(normalized);
-        }
-    }
-    deduped
-}
-
 fn locate_supervisor_in_target_roots(target_roots: &[PathBuf]) -> Option<PathBuf> {
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for root in target_roots {
@@ -3303,6 +3252,10 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
 }
 
 fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
+    resolve_supervisor_path_for(&HostProcess::current())
+}
+
+fn resolve_supervisor_path_for(host: &HostProcess) -> Result<PathBuf, BuilderVmError> {
     // An explicit override that points at a non-file is a hard error, not a
     // silent fall-through to a different binary — surface the operator's typo.
     let env_override = match std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
@@ -3321,8 +3274,8 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
     if let Some(path) = env_override {
         return Ok(path);
     }
-    let exe = std::env::current_exe().ok();
-    let exe_dir = exe.as_deref().and_then(Path::parent);
+    let binary_dir = host.binary_dir();
+    let exe_dir = binary_dir.as_deref();
     let on_path = which::which(LIBKRUN_SUPERVISOR_BIN).ok();
     let source_checkout_build = match source_checkout_supervisor(exe_dir) {
         Some(Ok(path)) => Some(path),
@@ -4573,7 +4526,7 @@ mod tests {
 
     #[test]
     fn builder_egress_supervisor_keeps_protocol_stdout_free_of_tracing() {
-        let command = builder_egress_supervisor_command(
+        let command = egress_process::builder_egress_supervisor_command(
             Path::new("/opt/mvmctl"),
             Path::new("/opt/mvm-network-endpoint"),
         );
@@ -4607,6 +4560,19 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_libkrun_supervisor_in_a_declared_host_binary_dir_wins() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove("MVM_LIBKRUN_SUPERVISOR_PATH");
+        let declared = TempDir::new().unwrap();
+        let supervisor = declared.path().join(LIBKRUN_SUPERVISOR_BIN);
+        std::fs::write(&supervisor, b"bin").unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+
+        assert_eq!(resolve_supervisor_path_for(&host).unwrap(), supervisor);
+    }
 
     /// Drop the per-run `mvm.hostepoch=<secs>` clock token the image cmdline
     /// carries (its value is wall-clock-dependent), so exact-cmdline assertions
@@ -7531,59 +7497,5 @@ fi
         assert!(summary.contains("vsock_exit_code=7"));
         assert!(summary.contains("file_exit_code=9"));
         assert!(summary.contains("build_ms=2"));
-    }
-
-    /// The regression this exists for. `machine run` does not build the
-    /// endpoint, so a copy from an older checkout is found first and used
-    /// silently; the guest and host then speak different protocols and the
-    /// only symptom is a frame-length field that decodes to ASCII.
-    #[test]
-    fn an_endpoint_older_than_the_running_exe_is_stale() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let old = dir.path().join("mvm-network-endpoint");
-        std::fs::write(&old, b"pre-cutover").expect("write");
-        // Backdate well past any plausible clock skew between the two files.
-        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86_400);
-        std::fs::File::options()
-            .write(true)
-            .open(&old)
-            .expect("open")
-            .set_modified(long_ago)
-            .expect("backdate");
-
-        assert!(
-            endpoint_predates_running_exe(&old),
-            "an endpoint a week older than the running binary must read as stale"
-        );
-    }
-
-    /// The companion, so the check cannot pass by calling everything stale:
-    /// a binary newer than the running one is used as-is.
-    #[test]
-    fn an_endpoint_newer_than_the_running_exe_is_not_stale() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let fresh = dir.path().join("mvm-network-endpoint");
-        std::fs::write(&fresh, b"current").expect("write");
-        let soon = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
-        std::fs::File::options()
-            .write(true)
-            .open(&fresh)
-            .expect("open")
-            .set_modified(soon)
-            .expect("postdate");
-
-        assert!(
-            !endpoint_predates_running_exe(&fresh),
-            "an endpoint newer than the running binary must be used as-is"
-        );
-    }
-
-    /// A path that cannot be stat'd has no usable time. Reading that as stale
-    /// costs a rebuild; reading it as fresh costs a protocol mismatch nobody
-    /// can diagnose, so it fails towards the rebuild.
-    #[test]
-    fn an_unstattable_endpoint_reads_as_stale() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(endpoint_predates_running_exe(&dir.path().join("absent")));
     }
 }

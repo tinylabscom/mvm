@@ -289,11 +289,7 @@ pub fn hvf_supervisor_launch_support_available() -> bool {
         return path.is_file();
     }
 
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        && dir.join("mvm-hvf-supervisor").is_file()
-    {
+    if supervisor_in_host_binary_dir(&mvm_vmm::host::aux_bin::HostProcess::current()) {
         return true;
     }
 
@@ -313,6 +309,11 @@ pub fn hvf_supervisor_launch_support_available() -> bool {
     }
 
     workspace_root.join("Cargo.toml").is_file()
+}
+
+/// Whether the supervisor sits in `host`'s host binary directory.
+fn supervisor_in_host_binary_dir(host: &mvm_vmm::host::aux_bin::HostProcess) -> bool {
+    host.binary_named("mvm-hvf-supervisor").is_some()
 }
 
 pub(crate) fn hvf_workload_support_available() -> bool {
@@ -370,5 +371,22 @@ pub fn hvf_platform_supported() -> bool {
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod host_binary_dir_tests {
+    use super::*;
+    use mvm_vmm::host::aux_bin::HostProcess;
+
+    #[test]
+    fn the_supervisor_is_found_in_a_declared_host_binary_dir() {
+        let declared = tempfile::tempdir().unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+        assert!(!supervisor_in_host_binary_dir(&host));
+
+        std::fs::write(declared.path().join("mvm-hvf-supervisor"), b"bin").unwrap();
+
+        assert!(supervisor_in_host_binary_dir(&host));
     }
 }
