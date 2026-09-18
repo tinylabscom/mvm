@@ -1325,6 +1325,37 @@ mod tests {
         );
     }
 
+    /// The 502 a policy refusal produces on a terminated flow is recorded in
+    /// the chain, naming the refused `host:port` and a fixed reason, and none
+    /// of the request: not its path, its placeholder, or its body.
+    #[test]
+    fn a_policy_refusal_on_a_terminated_flow_is_recorded_in_the_chain_signed_log() {
+        let harness = harness(OTHER_HOST, b"never sent");
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(status_line(&response).starts_with("HTTP/1.1 502"));
+
+        let chain = harness.audit_chain();
+        assert!(chain.contains("secret.flow_refused"), "{chain}");
+        assert!(chain.contains("policy_denied"), "{chain}");
+        assert!(chain.contains(&format!("{BOUND_HOST}:443")), "{chain}");
+        // The body is `{"a":"b"}`; a JSON chain would carry it escaped.
+        for content in [
+            "/v1/messages",
+            harness.placeholder.as_str(),
+            "\"a\":\"b\"",
+            "\\\"a\\\":\\\"b\\\"",
+        ] {
+            assert!(
+                !chain.contains(content),
+                "request content `{content}` reached the chain: {chain}"
+            );
+        }
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
+    }
+
     #[test]
     fn decrypted_host_header_must_match_the_connect_authority() {
         let harness = harness(BOUND_HOST, b"never sent");

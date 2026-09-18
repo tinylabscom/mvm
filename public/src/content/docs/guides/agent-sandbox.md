@@ -252,6 +252,7 @@ tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
 | `secret.substituted` | A request carrying a substituted secret completed, including its upstream response. Not written when the forward fails in flight, even if the key was already sent | `name`, `destination`, `auth_type` |
 | `secret.redacted` | Secret-shaped or PII content was masked out of an outbound request, or a request failed or was refused fail-closed | `destination`, rule categories or reason |
 | `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
+| `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), or, on a connection the host intercepted, it was addressed to a different host than the connection or could not be framed | `destination`, `reason` |
 
 No entry carries a secret value, a request body, or a header value.
 

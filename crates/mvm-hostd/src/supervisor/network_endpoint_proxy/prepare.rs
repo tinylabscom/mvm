@@ -129,6 +129,36 @@ fn url_host_port(url: &str) -> Option<String> {
     }
 }
 
+/// The reason a peer destination is refused, as recorded in the chain.
+const REASON_PEER_DESTINATION: &str = "peer_destination";
+/// The reason a destination the network policy does not admit is refused.
+/// The FlowMux connect path records the same word for the same decision.
+const REASON_POLICY_DENIED: &str = "policy_denied";
+/// The reason a request whose URL names no `host:port` is refused.
+const REASON_MALFORMED: &str = "malformed";
+/// What a refusal records as its destination when the URL names none.
+const UNPARSEABLE_DESTINATION: &str = "unparseable";
+
+/// Why the claim-10 gate refuses `target`, or `None` when it admits it.
+///
+/// `target` is the request's `host:port`, and `None` when the URL has no
+/// parseable one. The returned label is chosen here from a fixed set, so the
+/// chain entry built from it carries nothing the workload sent.
+fn claim10_refusal(
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
+    target: Option<&str>,
+) -> Option<&'static str> {
+    use mvm_runtime::vmm::egress_gate::EgressVerdict;
+    let Some(target) = target else {
+        return Some(REASON_MALFORMED);
+    };
+    match gate.decide_request(target) {
+        EgressVerdict::Allow { .. } => None,
+        EgressVerdict::Malformed => Some(REASON_MALFORMED),
+        EgressVerdict::Deny(_) => Some(REASON_POLICY_DENIED),
+    }
+}
+
 /// Capture per-secret audit metadata (name + auth-type) for every header that
 /// carries a known placeholder — BEFORE substitution consumes the request.
 /// `resolve_meta` touches no secret value, so this is claim-13 safe.
@@ -187,8 +217,8 @@ impl SubstitutionService {
         // Claim-10: gate the full host:port against the VM's admitted network
         // policy before anything reaches the wire. Fail closed — a URL without a
         // parseable host:port, or a destination the policy doesn't admit, is
-        // refused here. (Audit of the claim-10 denial is a later increment; the
-        // refusal itself is the enforcement.)
+        // refused here, and the refusal is chain-signed so a workload probing
+        // destinations it was not admitted to leaves a record.
         //
         // A peer name is refused here even when the plan binds it. Peer
         // traffic goes over FlowMux as raw TCP; this leg substitutes secrets
@@ -199,18 +229,19 @@ impl SubstitutionService {
         if let Some(host) = destination.as_deref()
             && mvm_contract::peer::PeerName::is_peer_target(host)
         {
+            self.audit_flow_refused(host, REASON_PEER_DESTINATION).await;
             return Err(WireResponse::Refused {
                 message: "peer destinations are not reachable through the substitution proxy"
                     .into(),
             });
         }
-        let admitted = url_host_port(&req.url).as_deref().is_some_and(|hp| {
-            matches!(
-                self.egress_gate.decide_request(hp),
-                mvm_runtime::vmm::egress_gate::EgressVerdict::Allow { .. }
-            )
-        });
-        if !admitted {
+        let target = url_host_port(&req.url);
+        if let Some(reason) = claim10_refusal(&self.egress_gate, target.as_deref()) {
+            let recorded = target
+                .as_deref()
+                .or(destination.as_deref())
+                .unwrap_or(UNPARSEABLE_DESTINATION);
+            self.audit_flow_refused(recorded, reason).await;
             return Err(WireResponse::Refused {
                 message: "egress destination not admitted by network policy (claim-10)".into(),
             });
@@ -302,6 +333,29 @@ mod tests {
     use super::*;
     use crate::keyholder::SubstitutionRegistry;
     use crate::supervisor::network_endpoint_proxy::test_support::{bearer_ref, resolver_with};
+
+    /// Each refusal is named by a fixed label, and an admitted destination is
+    /// not a refusal at all. The label is all the chain entry says about why.
+    #[test]
+    fn a_claim10_refusal_is_named_by_a_fixed_label() {
+        use crate::supervisor::network_endpoint_proxy::test_support::gate_admitting;
+        let gate = gate_admitting(&[("93.184.216.34", 443)]);
+
+        assert_eq!(claim10_refusal(&gate, Some("93.184.216.34:443")), None);
+        assert_eq!(
+            claim10_refusal(&gate, Some("93.184.216.34:80")),
+            Some(REASON_POLICY_DENIED)
+        );
+        assert_eq!(
+            claim10_refusal(&gate, Some("elsewhere.example:443")),
+            Some(REASON_POLICY_DENIED)
+        );
+        assert_eq!(
+            claim10_refusal(&gate, Some("no-port")),
+            Some(REASON_MALFORMED)
+        );
+        assert_eq!(claim10_refusal(&gate, None), Some(REASON_MALFORMED));
+    }
 
     #[test]
     fn prepares_request_with_real_credential_for_a_bound_host() {
