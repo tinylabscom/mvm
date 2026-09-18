@@ -154,6 +154,31 @@ fn warm_process_round_trip_pid_stable() {
     assert_eq!(idle_call_count(&pool, pid_before), 2);
 }
 
+/// The long-lived worker is spawned while the agent can hold control-plane
+/// descriptors. Even a descriptor duplicated without close-on-exec must not
+/// survive into the workload wrapper.
+#[cfg(target_os = "linux")]
+#[test]
+fn warm_worker_drops_inherited_agent_descriptor() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let dir = tempfile::tempdir().expect("temporary socket directory");
+    let listener = UnixListener::bind(dir.path().join("agent.sock")).expect("agent listener");
+    let _client = UnixStream::connect(dir.path().join("agent.sock")).expect("agent connection");
+    let (connection, _) = listener.accept().expect("accept agent connection");
+    // SAFETY: fcntl duplicates the accepted connection; OwnedFd takes sole
+    // ownership of the new descriptor below.
+    let raw = unsafe { libc::fcntl(connection.as_raw_fd(), libc::F_DUPFD, 20) };
+    assert!(raw >= 20, "duplicate descriptor above the child contract");
+    // SAFETY: fcntl returned a newly owned descriptor on success.
+    let _held = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    let pool = start_pool_with_behavior(cfg(1, 100, 1024), Some("fd_20_closed"));
+    let outcome = dispatch(&pool, b"check-descriptors");
+    assert_eq!(outcome.stdout, b"closed");
+}
+
 #[test]
 fn warm_process_emits_control_records_through_pool() {
     // A wrapper that emits one envelope-style control

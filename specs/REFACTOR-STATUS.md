@@ -4,6 +4,11 @@ Last updated: 2026-09-17
 
 ## In progress
 
+- [ ] **Agent child descriptor isolation — issue #3404.**
+      Close non-contract descriptors in the RPC, streaming-exec, and
+      warm-worker child paths. Linux regression and Firecracker/KVM validation
+      pass; promotion is pending.
+
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
       Persistent entrypoint sessions preserve `--name` and report both the

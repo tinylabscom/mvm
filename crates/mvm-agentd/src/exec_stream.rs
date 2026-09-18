@@ -349,6 +349,33 @@ mod tests {
         assert_eq!(out, b"hello");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streamed_process_drops_inherited_descriptors() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let source = std::fs::File::open("/dev/null").expect("open held descriptor");
+        // SAFETY: fcntl duplicates a descriptor we own; the returned descriptor
+        // is adopted exactly once by OwnedFd below.
+        let raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 20) };
+        assert!(raw >= 20, "duplicate descriptor above the child contract");
+        // SAFETY: fcntl returned an owned descriptor on success.
+        let _held = unsafe { OwnedFd::from_raw_fd(raw) };
+
+        let mut events = Vec::new();
+        let terminal = stream_exec("ls -1 /proc/self/fd", None, None, |event| {
+            events.push(event)
+        });
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+        let inherited = String::from_utf8(stdout(&events)).expect("fd listing is utf-8");
+        assert!(
+            inherited
+                .lines()
+                .all(|fd| fd.parse::<u32>().is_ok_and(|fd| fd <= 3)),
+            "child retained unexpected descriptors: {inherited}"
+        );
+    }
+
     #[test]
     fn captures_stderr_and_nonzero_exit() {
         let mut events = Vec::new();
