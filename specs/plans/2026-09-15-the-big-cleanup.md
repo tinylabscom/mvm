@@ -174,7 +174,7 @@ rest being the secrets-substitution domain noun.
       Resolved: all five deleted. The fixture runs no services and is never
       sealed, so none applies; its header now says so, and `check-deferrals`
       walks `nix/`, `src/`, `install.sh` and the `Justfile`.
-- [ ] **A3.2** `NoopChecker` (`crates/mvm-hostd/src/supervisor/services/binary_integrity.rs:287`)
+- [x] **A3.2** `NoopChecker` (`crates/mvm-hostd/src/supervisor/services/binary_integrity.rs:287`)
       is `pub`, returns `Ok(())` unconditionally, and is not `#[cfg(test)]`
       gated — in the crate that gates subprocess binary integrity. Its own doc
       says "never register in production" and nothing enforces that. Same shape
@@ -182,6 +182,10 @@ rest being the secrets-substitution domain noun.
       All three have only test callers. _The two `stages.rs` doubles were
       deleted with the scan layer; `NoopChecker` remains._ Gate them behind `cfg(test)` or a
       `test-support` feature so a production registration cannot compile.
+      Resolved by deletion instead: `NoopChecker`'s only caller was a test of
+      `NoopChecker` itself, so gating it would have kept a double that tests
+      nothing. The trait doc also named an `AlwaysFailingChecker` that never
+      existed; it now names neither.
 - [ ] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d and its body is a
       comment describing a harness plus `unimplemented!()`. A test that can
