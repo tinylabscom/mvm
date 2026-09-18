@@ -297,6 +297,31 @@ pub fn verify_signed_payload(
     })
 }
 
+/// Verify `payload_bytes` against `cosign_bundle` under whichever of
+/// `identities` signed it, succeeding as soon as one verifies.
+///
+/// A keyless trust root is a *set* of accepted identities — a release train
+/// spans more than one workflow ref over its life — so every keyless caller
+/// needs this loop. One copy, so the "try each, report the last failure,
+/// refuse an empty set" shape cannot drift between them.
+pub fn verify_signed_payload_under_any_identity(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    identities: &[&str],
+    expected_issuer: &str,
+) -> VerifyResult<()> {
+    let mut failure: Option<VerifyError> = None;
+    for identity in identities {
+        match verify_signed_payload(payload_bytes, cosign_bundle, identity, expected_issuer) {
+            Ok(()) => return Ok(()),
+            Err(error) => failure = Some(error),
+        }
+    }
+    Err(failure.unwrap_or_else(|| VerifyError::SignatureInvalid {
+        reason: "no accepted identities configured for keyless verification".to_string(),
+    }))
+}
+
 /// No-feature fallback: refuse to accept any manifest as signed.
 ///
 /// `manifest-verify` is off unless something turns it on — `mvm-core`'s

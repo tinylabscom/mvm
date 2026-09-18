@@ -83,28 +83,18 @@ pub fn verify_pack_revocation_list(
     keyless: &KeylessTrust,
     now: DateTime<Utc>,
 ) -> Result<PackRevocationList, PackRevocationError> {
-    let mut failure: Option<String> = None;
-    let verified = keyless.accepted_identities.iter().any(|identity| {
-        match crate::crypto::image_verify::verify_signed_payload(
-            list_bytes,
-            cosign_bundle,
-            identity,
-            &keyless.issuer,
-        ) {
-            Ok(()) => true,
-            Err(error) => {
-                failure = Some(error.to_string());
-                false
-            }
-        }
-    });
-    if !verified {
-        return Err(PackRevocationError::SignatureInvalid(
-            failure.unwrap_or_else(|| {
-                "no accepted identities configured for keyless verification".to_string()
-            }),
-        ));
-    }
+    let identities: Vec<&str> = keyless
+        .accepted_identities
+        .iter()
+        .map(String::as_str)
+        .collect();
+    crate::crypto::image_verify::verify_signed_payload_under_any_identity(
+        list_bytes,
+        cosign_bundle,
+        &identities,
+        &keyless.issuer,
+    )
+    .map_err(|error| PackRevocationError::SignatureInvalid(error.to_string()))?;
     let list: PackRevocationList = serde_json::from_slice(list_bytes)
         .map_err(|error| PackRevocationError::Parse(error.to_string()))?;
     if list.schema_version != PACK_REVOCATION_SCHEMA_VERSION {

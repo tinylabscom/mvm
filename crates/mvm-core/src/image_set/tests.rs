@@ -1299,3 +1299,561 @@ mod lock {
         );
     }
 }
+
+mod verification {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::image_set::verify::{ImageSetVerification, verify_checked, verify_image_set};
+    use crate::pack_trust::{PackTrustConfig, RevokedPack};
+    use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus};
+    use crate::plan::bundle::{KeyId, key_id_from_identity};
+
+    /// Stand-in for the bundle bytes. Every test that reaches the real verifier
+    /// supplies a real bundle instead; the rest never look at these.
+    const BUNDLE: &[u8] = b"cosign-bundle-bytes";
+
+    /// Clears the signature stage so the stages after it are reachable offline.
+    /// A cosign bundle cannot be minted without the release workflow's identity,
+    /// so a test that had to satisfy the real check could never exercise the
+    /// structure, lock, artifact or revocation stages at all. The real check is
+    /// witnessed separately against a committed release bundle.
+    fn accept_signature(_: &[u8], _: &[u8], _: &KeylessTrust) -> Result<(), ImageSetError> {
+        Ok(())
+    }
+
+    /// One image set as published: the manifest bytes, a lock pinning them, and
+    /// a directory holding every member artifact.
+    struct StagedSet {
+        dir: tempfile::TempDir,
+        manifest_bytes: Vec<u8>,
+        lock: ImageLock,
+    }
+
+    impl StagedSet {
+        fn request(&self) -> ImageSetVerification<'_> {
+            ImageSetVerification::new(&self.manifest_bytes, BUNDLE, &self.lock, self.dir.path())
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.dir.path().join(name)
+        }
+
+        fn first_artifact_name(&self) -> String {
+            let manifest: ImageSetManifest = serde_json::from_slice(&self.manifest_bytes).unwrap();
+            manifest.members[0].artifacts[0].name.to_string()
+        }
+    }
+
+    /// Deterministic bytes for one artifact, distinct per name so a swapped
+    /// file is a digest mismatch rather than a coincidence.
+    fn artifact_bytes(name: &str) -> Vec<u8> {
+        name.bytes().cycle().take(512).collect()
+    }
+
+    /// Write every member artifact to a fresh directory and restate the
+    /// manifest's declared digest and size as what was actually written, so the
+    /// staged set is the one a correct publish would produce.
+    fn stage(mut manifest: ImageSetManifest) -> StagedSet {
+        let dir = tempfile::tempdir().unwrap();
+        for member in &mut manifest.members {
+            for artifact in &mut member.artifacts {
+                let bytes = artifact_bytes(artifact.name.as_str());
+                std::fs::write(dir.path().join(artifact.name.as_str()), &bytes).unwrap();
+                artifact.sha256 = Sha256Hex::from_bytes(&bytes);
+                artifact.size = bytes.len() as u64;
+            }
+        }
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let lock = lock_for(&manifest);
+        StagedSet {
+            dir,
+            manifest_bytes,
+            lock,
+        }
+    }
+
+    fn staged() -> StagedSet {
+        stage(manifest())
+    }
+
+    fn signer_key_id(lock: &ImageLock) -> KeyId {
+        key_id_from_identity(&lock.signing_identity.certificate_identity(&lock.repository))
+    }
+
+    /// A revocation list revoking exactly one hash under the lock's signer.
+    fn revoking(lock: &ImageLock, hash: &Sha256Hex) -> PackTrustConfig {
+        PackTrustConfig {
+            revocations: vec![RevokedPack {
+                key_id: signer_key_id(lock),
+                pack_hash: Some(hash.clone()),
+                reason: "known bad build".to_string(),
+            }],
+            ..PackTrustConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_staged_set_verifies_and_reports_every_artifact_it_checked() {
+        let set = staged();
+
+        let verified = verify_checked(&set.request(), accept_signature)
+            .expect("a correctly published set must verify");
+
+        assert_eq!(verified.manifest_sha256, set.lock.manifest_sha256);
+        assert_eq!(verified.signer_key_id, signer_key_id(&set.lock));
+        let declared: usize = verified
+            .manifest
+            .members
+            .iter()
+            .map(|member| member.artifacts.len())
+            .sum();
+        assert_eq!(verified.artifacts.len(), declared);
+        for artifact in &verified.artifacts {
+            assert!(
+                artifact.path.starts_with(set.dir.path()),
+                "an artifact must be reported where it was read: {artifact:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_flipped_byte_in_the_manifest_is_refused_by_the_digest() {
+        let mut set = staged();
+        let last = set.manifest_bytes.len() - 1;
+        set.manifest_bytes[last] = b' ';
+
+        let err = verify_checked(&set.request(), accept_signature)
+            .expect_err("tampered manifest bytes must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::ManifestDigestMismatch { .. }),
+            "got: {err}"
+        );
+    }
+
+    /// The digest is taken over the raw bytes before anything parses them, so
+    /// bytes that are not JSON at all still fail as a digest mismatch. If
+    /// parsing ever moved ahead of the digest this test would report a parse
+    /// error instead.
+    #[test]
+    fn bytes_that_are_not_json_still_fail_on_the_digest_not_the_parse() {
+        let set = staged();
+        let garbage = b"}not json at all{".to_vec();
+        let request = ImageSetVerification::new(&garbage, BUNDLE, &set.lock, set.dir.path());
+
+        let err = verify_checked(&request, accept_signature)
+            .expect_err("bytes the lock does not pin must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::ManifestDigestMismatch { .. }),
+            "parsing must not run before the digest: {err}"
+        );
+    }
+
+    #[test]
+    fn digest_matching_bytes_that_are_not_an_image_set_are_refused_at_the_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"{\"schema_version\":1}".to_vec();
+        let mut lock = lock_for(&manifest());
+        lock.manifest_sha256 = Sha256Hex::from_bytes(&bytes);
+        let request = ImageSetVerification::new(&bytes, BUNDLE, &lock, dir.path());
+
+        let err = verify_checked(&request, accept_signature)
+            .expect_err("a signed non-manifest must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::UnparseableManifest { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_structurally_invalid_set_is_refused() {
+        let mut manifest = manifest();
+        member_mut(&mut manifest, ImageSetRole::WorkloadRootfs, X86)
+            .artifacts
+            .clear();
+        let set = stage(manifest);
+
+        let err = verify_checked(&set.request(), accept_signature)
+            .expect_err("a member with no artifacts must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::MemberHasNoArtifacts { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_produced_by_another_repository_is_refused() {
+        let set = staged();
+        let mut lock = set.lock.clone();
+        lock.repository = RepositorySlug::new("someone-else/mvm-images").unwrap();
+        let request = ImageSetVerification::new(&set.manifest_bytes, BUNDLE, &lock, set.dir.path());
+
+        let err = verify_checked(&request, accept_signature)
+            .expect_err("a lock pinning another producer must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::RepositoryMismatch { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_set_is_refused_only_when_completeness_is_required() {
+        let mut manifest = manifest();
+        manifest
+            .members
+            .retain(|member| member.role != ImageSetRole::RuntimeOverlay);
+        let set = stage(manifest);
+
+        verify_checked(&set.request(), accept_signature)
+            .expect("a partial set is admitted when the caller asks for no requirement");
+
+        let requirement = ImageSetRequirement::current_train();
+        let err = verify_checked(&set.request().require(&requirement), accept_signature)
+            .expect_err("a partial set must be refused when completeness is required");
+
+        assert!(
+            matches!(err, ImageSetError::Incomplete { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_set_the_host_cannot_speak_to_is_refused_only_when_protocols_are_supplied() {
+        let set = staged();
+        let incompatible = HostProtocolSupport {
+            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            builder_cache_contract: 4,
+        };
+
+        verify_checked(&set.request(), accept_signature)
+            .expect("protocol compatibility is not checked unless the host declares it");
+
+        let err = verify_checked(
+            &set.request().with_host_protocols(&incompatible),
+            accept_signature,
+        )
+        .expect_err("a set this host cannot speak to must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::GuestAgentProtocolDisjoint { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_artifact_whose_bytes_differ_is_refused() {
+        let set = staged();
+        let name = set.first_artifact_name();
+        let mut bytes = artifact_bytes(&name);
+        bytes[0] ^= 0xff;
+        std::fs::write(set.path(&name), &bytes).unwrap();
+
+        let err = verify_checked(&set.request(), accept_signature)
+            .expect_err("an artifact whose bytes changed must be refused");
+
+        assert!(
+            matches!(&err, ImageSetError::ArtifactDigestMismatch { name: refused, .. } if refused.as_str() == name),
+            "the refusal must name the artifact: {err}"
+        );
+    }
+
+    #[test]
+    fn an_artifact_whose_size_differs_is_refused() {
+        let set = staged();
+        let name = set.first_artifact_name();
+        let mut bytes = artifact_bytes(&name);
+        bytes.truncate(bytes.len() - 1);
+        std::fs::write(set.path(&name), &bytes).unwrap();
+
+        let err = verify_checked(&set.request(), accept_signature)
+            .expect_err("a truncated artifact must be refused");
+
+        assert!(
+            matches!(&err, ImageSetError::ArtifactSizeMismatch { name: refused, .. } if refused.as_str() == name),
+            "the refusal must name the artifact: {err}"
+        );
+    }
+
+    #[test]
+    fn an_artifact_missing_from_the_directory_is_refused() {
+        let set = staged();
+        let name = set.first_artifact_name();
+        std::fs::remove_file(set.path(&name)).unwrap();
+
+        let err = verify_checked(&set.request(), accept_signature)
+            .expect_err("a missing artifact must be refused");
+
+        assert!(
+            matches!(&err, ImageSetError::ArtifactMissing { name: refused, .. } if refused.as_str() == name),
+            "the refusal must name the artifact: {err}"
+        );
+    }
+
+    #[test]
+    fn a_revoked_member_pack_hash_is_refused() {
+        let set = staged();
+        let manifest: ImageSetManifest = serde_json::from_slice(&set.manifest_bytes).unwrap();
+        let revoked = manifest.members[2].pack_hash.clone();
+        let revocations = revoking(&set.lock, &revoked);
+
+        let err = verify_checked(
+            &set.request().with_revocations(&revocations),
+            accept_signature,
+        )
+        .expect_err("a revoked member must be refused");
+
+        assert!(
+            matches!(&err, ImageSetError::MemberRevoked { pack_hash, .. } if *pack_hash == revoked),
+            "the refusal must name the revoked pack: {err}"
+        );
+    }
+
+    #[test]
+    fn a_revoked_set_digest_is_refused() {
+        let set = staged();
+        let revocations = revoking(&set.lock, &set.lock.manifest_sha256);
+
+        let err = verify_checked(
+            &set.request().with_revocations(&revocations),
+            accept_signature,
+        )
+        .expect_err("a revoked set must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::SetRevoked { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_revocation_of_something_else_admits_the_set() {
+        let set = staged();
+        let revocations = revoking(&set.lock, &sha("some other pack"));
+
+        verify_checked(
+            &set.request().with_revocations(&revocations),
+            accept_signature,
+        )
+        .expect("an unrelated revocation must not refuse this set");
+    }
+
+    /// A revocation entry keyed to a different signer must not be consulted for
+    /// this set: the key id binds a revocation to the identity that signed.
+    #[test]
+    fn a_revocation_under_another_signer_admits_the_set() {
+        let set = staged();
+        let manifest: ImageSetManifest = serde_json::from_slice(&set.manifest_bytes).unwrap();
+        let revocations = PackTrustConfig {
+            revocations: vec![RevokedPack {
+                key_id: key_id_from_identity(
+                    "https://github.com/elsewhere/.github/workflows/x.yml@refs/tags/v1.0.0",
+                ),
+                pack_hash: Some(manifest.members[0].pack_hash.clone()),
+                reason: "another signer's problem".to_string(),
+            }],
+            ..PackTrustConfig::default()
+        };
+
+        verify_checked(
+            &set.request().with_revocations(&revocations),
+            accept_signature,
+        )
+        .expect("a revocation under another signer must not refuse this set");
+    }
+
+    #[test]
+    fn the_public_entry_point_refuses_a_bundle_that_does_not_verify() {
+        let set = staged();
+
+        let err = verify_image_set(&set.request())
+            .expect_err("bundle bytes that are not a signature must be refused");
+
+        assert!(
+            matches!(err, ImageSetError::SignatureInvalid { .. }),
+            "got: {err}"
+        );
+    }
+
+    /// A build compiled without the verifier must refuse rather than admit an
+    /// unchecked set, and must say which feature would fix it.
+    #[cfg(not(feature = "manifest-verify"))]
+    #[test]
+    fn a_build_without_the_verifier_refuses_and_names_the_feature() {
+        let set = staged();
+
+        let err = verify_image_set(&set.request()).expect_err("a non-verifying build must refuse");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("manifest-verify"),
+            "the refusal must name the feature that would fix it: {message}"
+        );
+    }
+
+    /// A real bundle, as the release workflow published it for `v0.18.0-rc.1`,
+    /// over a checksum manifest. It is the only committed artifact that carries
+    /// a genuine Sigstore signature, so it is the only way to witness the
+    /// signature stage against the real verifier. The signed payload is a
+    /// checksum file rather than an image set, so a set locked to it gets past
+    /// the signature and fails at the parse — which is exactly what makes the
+    /// identity refusal below meaningful.
+    #[cfg(feature = "manifest-verify")]
+    mod release_bundle {
+        use std::path::Path;
+
+        use super::*;
+
+        const ASSET: &str = "builder-vm-aarch64-checksums-sha256.txt";
+
+        /// The fixture lives with `mvm-build`'s release-signature tests and is
+        /// read in place rather than copied: one committed bundle, verified by
+        /// whichever crate needs a real signature.
+        fn fixture(name: &str) -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1")
+                .join(name)
+        }
+
+        fn payload() -> Vec<u8> {
+            std::fs::read(fixture(ASSET)).expect("the committed checksum manifest")
+        }
+
+        fn bundle() -> Vec<u8> {
+            std::fs::read(fixture(&format!("{ASSET}.bundle"))).expect("the committed bundle")
+        }
+
+        /// A lock pinning the fixture's bytes, signed by `workflow`.
+        fn lock(workflow: &str) -> ImageLock {
+            let release_tag = ReleaseTag::new("v0.18.0-rc.1").unwrap();
+            ImageLock {
+                schema_version: IMAGE_LOCK_SCHEMA_VERSION,
+                repository: RepositorySlug::new("tinylabscom/mvm").unwrap(),
+                manifest_asset: ArtifactName::new(ASSET).unwrap(),
+                manifest_sha256: Sha256Hex::from_bytes(&payload()),
+                signing_identity: SigningIdentity {
+                    workflow: WorkflowPath::new(workflow).unwrap(),
+                    tag_ref: TagRef::for_tag(&release_tag),
+                },
+                release_tag,
+            }
+        }
+
+        fn verify(lock: &ImageLock, bundle: &[u8], payload: &[u8]) -> Result<(), ImageSetError> {
+            let dir = tempfile::tempdir().unwrap();
+            verify_image_set(&ImageSetVerification::new(
+                payload,
+                bundle,
+                lock,
+                dir.path(),
+            ))
+            .map(|_| ())
+        }
+
+        /// The control for every refusal below: without it they could mean only
+        /// that the fixture is unreadable.
+        #[test]
+        fn the_locked_identity_verifies_and_the_set_fails_only_at_the_parse() {
+            let err = verify(
+                &lock(".github/workflows/release.yml"),
+                &bundle(),
+                &payload(),
+            )
+            .expect_err("a checksum manifest is not an image set");
+
+            assert!(
+                matches!(err, ImageSetError::UnparseableManifest { .. }),
+                "the signature must have verified, leaving only the parse: {err}"
+            );
+        }
+
+        #[test]
+        fn a_bundle_signed_by_a_different_workflow_is_refused() {
+            let err = verify(
+                &lock(".github/workflows/release-boot-image.yml"),
+                &bundle(),
+                &payload(),
+            )
+            .expect_err("another workflow's identity must not accept this bundle");
+
+            assert!(
+                matches!(err, ImageSetError::SignatureInvalid { .. }),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn a_missing_bundle_is_refused() {
+            let err = verify(&lock(".github/workflows/release.yml"), b"", &payload())
+                .expect_err("an unsigned set must be refused");
+
+            assert!(
+                matches!(err, ImageSetError::SignatureInvalid { .. }),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn a_malformed_bundle_is_refused_rather_than_treated_as_absent() {
+            let err = verify(
+                &lock(".github/workflows/release.yml"),
+                b"{\"not\":\"a sigstore bundle\"}",
+                &payload(),
+            )
+            .expect_err("a malformed bundle must be refused");
+
+            assert!(
+                matches!(err, ImageSetError::SignatureInvalid { .. }),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn the_refusal_carries_no_bundle_bytes() {
+            let err = verify(
+                &lock(".github/workflows/release.yml"),
+                b"{\"canary\":\"SHOULD-NOT-APPEAR-IN-AN-ERROR\"}",
+                &payload(),
+            )
+            .expect_err("a bogus bundle must be refused");
+
+            assert!(
+                !err.to_string().contains("SHOULD-NOT-APPEAR-IN-AN-ERROR"),
+                "an error must not echo bundle contents: {err}"
+            );
+        }
+    }
+
+    /// Guards the lookup contract this module relies on: a checker is asked
+    /// under the lock's signer id, so a stub that ignored the key id would make
+    /// the two revocation tests above pass for the wrong reason.
+    #[test]
+    fn the_checker_is_asked_under_the_locked_signing_identity() {
+        struct Recording(std::cell::RefCell<Vec<KeyId>>);
+        impl PackRevocationChecker for Recording {
+            fn status(&self, key_id: &KeyId, _: &Sha256Hex) -> RevocationStatus {
+                self.0.borrow_mut().push(key_id.clone());
+                RevocationStatus::Good
+            }
+        }
+
+        let set = staged();
+        let recording = Recording(std::cell::RefCell::new(Vec::new()));
+        verify_checked(
+            &set.request().with_revocations(&recording),
+            accept_signature,
+        )
+        .expect("the set verifies");
+
+        let asked = recording.0.borrow();
+        assert!(!asked.is_empty(), "the checker must be consulted");
+        assert!(
+            asked.iter().all(|id| *id == signer_key_id(&set.lock)),
+            "every lookup must use the lock's signer id: {asked:?}"
+        );
+    }
+}

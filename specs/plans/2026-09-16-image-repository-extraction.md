@@ -359,7 +359,8 @@ Design constraints found while scoping (inventory taken 2026-09-17):
   is already strict (`deny_unknown_fields`), arch-typed, content-hashed, signed
   (ed25519 or keyless) and carries inputs, SBOM references and trust metadata.
   `crypto::image_verify::SignedManifest` and its `RevocationList` are a second,
-  string-typed model whose only caller is an example binary. The image set is a
+  string-typed model whose only caller is an example binary — which
+  `pack-signing-smoke.yml` runs, so it is a live witness rather than dead code. The image set is a
   signed index over member packs — each member names its role, guest
   architecture, boot protocol and `pack_hash` — and the unused model is removed
   rather than kept beside it.
@@ -389,12 +390,20 @@ Delivery slices, one PR each:
       architecture, boot protocol, capabilities, protocol range, supersession),
       round-trip and negative tests. `mvm_core::image_set`; semver parsing
       consolidated into `mvm_core::release_version`, shared with the updater.
-- [ ] W3b — offline verification of a signed set against the lock identity and
-      digest, member pack and artifact digests, and revocation; retire
-      `image_verify::SignedManifest` / `RevocationList`.
+- [x] W3b — offline verification of a signed set against the lock identity and
+      digest, member pack and artifact digests, and revocation.
+      `mvm_core::image_set::verify_image_set`; the "try each accepted identity"
+      loop the packs and revocation paths had each hand-rolled is now one
+      function.
 - [ ] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
       gate over workflow and script copies, and removal of "latest" selection.
-- [ ] W3d — an offline verifier command over manifest, bundle and artifacts.
+- [ ] W3d — an offline verifier command over manifest, bundle and artifacts,
+      and with it the retirement of `image_verify::SignedManifest` /
+      `RevocationList`. That family looked dead, but
+      `.github/workflows/pack-signing-smoke.yml` runs the
+      `verify-signed-manifest` example against a real cosign bundle as a live
+      witness, so retiring it means moving that lane onto the new verifier
+      rather than deleting an unused type.
 
 ### W4 — Move image sources and reproduce current bytes (#3362)
 

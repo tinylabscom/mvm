@@ -82,7 +82,7 @@ Last updated: 2026-09-18
       - [ ] W1 #3363: two post-merge runs compared against the 2026-09-15
             baseline.
       - [x] W3a #3365: image-set manifest and lock types with pure validation.
-      - [ ] W3b #3365: offline signed verification and revocation.
+      - [x] W3b #3365: offline signed verification and revocation.
       - [ ] W3c #3365: checked-in lock and generated pins.
       - [ ] W3d #3365: offline verifier command.
 
