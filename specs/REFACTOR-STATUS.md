@@ -83,7 +83,7 @@ Last updated: 2026-09-18
             baseline: 118 min → 92 and 106 min. The 25-minute hypothesis is
             rejected as stated; the SDK sidecar build is the remaining cost.
       - [x] W3a #3365: image-set manifest and lock types with pure validation.
-      - [ ] W3b #3365: offline signed verification and revocation.
+      - [x] W3b #3365: offline signed verification and revocation.
       - [ ] W3c #3365: checked-in lock and generated pins.
       - [ ] W3d #3365: offline verifier command.
 

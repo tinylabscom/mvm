@@ -24,6 +24,7 @@ mod error;
 mod identity;
 mod lock;
 mod validate;
+mod verify;
 
 pub use error::ImageSetError;
 pub use identity::{
@@ -36,6 +37,7 @@ pub use validate::{
     check_against_lock, check_protocol_compatibility, require_complete, select_member,
     validate_structure,
 };
+pub use verify::{ImageSetVerification, VerifiedArtifact, VerifiedImageSet, verify_image_set};
 
 pub const IMAGE_SET_SCHEMA_VERSION: u32 = 1;
 

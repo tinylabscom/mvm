@@ -141,6 +141,58 @@ pub enum ImageSetError {
         set_version: Box<ImageSetVersion>,
         tag_version: Box<ImageSetVersion>,
     },
+    #[error("no signature over the image set manifest verifies under {identity}: {reason}")]
+    SignatureInvalid { identity: String, reason: String },
+    #[error("signed image set manifest is not a manifest this build understands: {reason}")]
+    UnparseableManifest { reason: String },
+    #[error("member {role}/{target} artifact {name} is not at {path}")]
+    ArtifactMissing {
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: ArtifactName,
+        path: String,
+    },
+    #[error("member {role}/{target} artifact {name} cannot be read: {reason}")]
+    ArtifactUnreadable {
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: ArtifactName,
+        reason: String,
+    },
+    #[error(
+        "member {role}/{target} artifact {name} is {actual} bytes, not the declared {declared}"
+    )]
+    ArtifactSizeMismatch {
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: ArtifactName,
+        declared: u64,
+        actual: u64,
+    },
+    #[error(
+        "member {role}/{target} artifact {name} hashes to {}, not the declared {}",
+        .actual.as_str(),
+        .declared.as_str()
+    )]
+    ArtifactDigestMismatch {
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: ArtifactName,
+        declared: Sha256Hex,
+        actual: Sha256Hex,
+    },
+    #[error("member {role}/{target} pack {} is revoked: {reason}", .pack_hash.as_str())]
+    MemberRevoked {
+        role: ImageSetRole,
+        target: MemberTarget,
+        pack_hash: Sha256Hex,
+        reason: String,
+    },
+    #[error("image set {} is revoked: {reason}", .manifest_sha256.as_str())]
+    SetRevoked {
+        manifest_sha256: Sha256Hex,
+        reason: String,
+    },
 }
 
 fn join<T: std::fmt::Display>(items: &[T]) -> String {

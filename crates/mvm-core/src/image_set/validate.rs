@@ -404,7 +404,7 @@ pub fn check_against_lock(
     check_set_version_matches_lock(manifest, lock)
 }
 
-fn check_lock_schema_version(lock: &ImageLock) -> Result<(), ImageSetError> {
+pub(super) fn check_lock_schema_version(lock: &ImageLock) -> Result<(), ImageSetError> {
     if lock.schema_version == IMAGE_LOCK_SCHEMA_VERSION {
         Ok(())
     } else {
@@ -415,7 +415,10 @@ fn check_lock_schema_version(lock: &ImageLock) -> Result<(), ImageSetError> {
     }
 }
 
-fn check_manifest_digest(actual: &Sha256Hex, lock: &ImageLock) -> Result<(), ImageSetError> {
+pub(super) fn check_manifest_digest(
+    actual: &Sha256Hex,
+    lock: &ImageLock,
+) -> Result<(), ImageSetError> {
     if actual == &lock.manifest_sha256 {
         Ok(())
     } else {

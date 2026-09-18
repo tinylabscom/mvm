@@ -450,29 +450,13 @@ pub fn verify_pack_keyless_at(
         });
     }
     let payload = manifest.signature_payload_bytes()?;
-    let mut failure: Option<String> = None;
-    let verified =
-        candidates.iter().any(
-            |identity| match crate::crypto::image_verify::verify_signed_payload(
-                &payload,
-                cosign_bundle,
-                identity,
-                &keyless.issuer,
-            ) {
-                Ok(()) => true,
-                Err(error) => {
-                    failure = Some(error.to_string());
-                    false
-                }
-            },
-        );
-    if !verified {
-        return Err(PackVerifyError::KeylessSignatureInvalid(
-            failure.unwrap_or_else(|| {
-                "keyless signature did not verify under any candidate identity".to_string()
-            }),
-        ));
-    }
+    crate::crypto::image_verify::verify_signed_payload_under_any_identity(
+        &payload,
+        cosign_bundle,
+        &candidates,
+        &keyless.issuer,
+    )
+    .map_err(|error| PackVerifyError::KeylessSignatureInvalid(error.to_string()))?;
     validate_manifest_structural(manifest, policy)?;
     verify_files(manifest, root)?;
     verify_pack_hash(manifest)?;

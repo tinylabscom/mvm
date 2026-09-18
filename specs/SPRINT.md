@@ -136,6 +136,10 @@
       manifest and lock with pure completeness, architecture, boot-protocol,
       capability, protocol-range, supersession and lock checks; the updater and
       the image set share one semver model in `mvm_core::release_version`.
+      Slice W3b verifies a published set offline: the manifest digest is checked
+      against the lock before the bytes are parsed, the detached signature under
+      the locked identity next, then structure, lock fields, on-disk artifact
+      size and digest, and revocation keyed on the locked signer.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
