@@ -11,6 +11,9 @@ Last updated: 2026-09-18
       and clippy pass). All 28 runtime entries
       remain explicit capture gaps; 17 tools/fixtures carry no coverage credit.
       Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
+      `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
+      and limits. This does not enable the independent telemetry service.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.

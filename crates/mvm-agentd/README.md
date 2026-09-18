@@ -37,6 +37,27 @@ guest request as untrusted. Secrets and authorization decisions remain
 host-side; the agent receives only the capabilities and values needed for the
 admitted execution.
 
+## Bounded entrypoint capture
+
+Entrypoint stdout/stderr readers and the RPC handoff use eight-slot queues plus
+per-stream retention rings. Offers never wait for queue capacity. A saturated
+ring evicts old output and reports `mvm.stream.gap`, identifying `pipe_reader`
+or `consumer_handoff` so their independent loss counts are not conflated.
+Completion transfers ownership of the bounded tail instead of sending into a
+full queue. Accepted fd3 control records retain their cumulative wire-byte cap
+and are not evicted by stdout/stderr pressure.
+
+The ring retains one newest frame even when its byte cap is smaller than a
+frame; budget for that allowance, the fixed queue slots and record overhead.
+Order is preserved within each pipe, not across pipes. Pending tails and gap
+summaries may wait until another offer or EOF. Reader errors/panics produce
+`mvm.stream.capture_incomplete` with an unknown tail, without error text or data.
+
+This is invocation-scoped capture over the existing authenticated session, not
+an always-on telemetry service or complete tracing coverage. It does not certify
+allocation-free/wait-free internals or remove synchronous downstream sinks and
+pipe-EOF/reaping waits. VM-lifetime collection remains separate work.
+
 ## Main areas
 
 | Area | Representative modules |

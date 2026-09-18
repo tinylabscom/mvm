@@ -18,6 +18,11 @@
       records 28 runtime gaps and 17 non-runtime exclusions, not capture coverage.
       Remaining W1 sources/harness/measurements and runtime certification are open.
       Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W3a preparatory runtime capture: bounded reader handoffs, owned completion
+      tails, stage-specific losses and explicit unknown reader tails. Focused
+      tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:
+      `specs/sprint/delivery/3422-bounded-capture-handoff.md`.
+      The independent telemetry service and VM-lifetime collector remain open.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 

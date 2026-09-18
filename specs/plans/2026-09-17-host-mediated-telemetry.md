@@ -6,7 +6,7 @@ Validation: check-telemetry-inventory covers Rust binary inventory only; runtime
 **Tracking:** #3419 (epic); #3420 (W1), #3421 (W2), #3422 (W3), #3423 (W4),
 #3424 (W5), #3425 (W6), #3426 (W7).
 
-**Status: W1 IN PROGRESS; RUNTIME IMPLEMENTATION OPEN.** Baseline inspected:
+**Status: W1 AND PREPARATORY W3 CAPTURE WORK IN PROGRESS.** Baseline inspected:
 `2555ef935abb6aff8354f7c9001f4bcd42c52572`. Component tests from the preceding
 baseline `a424c1a8728b1d98654d471ae9f5a67a35d3aed4` are not an end-to-end witness.
 
@@ -46,8 +46,8 @@ does not implement guest telemetry.
 |---|---|
 | `mvm-agentd/src/vsock/framing.rs`, `AuthenticatedSession` | Provides reusable encrypted framing, not an always-on telemetry service. |
 | `mvm-net/src/channel.rs`, `GuestService` | No dedicated telemetry service. |
-| `mvm-agentd/src/entrypoint_stream.rs`, `Handoff` | Bounded live handoff, but `finish` uses blocking sends. |
-| `mvm-agentd/src/stream_pump.rs`, `StreamPump::run` | Unbounded upstream `mpsc::channel`; downstream caps do not bound all buffering. |
+| `mvm-agentd/src/entrypoint_stream.rs`, shared `stream_handoff::Handoff` | Bounded live handoff and owned completion tail; still invocation-scoped, not an independent telemetry producer. |
+| `mvm-agentd/src/stream_pump.rs`, `Pump::run` | Bounded reader queues/tails with stage-specific losses; synchronous sinks and pipe EOF/reaping are not a VM-lifetime telemetry supervisor. |
 | `mvm-cli/src/commands/vm/invoke.rs`, `write_entrypoint_event` | Invocation-scoped; only fd3 header is captured, payload is omitted; synchronous terminal writes/flushes may stall the consumer. |
 | `mvm-hostd/src/stream/entrypoint_source.rs` | Process-local collector lookup and mutex-taking ingest cannot establish VM-lifetime, non-waiting collection. |
 | `mvm-client/src/stream_tracing.rs` | Optional event bridge is not complete distributed span reconstruction. |
@@ -171,7 +171,7 @@ apple-container, QEMU, builder-tier guests and the separate wasm adapter.
 
 ## Delivery workstreams
 
-Runtime implementation checkboxes remain open. Each workstream has a product issue and
+Core telemetry-service implementation checkboxes remain open. Each workstream has a product issue and
 focused PRs; update this plan, SPRINT and REFACTOR-STATUS in the same change as
 tested progress. A documentation PR must not close the implementation epic.
 
@@ -217,6 +217,12 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
       outside-span events and log bridges; preserve span parent/link relationships.
 - [ ] Bound every upstream/downstream queue and active-span/field allocation;
       remove blocking completion sends and recursive diagnostics on capture paths.
+  - [x] W3a — Bound existing entrypoint pipe-reader handoffs and transfer completion
+        tails without queue sends. Reuse retention rings, separate pipe-reader and
+        consumer-handoff gap scopes, and mark reader failures as unknown tails.
+        Validated by 81 stream unit tests, authenticated encrypted mock streams
+        and a hermetic workload-completion BDD witness. See
+        [validation record](../sprint/delivery/3422-bounded-capture-handoff.md).
 - [ ] Add independent loss accounting, bounded summaries and cancellation/reaping;
       prove a stopped peer/full queue does not stall workload or pipe draining.
 
@@ -263,6 +269,11 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 Dependencies: W1 -> W2; W2 -> W3 and W4; W3+W4 -> W5; W1-W5 -> W6 -> W7.
 Telemetry is not blocked on mailbox storage or functional-stream reliability.
+W3a is an independent repair to existing invocation capture, not activation of the
+new telemetry feature ahead of W1/W2. It does not establish every-source coverage,
+strict wait-free queue internals, emission latency budgets, detached collection,
+or real-backend certification. Completion tails and gap summaries can remain
+pending until the next offer or EOF; live periodic loss reporting remains open.
 
 ## Required verification before product completion
 

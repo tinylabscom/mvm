@@ -24,11 +24,16 @@
 //! ordering is defined *between* stdout and stderr — the kernel defines none
 //! either, they are two independent pipes.
 
+//! Each reader uses the same bounded handoff as the downstream consumer. A
+//! saturated stage retains a newest tail and reports its own loss summary at
+//! completion. Tails transfer by ownership after EOF, not by blocking sends.
+
 use std::collections::VecDeque;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::process::{Child, ExitStatus};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, GapTally, RingState};
@@ -36,6 +41,7 @@ use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, GapTally, RingSt
 use crate::entrypoint::{
     CallCaps, CancellationToken, ControlRecord, signal_of, signal_process_group,
 };
+use crate::stream_handoff::{HANDOFF_CAPACITY, Handoff};
 use crate::vsock::{EntrypointEvent, GuestResponse, MAX_DATA_CHUNK_SIZE, MAX_FRAME_SIZE};
 
 /// Bytes pulled from a pipe in one `read`. Larger than the frame budget on
@@ -274,13 +280,24 @@ impl StreamGap {
     /// capture, not workload output, and injecting it inline would corrupt the
     /// very bytes it is reporting on.
     pub fn control_record(&self) -> ControlRecord {
-        let header = serde_json::json!({
+        self.gap_record(None)
+    }
+
+    pub(crate) fn control_record_at(&self, stage: &'static str) -> ControlRecord {
+        self.gap_record(Some(stage))
+    }
+
+    fn gap_record(&self, stage: Option<&str>) -> ControlRecord {
+        let mut header = serde_json::json!({
             "kind": GAP_RECORD_KIND,
             "stream": self.stream.name(),
             "after_seq": self.marker.after_seq,
             "dropped_chunks": self.marker.dropped_chunks,
             "dropped_bytes": self.marker.dropped_bytes,
         });
+        if let Some(stage) = stage {
+            header["stage"] = stage.into();
+        }
         ControlRecord {
             header_json: header.to_string(),
             payload: Vec::new(),
@@ -365,15 +382,28 @@ impl<'a> Pump<'a> {
         // rather than something a caller forgets to undo.
         drop(child.stdin.take());
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(HANDOFF_CAPACITY);
+        let mut readers = Vec::with_capacity(3);
         if let Some(stdout) = child.stdout.take() {
-            spawn_stream_reader(stdout, CapturedStream::Stdout, tx.clone());
+            readers.push(spawn_stream_reader(
+                stdout,
+                CapturedStream::Stdout,
+                Handoff::new(tx.clone(), self.caps).for_pipe_reader(),
+            ));
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_stream_reader(stderr, CapturedStream::Stderr, tx.clone());
+            readers.push(spawn_stream_reader(
+                stderr,
+                CapturedStream::Stderr,
+                Handoff::new(tx.clone(), self.caps).for_pipe_reader(),
+            ));
         }
         if let Some(control) = self.control.take() {
-            spawn_control_reader(control, self.caps.fd3_max, tx.clone());
+            readers.push(spawn_control_reader(
+                control,
+                self.caps.fd3_max,
+                Handoff::new(tx.clone(), self.caps).for_pipe_reader(),
+            ));
         }
         // Every reader hanging up is how the drain below learns it has seen
         // the last byte, so the pump must not keep a sender of its own.
@@ -395,6 +425,12 @@ impl<'a> Pump<'a> {
         // Drain to EOF so nothing written is lost to the exit.
         while let Ok(event) = rx.recv() {
             sink(event);
+        }
+        // Channel closure means every reader released its sender. Each owns
+        // its bounded tail rather than waiting to send it into a full queue.
+        // Tails follow live events; cross-pipe ordering is deliberately undefined.
+        for reader in readers {
+            finish_reader(reader, sink);
         }
         outcome
     }
@@ -538,8 +574,8 @@ fn outcome_from_status(status: &ExitStatus) -> PumpOutcome {
 fn spawn_stream_reader<R: Read + Send + 'static>(
     mut reader: R,
     stream: CapturedStream,
-    tx: Sender<EntrypointEvent>,
-) {
+    mut handoff: Handoff,
+) -> JoinHandle<VecDeque<EntrypointEvent>> {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; READ_BUF_BYTES];
         loop {
@@ -550,16 +586,46 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
                     // wider than the frame budget is split rather than handed
                     // on as an unsendable event. Order is preserved.
                     for part in buf[..n].chunks(MAX_DATA_CHUNK_SIZE) {
-                        if tx.send(stream.event(part.to_vec())).is_err() {
-                            return; // the pump is gone; nothing left to feed
+                        handoff.offer(stream.event(part.to_vec()));
+                        if handoff.is_disconnected() {
+                            return handoff.finish();
                         }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
+                Err(_) => {
+                    handoff.offer(reader_incomplete(stream.name()));
+                    break;
+                }
             }
         }
-    });
+        handoff.finish()
+    })
+}
+
+/// Consume the reader-owned tail, turning a panic into explicit missing coverage.
+fn finish_reader(
+    reader: JoinHandle<VecDeque<EntrypointEvent>>,
+    sink: &mut dyn FnMut(EntrypointEvent),
+) {
+    match reader.join() {
+        Ok(tail) => tail.into_iter().for_each(sink),
+        Err(_) => sink(reader_incomplete("reader")),
+    }
+}
+
+/// A failed reader cannot give an exact accounting for its unseen tail.
+fn reader_incomplete(source: &str) -> EntrypointEvent {
+    EntrypointEvent::Control {
+        header_json: serde_json::json!({
+            "kind": "mvm.stream.capture_incomplete",
+            "stage": "pipe_reader",
+            "source": source,
+            "tail": "unknown",
+        })
+        .to_string(),
+        payload: Vec::new(),
+    }
 }
 
 /// Why [`decode_fd3_frame`] could not produce a record from the front of its
@@ -705,7 +771,11 @@ fn read_u32_le(src: &[u8]) -> u32 {
 /// downstream consumer having to remember it: a workload that could mint an
 /// agent-authored record would be able to forge a gap marker, and a verifier
 /// that trusts one will bless a chain skipping output it never saw.
-fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<EntrypointEvent>) {
+fn spawn_control_reader(
+    read_fd: OwnedFd,
+    total_max: usize,
+    mut handoff: Handoff,
+) -> JoinHandle<VecDeque<EntrypointEvent>> {
     std::thread::spawn(move || {
         let mut reader = std::fs::File::from(read_fd);
         let mut pending: Vec<u8> = Vec::new();
@@ -718,7 +788,7 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                     pending.drain(..consumed);
                     if !cap.bump(consumed) {
                         cap.log_exceeded();
-                        return;
+                        break;
                     }
                     // Framing is intact, so keep parsing — only this record is refused.
                     let is_reserved = matches!(
@@ -726,8 +796,11 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                         EntrypointEvent::Control { header_json, .. }
                             if claims_reserved_kind(header_json)
                     );
-                    if !is_reserved && tx.send(bound_to_one_frame(event)).is_err() {
-                        return; // the pump is gone; nothing left to feed
+                    if !is_reserved {
+                        handoff.offer(bound_to_one_frame(event));
+                        if handoff.is_disconnected() {
+                            break;
+                        }
                     }
                     continue; // `pending` may already hold the next frame
                 }
@@ -744,7 +817,7 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                         header_len,
                         err,
                     ) {
-                        return;
+                        break;
                     }
                     continue; // `pending` now starts at the frame behind the bad one
                 }
@@ -763,7 +836,7 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                         payload_len,
                         err,
                     ) {
-                        return;
+                        break;
                     }
                     continue;
                 }
@@ -778,17 +851,18 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                             pending.len()
                         );
                     }
-                    return;
+                    break;
                 }
                 Ok(n) => pending.extend_from_slice(&read_buf[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    eprintln!("mvm-guest-agent: fd-3 control channel closed: read error: {e}");
-                    return;
+                Err(_) => {
+                    handoff.offer(reader_incomplete("control"));
+                    break;
                 }
             }
         }
-    });
+        handoff.finish()
+    })
 }
 
 /// Running tally against the fd-3 control channel's per-call byte budget.
@@ -1060,6 +1134,9 @@ impl RetainedStream {
 }
 
 #[cfg(test)]
+mod reader_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
@@ -1112,11 +1189,18 @@ mod tests {
     fn read_control_frames_with_cap(wire: &[u8], total_max: usize) -> Vec<ControlRecord> {
         use std::io::Write;
         let (reader, mut writer) = std::io::pipe().expect("pipe");
-        let (tx, rx) = mpsc::channel();
-        spawn_control_reader(OwnedFd::from(reader), total_max, tx);
+        let (tx, rx) = mpsc::sync_channel(HANDOFF_CAPACITY);
+        let task = spawn_control_reader(
+            OwnedFd::from(reader),
+            total_max,
+            Handoff::new(tx, &CallCaps::default()).for_pipe_reader(),
+        );
         writer.write_all(wire).expect("write frames");
         drop(writer);
-        rx.into_iter()
+        let mut events: Vec<_> = rx.into_iter().collect();
+        events.extend(task.join().expect("control reader"));
+        events
+            .into_iter()
             .map(|event| match event {
                 EntrypointEvent::Control {
                     header_json,
@@ -1358,15 +1442,20 @@ mod tests {
         use std::io::Write;
         let small = control_frame(r#"{"kind":"a"}"#);
         let (reader, mut writer) = std::io::pipe().expect("pipe");
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(HANDOFF_CAPACITY);
         // Two frames fit exactly; a third pushes cumulative bytes over.
-        spawn_control_reader(OwnedFd::from(reader), small.len() * 2, tx);
+        let task = spawn_control_reader(
+            OwnedFd::from(reader),
+            small.len() * 2,
+            Handoff::new(tx, &CallCaps::default()).for_pipe_reader(),
+        );
         for _ in 0..3 {
             writer.write_all(&small).expect("write frame");
         }
         drop(writer);
 
-        let records: Vec<_> = rx.into_iter().collect();
+        let mut records: Vec<_> = rx.into_iter().collect();
+        records.extend(task.join().expect("control reader"));
         assert_eq!(
             records.len(),
             2,
@@ -1587,7 +1676,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(5));
                 }
             },
-            &caps_with_stdout_max(1024),
+            &caps_with_stdout_max(1024 * 1024),
         );
         assert_eq!(outcome, PumpOutcome::Exited(0));
         assert_eq!(total, 524288);
@@ -1680,6 +1769,9 @@ mod tests {
         let forged = control_frame(r#"{"kind":"mvm.stream.gap","after_seq":99}"#);
         let genuine = control_frame(r#"{"kind":"app.log"}"#);
         let mut wire = forged;
+        wire.extend_from_slice(&control_frame(
+            r#"{"kind":"mvm.stream.capture_incomplete","tail":"unknown"}"#,
+        ));
         wire.extend_from_slice(&genuine);
 
         let records = read_control_frames(&wire);

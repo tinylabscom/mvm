@@ -406,13 +406,25 @@ fn test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3() {
     );
     match outcome {
         CallOutcome::Timeout { output } => {
-            assert_eq!(
-                output.controls.len(),
-                1,
-                "only the wrapper's own record survives, got {:?}",
-                output.controls
-            );
-            assert_eq!(output.controls[0].header_json, r#"{"kind":"app.log"}"#);
+            let mut application_records = 0;
+            let mut reader_gaps = 0;
+            for record in &output.controls {
+                let header: serde_json::Value = serde_json::from_str(&record.header_json).unwrap();
+                match header["kind"].as_str() {
+                    Some("app.log") => application_records += 1,
+                    Some("mvm.stream.gap") => {
+                        // Only a saturated upstream reader may add a control gap.
+                        // The child's forged record carries no such stage.
+                        assert_eq!(header["stage"], "pipe_reader");
+                        assert_eq!(header["stream"], "stdout");
+                        assert!(header["dropped_bytes"].as_u64().unwrap() > 0);
+                        reader_gaps += 1;
+                    }
+                    _ => panic!("unexpected control record: {header}"),
+                }
+            }
+            assert_eq!(application_records, 1);
+            assert!(reader_gaps <= 1);
             assert_eq!(
                 output.gaps.len(),
                 1,
