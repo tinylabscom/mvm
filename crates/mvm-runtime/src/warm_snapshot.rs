@@ -36,6 +36,14 @@ pub(crate) fn is_trusted_snapshot_id(id: &str) -> bool {
 /// The staged snapshot ID is load-bearing checkpoint metadata, covered by the
 /// parent's verified digest and audit lineage. A checkpoint without this
 /// binding is refused rather than falling back to a latency-expensive restage.
+///
+/// Unlike a restore or a `vm_full` fork, this does not require the claiming
+/// tenant to be the one that recorded the parent. A warm-pool parent is a
+/// factory boot that never ran a workload: `factory_parent_config` drops the
+/// plan, tenant, secrets, volumes, config and secret files before it boots, so
+/// its saved memory holds no tenant's data for another tenant to receive, and
+/// one parent serves claims from any tenant the pool admits. The child's own
+/// admitted plan carries its tenant from there on.
 pub fn materialize_child_from_parent(
     checkpoint_store: &CheckpointStore,
     snapshot_store: &FsSnapshotStore,
@@ -117,6 +125,10 @@ mod tests {
     }
 
     impl CheckpointChainAnchor for MockAnchor {
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(None)
+        }
+
         fn recorded_creation_digest(
             &self,
             meta: &CheckpointMeta,

@@ -734,6 +734,7 @@ fn restore(id: &str, json: bool) -> Result<()> {
         mvm_runtime::checkpoint::RestoreParams {
             checkpoint: id.clone(),
             target_vm: meta.vm_name.clone(),
+            tenant: crate::commands::vm::tenant_resolution::resolve_tenant(None),
         },
         restorer.as_ref(),
         &anchor,
