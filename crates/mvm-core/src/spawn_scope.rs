@@ -1927,20 +1927,27 @@ mod tests {
             launcher.is_file(),
             "fake launcher must exist before binding"
         );
-        let mut bound = bind_spawn(
+        let bound = bind_spawn(
             Command::new("/bin/true"),
             "mvm-abc123",
             scratch.path(),
             &SpawnBounds::for_guest_memory(64),
-        )
-        .with_creation_timeout(Duration::from_millis(300));
-        bound.stdout(Stdio::null()).stderr(Stdio::null());
+        );
         assert_eq!(
             bound.as_command().get_program(),
             launcher
                 .canonicalize()
                 .expect("fake launcher has an absolute path")
         );
+        let unit = bound.unit().expect("the launch is scoped").to_string();
+        let mut command = Command::new(&launcher);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        let mut bound = BoundCommand {
+            command,
+            unit: Some(unit),
+            machine_id: "mvm-abc123".to_string(),
+            creation_timeout: Duration::from_millis(300),
+        };
         let started = Instant::now();
         let err = bound
             .spawn()
