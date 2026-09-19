@@ -1453,6 +1453,15 @@ can be wired and reviewed while the Linux implementation is still absent.
 
 ### Task 9: The CPU bound, via a systemd transient scope
 
+- [x] Follow-up: resolve `systemd-run` to one absolute executable before
+      binding a launch, and make the unresponsive-manager regression use a
+      real executable with the same process-name contract. Forty-seven focused
+      host tests and all-target `mvm-core` Clippy pass; Linux CI carries the
+      process-table witness. Delivery evidence:
+      `specs/sprint/delivery/3477-spawn-scope-launcher-fixture.md`.
+- [ ] Deliver the follow-up through the merge queue and close #3477 from landed
+      Linux evidence.
+
 **Redesigned after Task 8's spike. Read `specs/benchmarks/308-cgroup-delegation-findings.md`
 before starting.** The original design — `mkdir` a leaf under
 `user@<uid>.service` and migrate the VMM into it — does not work unprivileged,

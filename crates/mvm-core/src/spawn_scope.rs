@@ -170,13 +170,7 @@ impl MechanismGap {
 /// are things a deployment can legitimately be missing.
 #[must_use]
 pub fn mechanism_gap() -> Option<MechanismGap> {
-    if !binary_on_path(SYSTEMD_RUN) {
-        return Some(MechanismGap::SystemdRunMissing);
-    }
-    if !session_bus_present() {
-        return Some(MechanismGap::NoUserSessionBus);
-    }
-    None
+    mechanism_launcher().err()
 }
 
 /// The operator-facing sentence for a boot that asked for a CPU bound and did
@@ -414,9 +408,9 @@ fn bindable_quota_percent(machine_id: &str, grant: Option<&CpuGrant>) -> Option<
 /// them — one building a [`Command`], one building a shell string for a spawn
 /// that daemonizes — and a second copy of this list is how the two would
 /// silently drift into bounding different things.
-fn scope_prefix(scope_id: &str, limits: &ScopeLimits) -> Vec<String> {
+fn scope_prefix(launcher: &Path, scope_id: &str, limits: &ScopeLimits) -> Vec<String> {
     let mut prefix = vec![
-        SYSTEMD_RUN.to_string(),
+        launcher.to_string_lossy().into_owned(),
         "--user".to_string(),
         "--scope".to_string(),
         "--quiet".to_string(),
@@ -430,6 +424,7 @@ fn scope_prefix(scope_id: &str, limits: &ScopeLimits) -> Vec<String> {
 
 /// A scope decided on for one boot: its minted id and the limits it carries.
 struct PreparedScope {
+    launcher: PathBuf,
     scope_id: String,
     limits: ScopeLimits,
 }
@@ -444,20 +439,23 @@ fn prepare_scope(
     state_dir: &Path,
     bounds: &SpawnBounds,
 ) -> Option<PreparedScope> {
-    if let Some(gap) = mechanism_gap() {
-        // A requested share going unenforced is worth an operator's attention.
-        // The memory and task ceilings every spawn gets were not requested, so
-        // their absence on a host without the mechanism is the expected case.
-        if let Some(CpuGrant::Share { millicores }) = bounds.cpu_grant {
-            tracing::info!(
-                "CPU share of {millicores} millicores for '{machine_id}' will not be enforced: {}",
-                gap.describe()
-            );
-        } else {
-            tracing::debug!("no spawn scope for '{machine_id}': {}", gap.describe());
+    let launcher = match mechanism_launcher() {
+        Ok(launcher) => launcher,
+        Err(gap) => {
+            // A requested share going unenforced is worth an operator's attention.
+            // The memory and task ceilings every spawn gets were not requested, so
+            // their absence on a host without the mechanism is the expected case.
+            if let Some(CpuGrant::Share { millicores }) = bounds.cpu_grant {
+                tracing::info!(
+                    "CPU share of {millicores} millicores for '{machine_id}' will not be enforced: {}",
+                    gap.describe()
+                );
+            } else {
+                tracing::debug!("no spawn scope for '{machine_id}': {}", gap.describe());
+            }
+            return None;
         }
-        return None;
-    }
+    };
     if let Err(e) = validate_scope_id(machine_id) {
         tracing::warn!("no spawn scope for '{machine_id}': {e}");
         return None;
@@ -476,7 +474,11 @@ fn prepare_scope(
             state_dir.display()
         );
     }
-    Some(PreparedScope { scope_id, limits })
+    Some(PreparedScope {
+        launcher,
+        scope_id,
+        limits,
+    })
 }
 
 /// The scope prefix for this boot, or `None` when nothing is to be bound.
@@ -493,7 +495,11 @@ pub fn scope_prefix_for_spawn(
     bounds: &SpawnBounds,
 ) -> Option<Vec<String>> {
     let prepared = prepare_scope(machine_id, state_dir, bounds)?;
-    Some(scope_prefix(&prepared.scope_id, &prepared.limits))
+    Some(scope_prefix(
+        &prepared.launcher,
+        &prepared.scope_id,
+        &prepared.limits,
+    ))
 }
 
 /// A VMM launch, wrapped in its scope when this host can serve one.
@@ -617,7 +623,12 @@ pub fn bind_spawn(
 ) -> BoundCommand {
     let (command, unit) = match prepare_scope(machine_id, state_dir, bounds) {
         Some(prepared) => (
-            wrap_checked(cmd, &prepared.scope_id, &prepared.limits),
+            wrap_checked(
+                cmd,
+                &prepared.launcher,
+                &prepared.scope_id,
+                &prepared.limits,
+            ),
             Some(scope_name(&prepared.scope_id)),
         ),
         None => (cmd, None),
@@ -635,8 +646,8 @@ pub fn bind_spawn(
 /// Split out because `Command` is not `Clone`: a fallible wrap consumes its
 /// input, so a caller that wants the original back on refusal has to do the
 /// checking before handing it over. [`bind_spawn`] is that caller.
-fn wrap_checked(cmd: Command, scope_id: &str, limits: &ScopeLimits) -> Command {
-    let prefix = scope_prefix(scope_id, limits);
+fn wrap_checked(cmd: Command, launcher: &Path, scope_id: &str, limits: &ScopeLimits) -> Command {
+    let prefix = scope_prefix(launcher, scope_id, limits);
     let mut wrapped = Command::new(&prefix[0]);
     wrapped.args(&prefix[1..]);
     wrapped.arg(cmd.get_program());
@@ -1056,15 +1067,29 @@ fn parse_memory_limit_exceeded(show: &str) -> Option<MemoryLimitExceeded> {
     })
 }
 
-/// Whether a binary is reachable through `PATH`.
+/// The absolute path of a binary reachable through `PATH`.
 ///
 /// Resolved by inspection rather than by spawning: probing availability must
 /// not itself start a process on a host where the answer is "absent".
-fn binary_on_path(binary: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(binary).is_file())
+fn binary_on_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            candidate.canonicalize().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// The launcher this process can execute, or the exact missing mechanism.
+fn mechanism_launcher() -> std::result::Result<PathBuf, MechanismGap> {
+    let launcher = binary_on_path(SYSTEMD_RUN).ok_or(MechanismGap::SystemdRunMissing)?;
+    if !session_bus_present() {
+        return Err(MechanismGap::NoUserSessionBus);
+    }
+    Ok(launcher)
 }
 
 /// Whether this process can reach a systemd *user* manager.
@@ -1119,6 +1144,12 @@ pub fn pretend_mechanism_with_launcher(
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))?;
+    }
+    if !fake.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("fake launcher was not published at {}", fake.display()),
+        ));
     }
     std::fs::write(run_dir.join("bus"), b"")?;
     let mut path = std::ffi::OsString::from(&bin_dir);
@@ -1311,7 +1342,12 @@ mod tests {
         // the clock and the pid, so an exact-argv assertion can only be written
         // against a fixed id. What is under test here is the *shape* — every
         // limit reaching systemd ahead of the payload — not how the id is minted.
-        let wrapped = wrap_checked(inner, "mvm-abc123-1f2e3d-2a", &limits(Some(150), Some(768)));
+        let wrapped = wrap_checked(
+            inner,
+            Path::new(SYSTEMD_RUN),
+            "mvm-abc123-1f2e3d-2a",
+            &limits(Some(150), Some(768)),
+        );
         assert_eq!(
             rendered_argv(&wrapped),
             vec![
@@ -1345,7 +1381,12 @@ mod tests {
         inner.env("MVM_HOME", "/tmp/mvm-home");
         inner.env_remove("RUST_LOG");
         inner.current_dir("/tmp");
-        let wrapped = wrap_checked(inner, "mvm-abc123-1f2e3d-2a", &limits(Some(100), None));
+        let wrapped = wrap_checked(
+            inner,
+            Path::new(SYSTEMD_RUN),
+            "mvm-abc123-1f2e3d-2a",
+            &limits(Some(100), None),
+        );
 
         let envs: Vec<(String, Option<String>)> = wrapped
             .get_envs()
@@ -1475,11 +1516,12 @@ mod tests {
         );
         assert_eq!(bound.unit(), Some(unit.as_str()));
         let mut skeleton = argv.clone();
+        skeleton[0] = "<launcher>".to_string();
         skeleton[5] = "<unit>".to_string();
         assert_eq!(
             skeleton,
             vec![
-                "systemd-run",
+                "<launcher>",
                 "--user",
                 "--scope",
                 "--quiet",
@@ -1879,6 +1921,12 @@ mod tests {
             "#!/bin/sh\nwhile true; do sleep 0.05; done\n",
         )
         .expect("fake launcher");
+        let launcher = scratch.path().join("bin").join(SYSTEMD_RUN);
+        std::fs::copy("/usr/bin/yes", &launcher).expect("install executable fake launcher");
+        assert!(
+            launcher.is_file(),
+            "fake launcher must exist before binding"
+        );
         let mut bound = bind_spawn(
             Command::new("/bin/true"),
             "mvm-abc123",
@@ -1886,6 +1934,13 @@ mod tests {
             &SpawnBounds::for_guest_memory(64),
         )
         .with_creation_timeout(Duration::from_millis(300));
+        bound.stdout(Stdio::null()).stderr(Stdio::null());
+        assert_eq!(
+            bound.as_command().get_program(),
+            launcher
+                .canonicalize()
+                .expect("fake launcher has an absolute path")
+        );
         let started = Instant::now();
         let err = bound
             .spawn()
@@ -2015,6 +2070,6 @@ mod tests {
 
     #[test]
     fn a_missing_binary_is_not_on_path() {
-        assert!(!binary_on_path("mvm-definitely-not-a-real-binary"));
+        assert!(binary_on_path("mvm-definitely-not-a-real-binary").is_none());
     }
 }

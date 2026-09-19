@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
 ## In progress
 
@@ -3419,8 +3419,11 @@ resume` takes a `current_head` and refuses when it differs from the
   - [~] WS4 — CPU quota via `systemd-run --user --scope` (born bounded for
     free: systemd registers the scope before exec'ing the payload). Per-boot
     unique unit name, recorded in the VM state dir so the read-back can
-    still resolve it. Prod gate consults host mechanism availability, not
-    just backend kind. STILL OPEN: `exec_secs` enforcement; and the live
+    still resolve it. The launcher is resolved once to an absolute path before
+    the spawn is bound, and the unresponsive-manager regression uses a real
+    executable named `systemd-run` instead of a racy shell script. Prod gate
+    consults host mechanism availability, not just backend kind. STILL OPEN:
+    `exec_secs` enforcement; and the live
     measurement predates the read-back landing, so a bounded boot's
     _reported tier_ is unwitnessed on hardware
   - [x] WS4b — the host admission budget: `HostBudget`/`MachineCharge` in

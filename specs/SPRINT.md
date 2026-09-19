@@ -4180,3 +4180,15 @@ writes the plan:
       explicit HVF/Firecracker receipt coverage, Linux builder-VM Clippy,
       gated-target checks, generated-artifact checks, and all repository gates.
 - [ ] Merge through the queue and close #3287 from landed evidence.
+
+## 2026-09-19 spawn-scope launcher fixture
+
+- [x] Resolve the probed `systemd-run` executable to an absolute path before
+      constructing either spawn shape.
+- [x] Replace the unresponsive-manager test's racy shell-script launcher with
+      a real executable named `systemd-run`, and verify the exact launcher path
+      before spawning.
+- [x] Pass all 47 focused `spawn_scope` host tests, formatting, and all-target
+      `mvm-core` Clippy with warnings denied.
+- [ ] Pass the Linux process-table witness in CI, merge through the queue, and
+      close #3477 from landed evidence.
