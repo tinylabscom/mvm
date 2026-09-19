@@ -50,6 +50,7 @@
 
 pub mod broker;
 pub mod console_source;
+pub mod display_source;
 pub mod durable;
 pub mod edge_connector;
 pub mod entrypoint_source;
@@ -66,6 +67,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+pub use display_source::{DisplaySource, DisplaySourceHandle};
 pub use edge_connector::{EdgeConnector, EdgeError, EdgeStep, servable};
 pub use entrypoint_source::{EntrypointSink, RecordedCopy, ShownChunk};
 pub use fanout::{

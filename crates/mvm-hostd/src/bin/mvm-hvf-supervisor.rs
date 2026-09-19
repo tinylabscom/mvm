@@ -381,6 +381,7 @@ fn main() -> anyhow::Result<()> {
                 egress_relay: cfg.egress_relay_socket.clone(),
                 trusted_builder_egress: cfg.trusted_builder_egress,
                 broker_socket: cfg.broker_socket.clone(),
+                display_socket: cfg.display_socket.clone(),
                 console_data_sockets: cfg
                     .console_data_sockets
                     .iter()

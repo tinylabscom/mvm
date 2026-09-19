@@ -239,10 +239,12 @@ Last updated: 2026-09-19
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.
-      Planned, not started. View-only frames over vsock first (no host→guest path, so
-      claim 15 is untouched), a host-side OAuth broker second, and
-      grant-gated attended input last. Software rendering only — Firecracker
-      has no display device and the workload kernel force-disables
+      P0 is complete: signed-plan-gated view-only frames cross one guest-to-host
+      vsock path into retained, hash-chained stream records; the viewer is
+      loopback-only with a one-shot token, and no display input path exists.
+      `check-single-display-path` ratchets that shape. The host-side OAuth broker
+      and grant-gated attended input remain open. Software rendering only —
+      Firecracker has no display device and the workload kernel force-disables
       `DRM`/`FB`/`INPUT`/`HID`.
 
 - [ ] **Install lifecycle and packaging polish.**

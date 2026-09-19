@@ -287,6 +287,7 @@ fn factory_parent_spec_inner(
         egress_gateway: Some(&egress),
         exit: &exit,
         broker: Some(&broker),
+        display: None,
         console_data: Vec::new(),
     };
     VmmSpec {
@@ -401,6 +402,7 @@ mod tests {
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
+                display: None,
                 console_data: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),

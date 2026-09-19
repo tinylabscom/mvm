@@ -163,6 +163,9 @@ mvmctl machine create web --image nginx --cpus 2 --memory 512M
 mvmctl machine start web
 mvmctl machine exec  web -- nginx -v
 mvmctl machine logs  web
+# For a workload admitted with host.display.view.v1, serve its frames at a
+# single-use URL bound to 127.0.0.1 only.
+mvmctl machine display web
 mvmctl machine reconfigure web --memory 1G     # patch + relaunch
 mvmctl machine stop  web && mvmctl machine rm web
 

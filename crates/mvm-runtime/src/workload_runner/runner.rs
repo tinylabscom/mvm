@@ -189,23 +189,22 @@ pub struct ConsoleCapture<'a> {
     pub vm_name: &'a str,
     /// The write-only capture file the backend is already writing.
     pub console_log: &'a Path,
+    /// Signed-grant guest-to-host display socket; the streamer only reads it.
+    pub display_socket: Option<&'a Path>,
     pub redaction: &'a RedactionPolicy,
     /// Whether the admitted plan asked for a durable transcript. Capture and
     /// live fan-out happen either way; this decides only what outlives the run.
     pub retention: StreamRetention,
 }
-
 /// The hook a process that registered no real streamer gets: console bytes
 /// keep going to the write-only capture file on disk and nothing republishes
 /// them. An embedder driving this crate as a library, and every unit test
 /// that does not care about output capture, land here.
 pub struct NoopConsoleStreamer;
-
 impl ConsoleStreamer for NoopConsoleStreamer {
     fn start(&self, _capture: &ConsoleCapture<'_>) {}
     fn stop(&self, _vm_name: &str) {}
 }
-
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -396,6 +395,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
+            display_socket: socks.display.as_deref(),
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
@@ -728,6 +728,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         self.console_streamer.start(&ConsoleCapture {
             vm_name: &child.0,
             console_log: &socks.console_log,
+            display_socket: socks.display.as_deref(),
             redaction: &redaction,
             retention: plan_stream_retention(child_cfg.plan_json.as_deref()),
         });

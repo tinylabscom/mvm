@@ -78,6 +78,14 @@ pub fn plan_stream_retention(plan_json: Option<&str>) -> mvm_core::plan::StreamR
         .unwrap_or_default()
 }
 
+/// Whether the admitted plan exposes the view-only display channel.
+/// Undecodable or absent plans remain closed.
+pub fn plan_grants_display_view(plan_json: Option<&str>) -> bool {
+    plan_json
+        .and_then(|json| mvm_core::plan::plan_from_admitted_json(json).ok())
+        .is_some_and(|plan| mvm_contract::stream::grants_display_view(&plan))
+}
+
 /// True when `plan_json` — an admitted plan in either the bare or the signed
 /// shape — binds at least one egress secret.
 ///

@@ -76,6 +76,7 @@ pub enum Direction {
     Stdout,
     Stderr,
     Trace,
+    Frame,
 }
 
 /// One sealed transcript chunk recorded in the manifest.
@@ -882,7 +883,12 @@ mod tests {
 
     #[test]
     fn stream_directions_round_trip_through_serde() {
-        for d in [Direction::Stdout, Direction::Stderr, Direction::Trace] {
+        for d in [
+            Direction::Stdout,
+            Direction::Stderr,
+            Direction::Trace,
+            Direction::Frame,
+        ] {
             let s = serde_json::to_string(&d).expect("serialize direction");
             let back: Direction = serde_json::from_str(&s).expect("deserialize direction");
             assert_eq!(d, back);

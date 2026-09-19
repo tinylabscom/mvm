@@ -31,10 +31,13 @@
 //! One broker per VM, resident in the per-tenant daemon rather than spawned
 //! per VM.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
+use mvm_contract::stream::{
+    DisplayFrame, DisplayFrameError, StreamKind, StreamRecord, StreamSource,
+};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
     CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptManifest, TranscriptWriter,
@@ -182,7 +185,13 @@ pub struct StreamBroker {
     prev_hash: [u8; 32],
     last_stamp_nanos: u64,
     counters: StreamCounters,
+    /// First frame digest observed for each agent step. Keeping only the
+    /// digest makes the sample an index into the retained stream rather than
+    /// a second, unbounded image store.
+    step_samples: BTreeMap<String, [u8; 32]>,
 }
+
+const MAX_STEP_SAMPLES: usize = 1024;
 
 impl StreamBroker {
     /// Build a broker for `vm` over a redaction seam.
@@ -222,6 +231,7 @@ impl StreamBroker {
             prev_hash: [0u8; 32],
             last_stamp_nanos: 0,
             counters: StreamCounters::default(),
+            step_samples: BTreeMap::new(),
         }
     }
 
@@ -315,6 +325,12 @@ impl StreamBroker {
         self.readers.iter().filter(|r| r.strong_count() > 0).count()
     }
 
+    /// Digest of the first frame captured for one agent step.
+    #[must_use]
+    pub fn step_sample(&self, step_id: &str) -> Option<[u8; 32]> {
+        self.step_samples.get(step_id).copied()
+    }
+
     /// Attach a follower. It receives every record ingested from now on;
     /// earlier records live in the transcript, not in its queue.
     pub fn subscribe(&mut self) -> ReaderHandle {
@@ -349,12 +365,42 @@ impl StreamBroker {
     pub fn ingest(&mut self, source: StreamSource, kind: StreamKind, bytes: &[u8]) -> ClearOutcome {
         self.counters.ingested = self.counters.ingested.saturating_add(1);
         let cleared = self.clear_for_display(source, kind, bytes);
-        let record = Arc::new(self.seal_record(source, cleared.kind, cleared.body));
+        self.publish(source, cleared.kind, cleared.body);
+        cleared.outcome
+    }
+
+    /// Validate and publish one view-only display frame.
+    ///
+    /// Image bodies do not pass through the text redactor: applying regexes to
+    /// compressed pixels would corrupt the image without making visible text
+    /// safe. The frame instead stays inside the same encrypted, retained,
+    /// hash-chained stream as every other record, and is reachable only when
+    /// the signed display grant opened its guest-to-host socket.
+    pub fn ingest_frame(&mut self, frame: &DisplayFrame) -> Result<[u8; 32], DisplayFrameError> {
+        let payload = frame.encode()?;
+        let digest = frame.digest();
+        if let Some(step_id) = frame.step_id.as_ref() {
+            self.remember_step_sample(step_id, digest);
+        }
+        self.counters.ingested = self.counters.ingested.saturating_add(1);
+        self.publish(StreamSource::Display, StreamKind::Frame, payload);
+        Ok(digest)
+    }
+
+    fn remember_step_sample(&mut self, step_id: &str, digest: [u8; 32]) {
+        if self.step_samples.contains_key(step_id) || self.step_samples.len() < MAX_STEP_SAMPLES {
+            self.step_samples
+                .entry(step_id.to_owned())
+                .or_insert(digest);
+        }
+    }
+
+    fn publish(&mut self, source: StreamSource, kind: StreamKind, payload: Vec<u8>) {
+        let record = Arc::new(self.seal_record(source, kind, payload));
         if let Some(durable) = self.durable.as_ref() {
             durable.push(&record);
         }
         self.fan_out(record);
-        cleared.outcome
     }
 
     /// Seal the transcript and hand back its manifest.
@@ -1437,5 +1483,49 @@ mod tests {
             "the signed entry must contain only attach metadata, never raw or redacted payload bytes"
         );
         assert_eq!(b.counters().audit_failures, 0);
+    }
+
+    #[test]
+    fn the_first_frame_digest_is_the_sample_for_each_agent_step() {
+        use mvm_contract::stream::{DisplayFrame, DisplayMime};
+
+        let mut broker = StreamBroker::live_only(
+            "vm-display",
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        let first = DisplayFrame {
+            step_id: Some("step-4".into()),
+            mime: DisplayMime::Jpeg,
+            width: 16,
+            height: 16,
+            bytes: vec![1, 2, 3],
+        };
+        let mut later = first.clone();
+        later.bytes = vec![4, 5, 6];
+
+        broker.ingest_frame(&first).unwrap();
+        broker.ingest_frame(&later).unwrap();
+
+        assert_eq!(broker.step_sample("step-4"), Some(first.digest()));
+        assert_ne!(broker.step_sample("step-4"), Some(later.digest()));
+        assert_eq!(broker.step_sample("missing"), None);
+    }
+
+    #[test]
+    fn the_agent_step_sample_index_has_a_fixed_bound() {
+        let mut broker = StreamBroker::live_only(
+            "vm-display",
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        let retained_digest = [7; 32];
+        for index in 0..MAX_STEP_SAMPLES {
+            broker.remember_step_sample(&format!("step-{index}"), retained_digest);
+        }
+        broker.remember_step_sample("one-too-many", [8; 32]);
+        broker.remember_step_sample("step-0", [9; 32]);
+
+        assert_eq!(broker.step_samples.len(), MAX_STEP_SAMPLES);
+        assert_eq!(broker.step_sample("one-too-many"), None);
+        assert_eq!(broker.step_sample("step-0"), Some(retained_digest));
     }
 }

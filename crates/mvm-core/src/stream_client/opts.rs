@@ -18,6 +18,9 @@ pub struct KindFilter {
     pub stderr: bool,
     /// Deliver [`StreamKind::Trace`] records.
     pub trace: bool,
+    /// Deliver [`StreamKind::Frame`] records.
+    #[serde(default)]
+    pub frame: bool,
 }
 
 impl KindFilter {
@@ -28,6 +31,7 @@ impl KindFilter {
             stdout: true,
             stderr: true,
             trace: true,
+            frame: true,
         }
     }
 
@@ -37,6 +41,7 @@ impl KindFilter {
             stdout: false,
             stderr: false,
             trace: false,
+            frame: false,
         }
     }
 
@@ -47,6 +52,7 @@ impl KindFilter {
             StreamKind::Stdout => filter.stdout = true,
             StreamKind::Stderr => filter.stderr = true,
             StreamKind::Trace => filter.trace = true,
+            StreamKind::Frame => filter.frame = true,
         }
         filter
     }
@@ -58,6 +64,7 @@ impl KindFilter {
             StreamKind::Stdout => self.stdout = true,
             StreamKind::Stderr => self.stderr = true,
             StreamKind::Trace => self.trace = true,
+            StreamKind::Frame => self.frame = true,
         }
         self
     }
@@ -68,6 +75,7 @@ impl KindFilter {
             StreamKind::Stdout => self.stdout,
             StreamKind::Stderr => self.stderr,
             StreamKind::Trace => self.trace,
+            StreamKind::Frame => self.frame,
         }
     }
 }
@@ -169,7 +177,12 @@ mod tests {
     #[test]
     fn the_default_filter_admits_every_kind() {
         let filter = KindFilter::default();
-        for kind in [StreamKind::Stdout, StreamKind::Stderr, StreamKind::Trace] {
+        for kind in [
+            StreamKind::Stdout,
+            StreamKind::Stderr,
+            StreamKind::Trace,
+            StreamKind::Frame,
+        ] {
             assert!(filter.matches(kind), "{kind:?}");
         }
     }
@@ -180,6 +193,7 @@ mod tests {
         assert!(filter.matches(StreamKind::Stderr));
         assert!(!filter.matches(StreamKind::Stdout));
         assert!(!filter.matches(StreamKind::Trace));
+        assert!(!filter.matches(StreamKind::Frame));
     }
 
     #[test]
@@ -188,6 +202,7 @@ mod tests {
         assert!(filter.matches(StreamKind::Stdout));
         assert!(filter.matches(StreamKind::Trace));
         assert!(!filter.matches(StreamKind::Stderr));
+        assert!(!filter.matches(StreamKind::Frame));
     }
 
     #[test]
