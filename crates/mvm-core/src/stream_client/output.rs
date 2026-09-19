@@ -861,6 +861,7 @@ fn output_kind(direction: Direction) -> Option<StreamKind> {
         Direction::Stdout => Some(StreamKind::Stdout),
         Direction::Stderr => Some(StreamKind::Stderr),
         Direction::Trace => Some(StreamKind::Trace),
+        Direction::Frame => Some(StreamKind::Frame),
         Direction::Egress | Direction::Ingress => None,
     }
 }

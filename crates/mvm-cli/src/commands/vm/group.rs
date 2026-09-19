@@ -13,8 +13,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl, snapshot,
-    volume, wait,
+    checkpoint, cp, diff, display, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl,
+    snapshot, volume, wait,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -53,6 +53,8 @@ pub(in crate::commands) enum VmCmd {
     /// Show filesystem changes in a running VM
     #[command(hide = true)]
     Diff(diff::Args),
+    /// Serve view-only display frames on a tokenized loopback URL
+    Display(display::Args),
     /// Wait for guest readiness
     #[command(hide = true)]
     Wait(wait::WaitArgs),
@@ -119,6 +121,7 @@ impl VmCmd {
             VmCmd::Fs(_) => "fs",
             VmCmd::Proc(_) => "proc",
             VmCmd::Diff(_) => "diff",
+            VmCmd::Display(_) => "display",
             VmCmd::Wait(_) => "wait",
             VmCmd::BootReport(_) => "boot-report",
             VmCmd::SetTtl(_) => "set-ttl",
@@ -142,6 +145,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Fs(a) => fs::run(cli, a, cfg),
         VmCmd::Proc(a) => proc::run(cli, a, cfg),
         VmCmd::Diff(a) => diff::run(cli, a, cfg),
+        VmCmd::Display(a) => display::run(cli, a, cfg),
         VmCmd::Wait(a) => wait::run_wait(cli, a, cfg),
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),
         VmCmd::SetTtl(a) => set_ttl::run(cli, a, cfg),

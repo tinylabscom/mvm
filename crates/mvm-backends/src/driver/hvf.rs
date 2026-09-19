@@ -267,6 +267,7 @@ fn relay_supervisor_config_with_handoff(
         // admitted host services reach the per-VM broker (or the per-tenant host-agent
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
         broker_socket: spec.host_socket_for_service(GuestService::Broker),
+        display_socket: spec.host_socket_for_service(GuestService::DisplayFrame),
         console_data_sockets,
         builder_control_sockets,
         exclusive_image_lock: exclusive_image_lock.map(Path::to_path_buf),
@@ -600,6 +601,8 @@ impl VmmDriver for HvfDriver {
                 mask | 4
             } else if channel.service == GuestService::Telemetry {
                 mask | mvm_vmm::hvf_handoff::HANDOFF_TELEMETRY
+            } else if channel.service == GuestService::DisplayFrame {
+                mask | mvm_vmm::hvf_handoff::HANDOFF_DISPLAY
             } else if matches!(
                 channel.service,
                 GuestService::ConsoleData { port }

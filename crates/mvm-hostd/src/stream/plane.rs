@@ -74,6 +74,7 @@ use crate::audit::host_keypair;
 use crate::audit::plan_persist;
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+use crate::stream::display_source::{DisplaySource, DisplaySourceHandle};
 use crate::stream::entrypoint_source::EntrypointSink;
 use crate::stream::fanout::ReaderHandle;
 use crate::stream::input_gate::InputRefusal;
@@ -91,6 +92,7 @@ use crate::stream::serve::{self, StreamServerHandle, serve_stream};
 /// unwinds the same way rather than a different one.
 struct VmStream {
     console: Option<ConsoleSourceHandle>,
+    display: Option<DisplaySourceHandle>,
     server: StreamServerHandle,
     broker: SharedBroker,
     /// Where this capture's manifest goes, or `None` when the plan admitted
@@ -229,6 +231,7 @@ impl StreamPlane {
             vm.to_string(),
             VmStream {
                 console: follow_console(vm, capture.console_log, &broker),
+                display: follow_display(vm, capture.display_socket, &broker),
                 server,
                 broker,
                 transcript_dir,
@@ -604,6 +607,23 @@ fn follow_console(
         .ok()
 }
 
+fn follow_display(
+    vm: &str,
+    display_socket: Option<&Path>,
+    broker: &SharedBroker,
+) -> Option<DisplaySourceHandle> {
+    let path = display_socket?;
+    DisplaySource::listen(path, Arc::clone(broker))
+        .inspect_err(|error| {
+            tracing::warn!(
+                vm = %vm,
+                error = %error,
+                "display frames will not be streamed for this workload"
+            );
+        })
+        .ok()
+}
+
 /// Wind one VM's capture down in the order that neither loses bytes nor
 /// wedges.
 ///
@@ -617,6 +637,7 @@ fn follow_console(
 fn seal_capture(vm: &str, stream: VmStream) {
     let VmStream {
         console,
+        display,
         server,
         broker,
         transcript_dir,
@@ -627,6 +648,9 @@ fn seal_capture(vm: &str, stream: VmStream) {
     let t_console = std::time::Instant::now();
     if let Some(console) = console {
         console.stop();
+    }
+    if let Some(display) = display {
+        display.stop();
     }
     tracing::debug!(
         vm = %vm,
@@ -945,6 +969,7 @@ mod tests {
         ConsoleCapture {
             vm_name: vm,
             console_log,
+            display_socket: None,
             redaction: &DEFAULT_REDACTION,
             retention: StreamRetention::Persist,
         }
@@ -1100,6 +1125,46 @@ mod tests {
         );
 
         plane.release("plane-vm");
+    }
+
+    #[test]
+    fn attach_wires_the_granted_display_socket_into_the_same_stream_chain() {
+        let (_env, tmp) = isolated_home();
+        let console = console_log_for("plane-display");
+        let display = tmp.path().join("display.sock");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&ConsoleCapture {
+                display_socket: Some(&display),
+                ..capture("plane-display", &console)
+            })
+            .expect("attach display capture");
+        let mut reader = plane.subscribe("plane-display").expect("subscribe");
+        let mut guest = std::os::unix::net::UnixStream::connect(&display).expect("guest dial");
+        let frame = mvm_contract::stream::DisplayFrame {
+            step_id: Some("agent-step-9".into()),
+            mime: mvm_contract::stream::DisplayMime::Jpeg,
+            width: 320,
+            height: 200,
+            bytes: vec![0xff, 0xd8, 0xff, 0xd9],
+        };
+        mvm_agentd::display_bridge::write_frame(&mut guest, &frame).expect("send frame");
+
+        let deadline = std::time::Instant::now() + DEADLINE;
+        let record = loop {
+            if let Some(record) = reader.recv() {
+                break record;
+            }
+            assert!(std::time::Instant::now() < deadline, "frame reached broker");
+            std::thread::yield_now();
+        };
+        assert_eq!(record.source, mvm_contract::stream::StreamSource::Display);
+        assert_eq!(record.kind, StreamKind::Frame);
+        assert_eq!(
+            mvm_contract::stream::DisplayFrame::decode(&record.payload).unwrap(),
+            frame
+        );
+        plane.release("plane-display");
     }
 
     #[test]
@@ -1350,6 +1415,7 @@ mod tests {
             .attach(&ConsoleCapture {
                 vm_name: "plane-policy",
                 console_log: &console,
+                display_socket: None,
                 redaction: &narrowed,
                 retention: StreamRetention::Persist,
             })

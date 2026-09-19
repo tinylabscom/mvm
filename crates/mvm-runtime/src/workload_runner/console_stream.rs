@@ -77,6 +77,7 @@ mod tests {
         ConsoleCapture {
             vm_name: vm,
             console_log: Path::new("/dev/null"),
+            display_socket: None,
             redaction: &REDACTION,
             retention: mvm_core::plan::StreamRetention::Persist,
         }

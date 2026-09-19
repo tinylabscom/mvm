@@ -141,6 +141,9 @@ pub struct WorkloadSockets<'a> {
     /// unadmitted VM carries no broker port, so a stray guest dial stays
     /// `ECONNREFUSED` (fail-closed).
     pub broker: Option<&'a Path>,
+    /// View-only guest-to-host display frame sink. Present only with the
+    /// signed display-view grant.
+    pub display: Option<&'a Path>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -182,6 +185,13 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
         ports.push(VsockPort {
             service: GuestService::Broker,
             host_uds: broker.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
+    if let Some(display) = socks.display {
+        ports.push(VsockPort {
+            service: GuestService::DisplayFrame,
+            host_uds: display.into(),
             direction: VsockDirection::GuestDials,
         });
     }
@@ -839,6 +849,7 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            display: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -868,6 +879,7 @@ mod tests {
             egress_gateway: None,
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            display: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -896,6 +908,7 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            display: None,
             console_data: Vec::new(),
         }
     }
@@ -925,6 +938,7 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
+            display: None,
             console_data: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
@@ -945,6 +959,26 @@ mod tests {
                 .iter()
                 .all(|p| p.service != GuestService::Broker),
             "unadmitted VM must carry no broker port"
+        );
+    }
+
+    #[test]
+    fn workload_vsock_ports_emit_display_as_guest_dials_only_when_granted() {
+        let granted = WorkloadSockets {
+            display: Some(Path::new("/run/display.sock")),
+            ..sample_sockets()
+        };
+        let display = workload_vsock_ports(&granted)
+            .into_iter()
+            .find(|port| port.service == GuestService::DisplayFrame)
+            .expect("display grant carries a frame channel");
+        assert_eq!(display.direction, VsockDirection::GuestDials);
+        assert_eq!(display.host_uds, PathBuf::from("/run/display.sock"));
+
+        assert!(
+            workload_vsock_ports(&sample_sockets())
+                .iter()
+                .all(|port| port.service != GuestService::DisplayFrame)
         );
     }
 
@@ -1111,6 +1145,7 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            display: None,
             console_data,
         };
         let ports = workload_vsock_ports(&socks);
@@ -1140,6 +1175,7 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            display: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -1163,6 +1199,7 @@ mod tests {
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
+                display: None,
                 console_data,
             },
             cmdline: String::new(),

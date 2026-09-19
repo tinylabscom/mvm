@@ -1,7 +1,7 @@
 # A display plane that is view-only until a signed plan says otherwise
 
 Backing: preview
-Validation: none — this is a proposed design; no code implements it and no test exercises it.
+Validation: P0 is backed by shipped source, workspace tests, `just check-gated`, and `check-single-display-path`; P1–P3 remain proposed.
 
 **Issues:** epic [#3276](https://github.com/tinylabscom/mvm/issues/3276); [#3265](https://github.com/tinylabscom/mvm/issues/3265), [#3266](https://github.com/tinylabscom/mvm/issues/3266), [#3267](https://github.com/tinylabscom/mvm/issues/3267)
 
@@ -101,20 +101,23 @@ redaction outright: `redact.rs` is line-oriented and cannot redact a JPEG.
 
 Issue: [#3265](https://github.com/tinylabscom/mvm/issues/3265).
 
-- [ ] Add a display vsock port constant to `crates/mvm-agentd/src/vsock/mod.rs`
+**Status: COMPLETE (2026-09-19).** Delivery evidence:
+`specs/sprint/delivery/3265-view-only-display-plane.md`.
+
+- [x] Add a display vsock port constant to `crates/mvm-agentd/src/vsock/mod.rs`
       and its entry in the host proxy allow-list.
-- [ ] Guest-side CDP screencast bridge in `crates/mvm-agentd`, speaking a fixed
+- [x] Guest-side CDP screencast bridge in `crates/mvm-agentd`, speaking a fixed
       method allow-list. No raw CDP passthrough.
-- [ ] Host frame sink into the stream plane
+- [x] Host frame sink into the stream plane
       (`crates/mvm-hostd/src/stream/{fanout,journal,durable}.rs`), with frame
       digests written to the chain and bytes held under `stream_retention`.
-- [ ] Viewer bound to loopback only, with a one-shot per-session token.
-- [ ] `xtask check-single-display-path`, modelled on
+- [x] Viewer bound to loopback only, with a one-shot per-session token.
+- [x] `xtask check-single-display-path`, modelled on
       `check_single_network_path.rs`: exactly one display spawn site, no guest
       listener, no non-loopback bind, and no second frame transport.
-- [ ] A per-agent-step frame sample, so "watch what the agent did" is an
+- [x] A per-agent-step frame sample, so "watch what the agent did" is an
       observability feature rather than an interactive session.
-- [ ] Witnesses: `display_view_grant_opens_no_input_route`,
+- [x] Witnesses: `display_view_grant_opens_no_input_route`,
       `display_frames_never_leave_loopback`.
 
 P0 adds no host→guest byte path, so claim 15 is untouched. It should ship and be

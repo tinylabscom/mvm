@@ -17,6 +17,8 @@ pub(super) struct StandingSockets {
     /// broker channel at all. The one path threaded into both the spec and the
     /// `BrokerRegistrar::register` call so the relay target and bind path match.
     pub(super) broker: Option<PathBuf>,
+    /// View-only display sink socket, present only when the signed plan grants it.
+    pub(super) display: Option<PathBuf>,
     pub(super) console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -35,6 +37,7 @@ impl StandingSockets {
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
+            display: self.display.as_deref(),
             console_data: self.console_data.clone(),
         }
     }
@@ -56,6 +59,12 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
             .tenant_id
             .is_some()
             .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
+        display: mvm_vmm::host::egress_shared::plan_grants_display_view(
+            config.plan_json.as_deref(),
+        )
+        .then(|| {
+            mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::DISPLAY_PORT)
+        }),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
     }
@@ -73,6 +82,7 @@ mod tests {
         let sockets = standing_sockets(state_dir, &VmStartConfig::default());
         assert!(sockets.broker.is_none());
         assert!(sockets.console_data.is_empty());
+        assert!(sockets.display.is_none());
         assert_ne!(sockets.telemetry, sockets.agent);
         assert_ne!(sockets.telemetry, sockets.exit);
         let spec = sockets.with_egress(None);
@@ -88,6 +98,38 @@ mod tests {
                 state_dir,
                 GuestService::Telemetry.port()
             )
+        );
+    }
+
+    #[test]
+    fn a_signed_plan_display_grant_adds_only_the_guest_dial_frame_socket() {
+        let state_dir = Path::new("/state/display-vm");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .services(vec![
+                mvm_contract::protocol::broker::ServiceId::parse(
+                    mvm_contract::stream::DISPLAY_VIEW_GRANT_SERVICE,
+                )
+                .unwrap(),
+            ])
+            .build();
+        let config = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).unwrap()),
+            ..VmStartConfig::default()
+        };
+
+        let sockets = standing_sockets(state_dir, &config);
+        let display_path = sockets.display.as_deref().expect("display grant socket");
+        let ports = workload_vsock_ports(&sockets.with_egress(None));
+        let display = ports
+            .iter()
+            .find(|port| port.service == GuestService::DisplayFrame)
+            .expect("display channel");
+
+        assert_eq!(display.host_uds, display_path);
+        assert_eq!(display.direction, crate::driver::VsockDirection::GuestDials);
+        assert_eq!(
+            display.service.port(),
+            mvm_contract::stream::DISPLAY_FRAME_PORT
         );
     }
 }

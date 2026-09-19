@@ -24,7 +24,7 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
 
-use mvm_contract::stream::StreamKind;
+use mvm_contract::stream::{DisplayFrame, StreamKind};
 use mvm_core::config;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::stream_client::{
@@ -310,6 +310,21 @@ fn render(record: &OutputRecord, sinks: &mut Sinks<'_>) -> Result<Rendered> {
             let labelled = format!(
                 "[mvmctl-trace] {}\n",
                 String::from_utf8_lossy(&record.payload)
+            );
+            write_out(&mut sinks.err, labelled.as_bytes())
+        }
+        StreamKind::Frame => {
+            let labelled = DisplayFrame::decode(&record.payload).map_or_else(
+                |_| "[mvmctl-display] invalid retained frame\n".to_string(),
+                |frame| {
+                    format!(
+                        "[mvmctl-display] {}x{} digest={} step={}\n",
+                        frame.width,
+                        frame.height,
+                        hex::encode(frame.digest()),
+                        frame.step_id.as_deref().unwrap_or("-")
+                    )
+                },
             );
             write_out(&mut sinks.err, labelled.as_bytes())
         }
@@ -1049,6 +1064,7 @@ mod tests {
             .attach(&mvm_runtime::workload_runner::ConsoleCapture {
                 vm_name: "planed-vm",
                 console_log: &console,
+                display_socket: None,
                 redaction: &redaction,
                 retention: mvm_core::plan::StreamRetention::Persist,
             })
