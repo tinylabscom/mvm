@@ -413,13 +413,25 @@ With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`
 1. **An explicit source flag.** Nothing is inferred.
 2. **`--runtime <name>`** against the built-in catalog. An unknown name is
    refused and lists the known ones — a typo never falls through to a default.
-3. **`--no-detect`** stops here, leaving the bundled default image.
-4. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
+3. **A first command word that reads as an OCI image reference** — a tag
+   colon, a digest, or an explicit registry host before a `/`, and not a
+   path — refuses right here, before any inference runs. This is not part
+   of inference and is not gated on steps 5–6 below finding nothing: it
+   applies equally to `--no-detect` and to `machine run`, which never reach
+   steps 5 or 6 at all. `mvmctl machine run app:1.0 -- sh` refuses with a
+   hint to pass `--image app:1.0` for exactly this reason. A source flag
+   from step 1, or `--runtime` from step 2, skips this check entirely, so a
+   legitimate command whose first word happens to contain a colon still
+   runs. A word that names an existing path relative to the working
+   directory is never refused, whichever marker it carries: `app.d/run`
+   reads like a registry host and `bin/run:dev` like a tag.
+4. **`--no-detect`** stops here, leaving the bundled default image.
+5. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
    found by the same walk-up `mvmctl machine build` uses, stopping at a `.git` boundary.
-5. **The command, then a project file.** `npm` selects node; `Cargo.toml`
+6. **The command, then a project file.** `npm` selects node; `Cargo.toml`
    selects rust. The command wins over the directory — argv is what you just
    typed, the directory is where you happened to be standing.
-6. **The bundled default image.**
+7. **The bundled default image.**
 
 | Runtime  | Image                | Commands                                     | Project files                                               |
 | -------- | -------------------- | -------------------------------------------- | ----------------------------------------------------------- |
@@ -430,20 +442,24 @@ With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`
 | `ruby`   | `ruby:3-alpine`      | `ruby`, `bundle`, `rake`, `gem`              | `Gemfile`, `Rakefile`                                       |
 | `shell`  | `alpine:3`           | `sh`, `bash`, `ash`                          | —                                                           |
 
-If no source flag is given and step 6 is reached, `mvmctl run` and
-`machine run` also refuse a first command word that reads as an OCI image
-reference — a tag colon, a digest, or an explicit registry host before a
-`/`, and not a path — rather than silently running it as the guest's
-command: `mvmctl machine run app:1.0 -- sh` refuses with a hint to pass
-`--image app:1.0`. Any source flag skips this check entirely, so a
-legitimate command whose first word happens to contain a colon still runs.
-
-Separately, a known run flag (`--image`, `--net`, …) placed as the very
-first word after `--` is refused and named rather than passed to the guest
+Separately, a known flag (`--image`, `--net`, …) placed as the very first
+word after `--` is refused and named rather than passed to the guest
 verbatim: `trailing_var_arg` never reinterprets anything after `--` as an
 option, so `mvmctl run -- --image alpine` would otherwise hand `--image` to
 the guest silently. Only that first position is checked; the same flag name
-appearing deeper in a workload's own argv is left alone.
+appearing deeper in a workload's own argv is left alone. The flag list is
+read from the subcommand being run, including the global flags clap passes
+down to it, so it covers `machine run` flags (`--name`, `-d`), `run`'s own
+(`--mode`), the flags they share, and `--verbose`/`-v`, `--builder` and the
+other global flags. The error says whether the flag belongs to that
+subcommand or is a global one. Every spelling counts: aliases, hidden or not
+(`--volume`), `--flag=value`, short flags, short clusters (`-it`), and a
+short flag with its value attached (`-p8080:80`). A standalone `--help` or
+`-h` is not refused, since a workload may forward it to its own program;
+inside a cluster (`-ih`), `h` is a flag like any other. `--version` and `-V`
+are never refused, because neither subcommand has them. On
+`mvmctl run` the check also runs before an SDK `--mode`, whose first word is
+a script path.
 
 An inferred source always announces itself on stderr before booting
 (`[mvm] detected node from the command `npm` — booting node:22-alpine`), so a
@@ -454,12 +470,13 @@ Detection picks a **source**, never a posture. An inferred run admits through
 the same signed `ExecutionPlan`, with the same `--profile standard` default and
 the same deny-all egress, as one that named its image.
 
-**`machine run` does not infer.** Steps 4 and 5 are skipped there: it creates a
+**`machine run` does not infer.** Steps 5 and 6 are skipped there: it creates a
 named, possibly persistent machine, and picking its base image from whatever
 directory you were standing in is a footgun — `machine run` inside any Rust
 checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
 naming every way to supply a source. `--runtime <name>` works on both verbs,
-because that is you naming one.
+because that is you naming one. The misplaced-image-reference refusal (step 3)
+still runs for `machine run`, exactly as it does for `run`.
 
 The catalog is curated, in-tree, and versioned with the code; it is never
 fetched at runtime. Its refs are **tags, not digests**, which is deliberate:

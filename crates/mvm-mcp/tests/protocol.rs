@@ -175,6 +175,8 @@ async fn invalid_ttl_and_oversized_output_fail_as_tool_results() {
     )
     .await;
     assert_eq!(invalid["result"]["isError"], true);
+    assert_eq!(invalid["result"]["_meta"]["code"], "INVALID_INPUT");
+    assert_eq!(invalid["result"]["_meta"]["retryable"], false);
 
     let bounded = McpServer::with_limits(
         Arc::new(MockBackend::default()),
@@ -184,6 +186,8 @@ async fn invalid_ttl_and_oversized_output_fail_as_tool_results() {
     );
     let response = call(&bounded, 44, "mvm.backend_capabilities", json!({})).await;
     assert_eq!(response["result"]["isError"], true);
+    assert_eq!(response["result"]["_meta"]["code"], "OUTPUT_TOO_LARGE");
+    assert_eq!(response["result"]["_meta"]["retryable"], false);
 }
 
 #[tokio::test]

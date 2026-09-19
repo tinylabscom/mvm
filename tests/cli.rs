@@ -529,6 +529,87 @@ fn machine_run_names_an_unknown_flag_instead_of_booting() {
     );
 }
 
+/// Runs `mvmctl` host-only in `cwd` with an isolated state root and returns
+/// whether it succeeded plus its stderr.
+fn mvmctl_in(cwd: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let home = tempfile::tempdir().unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .current_dir(cwd)
+        .env("HOME", home.path())
+        .env("MVM_HOME", home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// A verb's own flag placed right after `--` is refused by the verb that
+/// declares it: `--name` exists only on `machine run`, and `--image=alpine`
+/// is the `=` spelling of a shared flag on `run`.
+#[test]
+fn a_verbs_own_flag_right_after_double_dash_is_refused_by_that_verb() {
+    let cwd = tempfile::tempdir().unwrap();
+
+    let (ok, stderr) = mvmctl_in(
+        cwd.path(),
+        &["machine", "run", "--image", "alpine", "--", "--name", "web"],
+    );
+    assert!(!ok, "a misplaced --name must not run");
+    assert!(
+        stderr.contains("`--name` is an `mvmctl machine run` flag"),
+        "the error must name the flag, stderr: {stderr}"
+    );
+
+    let (ok, stderr) = mvmctl_in(cwd.path(), &["run", "--", "--image=alpine", "sh"]);
+    assert!(!ok, "a misplaced --image=alpine must not run");
+    assert!(
+        stderr.contains("`--image` is an `mvmctl run` flag"),
+        "the error must name the flag, stderr: {stderr}"
+    );
+}
+
+/// An SDK-mode run is checked too, before the script is launched: its
+/// argv[0] is the script path, which a flag-shaped word never is.
+#[test]
+fn an_sdk_mode_run_refuses_a_flag_right_after_double_dash() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (ok, stderr) = mvmctl_in(
+        cwd.path(),
+        &["run", "--mode", "live", "--", "--image=alpine"],
+    );
+    assert!(!ok, "a misplaced --image must not run");
+    assert!(
+        stderr.contains("`--image` is an `mvmctl run` flag"),
+        "the error must name the flag, stderr: {stderr}"
+    );
+}
+
+/// Project detection must not outrun the misplaced-image-reference refusal:
+/// next to a `package.json`, `mvmctl run node:22 -- index.js` refuses instead
+/// of booting the detected node runtime with `node:22` as its command.
+#[test]
+fn run_refuses_a_misplaced_image_reference_inside_a_detected_project() {
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::write(cwd.path().join("package.json"), b"{}").unwrap();
+
+    let (ok, stderr) = mvmctl_in(cwd.path(), &["run", "--", "node:22", "index.js"]);
+    assert!(!ok, "a misplaced image reference must not run");
+    assert!(
+        stderr.contains("--image node:22"),
+        "the refusal must point at --image, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("detected node"),
+        "nothing may be detected before the refusal, stderr: {stderr}"
+    );
+}
+
 /// The archive flags have to be reachable, not merely declared.
 ///
 /// This repo has shipped an `up::Args` whose flags were never wired to a
