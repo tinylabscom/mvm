@@ -7,6 +7,7 @@ pub(in crate::commands) mod checkpoint;
 pub(crate) mod console;
 pub(super) mod cp;
 pub(super) mod diff;
+pub(super) mod display;
 pub(super) mod down;
 use mvm_client::admission::entrypoint_resolve;
 pub(super) mod exec;

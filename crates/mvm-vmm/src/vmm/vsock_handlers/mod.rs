@@ -180,6 +180,13 @@ impl VsockHandlerRegistry {
                 egress_budget,
             )),
         );
+        guest_ports.insert(
+            mvm_agentd::vsock::DISPLAY_PORT,
+            Box::new(StreamRelayHandler::with_budget(
+                mvm_agentd::vsock::DISPLAY_PORT,
+                EgressBudget::new(),
+            )),
+        );
 
         let host_initiated: Vec<Box<dyn HostInitiatedHandler>> = vec![
             Box::new(AgentVsockHandler::new()),
@@ -248,6 +255,20 @@ impl VsockHandlerRegistry {
     pub(crate) fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::BROKER_PORT)
             .expect("broker handler present")
+            .bridge
+            .set_activity(counter);
+    }
+
+    pub(crate) fn set_display_endpoint(&mut self, path: &Path) {
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::DISPLAY_PORT)
+            .expect("display handler present")
+            .bridge
+            .set_endpoint(path);
+    }
+
+    pub(crate) fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::DISPLAY_PORT)
+            .expect("display handler present")
             .bridge
             .set_activity(counter);
     }

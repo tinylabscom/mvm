@@ -96,6 +96,7 @@ candidates=$(rg \
   --glob '!crates/mvm-build/src/egress_proxy/**' \
   --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
   --glob '!crates/mvm-cli/src/commands/vm/forward.rs' \
+  --glob '!crates/mvm-cli/src/commands/vm/display.rs' \
   --glob '!crates/mvm-cli/src/metrics_server.rs' \
   --glob '!crates/mvm-cli/src/template_cmd.rs' \
   --glob '!crates/deps/libkrun-sys/src/native_gateway.rs' \

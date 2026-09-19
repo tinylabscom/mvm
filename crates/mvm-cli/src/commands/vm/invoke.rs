@@ -1282,6 +1282,10 @@ fn show(chunk: mvm_hostd::stream::ShownChunk, out: &mut CallOutput<'_>) {
     let sink = match chunk.kind {
         StreamKind::Stdout => &mut out.sinks.out,
         StreamKind::Stderr | StreamKind::Trace => &mut out.sinks.err,
+        // Entrypoint capture never creates frame chunks. If a future shared
+        // caller supplies one, do not print compressed image bytes to a
+        // terminal; the dedicated display viewer is the only frame renderer.
+        StreamKind::Frame => return,
     };
     let _ = sink.write_all(&chunk.body);
     let _ = sink.flush();
@@ -1817,6 +1821,7 @@ mod captured_tests {
                 .attach(&ConsoleCapture {
                     vm_name: vm,
                     console_log: &state.join("console.log"),
+                    display_socket: None,
                     redaction: &redaction,
                     retention: mvm_core::plan::StreamRetention::Persist,
                 })
@@ -2022,6 +2027,7 @@ mod captured_tests {
             .attach(&ConsoleCapture {
                 vm_name: vm,
                 console_log: &state.join("console.log"),
+                display_socket: None,
                 redaction: &redaction,
                 retention: mvm_core::plan::StreamRetention::Persist,
             })

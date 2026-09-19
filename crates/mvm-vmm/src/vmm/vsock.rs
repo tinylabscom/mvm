@@ -55,6 +55,8 @@ pub struct VsockHostBindings {
     pub network_endpoint: Option<PathBuf>,
     /// Host broker endpoint path.
     pub broker_endpoint: Option<PathBuf>,
+    /// Host view-only display frame sink path.
+    pub display_endpoint: Option<PathBuf>,
     /// Additional host-dial listeners (telemetry and admitted console ports).
     pub console_sockets: Vec<(u32, PathBuf)>,
 }
@@ -65,6 +67,7 @@ struct VsockHostRuntimeConfig {
     agent_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
     substitution_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
     broker_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    display_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
     host_dial_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
     workload_exit_stop: Option<&'static AtomicBool>,
     trusted_builder_egress: bool,
@@ -77,6 +80,7 @@ impl VsockHostBindings {
             .map(PathBuf::as_path)
             .chain(self.network_endpoint.iter().map(PathBuf::as_path))
             .chain(self.broker_endpoint.iter().map(PathBuf::as_path))
+            .chain(self.display_endpoint.iter().map(PathBuf::as_path))
             .chain(self.console_sockets.iter().map(|(_, path)| path.as_path()))
             .collect()
     }
@@ -108,6 +112,10 @@ fn canonical_child_bindings(
     let broker_path =
         mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::BROKER_PORT);
     let broker_endpoint = (mask & HANDOFF_BROKER != 0).then_some(broker_path);
+    let display_path =
+        mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::DISPLAY_PORT);
+    let display_endpoint =
+        (mask & crate::hvf_handoff::HANDOFF_DISPLAY != 0).then_some(display_path);
     let mut console_sockets = if mask & HANDOFF_CONSOLE != 0 {
         mvm_agentd::vsock::dev_console_data_ports()
             .map(|port| {
@@ -131,6 +139,7 @@ fn canonical_child_bindings(
         agent_socket,
         network_endpoint,
         broker_endpoint,
+        display_endpoint,
         console_sockets,
     })
 }
@@ -241,6 +250,14 @@ impl VsockShared {
 
     pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_broker_activity(counter);
+    }
+
+    pub fn set_display_endpoint(&mut self, path: &std::path::Path) {
+        self.handlers.set_display_endpoint(path);
+    }
+
+    pub fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.handlers.set_display_activity(counter);
     }
 
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
@@ -447,6 +464,18 @@ impl VirtioVsock {
         self.notify_io();
     }
 
+    pub fn set_display_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_display_endpoint(path);
+        self.host_runtime.bindings.display_endpoint = Some(path.to_path_buf());
+        self.notify_io();
+    }
+
+    pub fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_display_activity(Arc::clone(&counter));
+        self.host_runtime.display_activity = Some(counter);
+        self.notify_io();
+    }
+
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
         self.host_runtime.workload_exit_stop = Some(stop);
@@ -499,6 +528,9 @@ impl VirtioVsock {
         if let Some(counter) = config.broker_activity {
             self.set_broker_activity(counter);
         }
+        if let Some(counter) = config.display_activity {
+            self.set_display_activity(counter);
+        }
         if let Some(counter) = config.host_dial_activity {
             self.set_host_dial_activity(counter);
         }
@@ -530,6 +562,9 @@ impl VirtioVsock {
             }
             if let Some(path) = &bindings.broker_endpoint {
                 self.set_broker_endpoint(path);
+            }
+            if let Some(path) = &bindings.display_endpoint {
+                self.set_display_endpoint(path);
             }
             if !bindings.console_sockets.is_empty() {
                 self.set_host_dial_sockets(

@@ -238,6 +238,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // no extraction, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
     ("logs", AuditPosture::ReadOnly),
+    ("display", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
     // Read-only lineage navigator over the checkpoint + image DAGs. Verifies
     // each hop against the signed chain but makes no trust decision and writes

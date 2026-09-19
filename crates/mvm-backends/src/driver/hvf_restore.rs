@@ -194,6 +194,7 @@ pub fn hvf_child_restore_config(
         substitution_socket: None,
         egress_relay_socket: None,
         broker_socket: None,
+        display_socket: None,
         // Observations use a fresh child-local endpoint, never the parent's
         // inherited listener and never an interactive console grant.
         console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::HostDialSocket {
@@ -361,6 +362,7 @@ mod tests {
             snapshot_frame: Some(PathBuf::from("/parent/snapshot.frame")),
             restore_ram: None,
             restore_frame: None,
+            display_socket: None,
             timeout_secs: 0,
             plan: None,
             audit_dir: None,

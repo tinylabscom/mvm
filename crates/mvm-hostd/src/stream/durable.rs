@@ -533,6 +533,7 @@ fn direction_for(kind: StreamKind) -> Direction {
         StreamKind::Stdout => Direction::Stdout,
         StreamKind::Stderr => Direction::Stderr,
         StreamKind::Trace => Direction::Trace,
+        StreamKind::Frame => Direction::Frame,
     }
 }
 

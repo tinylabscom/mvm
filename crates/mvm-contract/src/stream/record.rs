@@ -24,6 +24,8 @@ pub enum StreamSource {
     Console = 0,
     /// The workload entrypoint process.
     Entrypoint = 1,
+    /// The guest's fixed-method screencast bridge.
+    Display = 2,
 }
 
 /// Which output channel a [`StreamRecord`] carries.
@@ -41,6 +43,8 @@ pub enum StreamKind {
     Stderr = 1,
     /// A structured control/trace record rather than raw stdio bytes.
     Trace = 2,
+    /// An encoded view-only display frame.
+    Frame = 3,
 }
 
 /// One hash-chained chunk of captured workload output.
@@ -68,7 +72,7 @@ pub struct StreamRecord {
     /// first record in the chain.
     pub prev_hash: [u8; 32],
     /// Captured bytes: raw stdio for `Stdout`/`Stderr`, an encoded control
-    /// message for `Trace`.
+    /// message for `Trace`, or a bounded [`super::DisplayFrame`] for `Frame`.
     pub payload: Vec<u8>,
 }
 
@@ -125,8 +129,16 @@ mod tests {
         assert_ne!(r.hash(), base, "source");
 
         let mut r = sample();
+        r.source = StreamSource::Display;
+        assert_ne!(r.hash(), base, "display source");
+
+        let mut r = sample();
         r.kind = StreamKind::Stderr;
         assert_ne!(r.hash(), base, "kind");
+
+        let mut r = sample();
+        r.kind = StreamKind::Frame;
+        assert_ne!(r.hash(), base, "frame kind");
 
         let mut r = sample();
         r.host_unix_nanos = 2_000;
