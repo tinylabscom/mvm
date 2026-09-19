@@ -35,6 +35,9 @@ fn validate_prod_run(args: &RunArgs) -> Result<()> {
 }
 
 pub(super) fn validate_run_profile(args: &RunArgs) -> Result<()> {
+    if let Some(reference) = args.image.as_deref() {
+        super::super::image::ensure_prod_digest_pin(reference, args.prod)?;
+    }
     let grants = args.profile.grants();
     let name = args.profile.as_str();
 
@@ -141,6 +144,22 @@ mod tests {
         assert!(
             validate_prod_run(&args).is_ok(),
             "--prod with no command of its own is not refused here"
+        );
+    }
+
+    #[test]
+    fn prod_mutable_image_refusal_precedes_ad_hoc_command_refusal() {
+        let mut args = run_args(RunProfile::Standard);
+        args.prod = true;
+        args.image = Some("alpine:latest".to_string());
+
+        let message = validate_run_profile(&args)
+            .expect_err("a mutable production image must be refused")
+            .to_string();
+
+        assert!(
+            message.contains("requires a digest-pinned reference"),
+            "{message}"
         );
     }
 }
