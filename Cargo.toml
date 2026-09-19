@@ -24,6 +24,9 @@ members = [
     "crates/mvm-hostd",
     "crates/mvm-client",
     "crates/mvm-mcp",
+    # The host library the language SDKs load in-process instead of running
+    # mvmctl. Top of the graph: nothing depends on it.
+    "crates/mvm-hostlib",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
     # verity generation land in subsequent W1 PRs). Anonymous-only at
@@ -365,6 +368,7 @@ mvm-client = { path = "crates/mvm-client", version = "0.18.0-rc.2" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0-rc.2" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0-rc.2" }
 mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0-rc.2" }
+mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.18.0-rc.2" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0-rc.2", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0-rc.2", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0-rc.2" }
