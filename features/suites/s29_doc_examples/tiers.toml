@@ -109,6 +109,11 @@ path = "env cleanup"
 tier = "exec"
 
 [[command]]
+path = "env verify-release"
+tier = "exec"
+fixture = "release-signature"
+
+[[command]]
 path = "env uninstall"
 tier = "exec"
 env = { MVM_INSTALL_DIR = "sandbox/bin", MVM_INSTALL_LIB_DIR = "sandbox/lib/mvm" }

@@ -100,6 +100,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
     // not by omission.
     ("uninstall", AuditPosture::Emits("Uninstall")),
     ("update", AuditPosture::Emits("UpdateInstall")),
+    ("verify-release", AuditPosture::ReadOnly),
     ("sign", AuditPosture::ReadOnly),
 ];
 

@@ -456,6 +456,23 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
                 std::fs::write(dir.join(file), script).expect("write decorator fixture");
             }
         }
+        // The verifier binds the artifact bytes and release-workflow identity;
+        // the filename is used only for attribution. Stage the repository's
+        // genuine signed release fixture under the illustrative archive name
+        // used by the guide so the documented command executes offline.
+        "release-signature" => {
+            let fixture_dir =
+                repo_root().join("crates/mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1");
+            let fixture = "builder-vm-aarch64-checksums-sha256.txt";
+            let archive = "mvmctl-aarch64-apple-darwin.tar.gz";
+            std::fs::copy(fixture_dir.join(fixture), dir.join(archive))
+                .expect("stage signed release artifact");
+            std::fs::copy(
+                fixture_dir.join(format!("{fixture}.bundle")),
+                dir.join(format!("{archive}.bundle")),
+            )
+            .expect("stage release signature bundle");
+        }
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
 }

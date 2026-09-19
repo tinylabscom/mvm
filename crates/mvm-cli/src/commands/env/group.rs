@@ -11,7 +11,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{bootstrap, cleanup, sign, uninstall, update};
+use super::{bootstrap, cleanup, sign, uninstall, update, verify_release};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -29,6 +29,8 @@ pub(in crate::commands) enum EnvCmd {
     Uninstall(uninstall::Args),
     /// Check for and install the latest version of mvmctl
     Update(update::Args),
+    /// Verify a downloaded release archive against its signature bundle, offline
+    VerifyRelease(verify_release::Args),
     /// Re-sign mvmctl + supervisors with the VMM entitlements (macOS)
     Sign(sign::Args),
 }
@@ -41,6 +43,7 @@ impl EnvCmd {
             EnvCmd::Cleanup(_) => "cleanup",
             EnvCmd::Uninstall(_) => "uninstall",
             EnvCmd::Update(_) => "update",
+            EnvCmd::VerifyRelease(_) => "verify-release",
             EnvCmd::Sign(_) => "sign",
         }
     }
@@ -52,6 +55,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         EnvCmd::Cleanup(a) => cleanup::run(cli, a, cfg),
         EnvCmd::Uninstall(a) => uninstall::run(&a),
         EnvCmd::Update(a) => update::run(cli, a, cfg),
+        EnvCmd::VerifyRelease(a) => verify_release::run(cli, a, cfg),
         EnvCmd::Sign(a) => sign::run(cli, a, cfg),
     }
 }

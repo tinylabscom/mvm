@@ -287,7 +287,10 @@ test-cargo:
 
 # not-yet-implemented coverage and are filtered out by the runner.
 bdd:
-    ./scripts/cargo-fast.sh build --bin mvmctl
+    # `user` pulls the sigstore/aws-lc verifier. Keep that native dependency on
+    # the standard compiler/linker path: Cranelift leaves its symbols unresolved
+    # on Linux, while the rest of this hermetic suite can retain the fast path.
+    cargo build --bin mvmctl --features user
     ./scripts/cargo-fast.sh build -p xtask
     # The schema emitters `check-stubs` runs, built here rather than through
     # `cargo run` from inside a scenario. `cargo run` takes cargo's package

@@ -218,6 +218,7 @@ uncovered = [
     "mvmctl env cleanup",
     "mvmctl env update",
     "mvmctl env update --check",
+    "mvmctl env verify-release mvmctl-aarch64-apple-darwin.tar.gz --tag v0.18.0-rc.1",
     "mvmctl image inspect alpine",
     "mvmctl init .",
     "mvmctl init ./agent-sandbox --preset python",

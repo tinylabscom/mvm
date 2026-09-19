@@ -87,6 +87,7 @@ fi
 require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
+require_text Justfile 'cargo build --bin mvmctl --features user'
 require_text Justfile 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
 require_text crates/mvm-conformance/tests/steps/cli.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
