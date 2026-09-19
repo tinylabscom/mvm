@@ -1,6 +1,6 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar` are the
+//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar`/`image-set` are the
 //! build-time verbs. Image builds moved to `machine build`.
 
 use anyhow::Result;
@@ -9,7 +9,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{address, compile, kernel, runtime_overlay, sdk_sidecar, validate};
+use super::{address, compile, image_set, kernel, runtime_overlay, sdk_sidecar, validate};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -33,6 +33,9 @@ pub(in crate::commands) enum BuildCmd {
     SdkSidecar(sdk_sidecar::Args),
     /// Print a Workload IR's workload address and ir-hash
     Address(address::Args),
+    /// Build one role of the MVM_IMAGES_DIR checkout into the local image cache
+    #[command(name = "image-set")]
+    ImageSet(image_set::Args),
 }
 
 impl BuildCmd {
@@ -45,6 +48,7 @@ impl BuildCmd {
             BuildCmd::RuntimeOverlay(_) => "runtime-overlay",
             BuildCmd::SdkSidecar(_) => "sdk-sidecar",
             BuildCmd::Address(_) => "address",
+            BuildCmd::ImageSet(_) => "image-set",
         }
     }
 }
@@ -57,5 +61,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BuildCmd::RuntimeOverlay(a) => runtime_overlay::run(cli, a, cfg),
         BuildCmd::SdkSidecar(a) => sdk_sidecar::run(cli, a, cfg),
         BuildCmd::Address(a) => address::run(cli, a, cfg),
+        BuildCmd::ImageSet(a) => image_set::run(cli, a, cfg),
     }
 }

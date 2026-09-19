@@ -147,36 +147,10 @@ impl SidecarBuildBoundary {
 
     fn run_shell_job(self, job: &mvm_build::libkrun_builder::BuilderShellJob) -> Result<()> {
         match self {
-            Self::Hvf => {
-                let (kernel, rootfs, closure_nar) =
-                    crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
-                        .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
-                mvm_runtime::builder_runner::DriverBuilderVm::new(
-                    mvm_backends::driver::hvf::HvfDriver::new(),
-                    kernel,
-                    rootfs,
-                )
-                .with_closure_nar(closure_nar)
-                .run_shell_script(job)
-                .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
-            }
-            Self::Firecracker => {
-                let image = crate::commands::build::fc_builder_image::resolve_fc_builder_image()
-                    .map_err(|error| {
-                        anyhow::anyhow!("resolving Firecracker builder image: {error}")
-                    })?;
-                mvm_runtime::builder_runner::DriverBuilderVm::new(
-                    mvm_backends::driver::fc::FcDriver::new(),
-                    image.kernel,
-                    image.rootfs,
-                )
-                .with_closure_nar(image.closure_nar)
-                .run_shell_script(job)
-                .map_err(|error| anyhow::anyhow!("Firecracker builder shell job: {error}"))?;
-            }
+            Self::Hvf => super::ShellJobBuilder::Hvf.run(job),
+            Self::Firecracker => super::ShellJobBuilder::Firecracker.run(job),
             Self::Stage0 => anyhow::bail!("Stage 0 builds the sidecar without a builder shell job"),
         }
-        Ok(())
     }
 }
 

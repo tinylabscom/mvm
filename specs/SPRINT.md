@@ -240,6 +240,12 @@
       flake locks the role evaluates. A set is staged, verified whole, and
       published by one `rename`; concurrent publishers of a key agree on one
       entry, and every read re-verifies the entry and evicts it on failure.
+      W5 (#3364) slice W5e: `mvmctl build image-set <role>` builds one target
+      of the `MVM_IMAGES_DIR` checkout against this mvm checkout in the HVF or
+      Firecracker builder (never host Nix), with the image checkout's own
+      host-binary and manifest scripts, and publishes it to the local image
+      cache; `bin/dev` runs it with `MVM_HOME` and `CARGO_TARGET_DIR` scoped to
+      the pair.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

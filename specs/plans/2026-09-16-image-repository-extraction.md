@@ -247,10 +247,11 @@ local source     -> sibling build output   -> dev-identified artifact cache
                                   one resolver and boot path
 ```
 
-Provide a checked-in wrapper, tentatively:
+Provide a checked-in wrapper (shipped in W5e as `bin/dev`; the build verb is
+`build image-set`, beside the other source builds of image-set members):
 
 ```bash
-MVM_IMAGES_DIR=../mvm-images bin/dev image build builder-vm
+MVM_IMAGES_DIR=../mvm-images bin/dev build image-set builder-vm
 MVM_IMAGES_DIR=../mvm-images bin/dev machine run ...
 ```
 
@@ -694,9 +695,11 @@ Delivery slices, one PR each:
       local outputs.
       Landed as `LocalImageCache`: verified, then published by one `rename`;
       re-verified on every read, evicted on failure, only ever `local-dev`.
-- [ ] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
+- [x] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
       selected checkout inside the builder VM, plus the `bin/dev` wrapper that
       sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.
+      Landed as `mvmctl build image-set <role>` on the HVF/Firecracker shell job,
+      with the image checkout's own host-binary and manifest scripts.
 - [ ] W5f (`mvm`) — the builder VM: `find_builder_vm_flake`,
       `builder_vm_is_source_checkout` and their callers, the Stage 0 source
       fingerprint in `stage0_cache.rs`, the flake references `stage0-init.rs`
