@@ -1416,6 +1416,59 @@ mod tests {
         assert!(!cfg.disks[1].ephemeral);
     }
 
+    /// A control over a state dir holding a launch config with these disks.
+    fn control_with_disks(state: &Path, read_only: &[bool]) -> HvfVmFullControl {
+        let blocks = read_only
+            .iter()
+            .enumerate()
+            .map(|(slot, &read_only)| BlockDev {
+                source: format!("/img/disk{slot}.img").into(),
+                read_only,
+                ephemeral: false,
+                slot: slot as u8,
+            })
+            .collect();
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            blocks,
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        std::fs::write(
+            state.join("supervisor.json"),
+            serde_json::to_vec(&cfg).unwrap(),
+        )
+        .unwrap();
+        HvfVmFullControl {
+            vm_name: "w".into(),
+            state_dir: state.to_path_buf(),
+        }
+    }
+
+    /// Guest writes on a writable disk live in the image file, which a
+    /// snapshot does not carry, so a checkpoint taken right after them could
+    /// not restore to a guest that agrees with its disk. Capture refuses
+    /// before asking the supervisor for anything.
+    #[test]
+    fn full_checkpoint_capture_refuses_a_vm_with_a_writable_disk() {
+        let state = tempfile::tempdir().unwrap();
+        let control = control_with_disks(state.path(), &[true, false]);
+        let err = control
+            .save_memory(&state.path().join("out/memory"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/img/disk1.img"), "{err}");
+        assert!(err.contains("writable"), "{err}");
+        assert!(!state.path().join("snapshot.request").exists());
+    }
+
+    #[test]
+    fn full_checkpoint_capture_admits_a_vm_whose_disks_are_all_read_only() {
+        let state = tempfile::tempdir().unwrap();
+        let control = control_with_disks(state.path(), &[true, true]);
+        control.ensure_every_disk_is_restorable().unwrap();
+    }
+
     #[test]
     fn relay_config_trusted_builder_uses_the_same_egress_relay() {
         let mut spec = spec_with(
