@@ -2139,6 +2139,26 @@ mod auto_stdin_tests {
         assert!(got.is_empty());
     }
 
+    /// How long the readiness test waits for EOF to surface: far past the
+    /// delay seen on a loaded macOS host, far short of the 30-second holder a
+    /// leaked write end would have.
+    const EOF_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Whether `fd` polls readable before `deadline`, blocking in `poll` rather
+    /// than spinning.
+    fn fd_becomes_readable_within(fd: std::os::fd::RawFd, deadline: std::time::Duration) -> bool {
+        let timeout = libc::c_int::try_from(deadline.as_millis()).unwrap_or(libc::c_int::MAX);
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is a single initialized `pollfd` living for the whole
+        // call, and the count matches. `poll` writes only `revents`.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        ready > 0 && pfd.revents != 0
+    }
+
     /// The probe itself, against real pipes. The first case is the bug: a pipe
     /// with a live writer that has sent nothing is what `ssh host 'mvmctl ...'`,
     /// CI runners and any script hand us, and reading it parks the launch
@@ -2191,8 +2211,8 @@ mod auto_stdin_tests {
             "a pipe carrying data must read as ready"
         );
 
-        // A closed writer is EOF, which is available immediately — reading it
-        // returns empty rather than blocking, so it counts as ready.
+        // A closed writer is EOF — reading it returns empty rather than
+        // blocking, so it counts as ready.
         //
         // Spawning a child here is the point, not incidental setup. This
         // assertion was flaky before `FD_CLOEXEC` was set above: it failed
@@ -2209,9 +2229,14 @@ mod auto_stdin_tests {
         // out-running it — the first version of this test spawned and polled
         // immediately, and duly failed under a loaded full-suite run while
         // passing alone.
+        //
+        // `exec` makes the shell *become* the long-lived holder, so killing the
+        // child kills the process that would keep an inherited write end open.
+        // Without it `sleep` is a grandchild that outlives `kill`, still holding
+        // the piped stdout and the test's stderr.
         let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg("echo exec-done; sleep 30")
+            .arg("echo exec-done; exec sleep 30")
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn a child to hold any inherited descriptor open");
@@ -2228,8 +2253,16 @@ mod auto_stdin_tests {
         let mut drain = [0u8; 7];
         std::io::Read::read_exact(&mut { &read_end }, &mut drain).unwrap();
         drop(write_end);
+        // EOF is awaited, not sampled. On macOS, once a child has been spawned
+        // while the pipe was open, EOF can surface up to a few hundred
+        // milliseconds after the last write end is closed — with no process
+        // holding that end, and even when the child has already been reaped.
+        // A zero-timeout poll read that as a live writer. A leaked writer is
+        // held by a child that lives for 30 seconds, so a bounded wait still
+        // fails every time on the leak this test exists to catch.
+        //
         // Read the answer before cleaning up, so a failure still reaps the child.
-        let ready_at_eof = super::fd_is_readable_now(fd);
+        let ready_at_eof = fd_becomes_readable_within(fd, EOF_DEADLINE);
         let _ = child.kill();
         let _ = child.wait();
 
