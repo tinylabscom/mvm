@@ -116,7 +116,8 @@ Last updated: 2026-09-18
       - [ ] W3d #3365: offline verifier command.
       - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
             Rust consumers W5 must replace.
-      - [ ] W4a #3362: `mvm` exports its guest recipes as flake outputs.
+      - [x] W4a #3362: guest recipes exported from `nix/flake.nix`; image
+            flakes consume them with byte-identical derivations.
       - [ ] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input.
       - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
 

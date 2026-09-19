@@ -160,15 +160,24 @@ fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
         "the workload guest must pass pkgs into mvm-setpriv.nix"
     );
 
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("nix/packages/guest.nix must be readable"),
+    );
+    assert!(
+        guest_recipes.contains(
+            "mvm-setpriv = import ./mvm-setpriv.nix { inherit pkgs lib mvmSrc; rustPlatform = staticPkgs.rustPlatform;"
+        ),
+        "the exported setpriv recipe must pass pkgs into mvm-setpriv.nix"
+    );
+
     let builder_flake = normalized_whitespace(
         &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
             .expect("builder VM flake must be readable"),
     );
     assert!(
-        builder_flake.contains(
-            "import (workspace + \"/nix/packages/mvm-setpriv.nix\") { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
-        ),
-        "the builder guest must pass pkgs into mvm-setpriv.nix"
+        builder_flake.contains("builderSetprivFor = system: mvm.packages.${system}.mvm-setpriv;"),
+        "the builder guest must take setpriv from the mvm flake's exported recipe"
     );
 }
 
@@ -372,13 +381,25 @@ fn workspace_versioned_packages_read_the_version_from_the_manifest() {
         );
     }
 
-    let runtime_overlay = fs::read_to_string("nix/images/runtime-overlay/flake.nix")
-        .expect("read runtime-overlay flake");
+    // The exported recipes read the version from the unfiltered workspace
+    // root, never from the filtered source store path.
+    let flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("flake.nix")).expect("read nix/flake.nix"),
+    );
     assert!(
-        runtime_overlay.contains(
-            "(nixpkgs.lib.importTOML (workspaceRoot + \"/Cargo.toml\")).workspace.package.version;"
-        ) && runtime_overlay.contains("inherit pkgs libc workspaceVersion;"),
-        "the runtime-overlay flake must pass manifest metadata from its stable workspace root"
+        flake.contains(
+            "manifest = if envPath != \"\" then /. + envPath + \"/Cargo.toml\" else ../Cargo.toml;"
+        ) && flake.contains("(nixpkgs.lib.importTOML manifest).workspace.package.version;"),
+        "nix/flake.nix must read the workspace version from its stable workspace root"
+    );
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("read nix/packages/guest.nix"),
+    );
+    assert!(
+        guest_recipes.contains("inherit pkgs lib mvmSrc libc workspaceVersion;")
+            && guest_recipes.contains("version = workspaceVersion;"),
+        "the exported SDK cdylib and runner must take the manifest version"
     );
 }
 
@@ -1413,12 +1434,27 @@ fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
         .and_then(|tail| tail.split(" in {").next())
         .expect("runtime-overlay derivation body");
 
-    assert!(
-        content.contains("pkgs = pkgs.pkgsStatic;"),
-        "all runtime-overlay guest package recipes must be instantiated from pkgsStatic"
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("read nix/packages/guest.nix"),
     );
+    for recipe in [
+        "mvm-guest-agent",
+        "mvm-egress-client",
+        "mvm-addon-dns",
+        "mvm-exit-report",
+    ] {
+        assert!(
+            guest_recipes.contains(&format!(
+                "{recipe} = import ./{recipe}.nix {{ pkgs = staticPkgs;"
+            )),
+            "the exported {recipe} recipe must be instantiated from pkgsStatic"
+        );
+    }
+    let runner = fs::read_to_string(nix_dir().join("packages").join("mvm-runner.nix"))
+        .expect("read nix/packages/mvm-runner.nix");
     assert!(
-        content.contains("staticPkgs.rustPlatform.buildRustPackage"),
+        runner.contains("pkgs.pkgsStatic.rustPlatform.buildRustPackage"),
         "the runner must use the static-musl Rust platform too"
     );
     for forbidden in [
@@ -2066,4 +2102,122 @@ fn image_fetches_do_not_derive_their_release_url_from_the_cli_version() {
          whenever the crate version is ahead of the last CLI tag: {offenders:?}. \
          Use `update::boot_image_release()`."
     );
+}
+
+/// The guest recipes every image needs, exported by `nix/flake.nix` as
+/// `packages.<linux-system>.*`. This list is the interface an image
+/// repository pins `mvm` for; renaming or dropping one breaks it.
+const EXPORTED_GUEST_RECIPES: &[&str] = &[
+    "mvm-guest-agent",
+    "mvm-guest-agent-static",
+    "mvm-setpriv",
+    "mvm-runner",
+    "mvm-egress-client",
+    "mvm-addon-dns",
+    "mvm-exit-report",
+    "mvm-sdk-cdylib-glibc",
+    "mvm-sdk-cdylib-musl",
+];
+
+const IMAGE_FLAKES: &[&str] = &[
+    "builder-vm",
+    "default-tenant",
+    "runtime-overlay",
+    "initramfs",
+];
+
+/// Nix source with `#` comments removed, so an assertion about what a flake
+/// imports is not satisfied (or tripped) by prose.
+fn nix_code_only(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn nix_flake_exports_the_guest_recipes_for_the_linux_systems() {
+    let guest = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("nix/packages/guest.nix must be present"),
+    );
+    for name in EXPORTED_GUEST_RECIPES {
+        assert!(
+            guest.contains(&format!("{name} = ")),
+            "nix/packages/guest.nix must define the exported recipe {name}"
+        );
+    }
+
+    let flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("flake.nix")).expect("nix/flake.nix must be present"),
+    );
+    assert!(
+        flake.contains("guestPackagesFor = system: import ./packages/guest.nix {")
+            && flake.contains("mvmSrc = workspaceSrc;"),
+        "nix/flake.nix must build the guest recipes from the same workspace source as mkGuest"
+    );
+    assert!(
+        flake.contains(
+            "// nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system));"
+        ),
+        "the guest recipes must be exported under packages for the Linux image systems only"
+    );
+    assert!(
+        flake.contains("hostBinaries = import ./lib/mvm-host-binaries.nix;"),
+        "nix/flake.nix must export the host-binaries manifest under lib.<system>"
+    );
+    assert!(
+        flake.contains("libFor { inherit system; } // {"),
+        "the exported lib.<system> must still be the mkGuest library, extended not replaced"
+    );
+}
+
+#[test]
+fn image_flakes_build_guest_recipes_through_the_mvm_flake() {
+    for image in IMAGE_FLAKES {
+        let path = nix_dir().join("images").join(image).join("flake.nix");
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be present: {e}", path.display()));
+        let code = nix_code_only(&content);
+        let normalized = normalized_whitespace(&code);
+
+        assert!(
+            normalized.contains("mvm = (import (workspaceRoot + \"/nix/flake.nix\")).outputs {")
+                && normalized.contains("mvm-workspace = workspace;"),
+            "{image} must evaluate the mvm flake's outputs against its filtered workspace"
+        );
+        assert!(
+            !code.contains("/nix/packages/"),
+            "{image} must not path-import a guest recipe; use mvm.packages.<system>.*"
+        );
+        // The workspace filter stages the source the mvm flake is called
+        // with, so it is the one nix/lib file an image flake still reads.
+        for (idx, _) in code.match_indices("/nix/lib") {
+            assert!(
+                code[idx..].starts_with("/nix/lib/workspace-filter.nix"),
+                "{image} must take mkGuest and the host-binaries manifest from the mvm flake, \
+                 not import nix/lib directly"
+            );
+        }
+        for (idx, _) in code.match_indices("mvm.packages.${system}.") {
+            let rest = &code[idx + "mvm.packages.${system}.".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.is_empty() {
+                // `mvm.packages.${system}."mvm-sdk-cdylib-${libc}"`
+                assert!(
+                    rest.starts_with("\"mvm-sdk-cdylib-${libc}\""),
+                    "{image} indexes mvm.packages with an unexpected expression"
+                );
+                continue;
+            }
+            assert!(
+                EXPORTED_GUEST_RECIPES.contains(&name.as_str()),
+                "{image} consumes mvm.packages.<system>.{name}, which the mvm flake does not export"
+            );
+        }
+    }
 }

@@ -156,6 +156,10 @@
       W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
       pack move; the guest binary recipes stay in `mvm` and are consumed from a
       pinned `mvm` flake input, so nothing is copied between the repositories.
+      W4 (#3362) slice W4a: the guest recipes that compile `mvm` source are
+      exported from `nix/flake.nix` and the in-tree image flakes build through
+      them, so the interface `mvm-images` will pin is already the one in use;
+      no image or check derivation changed.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

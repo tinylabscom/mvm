@@ -35,11 +35,15 @@
         })
         { inherit workspaceRoot; };
 
-      libFor = system:
-        (import (workspace + "/nix/lib") {
-          inherit nixpkgs microvm;
-          mvmSrc = workspace;
-        }) { inherit system; };
+      # The `mvm` flake, evaluated against this flake's pinned inputs and the
+      # filtered workspace; mkGuest is its user-facing `lib.<system>` output.
+      mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs {
+        self = { };
+        inherit nixpkgs microvm;
+        mvm-workspace = workspace;
+      };
+
+      libFor = system: mvm.lib.${system};
 
       # Workload kernel — the single shared definition in
       # `nix/images/kernel/`, identical to the one builder-vm builds. Both
