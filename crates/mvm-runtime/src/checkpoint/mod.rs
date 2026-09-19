@@ -11,8 +11,11 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
+#[cfg(test)]
+mod durability_tests;
 mod params;
 mod retention;
+mod staging;
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness,
@@ -26,7 +29,8 @@ pub use retention::{
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
-/// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`.
+/// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`, plus
+/// `<root>/.staging/` for captures still being written (see `staging`).
 pub struct CheckpointStore {
     root: PathBuf,
 }
@@ -54,14 +58,18 @@ impl CheckpointStore {
         self.dir_for(id).join("meta.json")
     }
 
+    /// Write `meta` in place of any record already stored under its id.
+    ///
+    /// Atomic and durable: a crash leaves the old record or the new one, never
+    /// a torn one — a torn record would make every [`Self::list`] fail.
     pub fn write_meta(&self, meta: &CheckpointMeta) -> Result<()> {
-        let dir = self.dir_for(&meta.id);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating checkpoint dir {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(meta).context("serializing checkpoint meta")?;
         let path = self.meta_path(&meta.id);
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        mvm_core::atomic_io::atomic_write_durable(&path, &json)
+            .with_context(|| format!("writing {}", path.display()))?;
+        // The record may have created its checkpoint's directory; make that
+        // name durable too.
+        mvm_core::atomic_io::sync_dir(&self.root)
     }
 
     pub fn read_meta(&self, id: &CheckpointId) -> Result<CheckpointMeta> {
@@ -79,7 +87,9 @@ impl CheckpointStore {
         };
         for entry in entries {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            // A dot-named directory is the staging area, never a checkpoint.
+            if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.')
+            {
                 continue;
             }
             let id = CheckpointId::new(entry.file_name().to_string_lossy().into_owned());
@@ -134,12 +144,21 @@ impl CheckpointStore {
 /// Verify every blob named in `meta.content` exists in the checkpoint's content
 /// dir and hashes to its recorded value. Fail-closed: any missing or mismatched
 /// blob is an error.
+///
+/// The blobs are hashed concurrently, one per worker, so the wait is set by
+/// the largest blob rather than the sum of all of them. The error reported is
+/// the first failing blob in manifest order, whichever finished first.
 pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
     let dir = store.content_dir(&meta.id);
-    for blob in &meta.content {
-        let path = dir.join(&blob.name);
-        let actual = sha256_file_hex(&path)
-            .with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
+    let paths: Vec<PathBuf> = meta
+        .content
+        .iter()
+        .map(|blob| dir.join(&blob.name))
+        .collect();
+    let digests = sha256_files_parallel(paths.clone());
+    for ((blob, path), actual) in meta.content.iter().zip(&paths).zip(digests) {
+        let actual =
+            actual.with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
         if actual != blob.sha256 {
             anyhow::bail!(
                 "checkpoint '{}' blob {:?} failed integrity (sha256): expected {}, got {}",
@@ -669,9 +688,10 @@ fn capture_vm_full_inner(
     snapshot_store: Option<&FsSnapshotStore>,
     trusted_backend: Option<&dyn TrustedSnapshotBackend>,
 ) -> Result<CheckpointMeta> {
-    let content_dir = store.content_dir(&params.id);
-    std::fs::create_dir_all(&content_dir)
-        .with_context(|| format!("creating {}", content_dir.display()))?;
+    // Everything is written under a private staging name and appears under
+    // the checkpoint's own name only once it is complete and durable.
+    let staged = staging::StagedCapture::begin(store, &params.id)?;
+    let content_dir = staged.content_dir();
 
     let memory = content_dir.join("memory.bin");
     let rootfs_dst = content_dir.join("rootfs.ext4");
@@ -707,14 +727,22 @@ fn capture_vm_full_inner(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
+    // The two large blobs, hashed together rather than one after the other.
+    let mut digests = sha256_files_parallel(vec![rootfs_dst.clone(), memory.clone()]).into_iter();
+    let mut next_digest = || {
+        digests
+            .next()
+            .expect("one digest per hashed blob")
+            .context("hashing captured blob")
+    };
     let mut content = vec![
         ContentBlob {
             name: "rootfs.ext4".into(),
-            sha256: sha256_file_hex(&rootfs_dst)?,
+            sha256: next_digest()?,
         },
         ContentBlob {
             name: "memory.bin".into(),
-            sha256: sha256_file_hex(&memory)?,
+            sha256: next_digest()?,
         },
     ];
 
@@ -874,7 +902,7 @@ fn capture_vm_full_inner(
         .snapshot_id(snapshot_id)
         .grants(params.grants)
         .build();
-    store.write_meta(&meta)?;
+    staged.commit(&meta)?;
     Ok(meta)
 }
 
@@ -979,6 +1007,11 @@ pub fn restore_checkpoint(
 fn sha256_file_hex(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
+}
+
+/// [`sha256_file_hex`] over `paths` concurrently, results in input order.
+fn sha256_files_parallel(paths: Vec<PathBuf>) -> Vec<Result<String>> {
+    mvm_fs::parallel::par_map(paths, |path| sha256_file_hex(&path))
 }
 
 /// Guest sidecar files that may sit next to `rootfs.ext4` and must be
@@ -1149,9 +1182,8 @@ pub fn capture_fs_quick(
             params.vm_name
         );
     }
-    let content_dir = store.content_dir(&params.id);
-    std::fs::create_dir_all(&content_dir)
-        .with_context(|| format!("creating {}", content_dir.display()))?;
+    let staged = staging::StagedCapture::begin(store, &params.id)?;
+    let content_dir = staged.content_dir();
 
     let file_name = params
         .rootfs
@@ -1184,7 +1216,7 @@ pub fn capture_fs_quick(
         .runtime_overlay_version(params.runtime_overlay_version)
         .grants(params.grants)
         .build();
-    store.write_meta(&meta)?;
+    staged.commit(&meta)?;
     Ok(meta)
 }
 
@@ -2182,7 +2214,9 @@ mod tests {
     /// any blobs returned by `extra_content`.
     struct NoMachineIdControl {
         rootfs: PathBuf,
-        extra: Vec<ContentBlob>,
+        /// Files the backend writes beside the memory image, as Firecracker
+        /// writes `vmstate.bin`, and reports through `extra_content`.
+        extra: Vec<(&'static str, &'static [u8])>,
     }
     impl VmFullControl for NoMachineIdControl {
         fn pause(&self) -> Result<()> {
@@ -2194,6 +2228,9 @@ mod tests {
         fn save_memory(&self, memory_path: &Path) -> Result<()> {
             std::fs::write(memory_path, b"mem").unwrap();
             // Intentionally does NOT write a .machine-id sidecar.
+            for (name, bytes) in &self.extra {
+                std::fs::write(memory_path.with_file_name(name), bytes).unwrap();
+            }
             Ok(())
         }
         fn rootfs_path(&self) -> Result<PathBuf> {
@@ -2209,8 +2246,16 @@ mod tests {
                 vsock: dir.join("v.sock"),
             })
         }
-        fn extra_content(&self, _content_dir: &Path) -> Result<Vec<ContentBlob>> {
-            Ok(self.extra.clone())
+        fn extra_content(&self, content_dir: &Path) -> Result<Vec<ContentBlob>> {
+            self.extra
+                .iter()
+                .map(|(name, _)| {
+                    Ok(ContentBlob {
+                        name: (*name).into(),
+                        sha256: sha256_file_hex(&content_dir.join(name))?,
+                    })
+                })
+                .collect()
         }
     }
 
@@ -2267,23 +2312,15 @@ mod tests {
         let store = CheckpointStore::at(tmp.path().join("store"));
         let rootfs = tmp.path().join("live.ext4");
         std::fs::write(&rootfs, b"disk").unwrap();
-        // Write a fake vmstate.bin that extra_content will return as a blob.
+        // The expected digest of the vmstate.bin the backend writes.
         let vmstate = tmp.path().join("vmstate.bin");
         std::fs::write(&vmstate, b"fake-vmstate").unwrap();
         let sha256 = mvm_core::crypto::image_verify::sha256_file(&vmstate).unwrap();
         let ctl = NoMachineIdControl {
             rootfs,
-            extra: vec![ContentBlob {
-                name: "vmstate.bin".into(),
-                sha256: sha256.clone(),
-            }],
+            extra: vec![("vmstate.bin", b"fake-vmstate")],
         };
-        // The extra content blob references a file in the content dir — write
-        // the file there so verify_content passes.
         let id = CheckpointId::new("fc2");
-        let content_dir = store.content_dir(&id);
-        std::fs::create_dir_all(&content_dir).unwrap();
-        std::fs::write(content_dir.join("vmstate.bin"), b"fake-vmstate").unwrap();
 
         let meta = capture_vm_full(
             &store,
@@ -2571,17 +2608,9 @@ mod tests {
         let rootfs = tmp.join(format!("{id}-live.ext4"));
         std::fs::write(&rootfs, b"disk").unwrap();
         let checkpoint_id = CheckpointId::new(id);
-        let content_dir = store.content_dir(&checkpoint_id);
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let vmstate = content_dir.join("vmstate.bin");
-        std::fs::write(&vmstate, b"fake-vmstate").unwrap();
-        let sha256 = mvm_core::crypto::image_verify::sha256_file(&vmstate).unwrap();
         let ctl = NoMachineIdControl {
             rootfs,
-            extra: vec![ContentBlob {
-                name: "vmstate.bin".into(),
-                sha256,
-            }],
+            extra: vec![("vmstate.bin", b"fake-vmstate")],
         };
         capture_vm_full(
             store,

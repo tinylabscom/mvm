@@ -217,6 +217,14 @@ enforcement.
 `rootfs.ext4` as whole blobs, hashes them one after another in `verify_content`,
 and never syncs blob copies.
 
+**Scoped into its own plan:**
+`specs/plans/2026-09-18-chunked-durable-checkpoints.md` (workstreams C0–C8).
+The boxes below stay open until the chunked format ships. Its C0 has landed:
+whole-blob capture is staged, synced and published with one rename, a failed
+recapture no longer damages the checkpoint it was replacing, and
+`verify_content` hashes blobs concurrently (one worker per blob, not per
+chunk).
+
 - [ ] W7.1 Split RAM and disk into 1 MiB SHA-256-keyed chunks. Record all-zero
       chunks in the index without storing them.
 - [ ] W7.2 Give each checkpoint an index of chunk digests. Share objects across

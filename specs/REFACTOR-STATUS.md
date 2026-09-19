@@ -81,6 +81,20 @@ Last updated: 2026-09-18
         W9.6 media-type alignment with #3365 stays open.
   - [x] W6 (#3383): every VMM spawn is scoped with memory and task ceilings,
         scope creation is bounded, and the ceilings are read back and audited.
+  - [ ] W7 (#3384): chunked, parallel, durable checkpoints, scoped into
+        `specs/plans/2026-09-18-chunked-durable-checkpoints.md`.
+    - [x] C0 — whole-blob capture staged, synced and published by one rename;
+          a failed recapture leaves the old checkpoint intact; parallel
+          per-blob verify (1.65–2.28x on 2–3 GiB checkpoints). Delivery:
+          `specs/sprint/delivery/3384-durable-checkpoint-capture.md`.
+    - [ ] C1 — chunk index and per-domain, hard-linked object pool.
+    - [ ] C2 — chunked capture; idle second checkpoint under 10% of the first.
+    - [ ] C3 — parallel chunk verify; contiguous verified materialization.
+    - [ ] C4 — diff restore from a cached materialization (with #3382).
+    - [ ] C5 — `cache prune` reclaims unlinked objects and abandoned staging.
+    - [ ] C6 — index digest as the audited content address.
+    - [ ] C7 — dedup confined to one key domain.
+    - [ ] C8 — retire the whole-blob layout (no migration).
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`
