@@ -178,6 +178,11 @@ path = "machine diff"
 tier = "live"
 
 [[command]]
+path = "machine display"
+tier = "parse"
+reason = "requires a running machine admitted with display.view, a live frame stream, and a long-lived loopback viewer; focused endpoint tests exercise the one-shot token and loopback-only bind"
+
+[[command]]
 path = "machine exec"
 tier = "live"
 

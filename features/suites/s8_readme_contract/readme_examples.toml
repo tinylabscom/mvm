@@ -103,6 +103,10 @@ witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persis
 command = "mvmctl machine inspect web"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
 
+[[example]]
+command = "mvmctl machine display web"
+exempt = "serves a long-lived, one-shot-token loopback viewer for frames from a running machine admitted with display.view; executing it in the README lane would require both a live display-producing guest and a browser client, while focused endpoint tests cover the loopback bind, token consumption, and frame delivery"
+
 # ── Host setup ───────────────────────────────────────────────────────────────
 
 [[example]]
