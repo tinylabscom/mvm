@@ -190,6 +190,8 @@ impl LocalBackend {
         );
         let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
             .map_err(|e| backend_err(format!("VM {vm_name:?} is not running: {e:#}")))?;
+        mvm_runtime::microvm::ensure_fc_sockets_in_state_dir(&vm_dir, "a sealed snapshot")
+            .map_err(|e| backend_err(format!("{e:#}")))?;
         Ok(Box::new(FirecrackerIO::new(firecracker_socket(&vm_dir))))
     }
 

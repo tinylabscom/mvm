@@ -11,7 +11,8 @@ use mvm_vmm::host::shell::run_in_vm;
 /// the API socket. Call `defuse()` after a successful launch to prevent
 /// cleanup (ownership transfers to the normal stop path).
 pub struct FirecrackerGuard {
-    /// Absolute path to the VM directory on the Linux host (contains fc.pid, fc.socket).
+    /// Absolute path to the VM directory on the Linux host (contains fc.pid; the
+    /// API socket is wherever [`super::fc_api_socket_path`] puts it).
     abs_dir: Option<String>,
 }
 
@@ -43,9 +44,10 @@ impl Drop for FirecrackerGuard {
                     sudo kill "$(cat {dir}/.fc-pid)" 2>/dev/null || true
                     rm -f {dir}/.fc-pid
                 fi
-                sudo rm -f {dir}/fc.socket
+                sudo rm -f {socket}
                 "#,
                 dir = dir,
+                socket = mvm_vmm::host::shell::shell_quote(&super::fc_api_socket_path(dir)),
             )) {
                 warn!("FirecrackerGuard: cleanup failed: {e}");
             }
