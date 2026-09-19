@@ -41,9 +41,10 @@ state inside a persistent machine is not automatically a production input.
 
 On the HVF backend, a guest fsync on a writable disk volume puts the data in
 the host's storage, but not past the drive's write cache. The drive cache is
-emptied once, when the VM stops. A guest fsync therefore survives a crash of
-the guest or of the VM process, but a host power loss or kernel panic while
-the VM runs can lose writes the guest believed durable.
+emptied once, when the VM stops cleanly; a VM process that is force-killed
+skips that step. A guest fsync therefore survives a crash of the guest or of
+the VM process, but a host power loss or kernel panic before the drive cache is
+emptied can lose writes the guest believed durable.
 
 That trade is deliberate. Emptying the drive cache on macOS costs milliseconds
 per call, and a guest that syncs after every small write ran about twice as
