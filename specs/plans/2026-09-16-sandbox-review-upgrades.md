@@ -50,7 +50,8 @@ W1 comes first: it is a security bug. W2 and W3 are small correctness fixes and
 can run in parallel with it. Among the upgrades:
 
 - W5 lands before W4, because memory reclaim has to know which ranges are
-  copy-on-write file mappings.
+  copy-on-write file mappings. (W4 was done first: it skips every private file
+  mapping, so W5 inherits a device that never releases one.)
 - W8 starts with a measurement and may close with no code change.
 - W8 touches the same virtio-blk device as #3360 (no discard support), so the
   two should be sequenced rather than developed in parallel branches.
@@ -156,21 +157,63 @@ and guest RAM stays resident until teardown. The hypervisor pins every range it
 maps into the guest, so advising the host that pages are free does nothing
 while the range is mapped.
 
-- [ ] W4.1 Add a virtio-balloon device to the HVF device model (`crates/mvm-vmm`)
+- [x] W4.1 Add a virtio-balloon device to the HVF device model (`crates/mvm-vmm`)
       that offers only free page reporting, plus `DEFLATE_ON_OOM`.
-- [ ] W4.2 For each reported range: unmap, `madvise(MADV_FREE_REUSABLE)`, remap,
-      and only then acknowledge. Lazy remap on fault is ruled out: two vCPUs
-      faulting together race, and that fault cannot be told apart from device
-      access.
-- [ ] W4.3 Handle ranges that W5 backs with a copy-on-write file mapping.
-- [ ] W4.4 Enable `VIRTIO_BALLOON` and `PAGE_REPORTING` in the guest kernel.
+      `crates/mvm-vmm/src/vmm/virtio_balloon.rs`, at the MMIO slot and SPI
+      after the entropy device. The reporting queue is index 2: the driver
+      numbers only the queues whose features were negotiated, so stats and
+      free page hinting would each move it up one; the device offers neither.
+- [x] W4.2 For each reported range: unmap, release, remap, and only then
+      acknowledge. Lazy remap on fault is ruled out: two vCPUs faulting
+      together race, and that fault cannot be told apart from device access.
+      The release is **not** `madvise(MADV_FREE_REUSABLE)`, which was built
+      first and measured: it dropped the footprint, but when the guest
+      refilled the memory it had freed the VM process showed 512 MiB of
+      footprint against 1621 MiB resident — reused reusable pages are never
+      charged back. The release maps fresh anonymous memory over the span
+      instead, which frees the pages at once and charges them again on reuse
+      (1611 MiB after the same refill). A span with no resident host page is
+      skipped, so the report a fresh guest makes of its untouched memory costs
+      no hypervisor calls. A span that cannot be remapped is never
+      acknowledged and stops the device.
+- [x] W4.3 Handle ranges that W5 backs with a copy-on-write file mapping.
+      Such mappings already exist on `main` — the kernel image, and the whole
+      of RAM on a restore from a memory blob — so this is live, not
+      preparatory. `GuestRam` records each private file mapping; the device
+      skips those parts of a report and still acknowledges it. A restored
+      guest therefore returns no memory until W5 decides how its written
+      pages should be reclaimed.
+- [x] W4.4 Enable `VIRTIO_BALLOON` and `PAGE_REPORTING` in the guest kernel.
+      No change: `nix/images/kernel/base.nix` already enables
+      `VIRTIO_BALLOON`, which selects `PAGE_REPORTING` in 6.12, and a built
+      workload config shows `CONFIG_PAGE_REPORTING=y` with
+      `INIT_ON_FREE_DEFAULT_ON` and `PAGE_POISONING` off (either would make
+      the driver drop reporting without `PAGE_POISON`). The kernel artifact is
+      unchanged.
 - [ ] W4.5 Advertise `balloon: true` for HVF, and let the existing
-      `BalloonController` drive it.
-- [ ] W4.6 Unit tests for the report queue: parsing, acknowledgement order,
-      ranges that are misaligned or out of bounds.
-- [ ] W4.7 Live test: a 2 GiB guest allocates and frees 1.5 GiB, and the VM
+      `BalloonController` drive it. **Not done as written, on purpose.**
+      `balloon` means host-driven inflate toward a target —
+      `balloon_set_target`, and `mem_initial` booting pre-inflated — and the
+      controller's only action is setting that target. A reporting-only
+      device has no target, so `balloon: true` would be false and the
+      controller would call a setter with nothing behind it. HVF instead
+      advertises a new `free_page_reporting` capability, keeps `balloon`
+      false, and the controller keeps skipping it, which is correct: reclaim
+      happens without it. `mvmctl doctor` shows the two as separate columns.
+      Target inflate on HVF would need a host-to-supervisor control channel
+      and is not planned.
+- [x] W4.6 Unit tests for the report queue: parsing, acknowledgement order,
+      ranges that are misaligned or out of bounds. Plus zero-length, wrapping,
+      straddling two regions, file-backed, untouched, the queue layout per
+      feature set, failed unmap/release/remap, and device-state round trip.
+- [x] W4.7 Live test: a 2 GiB guest allocates and frees 1.5 GiB, and the VM
       process's host footprint drops by at least 1 GiB within 30 s.
-- [ ] W4.8 Boot time does not regress.
+      macOS 26 Apple Silicon: 1610 MiB → 78 MiB, the first 1 GiB gone
+      10.9 s after the free (main: 1613 MiB, no drop).
+- [x] W4.8 Boot time does not regress. Twenty interleaved boots per build
+      under host load ~170–210: `backend_start` median 926 ms on `main`,
+      915 ms with the device; paired median difference +64 ms, the new build
+      slower in 11 of 20 — within the noise of this host.
 
 ## W5 — Copy-on-write HVF restore (#3382)
 
