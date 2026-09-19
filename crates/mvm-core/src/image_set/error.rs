@@ -2,8 +2,10 @@
 
 use thiserror::Error;
 
+use super::checkout::RepoIdentity;
 use super::identity::{
-    ArtifactName, ImageSetVersion, ProtocolRange, ReleaseTag, RepositorySlug, TagRef, WorkflowPath,
+    ArtifactName, GitCommit, ImageSetVersion, ProtocolRange, ReleaseTag, RepositorySlug, TagRef,
+    WorkflowPath,
 };
 use super::validate::RequiredMember;
 use super::{ArtifactFormat, BootProtocol, GuestDeviceRequirement, ImageSetRole, MemberTarget};
@@ -74,6 +76,53 @@ pub enum ImageSetError {
     },
     #[error("image set pins no Nix flake lock")]
     MissingNixLock,
+    #[error("released image set has no {field}")]
+    ReleaseFieldMissing { field: &'static str },
+    #[error("member {role}/{target} of a released image set has no {field}")]
+    ReleaseMemberFieldMissing {
+        role: ImageSetRole,
+        target: MemberTarget,
+        field: &'static str,
+    },
+    #[error("locally built image set carries {field}, which only a release has")]
+    LocalFieldPresent { field: &'static str },
+    #[error(
+        "member {role}/{target} of a locally built image set carries {field}, which only a release has"
+    )]
+    LocalMemberFieldPresent {
+        role: ImageSetRole,
+        target: MemberTarget,
+        field: &'static str,
+    },
+    #[error(
+        "locally built image set declares mvm source {declared}, but its mvm checkout is at {recorded}"
+    )]
+    LocalMvmCommitMismatch {
+        declared: GitCommit,
+        recorded: GitCommit,
+    },
+    #[error(
+        "image set was built from local checkouts, not published by a release, and cannot be \
+         verified as one"
+    )]
+    NotARelease,
+    #[error(
+        "image set read as a local build names the release producer {repository} \
+         ({workflow}); a locally built set is never a release"
+    )]
+    LocalSetClaimsRelease {
+        repository: RepositorySlug,
+        workflow: WorkflowPath,
+    },
+    #[error(
+        "the {checkout} checkout is now {current}, but the image set was built from {recorded}; \
+         rebuild it"
+    )]
+    StaleLocalSet {
+        checkout: &'static str,
+        recorded: Box<RepoIdentity>,
+        current: Box<RepoIdentity>,
+    },
     #[error("image set is incomplete; missing {}", join(.missing))]
     Incomplete { missing: Vec<RequiredMember> },
     #[error("guest-agent protocol {set} declared by the set does not overlap host support {host}")]
@@ -152,6 +201,13 @@ pub enum ImageSetError {
         name: ArtifactName,
         path: String,
     },
+    #[error("member {role}/{target} artifact {name} at {path} is not a regular file")]
+    ArtifactNotRegularFile {
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: ArtifactName,
+        path: String,
+    },
     #[error("member {role}/{target} artifact {name} cannot be read: {reason}")]
     ArtifactUnreadable {
         role: ImageSetRole,
@@ -213,6 +269,11 @@ pub enum ImageSetStage {
     Parse,
     /// The manifest is internally inconsistent.
     Structure,
+    /// The manifest's producer is not the kind this path accepts: a local set
+    /// offered as a release, or a release offered as a local set.
+    Provenance,
+    /// A locally built set whose checkouts have changed since it was built.
+    Freshness,
     /// The manifest names a different producer, tag or version than the lock.
     LockMatch,
     /// A member the caller requires is absent.
@@ -236,6 +297,8 @@ impl ImageSetStage {
             Self::Signature => "signature",
             Self::Parse => "parse",
             Self::Structure => "structure",
+            Self::Provenance => "provenance",
+            Self::Freshness => "freshness",
             Self::LockMatch => "lock-match",
             Self::Completeness => "completeness",
             Self::ProtocolCompatibility => "protocol-compatibility",
@@ -273,7 +336,14 @@ impl ImageSetError {
             | Self::UnknownSidecarLibc { .. }
             | Self::ReleaseTagVersionMismatch { .. }
             | Self::SupersedesNotOlder { .. }
-            | Self::MissingNixLock => ImageSetStage::Structure,
+            | Self::MissingNixLock
+            | Self::ReleaseFieldMissing { .. }
+            | Self::ReleaseMemberFieldMissing { .. }
+            | Self::LocalFieldPresent { .. }
+            | Self::LocalMemberFieldPresent { .. }
+            | Self::LocalMvmCommitMismatch { .. } => ImageSetStage::Structure,
+            Self::NotARelease | Self::LocalSetClaimsRelease { .. } => ImageSetStage::Provenance,
+            Self::StaleLocalSet { .. } => ImageSetStage::Freshness,
             Self::RepositoryMismatch { .. }
             | Self::WorkflowMismatch { .. }
             | Self::ReleaseTagMismatch { .. }
@@ -284,6 +354,7 @@ impl ImageSetError {
                 ImageSetStage::ProtocolCompatibility
             }
             Self::ArtifactMissing { .. }
+            | Self::ArtifactNotRegularFile { .. }
             | Self::ArtifactUnreadable { .. }
             | Self::ArtifactSizeMismatch { .. }
             | Self::ArtifactDigestMismatch { .. } => ImageSetStage::Artifacts,

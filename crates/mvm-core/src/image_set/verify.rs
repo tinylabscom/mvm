@@ -14,8 +14,8 @@
 //! 2. the detached signature over those same raw bytes is checked against the
 //!    identity the lock names;
 //! 3. only then is the JSON parsed;
-//! 4. the parsed manifest is checked for internal consistency and against the
-//!    lock's own fields;
+//! 4. the parsed manifest is checked for internal consistency, refused if its
+//!    producer is not a release, and checked against the lock's own fields;
 //! 5. every member artifact is checked on disk, by size and by digest;
 //! 6. the set digest and every member pack hash are checked for revocation.
 //!
@@ -26,11 +26,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::validate::{check_lock_schema_version, check_manifest_digest};
+use super::validate::{check_lock_schema_version, check_manifest_digest, require_release};
 use super::{
     ArtifactName, HostProtocolSupport, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
-    ImageSetRequirement, ImageSetRole, MemberArtifact, MemberTarget, check_against_lock,
-    check_protocol_compatibility, require_complete, validate_structure,
+    ImageSetRequirement, ImageSetRole, ImageTrustTier, MemberArtifact, MemberTarget,
+    ReleaseProducer, check_against_lock, check_protocol_compatibility, require_complete,
+    validate_structure,
 };
 use crate::crypto::image_verify::{sha256_file, verify_signed_payload_under_any_identity};
 use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus, Sha256Hex};
@@ -99,12 +100,25 @@ impl<'a> ImageSetVerification<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedImageSet {
     pub manifest: ImageSetManifest,
+    /// The release the manifest names, which verification has matched to the
+    /// lock. Held apart from the manifest so a caller reads it without
+    /// re-deciding what kind of producer the set has.
+    pub release: ReleaseProducer,
     /// Digest of the bytes that were signed, and the key revocation is keyed on.
     pub manifest_sha256: Sha256Hex,
     /// Derived from the lock's signing identity, so it names who the set was
     /// accepted from rather than who it claims to be from.
     pub signer_key_id: KeyId,
     pub artifacts: Vec<VerifiedArtifact>,
+}
+
+impl VerifiedImageSet {
+    /// Always [`ImageTrustTier::VerifiedRelease`]: a value of this type exists
+    /// only once a signed, lock-pinned manifest has verified.
+    #[must_use]
+    pub fn tier(&self) -> ImageTrustTier {
+        ImageTrustTier::VerifiedRelease
+    }
 }
 
 /// One artifact found on disk with the digest and size its member declared.
@@ -154,6 +168,7 @@ pub(super) fn verify_checked(
 
     let manifest = parse_manifest(request.manifest_bytes)?;
     validate_structure(&manifest)?;
+    let release = require_release(&manifest)?.clone();
     check_against_lock(&manifest, &manifest_sha256, lock)?;
     if let Some(requirement) = request.requirement {
         require_complete(&manifest, requirement)?;
@@ -170,6 +185,7 @@ pub(super) fn verify_checked(
 
     Ok(VerifiedImageSet {
         manifest,
+        release,
         manifest_sha256,
         signer_key_id,
         artifacts,
@@ -200,7 +216,7 @@ fn check_keyless_signature(
     })
 }
 
-fn parse_manifest(bytes: &[u8]) -> Result<ImageSetManifest, ImageSetError> {
+pub(super) fn parse_manifest(bytes: &[u8]) -> Result<ImageSetManifest, ImageSetError> {
     serde_json::from_slice(bytes).map_err(|error| ImageSetError::UnparseableManifest {
         reason: error.to_string(),
     })
@@ -213,7 +229,7 @@ fn locked_signer_key_id(lock: &ImageLock) -> KeyId {
     key_id_from_identity(&lock.signing_identity.certificate_identity(&lock.repository))
 }
 
-fn verify_artifacts(
+pub(super) fn verify_artifacts(
     manifest: &ImageSetManifest,
     dir: &Path,
 ) -> Result<Vec<VerifiedArtifact>, ImageSetError> {
@@ -226,9 +242,11 @@ fn verify_artifacts(
     Ok(verified)
 }
 
-/// Check one artifact's bytes. Size is compared first: it is a stat rather than
-/// a read of the whole file, so a truncated multi-hundred-megabyte rootfs is
-/// refused without hashing it.
+/// Check one artifact's bytes. The name has already been proven a single file
+/// name, so the path cannot leave `dir`; the file must also be a regular file
+/// in it, not a link that would make the bytes checked here some other file's.
+/// Size is compared next: it is a stat rather than a read of the whole file,
+/// so a truncated multi-hundred-megabyte rootfs is refused without hashing it.
 fn verify_member_artifact(
     member: &ImageSetMember,
     artifact: &MemberArtifact,
@@ -270,8 +288,14 @@ fn artifact_size(
     artifact: &MemberArtifact,
     path: &Path,
 ) -> Result<u64, ImageSetError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(metadata.len()),
+        Ok(_) => Err(ImageSetError::ArtifactNotRegularFile {
+            role: member.role,
+            target: member.target,
+            name: artifact.name.clone(),
+            path: path.display().to_string(),
+        }),
         Err(error) => Err(read_failure(member, artifact, path, &error)),
     }
 }
@@ -334,14 +358,17 @@ fn check_revocations(
             reason,
         });
     }
+    // Structure validation has already refused a release member without a
+    // pack hash, so every member of a set that reaches here has one.
     for member in &manifest.members {
-        if let RevocationStatus::Revoked { reason } =
-            revocations.status(signer_key_id, &member.pack_hash)
-        {
+        let Some(pack_hash) = &member.pack_hash else {
+            continue;
+        };
+        if let RevocationStatus::Revoked { reason } = revocations.status(signer_key_id, pack_hash) {
             return Err(ImageSetError::MemberRevoked {
                 role: member.role,
                 target: member.target,
-                pack_hash: member.pack_hash.clone(),
+                pack_hash: pack_hash.clone(),
                 reason,
             });
         }

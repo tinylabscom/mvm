@@ -95,7 +95,7 @@ fn verified_json(verified: &VerifiedImageSet) -> serde_json::Value {
     json!({
         "verified": true,
         "set_version": verified.manifest.set_version.as_str(),
-        "release_tag": verified.manifest.producer.release_tag.as_str(),
+        "release_tag": verified.release.release_tag.as_str(),
         "manifest_sha256": verified.manifest_sha256.as_str(),
         "signer_key_id": verified.signer_key_id.0,
         "artifacts": verified.artifacts.iter().map(|artifact| json!({
@@ -120,7 +120,7 @@ fn verified_text(verified: &VerifiedImageSet) -> String {
     let mut text = format!(
         "Image set {} ({}) verified.\n  manifest sha256: {}\n  signer key id:   {}\n  artifacts:       {}\n",
         verified.manifest.set_version,
-        verified.manifest.producer.release_tag,
+        verified.release.release_tag,
         verified.manifest_sha256.as_str(),
         verified.signer_key_id.0,
         verified.artifacts.len(),
@@ -370,6 +370,7 @@ mod tests {
         let member = &manifest.members[0];
         let artifact = &member.artifacts[0];
         let verified = VerifiedImageSet {
+            release: manifest.producer.release().unwrap().clone(),
             manifest_sha256: Sha256Hex::from_bytes(MANIFEST.as_bytes()),
             signer_key_id: mvm_core::plan::bundle::key_id_from_identity("someone"),
             artifacts: vec![mvm_core::image_set::VerifiedArtifact {
