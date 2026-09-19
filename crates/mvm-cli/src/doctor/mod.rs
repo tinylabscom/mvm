@@ -108,6 +108,33 @@ struct Check {
     info: String,
 }
 
+/// Whether the installed Firecracker hands a guest's trimmed blocks back to
+/// the host. `install` keeps an existing Firecracker, so a host provisioned
+/// before the pin moved can sit below the version that added discard, and the
+/// builder stores then keep their high-water mark with nothing saying why.
+fn fc_block_discard_check(version_output: &str) -> Check {
+    let installed = version_output
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().last())
+        .unwrap_or("");
+    let info = if mvm_backends::fc::FcCapabilities::for_version(installed).block_discard {
+        "yes — a guest trim returns builder-store disk to the host".to_string()
+    } else {
+        format!(
+            "no — Firecracker {installed} predates 1.17; builder stores keep their \
+             high-water mark on disk until Firecracker {} is installed",
+            fc_version()
+        )
+    };
+    Check {
+        name: "fc block discard",
+        category: "tools",
+        ok: true,
+        info,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     /// Workflow scope this report was filtered for, or `None` for
@@ -153,11 +180,16 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     } else {
         builder::builder_tool_skipped("nix", "tools")
     });
-    checks.push(if vm_up {
+    let firecracker = if vm_up {
         toolchain::check_vm_cmd("firecracker", "tools", "firecracker --version")
     } else {
         builder::builder_tool_skipped("firecracker", "tools")
-    });
+    };
+    let block_discard = firecracker
+        .ok
+        .then(|| fc_block_discard_check(&firecracker.info));
+    checks.push(firecracker);
+    checks.extend(block_discard);
 
     checks.push(Check {
         name: "fc target",
