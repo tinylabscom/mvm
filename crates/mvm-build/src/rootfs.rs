@@ -13,7 +13,7 @@
 //!   ext4 creation inside the Linux builder boundary for trees the
 //!   pure writer structurally can't represent.
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any(test, feature = "builder-vm"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -337,6 +337,41 @@ pub struct MaterializedExt4 {
     pub verity_root_hash: Option<String>,
 }
 
+/// How a materialization reached the builder-VM writer.
+///
+/// The builder VM copies the host tree, so it cannot place a path the host
+/// filesystem refused or an owner an unprivileged unpack could not apply. What
+/// to do about that depends entirely on how the run got here, and naming the
+/// wrong one sends a reader after a setting nobody set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderVmRoute {
+    /// Asked for outright, so the in-process writer was never tried and is
+    /// still available.
+    Selected,
+    /// Reached automatically after the in-process writer could not emit this
+    /// image, carrying the failure that sent it here. Nothing was configured;
+    /// the image itself is what has to change.
+    PureFallback { because: String },
+}
+
+impl BuilderVmRoute {
+    /// The half of a refusal that tells a reader what to do about it.
+    fn remedy(&self) -> String {
+        match self {
+            Self::Selected => {
+                "use the in-process materializer (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+                    .to_string()
+            }
+            Self::PureFallback { because } => format!(
+                "the in-process materializer was tried first and could not emit this image \
+                 ({because}). To build it, bring the image within that writer's limits — fewer \
+                 or smaller files, or smaller extended attributes, as the failure names — or \
+                 remove from the image what this materializer cannot carry"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RootfsError {
     #[error("unpacked root is not a directory: {0}")]
@@ -359,18 +394,34 @@ pub enum RootfsError {
     VerityFeatureDisabled,
 
     #[error(
-        "the builder-VM materializer copies the host tree, so it cannot supply the {0} \
-         path(s) the host filesystem could not hold; use the in-process materializer \
-         (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+        "the builder-VM materializer copies the host tree, so it cannot supply the {count} \
+         path(s) the host filesystem could not hold; {}", route.remedy()
     )]
-    DeferredNodesUnsupported(usize),
+    DeferredNodesUnsupported { count: usize, route: BuilderVmRoute },
 
     #[error(
-        "the builder-VM materializer copies the host tree, so it cannot give the {0} \
-         path(s) the image layers assign to a non-root account their owners; use the \
-         in-process materializer (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+        "the builder-VM materializer copies the host tree, so it cannot give the {count} \
+         path(s) the image layers assign to a non-root account their owners; {}", route.remedy()
     )]
-    LayerOwnershipUnsupported(usize),
+    LayerOwnershipUnsupported { count: usize, route: BuilderVmRoute },
+
+    #[error(
+        "the builder-VM materializer cannot carry the extended attribute {name} on {} \
+         (file capabilities and ACLs are lost in its copy); the image must not set it on that \
+         file for this materializer. {}", path.display(), route.remedy()
+    )]
+    XattrUnsupported {
+        path: PathBuf,
+        name: String,
+        route: BuilderVmRoute,
+    },
+
+    #[error("archiving {path} for the builder VM: {source}")]
+    ArchiveTree {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
@@ -422,8 +473,10 @@ impl RootfsError {
     }
 
     /// Whether the run path should retry this pure-path failure via the builder
-    /// VM (which has no such limits and whose `cp -a` preserves xattrs). A
-    /// malformed tree or I/O error is genuine and surfaces unchanged.
+    /// VM, which has no size limits. It carries no extended attributes, so a
+    /// tree whose attributes overflowed the in-process writer is refused there
+    /// in turn, naming this failure. A malformed tree or I/O error is genuine
+    /// and surfaces unchanged.
     pub fn pure_should_fall_back(&self) -> bool {
         self.is_pure_capacity_limit()
     }
@@ -466,15 +519,20 @@ pub fn estimate_ext4_size(
 /// Materialize `input.unpacked_root` into `input.output`.
 ///
 /// The host allocates the sparse file, but never formats it. When
-/// compiled with the `builder-vm` feature, the existing libkrun
-/// builder VM receives the unpacked tree over virtio-fs and the
-/// sparse output image as a writable virtio-blk device, then runs
-/// `mkfs.ext4` inside the guest. Default builds return
+/// compiled with the `builder-vm` feature, the host archives the tree
+/// ([`write_rootfs_archive`]) and hands the builder VM that archive as its
+/// `/work` input and the sparse output image as a writable disk; the guest runs
+/// `mkfs.ext4` and extracts the archive onto it. Default builds return
 /// [`RootfsError::BuilderVmFeatureDisabled`] because they do not link
 /// the libkrun builder launcher.
+///
+/// `route` is how the caller got here, and is only ever read to explain a
+/// refusal. It is a parameter rather than a default so a caller cannot reach
+/// this writer without saying which it is.
 pub fn materialize_ext4(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
+    route: &BuilderVmRoute,
 ) -> Result<MaterializedExt4, RootfsError> {
     if !input.unpacked_root.is_dir() {
         return Err(RootfsError::UnpackedRootNotDirectory(
@@ -482,7 +540,7 @@ pub fn materialize_ext4(
         ));
     }
 
-    refuse_tree_only_materialization_loss(input)?;
+    refuse_tree_only_materialization_loss(input, route)?;
     let size_bytes = estimate_ext4_size(input.uncompressed_size_bytes, options)?;
 
     #[cfg(not(feature = "builder-vm"))]
@@ -515,15 +573,46 @@ pub fn materialize_ext4(
 /// refused, and an owner an unprivileged unpack could not apply. Fail closed
 /// rather than emit an image that is quietly missing paths or has a service's
 /// files owned by root.
-fn refuse_tree_only_materialization_loss(input: &MaterializeExt4Input) -> Result<(), RootfsError> {
+///
+/// The refusal carries `route` because the two ways to be here have different
+/// causes: an operator who asked for this writer can stop asking, while an
+/// automatic fallback was reached without anyone configuring anything.
+fn refuse_tree_only_materialization_loss(
+    input: &MaterializeExt4Input,
+    route: &BuilderVmRoute,
+) -> Result<(), RootfsError> {
     if !input.deferred_nodes.is_empty() {
-        return Err(RootfsError::DeferredNodesUnsupported(
-            input.deferred_nodes.len(),
-        ));
+        return Err(RootfsError::DeferredNodesUnsupported {
+            count: input.deferred_nodes.len(),
+            route: route.clone(),
+        });
     }
-    let non_root = input.owners.non_root_count();
+    // A path the builder claims is set back to root after the copy, so a
+    // layer owner there is not one this writer loses.
+    let non_root = input
+        .owners
+        .non_root_count(&crate::oci_runtime_inject::injected_root_owned_paths());
     if non_root > 0 {
-        return Err(RootfsError::LayerOwnershipUnsupported(non_root));
+        return Err(RootfsError::LayerOwnershipUnsupported {
+            count: non_root,
+            route: route.clone(),
+        });
+    }
+    // The archive this writer hands the builder carries no extended
+    // attributes, and the builder's `tar` could not restore them if it did.
+    let xattr =
+        mvm_fs::rootfs::first_guest_semantic_xattr(&input.unpacked_root).map_err(|source| {
+            RootfsError::ArchiveTree {
+                path: input.unpacked_root.clone(),
+                source,
+            }
+        })?;
+    if let Some((path, name)) = xattr {
+        return Err(RootfsError::XattrUnsupported {
+            path,
+            name,
+            route: route.clone(),
+        });
     }
     Ok(())
 }
@@ -548,30 +637,61 @@ fn allocate_sparse_image(path: &Path, size_bytes: u64) -> Result<(), RootfsError
     Ok(())
 }
 
+/// The builder job that turns the tree into an image: the tree archived into
+/// `work`, which becomes the job's `/work`, and a script that extracts that
+/// archive onto the output disk. The tree itself is never the job's input —
+/// the generic staging a work directory passes through drops names and reads
+/// special files.
+#[cfg(feature = "builder-vm")]
+fn builder_rootfs_job(
+    input: &MaterializeExt4Input,
+    options: &MaterializeExt4Options,
+    device_size_bytes: u64,
+    work: &Path,
+) -> Result<crate::builder_vm::BuilderShellJob, RootfsError> {
+    write_rootfs_archive(&input.unpacked_root, &work.join(ROOTFS_ARCHIVE_NAME))?;
+    Ok(crate::builder_vm::BuilderShellJob {
+        work_dir: work.to_path_buf(),
+        artifact_out: input
+            .output
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        script: ext4_materialization_script(
+            &options.guest_output_device,
+            device_size_bytes,
+            &crate::oci_runtime_inject::injected_root_owned_paths(),
+        ),
+        extra_disks: vec![crate::builder_vm::BuilderExtraDisk {
+            id: "oci-rootfs".to_string(),
+            path: input.output.clone(),
+            read_only: false,
+        }],
+    })
+}
+
 #[cfg(feature = "builder-vm")]
 fn materialize_ext4_in_builder_vm(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
     device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
-    use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob};
-
     let artifact_out = input
         .output
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let script = ext4_materialization_script(&options.guest_output_device, device_size_bytes);
-    let shell_job = BuilderShellJob {
-        work_dir: input.unpacked_root.clone(),
-        artifact_out,
-        script,
-        extra_disks: vec![BuilderExtraDisk {
-            id: "oci-rootfs".to_string(),
-            path: input.output.clone(),
-            read_only: false,
-        }],
-    };
+    // Beside the output rather than in the system temp dir: this path runs for
+    // the images too large for the in-process writer, and the archive is the
+    // size of the tree.
+    let work = tempfile::Builder::new()
+        .prefix("mvm-rootfs-archive-")
+        .tempdir_in(&artifact_out)
+        .map_err(|source| RootfsError::ArchiveTree {
+            path: artifact_out.clone(),
+            source,
+        })?;
+    let shell_job = builder_rootfs_job(input, options, device_size_bytes, work.path())?;
 
     // Keep the materializer on the same builder-backend policy as the rest of
     // the builder surface. In particular, do not silently retry on qemu here:
@@ -632,10 +752,24 @@ fn ext4_block_count(device_size_bytes: u64) -> u64 {
 /// the ext4 to an explicit block count a margin below it so the image
 /// mounts on a workload backend whose virtio-blk device reports slightly
 /// fewer blocks than the builder VM saw (see [`EXT4_DEVICE_MARGIN_BYTES`]).
+///
+/// The tree arrives as [`ROOTFS_ARCHIVE_NAME`], written by
+/// [`write_rootfs_archive`] with every entry owned 0:0. `root_owned` names the
+/// paths the image builder owns; the script sets each back to root after the
+/// extraction anyway, the same guarantee the in-process writer gives through
+/// the owner table, so it does not rest on the archive alone.
+///
+/// What `-h` does and does not promise: `chown -h` does not follow the final
+/// component, and `chown -Rh` does not follow links it meets while recursing.
+/// Neither stops the kernel resolving a symbolic link in an *intermediate*
+/// component of the path it is given. That is safe here only because the host
+/// refused, before injection, any tree in which a component leading to a
+/// claimed path is a link.
 #[cfg(any(test, feature = "builder-vm"))]
 pub(crate) fn ext4_materialization_script(
     guest_output_device: &str,
     device_size_bytes: u64,
+    root_owned: &mvm_fs::ownership::RootOwnedPaths,
 ) -> String {
     format!(
         r#"#!/bin/sh
@@ -644,19 +778,197 @@ set -eu
 ROOTFS_DEV='{guest_output_device}'
 MOUNTPOINT=/tmp/mvm-image-rootfs
 
+chown_root() {{
+    if [ -e "$1" ] || [ -L "$1" ]; then chown -h 0:0 "$1"; fi
+}}
+chown_root_tree() {{
+    if [ -e "$1" ] || [ -L "$1" ]; then chown -Rh 0:0 "$1"; fi
+}}
+
 mkdir -p "$MOUNTPOINT"
 /sbin/mkfs.ext4 -F -b {block_size} "$ROOTFS_DEV" {block_count}
 mount -t ext4 "$ROOTFS_DEV" "$MOUNTPOINT"
 trap 'umount "$MOUNTPOINT" 2>/dev/null || true' EXIT
-cp -aR /work/. "$MOUNTPOINT"/
-sync
+tar -xf /work/{archive} -C "$MOUNTPOINT"
+chown -h 0:0 "$MOUNTPOINT"
+{chown_root_owned}sync
 umount "$MOUNTPOINT"
 trap - EXIT
 "#,
         guest_output_device = shell_single_quote_escape(guest_output_device),
         block_size = EXT4_BLOCK_SIZE_BYTES,
         block_count = ext4_block_count(device_size_bytes),
+        chown_root_owned = chown_root_owned_lines(root_owned),
+        archive = ROOTFS_ARCHIVE_NAME,
     )
+}
+
+/// The one file the builder VM's `/work` holds for a rootfs job: the tree as a
+/// tar the host wrote itself.
+#[cfg(any(test, feature = "builder-vm"))]
+const ROOTFS_ARCHIVE_NAME: &str = "mvm-rootfs.tar";
+
+/// Archive the tree at `root` into `out` for the builder VM to extract.
+///
+/// The builder's generic work-input staging is built for source checkouts: it
+/// drops `node_modules`, `target`, `dist`, `.git` and the rest at any depth,
+/// and copies a special file by reading it. Applied to an image that deleted a
+/// node image's `/usr/local/lib/node_modules`, and would hang on a FIFO. One
+/// archive file passes through that staging untouched, so the tree the image
+/// writer sees is the tree the host holds.
+///
+/// Each entry is written the way the image should hold it, not the way the
+/// host does:
+/// - owned 0:0, which is every owner this writer is allowed to emit (a
+///   non-root layer owner outside the claimed paths is refused before this
+///   runs), so the guest's `tar` does not restore the host account's ids;
+/// - a symbolic link as a link, never its host target;
+/// - an owner-unreadable file read the way the in-process writer reads one;
+/// - a device, FIFO or socket omitted, as the in-process writer omits it:
+///   `devtmpfs` supplies `/dev` at boot.
+///
+/// Entries are sorted, so the archive is a function of the tree.
+#[cfg(any(test, feature = "builder-vm"))]
+pub(crate) fn write_rootfs_archive(root: &Path, out: &Path) -> Result<(), RootfsError> {
+    let archive_err = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| RootfsError::ArchiveTree { path, source }
+    };
+    let file = std::fs::File::create(out).map_err(archive_err(out))?;
+    let mut builder = tar::Builder::new(std::io::BufWriter::new(file));
+    builder.follow_symlinks(false);
+    let mut stack = vec![PathBuf::new()];
+    while let Some(dir_rel) = stack.pop() {
+        let dir = root.join(&dir_rel);
+        let mut names = std::fs::read_dir(&dir)
+            .map_err(archive_err(&dir))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(archive_err(&dir))?;
+        names.sort();
+        let mut subdirs = Vec::new();
+        for name in names {
+            let rel = dir_rel.join(&name);
+            if append_archive_entry(&mut builder, root, &rel)? {
+                subdirs.push(rel);
+            }
+        }
+        // Reversed, so popping visits subdirectories in sorted order.
+        stack.extend(subdirs.into_iter().rev());
+    }
+    builder
+        .into_inner()
+        .and_then(|writer| {
+            writer
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)
+        })
+        .and_then(|file| file.sync_all())
+        .map_err(archive_err(out))
+}
+
+/// Append the node at `root/rel` to `builder`. Returns whether it is a
+/// directory the walk should descend into.
+#[cfg(any(test, feature = "builder-vm"))]
+fn append_archive_entry<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    root: &Path,
+    rel: &Path,
+) -> Result<bool, RootfsError> {
+    let path = root.join(rel);
+    let err = |source| RootfsError::ArchiveTree {
+        path: path.clone(),
+        source,
+    };
+    let meta = std::fs::symlink_metadata(&path).map_err(err)?;
+    let file_type = meta.file_type();
+    if !(file_type.is_dir() || file_type.is_file() || file_type.is_symlink()) {
+        return Ok(false);
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata_in_mode(&meta, tar::HeaderMode::Complete);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_username("root").map_err(err)?;
+    header.set_groupname("root").map_err(err)?;
+    if file_type.is_symlink() {
+        header.set_size(0);
+        let target = std::fs::read_link(&path).map_err(err)?;
+        builder
+            .append_link(&mut header, rel, &target)
+            .map_err(err)?;
+        Ok(false)
+    } else if file_type.is_dir() {
+        header.set_size(0);
+        builder
+            .append_data(&mut header, rel, std::io::empty())
+            .map_err(err)?;
+        Ok(true)
+    } else {
+        // Streamed: this writer exists for the trees too large for the
+        // in-process one, so a file is never held in memory whole. The size in
+        // the header is the one `set_metadata_in_mode` read with the mode.
+        let file = open_for_archive(&path).map_err(err)?;
+        builder.append_data(&mut header, rel, file).map_err(err)?;
+        Ok(false)
+    }
+}
+
+/// Open a regular file of the tree for reading, widening an owner-unreadable
+/// mode (a 0000 `/etc/shadow`) for the open alone. The mode is restored as
+/// soon as the file is open — the descriptor stays readable — so the host
+/// tree is left as it was however the archive then fails.
+///
+/// Never through a link: every open refuses one (`O_NOFOLLOW`), and the mode
+/// is widened only on a path that `lstat` has just shown to be a regular
+/// file, so a `chmod` — which does follow links — cannot reach a file outside
+/// the tree.
+#[cfg(any(test, feature = "builder-vm"))]
+fn open_for_archive(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    match open() {
+        Ok(file) => Ok(file),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            let meta = std::fs::symlink_metadata(path)?;
+            if !meta.file_type().is_file() {
+                return Err(err);
+            }
+            let original = meta.permissions().mode();
+            let widened = original | 0o400;
+            if widened == original {
+                return Err(err);
+            }
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(widened))?;
+            let opened = open();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(original))?;
+            opened
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// One `chown_root` line per claimed path and one `chown_root_tree` line per
+/// claimed tree, each under the image mount point.
+#[cfg(any(test, feature = "builder-vm"))]
+fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> String {
+    let path_lines = root_owned.paths().map(|path| ("chown_root", path));
+    let tree_lines = root_owned.trees().map(|tree| ("chown_root_tree", tree));
+    path_lines
+        .chain(tree_lines)
+        .map(|(function, path)| {
+            format!(
+                "{function} \"$MOUNTPOINT\"'{}'\n",
+                shell_single_quote_escape(path)
+            )
+        })
+        .collect()
 }
 
 #[cfg(feature = "pure-mkfs")]
@@ -677,6 +989,32 @@ pub fn materialize_ext4_pure(
     materialize_ext4_pure_with_walk_options(input, mvm_fs::rootfs::WalkOptions::default())
 }
 
+/// The writer options every in-process materialization runs under.
+///
+/// One function so the ownership guarantee cannot be lost by adding a second
+/// entry point: the paths the runtime injects are claimed here, on every tree
+/// rather than only on trees built from image layers. A tree carrying no
+/// declared owners loses nothing by it, and no caller has to remember to ask.
+///
+/// Stage-0 `/work` is mounted by label; every other caller leaves
+/// `volume_label` unset and gets the unchanged default-options image.
+#[cfg(feature = "pure-mkfs")]
+fn pure_materialize_options(
+    input: &MaterializeExt4Input,
+    walk: mvm_fs::rootfs::WalkOptions,
+) -> mvm_fs::rootfs::MaterializeOptions {
+    let options = mvm_fs::rootfs::MaterializeOptions::builder()
+        .walk(walk)
+        .extra_nodes(input.deferred_nodes.clone())
+        .owners(input.owners.clone())
+        .root_owned(crate::oci_runtime_inject::injected_root_owned_paths())
+        .build();
+    match &input.volume_label {
+        Some(label) => options.with_volume_label(label.as_bytes()),
+        None => options,
+    }
+}
+
 /// Materialize with caller-selected source-walk behavior.
 ///
 /// Immutable OCI roots use [`mvm_fs::rootfs::WalkOptions::default`]. Live
@@ -692,16 +1030,7 @@ pub fn materialize_ext4_pure_with_walk_options(
             input.unpacked_root.clone(),
         ));
     }
-    // Stage-0 /work is mounted by label; every other caller leaves
-    // volume_label None and gets the unchanged default-options image.
-    let mut options = mvm_fs::rootfs::MaterializeOptions::builder()
-        .walk(walk)
-        .extra_nodes(input.deferred_nodes.clone())
-        .owners(input.owners.clone())
-        .build();
-    if let Some(label) = &input.volume_label {
-        options = options.with_volume_label(label.as_bytes());
-    }
+    let options = pure_materialize_options(input, walk);
     if !input.emit_verity {
         let materialized =
             mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
@@ -1080,14 +1409,268 @@ mod tests {
 
     #[test]
     fn script_formats_mounts_copies_and_unmounts_inside_guest() {
-        let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024);
+        let script = ext4_materialization_script(
+            "/dev/vdc",
+            64 * 1024 * 1024,
+            &mvm_fs::ownership::RootOwnedPaths::none(),
+        );
         // Formats to an explicit block count a margin below the device
         // so the image mounts on a backend reporting fewer blocks.
         assert!(script.contains("/sbin/mkfs.ext4 -F -b 4096 \"$ROOTFS_DEV\""));
         assert!(script.contains("mount -t ext4 \"$ROOTFS_DEV\" \"$MOUNTPOINT\""));
-        assert!(script.contains("cp -aR /work/. \"$MOUNTPOINT\"/"));
+        assert!(script.contains("tar -xf /work/mvm-rootfs.tar -C \"$MOUNTPOINT\""));
+        assert!(!script.contains("cp -aR"));
         assert!(script.contains("umount \"$MOUNTPOINT\""));
         assert!(!script.contains("mke2fs -d"));
+    }
+
+    /// The builder VM copies the host tree with the ids the transport carried
+    /// — the host account's — so the files mvm injects are set back to root
+    /// after the copy and before the image is flushed, matching the
+    /// in-process writer's guarantee.
+    #[test]
+    fn script_sets_every_injected_path_back_to_root_after_the_copy() {
+        let claimed = crate::oci_runtime_inject::injected_root_owned_paths();
+        let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024, &claimed);
+        let copy = script
+            .find("tar -xf /work/mvm-rootfs.tar")
+            .expect("extracts the tree");
+        let image_root = script
+            .find("\nchown -h 0:0 \"$MOUNTPOINT\"\n")
+            .expect("the image root is set back to root, without following a link");
+        assert!(copy < image_root);
+        let flush = script.find("\nsync\n").expect("flushes the image");
+        for line in [
+            "chown_root \"$MOUNTPOINT\"'/etc/passwd'",
+            "chown_root \"$MOUNTPOINT\"'/etc/group'",
+            "chown_root \"$MOUNTPOINT\"'/etc'",
+            "chown_root \"$MOUNTPOINT\"'/usr/lib/mvm/wrappers/oci-entrypoint'",
+            "chown_root_tree \"$MOUNTPOINT\"'/etc/mvm'",
+            "chown_root_tree \"$MOUNTPOINT\"'/mvm'",
+        ] {
+            let at = script
+                .find(line)
+                .unwrap_or_else(|| panic!("missing {line}"));
+            assert!(copy < at && at < flush, "{line} must run after the copy");
+        }
+        assert_eq!(
+            script.matches("chown_root ").count() + script.matches("chown_root_tree ").count(),
+            claimed.paths().count() + claimed.trees().count(),
+            "one line per claim, nothing else chowned"
+        );
+        assert!(
+            script.contains("chown -h 0:0") && script.contains("chown -Rh 0:0"),
+            "never follows a link out of the image"
+        );
+    }
+
+    /// A claimed path the image does not carry — the trust policy on an
+    /// unsealed run — is skipped rather than failing a `set -e` script.
+    #[test]
+    fn script_chowns_only_what_exists() {
+        let script = ext4_materialization_script(
+            "/dev/vdc",
+            64 * 1024 * 1024,
+            &mvm_fs::ownership::RootOwnedPaths::none().with_path("etc/absent"),
+        );
+        assert!(script.contains(r#"if [ -e "$1" ] || [ -L "$1" ]; then chown -h 0:0 "$1"; fi"#));
+        assert!(script.contains("chown_root \"$MOUNTPOINT\"'/etc/absent'"));
+    }
+
+    fn archive_entries(archive: &Path) -> Vec<(String, tar::Header, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut reader = tar::Archive::new(std::fs::File::open(archive).unwrap());
+        for entry in reader.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let header = entry.header().clone();
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut body).unwrap();
+            out.push((path.trim_end_matches('/').to_string(), header, body));
+        }
+        out
+    }
+
+    /// The builder VM receives the tree the host holds. The generic
+    /// work-input staging drops `node_modules`, `target`, `dist`, `.git` at
+    /// any depth; the archive is one file, so a node image keeps
+    /// `/usr/local/lib/node_modules`.
+    #[test]
+    fn the_rootfs_archive_keeps_names_the_workspace_staging_drops() {
+        let tree = tempfile::tempdir().unwrap();
+        for dir in [
+            "usr/local/lib/node_modules/npm",
+            "srv/target",
+            "srv/dist",
+            "srv/.git",
+            "srv/result",
+        ] {
+            std::fs::create_dir_all(tree.path().join(dir)).unwrap();
+        }
+        std::fs::write(
+            tree.path().join("usr/local/lib/node_modules/npm/index.js"),
+            b"js",
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(tree.path(), &archive).unwrap();
+
+        let paths: Vec<String> = archive_entries(&archive).into_iter().map(|e| e.0).collect();
+        for kept in [
+            "usr/local/lib/node_modules/npm/index.js",
+            "srv/target",
+            "srv/dist",
+            "srv/.git",
+            "srv/result",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == kept),
+                "{kept} missing from {paths:?}"
+            );
+        }
+        let again = out.path().join("again.tar");
+        write_rootfs_archive(tree.path(), &again).unwrap();
+        assert_eq!(
+            std::fs::read(&archive).unwrap(),
+            std::fs::read(&again).unwrap(),
+            "the archive is a function of the tree"
+        );
+    }
+
+    /// Every entry is root's whatever the host account is, keeps its mode
+    /// (setuid included), and a link is stored as a link to the target it
+    /// names, never the target's bytes.
+    #[test]
+    fn the_rootfs_archive_is_root_owned_mode_faithful_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let host = tempfile::tempdir().unwrap();
+        let secret = host.path().join("id_ed25519");
+        std::fs::write(&secret, b"host private key").unwrap();
+        let tree = host.path().join("tree");
+        std::fs::create_dir_all(tree.join("usr/bin")).unwrap();
+        let su = tree.join("usr/bin/su");
+        std::fs::write(&su, b"elf").unwrap();
+        std::fs::set_permissions(&su, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let shadow = tree.join("shadow");
+        std::fs::write(&shadow, b"root:*:").unwrap();
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(&secret, tree.join("k")).unwrap();
+        let archive = host.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(&tree, &archive).unwrap();
+
+        let entries = archive_entries(&archive);
+        for (path, header, body) in &entries {
+            assert_eq!(header.uid().unwrap(), 0, "{path}");
+            assert_eq!(header.gid().unwrap(), 0, "{path}");
+            assert!(
+                !body.windows(16).any(|w| w == b"host private key"),
+                "{path} carries the host file a link names"
+            );
+        }
+        let find = |name: &str| entries.iter().find(|e| e.0 == name).unwrap();
+        assert_eq!(find("usr/bin/su").1.mode().unwrap() & 0o7777, 0o4755);
+        let (_, shadow_header, shadow_body) = find("shadow");
+        assert_eq!(shadow_header.mode().unwrap() & 0o7777, 0o000);
+        assert_eq!(
+            shadow_body, b"root:*:",
+            "an owner-unreadable file is still read"
+        );
+        let (_, link, _) = find("k");
+        assert_eq!(link.entry_type(), tar::EntryType::Symlink);
+        assert_eq!(link.link_name().unwrap().unwrap(), secret);
+        assert_eq!(
+            std::fs::metadata(&shadow).unwrap().permissions().mode() & 0o7777,
+            0o000,
+            "the host file's mode is restored"
+        );
+    }
+
+    /// A link is never opened or widened through: its target outside the tree
+    /// keeps its mode and is not read.
+    #[test]
+    fn open_for_archive_refuses_a_link_and_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("outside");
+        std::fs::write(&target, b"host").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(open_for_archive(&link).is_err());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o000
+        );
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A FIFO is omitted, as the in-process writer omits it, rather than read
+    /// (which blocks forever) or failing the archive.
+    #[test]
+    fn the_rootfs_archive_omits_a_fifo_instead_of_reading_it() {
+        let tree = tempfile::tempdir().unwrap();
+        let fifo = tree.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(tree.path().join("regular"), b"x").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(tree.path(), &archive).unwrap();
+
+        let paths: Vec<String> = archive_entries(&archive).into_iter().map(|e| e.0).collect();
+        assert_eq!(paths, ["regular"]);
+    }
+
+    /// The job the builder runs gets the archive as its whole `/work`, never
+    /// the tree, and its script extracts exactly that archive.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn the_builder_job_is_handed_the_archive_not_the_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tree.path().join("usr/local/lib/node_modules")).unwrap();
+        std::fs::write(tree.path().join("usr/local/lib/node_modules/x.js"), b"js").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let input =
+            MaterializeExt4Input::new(tree.path().to_path_buf(), out.path().join("rootfs.ext4"), 1);
+
+        let job = builder_rootfs_job(
+            &input,
+            &MaterializeExt4Options::default(),
+            64 * 1024 * 1024,
+            work.path(),
+        )
+        .unwrap();
+
+        assert_eq!(job.work_dir, work.path());
+        assert_ne!(job.work_dir, input.unpacked_root);
+        let listed: Vec<_> = std::fs::read_dir(&job.work_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(listed, [ROOTFS_ARCHIVE_NAME]);
+        assert!(
+            job.script
+                .contains(&format!("tar -xf /work/{ROOTFS_ARCHIVE_NAME}"))
+        );
+        let paths: Vec<String> = archive_entries(&job.work_dir.join(ROOTFS_ARCHIVE_NAME))
+            .into_iter()
+            .map(|e| e.0)
+            .collect();
+        assert!(paths.iter().any(|p| p == "usr/local/lib/node_modules/x.js"));
+        assert_eq!(job.extra_disks[0].path, input.output);
     }
 
     #[test]
@@ -1132,9 +1715,108 @@ mod tests {
         let output = output_dir.path().join("rootfs.ext4");
         let input = MaterializeExt4Input::new(unpacked.path().to_path_buf(), output.clone(), 1);
 
-        let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
+        let err = materialize_ext4(
+            &input,
+            &MaterializeExt4Options::default(),
+            &BuilderVmRoute::Selected,
+        )
+        .unwrap_err();
         assert!(matches!(err, RootfsError::BuilderVmFeatureDisabled));
         assert!(!output.exists());
+    }
+}
+
+#[cfg(all(test, feature = "pure-mkfs"))]
+mod injected_ownership_tests {
+    use super::*;
+    use mvm_fs::ext4::Owner;
+
+    const HOSTILE: Owner = Owner::new(1000, 1000);
+
+    /// An image layer that names the paths mvm injects, with an owner of its
+    /// own choosing — the shape a hostile image takes to get `/etc/passwd`
+    /// away from root.
+    fn hostile_owners() -> mvm_fs::ownership::OwnerTable {
+        let tree = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in [
+            "etc/passwd",
+            "etc/group",
+            "etc/mvm/verb-trust.json",
+            "usr/lib/mvm/wrappers/oci-entrypoint",
+            "srv/app.conf",
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_uid(HOSTILE.uid.into());
+            header.set_gid(HOSTILE.gid.into());
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+        }
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            tree.path(),
+            &mvm_fs::oci::unpack::UnpackOptions::default(),
+        )
+        .unwrap();
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+        owners
+    }
+
+    fn owner_in_image(nodes: &[mvm_fs::ext4::Node], path: &str) -> Owner {
+        nodes
+            .iter()
+            .find(|node| node.path() == path)
+            .unwrap_or_else(|| panic!("{path} must be in the image"))
+            .owner()
+    }
+
+    /// The in-process materializer's options claim the injected paths on every
+    /// tree, so the image a hostile layer table is applied to still has mvm's
+    /// files owned by root — and only those.
+    #[test]
+    fn an_injected_path_is_root_owned_and_the_image_keeps_the_rest() {
+        let tree = tempfile::tempdir().unwrap();
+        for dir in ["etc/mvm", "usr/lib/mvm/wrappers", "srv"] {
+            std::fs::create_dir_all(tree.path().join(dir)).unwrap();
+        }
+        for file in [
+            "etc/passwd",
+            "etc/group",
+            "etc/mvm/verb-trust.json",
+            "usr/lib/mvm/wrappers/oci-entrypoint",
+            "srv/app.conf",
+        ] {
+            std::fs::write(tree.path().join(file), b"x").unwrap();
+        }
+        let input =
+            MaterializeExt4Input::new(tree.path().to_path_buf(), tree.path().join("out.ext4"), 0)
+                .with_owners(hostile_owners());
+
+        let options = pure_materialize_options(&input, mvm_fs::rootfs::WalkOptions::default());
+        let nodes = mvm_fs::rootfs::image_nodes(tree.path(), &options).unwrap();
+
+        for injected in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/mvm/verb-trust.json",
+            "/usr/lib/mvm/wrappers/oci-entrypoint",
+        ] {
+            assert_eq!(
+                owner_in_image(&nodes, injected),
+                Owner::ROOT,
+                "{injected} is mvm's, whatever the layer declared"
+            );
+        }
+        assert_eq!(
+            owner_in_image(&nodes, "/srv/app.conf"),
+            HOSTILE,
+            "a path mvm does not inject keeps the owner its layer declared"
+        );
     }
 }
 
@@ -1177,9 +1859,22 @@ mod tree_only_materialization_loss_tests {
     }
 
     fn owners_from_layer(uid: u64) -> mvm_fs::ownership::OwnerTable {
+        owners_at("var/lib/svc/", uid)
+    }
+
+    /// An image whose only non-root owners sit on paths mvm claims loses
+    /// nothing through the tree copy: the script sets those back to root.
+    #[test]
+    fn a_non_root_owner_only_on_claimed_paths_is_not_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_at("etc/mvm/", 1000));
+        assert!(refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected).is_ok());
+    }
+
+    fn owners_at(path: &str, uid: u64) -> mvm_fs::ownership::OwnerTable {
         let tree = tempfile::tempdir().unwrap();
         let mut header = tar::Header::new_gnu();
-        header.set_path("var/lib/svc/").unwrap();
+        header.set_path(path).unwrap();
         header.set_size(0);
         header.set_mode(0o750);
         header.set_entry_type(tar::EntryType::Directory);
@@ -1206,9 +1901,14 @@ mod tree_only_materialization_loss_tests {
     fn non_root_layer_owners_refuse_the_tree_copy_materializer() {
         let dir = tempfile::tempdir().unwrap();
         let input = input_in(&dir).with_owners(owners_from_layer(999));
-        let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
+        let err = materialize_ext4(
+            &input,
+            &MaterializeExt4Options::default(),
+            &BuilderVmRoute::Selected,
+        )
+        .unwrap_err();
         assert!(
-            matches!(err, RootfsError::LayerOwnershipUnsupported(1)),
+            matches!(err, RootfsError::LayerOwnershipUnsupported { count: 1, .. }),
             "got {err:?}"
         );
         assert!(!input.output.exists(), "refused before allocating an image");
@@ -1219,7 +1919,10 @@ mod tree_only_materialization_loss_tests {
     fn root_only_layer_owners_are_not_a_loss() {
         let dir = tempfile::tempdir().unwrap();
         let input = input_in(&dir).with_owners(owners_from_layer(0));
-        assert!(refuse_tree_only_materialization_loss(&input).is_ok());
+        assert!(
+            refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected).is_ok(),
+            "root-only owners survive a tree copy"
+        );
     }
 
     #[test]
@@ -1231,8 +1934,72 @@ mod tree_only_materialization_loss_tests {
             owner: mvm_fs::ext4::Owner::ROOT,
         }]);
         assert!(matches!(
-            refuse_tree_only_materialization_loss(&input),
-            Err(RootfsError::DeferredNodesUnsupported(1))
+            refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected),
+            Err(RootfsError::DeferredNodesUnsupported { count: 1, .. })
         ));
+    }
+
+    /// The builder's archive carries no extended attributes and its `tar`
+    /// could not restore them, so a tree that has any is refused rather than
+    /// emitted without them.
+    #[test]
+    fn a_guest_semantic_xattr_refuses_the_tree_copy_materializer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("ping");
+        std::fs::write(&bin, b"elf").unwrap();
+        if xattr::set(&bin, "user.mvm.cap", b"c").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        let err = refuse_tree_only_materialization_loss(
+            &input_in(&dir),
+            &BuilderVmRoute::PureFallback {
+                because: "xattr too large".to_string(),
+            },
+        )
+        .expect_err("an attribute the writer cannot carry must refuse");
+        assert!(
+            matches!(&err, RootfsError::XattrUnsupported { name, .. } if name == "user.mvm.cap"),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("xattr too large"), "{err}");
+    }
+
+    fn refusal_message(route: &BuilderVmRoute) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_from_layer(999));
+        refuse_tree_only_materialization_loss(&input, route)
+            .expect_err("a non-root owner is a loss on either route")
+            .to_string()
+    }
+
+    /// An operator who asked for the builder VM can stop asking, and the
+    /// refusal says so.
+    #[test]
+    fn a_requested_builder_vm_refusal_names_the_setting_that_selected_it() {
+        let message = refusal_message(&BuilderVmRoute::Selected);
+        assert!(
+            message.contains("unset MVM_MATERIALIZE_BUILDER_VM"),
+            "got {message}"
+        );
+    }
+
+    /// On the automatic fallback nobody set that variable, so naming it sends
+    /// a reader after a setting that is not there. Name the failure that
+    /// caused the fallback instead.
+    #[test]
+    fn a_fallback_refusal_names_the_failure_that_caused_it_and_no_setting() {
+        let message = refusal_message(&BuilderVmRoute::PureFallback {
+            because: "file too fragmented".to_string(),
+        });
+        assert!(
+            !message.contains("MVM_MATERIALIZE_BUILDER_VM"),
+            "the fallback path set nothing to unset; got {message}"
+        );
+        assert!(message.contains("file too fragmented"), "got {message}");
+        assert!(
+            message.contains("bring the image within"),
+            "the refusal says what can be done; got {message}"
+        );
     }
 }

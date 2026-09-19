@@ -776,6 +776,62 @@ fn bundle_fetch_prod_refuses_allow_http() {
     );
 }
 
+/// `run --prod -- <cmd>` is refused before any pull: the registry host here
+/// does not exist, so reaching the network would fail with a different
+/// message.
+#[test]
+fn run_prod_refuses_an_ad_hoc_command_before_pulling() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "run",
+            "--image",
+            "registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "--prod",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .expect("run mvmctl run --prod -- /bin/true");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refuses an ad-hoc command"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("image pull --prod"), "stderr: {stderr}");
+    assert!(stderr.contains("no way to run one yet"), "stderr: {stderr}");
+}
+
+/// `--prod --profile dev` is refused before any pull.
+#[test]
+fn run_prod_refuses_the_dev_profile_before_pulling() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "machine",
+            "run",
+            "--image",
+            "registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "--prod",
+            "--profile",
+            "dev",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .expect("run mvmctl machine run --prod --profile dev");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--profile dev"), "stderr: {stderr}");
+}
+
 /// `--prod` with a tag must be refused from the reference alone. The
 /// registry host here does not exist, so reaching the network would fail
 /// with a different message.

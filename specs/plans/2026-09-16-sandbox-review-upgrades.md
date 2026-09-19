@@ -149,6 +149,64 @@ data directory ships owned by its own account boots with root-owned files.
   - [x] changing only an owner changes the fingerprint.
 - [ ] W3.6 Live test: an image whose service data directory is owned by a
       non-root account starts that service.
+- [x] W3.7 Keep the files mvm injects root-owned whatever a layer declares
+      (#3430). The owner table forces root on every injected destination,
+      mount point, directory leading to one, and mvm-only tree, so a layer
+      cannot take `/etc/passwd`, `/etc/group`, the verb-trust policy, or the
+      entrypoint wrapper.
+  - [x] adversarial tests through the production materializer and the ext4
+        oracle, including stacked layers (whiteout, opaque directory, hard
+        link); a path mvm does not inject keeps its declared owner;
+  - [x] the injection refuses an image that makes an injected path, or a
+        directory on the way to one, a symbolic link or a name the host
+        filesystem folds onto mvm's spelling, empties the mvm-only trees of
+        image content, writes the files it creates (and the provenance mark)
+        as fresh inodes, and checks the result by listing each directory;
+  - [x] a deferred layer node at an injected path is refused rather than laid
+        over the runtime's file;
+  - [x] concurrent runs of one image no longer inject into its shared unpacked
+        tree at once: every writer and copier of a tree takes its per-tree
+        lock, materialization holds the tree and output locks until the seal,
+        the overlay-lean staging tree is private per run, and the prepared
+        rootfs-only tree is renamed into place only when complete;
+  - [x] the resolve path of a `--prod` image run only ever selects a sealed
+        image, and `image pull --prod` verifies and seals: the rootfs path
+        carries its variant, a cached image is reused only when its
+        sidecar's `sealed` matches the run, a fresh `--prod` pull is sealed,
+        an unsealed image is refused to a `--prod` resolve, the trust check
+        runs before anything is materialized or signed, and `--prod` refuses
+        `--profile dev`, an ad-hoc command, a launch document and an SDK
+        mode. There is no way to run a `--prod` OCI image yet (issue #3481);
+        persistent (`-d`) and non-image `--prod` runs are issue #3480;
+  - [x] a rebuilt rootfs is published whole (flushed, sidecar last), reused
+        only when complete, and re-checked under the output lock so a
+        complete set is never rebuilt; the output lock lives outside the
+        image directory; `image rm` removes both variants under that lock and
+        keeps every file another reference still names;
+  - [x] the builder-VM writer sets the claimed paths back to root after its
+        copy;
+  - [x] a builder-VM refusal names the route that reached it;
+  - [x] owner and deferred-node sidecars are written atomically, and a corrupt
+        one forces a re-unpack instead of a hard error.
+- [ ] W3.8 Builder-VM input fidelity, found while closing W3.7. An image
+      materialized through the builder VM does not keep the tree it was
+      given:
+  - [x] the work-input staging copied a symbolic link's host-resolved target
+        instead of the link, so an absolute link in an image read a host file
+        into the rootfs; staging and the input archive now carry links as
+        links (#3430);
+  - [x] the input tar recorded the host account's uid and gid for every file,
+        and the guest extracted and copied them, so every path mvm does not
+        claim was owned by the host account; the rootfs now reaches the builder
+        as one archive the host writes with every entry owned 0:0 (#3430);
+  - [x] the generic work-input staging dropped `node_modules`, `target`,
+        `dist`, `.git` and `result*` at any depth (a node image lost
+        `/usr/local/lib/node_modules`) and read special files (a FIFO hung
+        the copy); the one-file archive passes through staging untouched and
+        omits special files the way the in-process writer does (#3430);
+  - [ ] on macOS the unpacker's hard-link fallback removes the link source,
+        not the destination, when an earlier layer wrote it, and then refuses
+        the link.
 
 ## W4 — Return freed guest memory on HVF (#3381)
 

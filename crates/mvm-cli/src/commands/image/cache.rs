@@ -74,10 +74,33 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
     let mut removed_files = 0usize;
     let mut freed_bytes = 0u64;
     let shared_layer_paths = remaining_layer_paths(&index);
+    // Every file another cached reference still names stays: two references
+    // to one digest share its digest-keyed manifest, config and claims, and
+    // removing them left the other unable to rebuild ("read OCI config").
+    let shared_paths: BTreeSet<String> = index.images.iter().flat_map(all_image_paths).collect();
     validate_image_paths(cache_root, &image)?;
 
+    let rootfs_shared = index
+        .images
+        .iter()
+        .any(|other| other.resolved_digest == image.resolved_digest);
     for path in metadata_paths(&image) {
+        if shared_paths.contains(&path) {
+            continue;
+        }
+        if image.rootfs_path.as_deref() == Some(path.as_str()) {
+            // A rootfs under `rootfs/` goes with its whole directory below; a
+            // legacy one anywhere else in the cache is removed as a file.
+            if rootfs_shared || is_rootfs_dir_member(cache_root, &path)? {
+                continue;
+            }
+        }
         remove_cache_file(cache_root, &path, &mut removed_files, &mut freed_bytes)?;
+    }
+    if !rootfs_shared {
+        for dir in rootfs_dirs_of(cache_root, &image)? {
+            remove_rootfs_dir(cache_root, &dir, &mut removed_files, &mut freed_bytes)?;
+        }
     }
 
     for layer in &image.layers {
@@ -193,20 +216,52 @@ pub(super) fn write_deferred_nodes(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec_pretty(nodes).context("serialize deferred unpack nodes")?;
-    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+    mvm_core::util::atomic_io::atomic_write(&path, &body)
 }
 
-/// Read back what [`write_deferred_nodes`] stored. A missing sidecar is
-/// the normal case (nothing was deferred) and reads as empty.
+/// Read back what [`write_deferred_nodes`] stored.
+///
+/// A missing sidecar is the normal case — nothing was deferred — and reads as
+/// an empty list. A sidecar that exists and cannot be parsed is a different
+/// answer: it means nodes were deferred and we no longer know which, so it
+/// reads as `None` and the tree has to be unpacked again. Reading it as empty
+/// would build an image quietly missing paths.
 pub(super) fn read_deferred_nodes(
     cache_root: &Path,
     resolved_digest: &str,
-) -> Result<Vec<mvm_fs::ext4::Node>> {
+) -> Result<Option<Vec<mvm_fs::ext4::Node>>> {
     let path = deferred_nodes_sidecar(cache_root, resolved_digest)?;
-    let Ok(body) = fs::read(&path) else {
-        return Ok(Vec::new());
+    // Only an absent sidecar means "nothing deferred". One that is there and
+    // cannot be read — permissions, a directory in its place, an I/O error —
+    // says nothing about what was deferred, and reading it as empty would
+    // build an image quietly missing paths.
+    let body = match fs::read(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
-    serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))
+    Ok(parse_sidecar(&path, &body))
+}
+
+/// Decode a sidecar, treating a corrupt one as absent.
+///
+/// A sidecar is a cache, and the tree it sits beside can always be unpacked
+/// again. A write interrupted by a crash or a full disk left a truncated file
+/// that returned a hard error on every later read, so the image stayed
+/// unusable until someone deleted the file by hand — a worse outcome than the
+/// re-unpack the cache was built to allow.
+fn parse_sidecar<T: serde::de::DeserializeOwned>(path: &Path, body: &[u8]) -> Option<T> {
+    match serde_json::from_slice(body) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "unreadable OCI cache sidecar; unpacking the layers again"
+            );
+            None
+        }
+    }
 }
 
 /// Sidecar holding the owners the image's layers declared, beside the
@@ -234,11 +289,12 @@ pub(super) fn write_layer_owners(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec(owners).context("serialize layer owners")?;
-    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+    mvm_core::util::atomic_io::atomic_write(&path, &body)
 }
 
 /// Read back what [`write_layer_owners`] stored, or `None` when the unpacked
-/// tree predates owner recording and must be unpacked again.
+/// tree predates owner recording, or records owners we can no longer read, and
+/// must be unpacked again.
 pub(super) fn read_layer_owners(
     cache_root: &Path,
     resolved_digest: &str,
@@ -249,9 +305,41 @@ pub(super) fn read_layer_owners(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
-    serde_json::from_slice(&body)
-        .map(Some)
-        .with_context(|| format!("parse {}", path.display()))
+    Ok(parse_sidecar(&path, &body))
+}
+
+/// An unpacked tree and everything a faithful image rebuild needs beside it.
+///
+/// The three are read together because they are only usable together: a tree
+/// whose owners or deferred nodes are missing rebuilds an image that is wrong
+/// rather than one that fails, so a caller that has the tree must not proceed
+/// without the rest.
+pub(super) struct CachedUnpack {
+    pub(super) root: PathBuf,
+    pub(super) owners: mvm_fs::ownership::OwnerTable,
+    pub(super) deferred_nodes: Vec<mvm_fs::ext4::Node>,
+}
+
+/// Read a cached unpacked tree, or `None` when it is gone or incomplete and
+/// the layers have to be unpacked again.
+pub(super) fn read_cached_unpack(
+    cache_root: &Path,
+    resolved_digest: &str,
+) -> Result<Option<CachedUnpack>> {
+    let Some(root) = unpacked_dir_if_present(cache_root, resolved_digest) else {
+        return Ok(None);
+    };
+    let Some(owners) = read_layer_owners(cache_root, resolved_digest)? else {
+        return Ok(None);
+    };
+    let Some(deferred_nodes) = read_deferred_nodes(cache_root, resolved_digest)? else {
+        return Ok(None);
+    };
+    Ok(Some(CachedUnpack {
+        root,
+        owners,
+        deferred_nodes,
+    }))
 }
 
 pub(super) fn sha256_hex(digest: &str) -> Result<String> {
@@ -363,6 +451,89 @@ pub(super) fn read_json_optional(cache_root: &Path, relative: &str) -> Result<Op
     serde_json::from_slice(&bytes)
         .map(Some)
         .with_context(|| format!("parse {}", path.display()))
+}
+
+/// Whether `relative` sits in a rootfs directory of its own under `rootfs/`,
+/// which [`remove_rootfs_dir`] removes whole.
+fn is_rootfs_dir_member(cache_root: &Path, relative: &str) -> Result<bool> {
+    let path = safe_cache_path(cache_root, relative)?;
+    Ok(path.parent().is_some_and(|dir| {
+        dir.starts_with(cache_root.join("rootfs")) && dir != cache_root.join("rootfs")
+    }))
+}
+
+/// Every materialized rootfs directory of `image`: the one its index entry
+/// names, and each directory derived from its digest — both variants, sealed
+/// and dev, under any runtime tag. Each holds one image and its sidecars.
+fn rootfs_dirs_of(cache_root: &Path, image: &CachedOciImage) -> Result<BTreeSet<PathBuf>> {
+    let mut dirs = BTreeSet::new();
+    if let Some(rel) = image.rootfs_path.as_deref() {
+        let path = safe_cache_path(cache_root, rel)?;
+        if is_rootfs_dir_member(cache_root, rel)?
+            && let Some(dir) = path.parent()
+            && dir.file_name().is_some_and(|name| name != ".locks")
+        {
+            dirs.insert(dir.to_path_buf());
+        }
+    }
+    // A digest this cache cannot key has no derived directories to find.
+    let Ok(hex) = sha256_hex(&image.resolved_digest) else {
+        return Ok(dirs);
+    };
+    let prefix = format!("{hex}-");
+    let rootfs_root = cache_root.join("rootfs");
+    let entries = match fs::read_dir(&rootfs_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(dirs),
+        Err(err) => return Err(err).with_context(|| format!("list {}", rootfs_root.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) && entry.file_type()?.is_dir() {
+            dirs.insert(entry.path());
+        }
+    }
+    Ok(dirs)
+}
+
+/// Remove a rootfs directory whole — image, verity tree, root hash, guest and
+/// provenance sidecars, locks — counting what it frees. Removing only
+/// `rootfs.ext4` left the sidecars to describe an image that was gone.
+fn remove_rootfs_dir(
+    cache_root: &Path,
+    dir: &Path,
+    removed_files: &mut usize,
+    freed_bytes: &mut u64,
+) -> Result<()> {
+    // The build lock, so a run building or publishing this image finishes
+    // first and none starts during the removal. Its file lives outside the
+    // directory, so removing the directory does not remove the lock.
+    let _output = mvm_build::run_image::lock_rootfs_output(&dir.join("rootfs.ext4"))?;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let entries = match fs::read_dir(&at) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("list {}", at.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let meta = fs::symlink_metadata(entry.path())
+                .with_context(|| format!("stat {}", entry.path().display()))?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                *removed_files += 1;
+                *freed_bytes = freed_bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("remove {}", dir.display())),
+    }
+    prune_empty_parents(cache_root, dir.parent())
 }
 
 pub(super) fn remove_cache_file(
@@ -723,6 +894,196 @@ mod tests {
     const SAMPLE_DIGEST: &str =
         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+    /// `image rm` removes both variants of the image's rootfs, each with its
+    /// sidecars, and nothing belonging to another digest.
+    #[test]
+    fn removing_an_image_removes_both_rootfs_variants_and_their_sidecars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let other_hex =
+            sha256_hex("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+                .unwrap();
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some(format!("rootfs/{hex}-tag-sealed/rootfs.ext4"));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "manifests/alpine.json", b"{}");
+        for variant in ["sealed", "dev"] {
+            for file in [
+                "rootfs.ext4",
+                "rootfs.verity",
+                "rootfs.roothash",
+                "mvm-meta.json",
+            ] {
+                write_file(
+                    tmp.path(),
+                    &format!("rootfs/{hex}-tag-{variant}/{file}"),
+                    b"x",
+                );
+            }
+        }
+        write_file(
+            tmp.path(),
+            &format!("rootfs/{other_hex}-tag-dev/rootfs.ext4"),
+            b"x",
+        );
+
+        let outcome = remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(!tmp.path().join(format!("rootfs/{hex}-tag-sealed")).exists());
+        assert!(!tmp.path().join(format!("rootfs/{hex}-tag-dev")).exists());
+        assert!(
+            tmp.path()
+                .join(format!("rootfs/{other_hex}-tag-dev/rootfs.ext4"))
+                .exists(),
+            "another digest's rootfs is untouched"
+        );
+        assert_eq!(
+            outcome.removed_files,
+            1 + 8,
+            "the manifest and both variants' files"
+        );
+    }
+
+    /// Two references to one digest share everything keyed by that digest —
+    /// manifest, config, claims and rootfs. Removing one keeps all of it for
+    /// the other; removing the last removes it.
+    #[test]
+    fn removing_one_reference_keeps_what_another_reference_shares() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let config_hex =
+            sha256_hex("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+                .unwrap();
+        let shared = [
+            format!("manifests/{hex}.json"),
+            format!("configs/{config_hex}.json"),
+            format!("claims/{hex}.provenance.json"),
+            format!("rootfs/{hex}-tag-dev/rootfs.ext4"),
+        ];
+        let mut by_tag = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        by_tag.manifest_path = shared[0].clone();
+        by_tag.config_path = Some(shared[1].clone());
+        by_tag.claims_path = Some(shared[2].clone());
+        by_tag.rootfs_path = Some(shared[3].clone());
+        let mut by_other = by_tag.clone();
+        by_other.reference = "docker.io/library/alpine:latest".to_string();
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![by_tag, by_other],
+            },
+        );
+        for path in &shared {
+            write_file(tmp.path(), path, b"x");
+        }
+        write_file(tmp.path(), "blobs/a", b"layer");
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        for path in &shared {
+            assert!(
+                tmp.path().join(path).exists(),
+                "{path} is still the other reference's"
+            );
+        }
+
+        remove_image(tmp.path(), "docker.io/library/alpine:latest").expect("remove the last");
+
+        for path in &shared {
+            assert!(
+                !tmp.path().join(path).exists(),
+                "{path} goes with the last reference"
+            );
+        }
+    }
+
+    /// A rootfs recorded outside `rootfs/` by an older cache is still removed.
+    #[test]
+    fn removing_an_image_removes_a_legacy_rootfs_outside_the_rootfs_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some("legacy/alpine.ext4".to_string());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "manifests/alpine.json", b"{}");
+        write_file(tmp.path(), "legacy/alpine.ext4", b"x");
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(!tmp.path().join("legacy/alpine.ext4").exists());
+    }
+
+    /// `image rm` waits for a run building the image, and leaves the build
+    /// lock's file in place, outside the directory it removes: a waiter must
+    /// never end up holding a lock on a file the next run cannot see.
+    #[test]
+    fn removing_an_image_waits_for_its_build_and_keeps_the_lock_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let rel = format!("rootfs/{hex}-tag-dev/rootfs.ext4");
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some(rel.clone());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), &rel, b"x");
+        let rootfs = tmp.path().join(&rel);
+        let building = mvm_build::run_image::lock_rootfs_output(&rootfs).expect("build lock");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cache = tmp.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let result = remove_image(&cache, "docker.io/library/alpine:3.20");
+            done_tx.send(result.is_ok()).unwrap();
+        });
+        assert!(
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "image rm removed a rootfs a run was still building"
+        );
+        drop(building);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+        );
+        worker.join().unwrap();
+
+        assert!(!rootfs.parent().unwrap().exists());
+        let lock_files: Vec<_> = std::fs::read_dir(tmp.path().join("rootfs/.locks"))
+            .expect("the lock directory survives")
+            .collect();
+        assert_eq!(
+            lock_files.len(),
+            1,
+            "the build lock's file is not removed with the image"
+        );
+    }
+
     #[test]
     fn deferred_nodes_roundtrip_through_the_sidecar() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -743,7 +1104,7 @@ mod tests {
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
         assert_eq!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("read"),
-            nodes
+            Some(nodes)
         );
     }
 
@@ -753,7 +1114,7 @@ mod tests {
         assert!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
                 .expect("read")
-                .is_empty(),
+                .is_some_and(|nodes| nodes.is_empty()),
             "a case-sensitive host writes no sidecar, and that is not an error"
         );
     }
@@ -771,7 +1132,7 @@ mod tests {
         assert!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
                 .expect("read")
-                .is_empty(),
+                .is_some_and(|nodes| nodes.is_empty()),
             "a re-pull that defers nothing must not inherit the old sidecar"
         );
     }
@@ -828,6 +1189,147 @@ mod tests {
             read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("read"),
             Some(mvm_fs::ownership::OwnerTable::new()),
             "an image whose layers declare only root is still recorded"
+        );
+    }
+
+    /// Overwrite a sidecar with `body`, as a crash mid-write or a stray edit
+    /// would leave it.
+    fn clobber(tmp: &Path, suffix: &str, body: &[u8]) {
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let path = tmp.join("unpacked").join(format!("{hex}.{suffix}"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn owner_table_json() -> Vec<u8> {
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        let tree = tempfile::tempdir().unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("srv/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(999);
+        header.set_gid(999);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            tree.path(),
+            &mvm_fs::oci::unpack::UnpackOptions::default(),
+        )
+        .unwrap();
+        owners.absorb(&report.ownership);
+        serde_json::to_vec(&owners).unwrap()
+    }
+
+    /// A write cut short leaves a prefix of valid JSON. That used to be a hard
+    /// error on every read, wedging the image until the file was deleted by
+    /// hand; it now reads as unrecorded, which sends the caller to unpack again.
+    #[test]
+    fn a_truncated_owner_sidecar_reads_as_unrecorded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let full = owner_table_json();
+        clobber(tmp.path(), "owners.json", &full[..full.len() / 2]);
+        assert_eq!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_garbage_owner_sidecar_reads_as_unrecorded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        clobber(tmp.path(), "owners.json", b"\x00\xffnot json");
+        assert_eq!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    /// An unreadable deferred-node sidecar is not "nothing deferred": nodes
+    /// were deferred and we no longer know which, so an image rebuilt as if
+    /// the list were empty would be quietly missing paths.
+    #[test]
+    fn a_truncated_deferred_sidecar_reads_as_unknown_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nodes = vec![mvm_fs::ext4::Node::Symlink {
+            path: "/a".to_string(),
+            target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
+        }];
+        let full = serde_json::to_vec_pretty(&nodes).unwrap();
+        clobber(tmp.path(), "deferred-nodes.json", &full[..full.len() - 3]);
+        assert_eq!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    /// A sidecar that exists and cannot be read is an error, never "nothing
+    /// deferred": here a directory stands where the file should be.
+    #[test]
+    fn an_unreadable_deferred_sidecar_is_an_error_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let path = tmp
+            .path()
+            .join("unpacked")
+            .join(format!("{hex}.deferred-nodes.json"));
+        std::fs::create_dir_all(&path).unwrap();
+        let err = read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
+            .expect_err("an unreadable sidecar must not read as empty");
+        assert!(
+            format!("{err:#}").contains("deferred-nodes.json"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_garbage_deferred_sidecar_reads_as_unknown_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        clobber(tmp.path(), "deferred-nodes.json", b"}{");
+        assert_eq!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
+            None
+        );
+    }
+
+    /// The tree survives, but either sidecar is unreadable: the cached unpack
+    /// is unusable as a whole, so the caller unpacks again rather than
+    /// building an image with the wrong owners or missing paths.
+    #[test]
+    fn a_cached_unpack_with_a_corrupt_sidecar_is_not_offered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        std::fs::create_dir_all(tmp.path().join("unpacked").join(&hex)).unwrap();
+        write_layer_owners(
+            tmp.path(),
+            SAMPLE_DIGEST,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .unwrap();
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_some(),
+            "a complete cached unpack is offered"
+        );
+
+        clobber(tmp.path(), "deferred-nodes.json", b"{");
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_none()
+        );
+
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &[]).unwrap();
+        clobber(tmp.path(), "owners.json", b"{\"/srv\":");
+        assert!(
+            read_cached_unpack(tmp.path(), SAMPLE_DIGEST)
+                .unwrap()
+                .is_none()
         );
     }
 
