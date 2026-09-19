@@ -1,4 +1,4 @@
-use super::stage0_cache::validate_builder_vm_stage0_artifacts;
+use super::stage0_cache::{BUILDER_FLAKE_NIX_INPUTS, validate_builder_vm_stage0_artifacts};
 use super::*;
 use std::io::Write;
 
@@ -882,6 +882,84 @@ fn builder_vm_source_fingerprint_changes_with_flake_inputs() {
     let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
 
     assert_ne!(first, second);
+}
+
+/// Every Nix source the builder flake reaches outside its own directory is part
+/// of the cache key: an edit to a kernel config, the runtime-overlay flake, a
+/// guest recipe or the top-level flake changes the image, so it must change the
+/// fingerprint too.
+#[test]
+fn builder_vm_source_fingerprint_changes_with_every_nix_input_it_imports() {
+    for input in [
+        "nix/flake.nix",
+        "nix/packages/mvm-setpriv.nix",
+        "nix/images/kernel/base.nix",
+        "nix/images/runtime-overlay/flake.nix",
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let flake = write_builder_vm_workspace(tmp.path());
+        let path = tmp.path().join(input);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir input parent");
+        std::fs::write(&path, "{ }\n").expect("write input");
+        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
+
+        std::fs::write(&path, "{ changed = true; }\n").expect("edit input");
+        let after = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
+
+        assert_ne!(
+            before, after,
+            "an edit to {input} must change the builder cache key"
+        );
+    }
+}
+
+/// The list of hashed inputs is only as good as its agreement with the flakes.
+/// Every `workspaceRoot + "/nix/…"` / `workspace + "/nix/…"` import in the
+/// shipped builder-vm flake, and in the runtime-overlay flake it imports, must
+/// sit under a listed input, and every listed input must exist.
+#[test]
+fn every_nix_import_of_the_shipped_builder_flake_is_fingerprinted() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    for input in BUILDER_FLAKE_NIX_INPUTS {
+        assert!(
+            workspace.join(input).exists(),
+            "{input} is fingerprinted but does not exist in the tree"
+        );
+    }
+
+    let mut imports = Vec::new();
+    for flake in [
+        "nix/images/builder-vm/flake.nix",
+        "nix/images/runtime-overlay/flake.nix",
+    ] {
+        let text = std::fs::read_to_string(workspace.join(flake)).expect("read shipped flake");
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("+ \"/nix/") {
+            let after = &rest[at + "+ \"/".len()..];
+            let end = after.find('"').expect("an import literal closes its quote");
+            imports.push((flake, after[..end].to_string()));
+            rest = &after[end..];
+        }
+    }
+    assert!(
+        !imports.is_empty(),
+        "the scan found no imports, so it would pass over anything"
+    );
+
+    for (flake, import) in imports {
+        if import.starts_with("nix/images/builder-vm/") {
+            continue;
+        }
+        assert!(
+            BUILDER_FLAKE_NIX_INPUTS
+                .iter()
+                .any(|input| import == *input || import.starts_with(&format!("{input}/"))),
+            "{flake} imports {import}, which the builder source fingerprint does not hash"
+        );
+    }
 }
 
 #[test]
