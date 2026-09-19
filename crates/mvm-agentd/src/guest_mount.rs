@@ -2292,6 +2292,40 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
 mod privilege_tests {
     use super::*;
 
+    /// Whether a privileged test asked for with `MVM_GUEST_PRIVILEGED_TESTS=1`
+    /// may run with effective uid `euid`. Asking without root is an error, not
+    /// a skip: the lane that sets the variable runs these under `sudo`, and an
+    /// escalation that silently failed would otherwise report a pass that
+    /// asserted nothing.
+    fn privileged_run(requested: Option<&str>, euid: u32) -> std::result::Result<bool, String> {
+        match (requested, euid) {
+            (Some("1"), 0) => Ok(true),
+            (Some("1"), euid) => Err(format!(
+                "MVM_GUEST_PRIVILEGED_TESTS=1 is set but this test runs as euid {euid}; \
+                 run it as root or unset the variable"
+            )),
+            _ => Ok(false),
+        }
+    }
+
+    /// Gate for the live privilege witnesses; panics on a request without root.
+    #[cfg(target_os = "linux")]
+    fn privileged() -> bool {
+        let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        privileged_run(requested.as_deref(), euid).unwrap_or_else(|refusal| panic!("{refusal}"))
+    }
+
+    #[test]
+    fn a_privileged_run_without_root_fails_instead_of_skipping() {
+        assert_eq!(privileged_run(None, 1000), Ok(false));
+        assert_eq!(privileged_run(Some("0"), 1000), Ok(false));
+        assert_eq!(privileged_run(Some("1"), 0), Ok(true));
+        let refusal = privileged_run(Some("1"), 1000).unwrap_err();
+        assert!(refusal.contains("euid 1000"), "{refusal}");
+    }
+
     /// The `u32` shift this replaced silently mis-answered every slot above
     /// 31 — `1u32 << 32` panics in debug, and the loop walks to 63. This is
     /// the regression test for that, and it runs on every host.
@@ -2427,10 +2461,7 @@ mod privilege_tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn harden_init_process_narrows_bounding_set_and_sets_no_new_privs() {
-        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
-            return;
-        }
-        if unsafe { libc::getuid() } != 0 {
+        if !privileged() {
             return;
         }
         super::harden_init_process().expect("harden_init_process should succeed as root");
@@ -2452,10 +2483,7 @@ mod privilege_tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root() {
-        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
-            return;
-        }
-        if unsafe { libc::getuid() } != 0 {
+        if !privileged() {
             return;
         }
         super::assume_identity_retaining(
@@ -2494,10 +2522,7 @@ mod privilege_tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn drop_guest_agent_privilege_reaches_the_agent_identity_from_root() {
-        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
-            return;
-        }
-        if unsafe { libc::getuid() } != 0 {
+        if !privileged() {
             return;
         }
         super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)

@@ -52,6 +52,71 @@ clearing the paused flag. Replay of older sealed snapshots is refused by the
 epoch binding. `mvmctl machine resume --warm` is a distinct live-memory request and
 fails closed when the selected backend cannot honor that tier.
 
+Once the guest is running again, `resume` hands it a fresh generation token and
+the guest reseeds its kernel random generator from it. The resume line reports
+the result (`VMGenID rotated`), and the same result goes into the resume's
+`workload_wake` entry in the local audit log. The same sealed snapshot can be
+resumed more than once, so a guest that did not reseed would reuse random state
+(nonces and keys included) that it had already used. **A resume whose guest does
+not confirm a reseed is refused**, whether the guest reported that it could not
+reseed or its agent did not answer, failed, did not acknowledge, or took longer
+than the admission deadline. Its VMM is stopped, the machine stays paused, the
+refusal is recorded as a `resume_refused` entry in the local audit log, and the
+sealed snapshot is kept, so the resume can be retried. The machine is marked
+resumed only after the guest confirms the reseed. The error says what to do: a
+guest whose image has no reseed helper needs its image rebuilt, and a guest whose
+helper failed can retry the resume. Only one resume of a machine runs at a time;
+a second waits for the first to finish.
+
+The same holds when the resume itself is cut short. If `mvmctl` receives Ctrl-C
+(SIGINT), SIGTERM, or SIGHUP (its terminal closed) while it waits for the guest,
+it stops the restored VMM and records the refusal before it exits. An admitted
+guest is recorded as admitted next to its VMM's pid before the machine is
+marked resumed. A SIGKILL or an out-of-memory kill cannot be caught: the guest
+then keeps running until the next state-touching `mvmctl` command, whose
+reconcile pass on entry finds a paused machine whose Firecracker is running with
+neither a pause nor an admission record, stops it, and records the refusal. That
+pass re-checks under the machine's resume lock, so it never stops a resume that
+another `mvmctl` process is still admitting, or one that has since admitted its
+guest.
+
+What a refusal does and does not undo:
+
+- **A refused guest has run.** Its vCPUs are resumed before it is asked to
+  reseed, so it runs until it answers or the fifteen-second admission deadline
+  passes (five seconds for its agent to come up, ten for the exchange), and then
+  for as long as stopping its VMM takes. Each retry of a refused resume runs the
+  same state for that window again.
+- **Its egress path is up during that window.** The per-VM network endpoint
+  stays running, so traffic the network policy admits can leave the VM before a
+  refusal, carrying values derived from the reused random state.
+- **An admitted guest also runs briefly on the old state**, between its vCPUs
+  resuming and the reseed taking effect.
+- **The reseed covers the kernel's generator only.** User-space generators that
+  were seeded before the snapshot (a library's own pool, a key a process already
+  derived) are not re-keyed by it; a workload that must not repeat such values
+  has to reseed them itself after a restore.
+- **The record is not tamper-evident.** `resume_refused` and `workload_wake` go
+  to the local audit log, which is unsigned and written best-effort; neither
+  goes to the chain-signed per-tenant log.
+
+`resume --warm` would refuse on the same grounds and stop the VM the same way,
+but no backend completes a live-memory warm start today, so that path is not
+reachable yet.
+
+When the snapshot is encrypted under a tenant key, a resume decrypts it into a
+private directory beside the sealed snapshot (mode 0700, files 0600) and loads
+from there. The sealed files are never modified, so a refused resume can be
+retried. The decrypted copies are removed when the load returns, whether it
+succeeded or failed, and by the interrupt handling above. If `mvmctl` is killed
+outright or aborts mid-load, they stay on disk until the next resume of that
+machine or the next state-touching command's reconcile pass removes them.
+
+This affects images built before the reseed helper existed: they cannot be
+resumed from a sealed snapshot until they are rebuilt. A snapshot taken from
+such an image keeps the old `/init` and can never reseed, so after you rebuild,
+boot the machine fresh before you pause it again.
+
 List and remove local sealed snapshots:
 
 ```sh

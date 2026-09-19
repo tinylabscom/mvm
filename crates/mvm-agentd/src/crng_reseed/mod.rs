@@ -21,9 +21,25 @@
 //!   checks the peer's uid before trusting a reply.
 //!
 //! Either way the agent's own capability sets never contain `CAP_SYS_ADMIN`. A
-//! compromised agent can make the helper reseed more often, and nothing else.
-//! A guest that has no helper, or whose helper fails, reports that it did not
-//! reseed, and the host refuses to treat it as a fresh clone.
+//! compromised agent can make the helper reseed as often as it likes, and each
+//! request adds 16 bytes the agent chose to the input pool, credited as 128 bits
+//! of entropy. That credit is accepted deliberately. The host token is the
+//! reseed's only fresh input, and pre-5.18 kernels skip a forced reseed unless
+//! enough entropy is credited, so the helper cannot credit less without making
+//! the reseed a no-op there. Chosen bytes never subtract from the pool: mixing
+//! is a hash, so they cannot cancel what is already in it. What the credit can
+//! do is make the kernel count entropy it does not have, and that matters only
+//! before the generator first initializes: an agent compromised that early in
+//! boot could have the kernel declare itself seeded while the rest of the pool
+//! is still thin. Every restore happens long after initialization, where the
+//! count no longer changes the output, and at boot the kernel's own hardware
+//! and jitter sources are what normally initialize it first.
+//!
+//! A guest that has no helper, or whose helper fails, still mixes the token
+//! into the input pool with an ordinary write to `/dev/urandom`, which needs no
+//! capability. That takes effect only at the kernel's next scheduled reseed, so
+//! the guest reports that it did not reseed, and the host refuses to treat it
+//! as a fresh clone or a resumed original.
 
 mod helper;
 mod protocol;
@@ -38,7 +54,9 @@ use mvm_core::crypto::vmgenid::GENID_BYTES;
 #[cfg(target_os = "linux")]
 pub use helper::{HelperSpawn, start_helper};
 pub use helper::{HelperTransport, helper_transport, run_helper};
-pub use protocol::{KernelEntropy, ReseedStep, reseed_with, serve, serve_connections};
+pub use protocol::{
+    CONNECTION_DEADLINE, Deadline, KernelEntropy, ReseedStep, reseed_with, serve, serve_connections,
+};
 
 use crate::genid::ReseedFailure;
 use crate::vsock::ReseedShortfall;
@@ -197,12 +215,58 @@ pub fn reseed_via_helper(token: &[u8; GENID_BYTES]) -> Result<(), ReseedFailure>
     reseed_through(&mut link, connect_to_listening_helper, token).map_err(ReseedFailure::from)
 }
 
+/// The restore reseed: through the helper, falling back to mixing the token
+/// into the input pool when the helper is missing or fails.
+pub fn reseed_for_restore(token: &[u8; GENID_BYTES]) -> Result<(), ReseedFailure> {
+    reseed_or_mix(token, reseed_via_helper, mix_into_input_pool)
+}
+
+/// Run `reseed`; if it does not succeed, `mix` the token into the input pool
+/// so the failure path still carries the host's fresh bytes into the guest.
+///
+/// The result is still the reseed's. A mix leaves the generator on its old key
+/// until the kernel's own schedule folds the pool in, so it is never reported
+/// as a reseed; the reason says whether the mix happened.
+pub fn reseed_or_mix(
+    token: &[u8; GENID_BYTES],
+    reseed: impl FnOnce(&[u8; GENID_BYTES]) -> Result<(), ReseedFailure>,
+    mix: impl FnOnce(&[u8]) -> io::Result<()>,
+) -> Result<(), ReseedFailure> {
+    let failure = match reseed(token) {
+        Ok(()) => return Ok(()),
+        Err(failure) => failure,
+    };
+    let mixed = match mix(token) {
+        Ok(()) => "the token was mixed into the input pool without an immediate reseed".to_string(),
+        Err(error) => format!("mixing the token into the input pool also failed: {error}"),
+    };
+    Err(ReseedFailure {
+        shortfall: failure.shortfall,
+        reason: format!("{}; {mixed}", failure.reason),
+    })
+}
+
+/// Mix `bytes` into the kernel's input pool without crediting them. Any
+/// process may write `/dev/urandom`; no capability is involved.
+fn mix_into_input_pool(bytes: &[u8]) -> io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/urandom")?
+        .write_all(bytes)
+}
+
 /// Send one request over `link`.
 ///
 /// A socket pair is used as it is: no error replaces it, and there is nothing
 /// to connect to. A listening helper is connected to on first use; a connection
-/// the helper closed is dropped so the next restore connects again, while a
-/// timeout keeps it, because the late reply will be matched and discarded.
+/// the helper closed is dropped, while a timeout keeps it, because the late
+/// reply will be matched and discarded.
+///
+/// A kept connection is usually one the helper has since closed: it drops any
+/// connection once its one-second budget is spent, and restores are far apart.
+/// So when a kept connection turns out to be gone, the request is sent once
+/// more on a fresh one. A connection made for this request gets no second try;
+/// its failure is the answer.
 pub fn reseed_through<S: Read + Write>(
     link: &mut HelperLink<S>,
     connect: impl FnOnce() -> Result<S, ReseedError>,
@@ -212,17 +276,30 @@ pub fn reseed_through<S: Read + Write>(
         HelperLink::Pair(connection) => return connection.reseed(token),
         HelperLink::Listening(slot) => slot,
     };
-    if slot.is_none() {
-        *slot = Some(HelperConnection::new(connect()?));
-    }
-    let Some(connection) = slot.as_mut() else {
-        return Err(ReseedError::NoHelper);
+    let (connection, fresh_connect) = match slot.take() {
+        Some(kept) => (kept, Some(connect)),
+        None => (HelperConnection::new(connect()?), None),
     };
+    match reseed_on(slot, connection, token) {
+        Err(ReseedError::Transport(error)) if helper_went_away(&error) => match fresh_connect {
+            Some(connect) => reseed_on(slot, HelperConnection::new(connect()?), token),
+            None => Err(ReseedError::Transport(error)),
+        },
+        result => result,
+    }
+}
+
+/// One request on `connection`, which is put back in `slot` unless the helper
+/// is gone from the other end of it.
+fn reseed_on<S: Read + Write>(
+    slot: &mut Option<HelperConnection<S>>,
+    mut connection: HelperConnection<S>,
+    token: &[u8; GENID_BYTES],
+) -> Result<(), ReseedError> {
     let result = connection.reseed(token);
-    if let Err(ReseedError::Transport(error)) = &result
-        && helper_went_away(error)
-    {
-        *slot = None;
+    let gone = matches!(&result, Err(ReseedError::Transport(error)) if helper_went_away(error));
+    if !gone {
+        *slot = Some(connection);
     }
     result
 }
@@ -462,6 +539,94 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_connection_the_helper_dropped_is_replaced_and_the_request_resent() {
+        let mut dropped = ScriptedStream::default();
+        dropped.reads.push_back(Ok(Vec::new())); // closed at the helper's deadline
+        let mut link = HelperLink::Listening(Some(HelperConnection::new(dropped)));
+        let mut fresh = ScriptedStream::default();
+        fresh.reads.push_back(Ok(ok_reply(1)));
+        reseed_through(&mut link, || Ok(fresh), &TOKEN)
+            .expect("the request is resent on a fresh connection");
+        let HelperLink::Listening(Some(connection)) = &link else {
+            panic!("the fresh connection is kept");
+        };
+        assert_eq!(connection.stream.written.len(), REQUEST_BYTES);
+    }
+
+    #[test]
+    fn a_fresh_connection_that_fails_is_not_retried() {
+        let mut closed = ScriptedStream::default();
+        closed.reads.push_back(Ok(Vec::new()));
+        let mut link = HelperLink::Listening(None);
+        let mut connects = 0;
+        let result = reseed_through(
+            &mut link,
+            || {
+                connects += 1;
+                Ok(closed)
+            },
+            &TOKEN,
+        );
+        assert!(matches!(result, Err(ReseedError::Transport(_))));
+        assert_eq!(connects, 1);
+    }
+
+    fn helper_failure(shortfall: ReseedShortfall) -> ReseedFailure {
+        ReseedFailure {
+            shortfall,
+            reason: "no reseed".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_missing_or_failed_helper_still_mixes_the_token_and_reports_no_reseed() {
+        for shortfall in [ReseedShortfall::HelperMissing, ReseedShortfall::Failed] {
+            let mut mixed = Vec::new();
+            let failure = reseed_or_mix(
+                &TOKEN,
+                |_| Err(helper_failure(shortfall)),
+                |bytes| {
+                    mixed.extend_from_slice(bytes);
+                    Ok(())
+                },
+            )
+            .expect_err("a mix is never reported as a reseed");
+            assert_eq!(mixed, TOKEN, "the token itself is mixed in");
+            assert_eq!(
+                failure.shortfall, shortfall,
+                "the helper's shortfall is kept"
+            );
+            assert!(
+                failure.reason.contains("no reseed") && failure.reason.contains("mixed"),
+                "{}",
+                failure.reason
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_mix_is_reported_alongside_the_reseed_failure() {
+        let failure = reseed_or_mix(
+            &TOKEN,
+            |_| Err(helper_failure(ReseedShortfall::HelperMissing)),
+            |_| Err(io::Error::from_raw_os_error(libc::EACCES)),
+        )
+        .unwrap_err();
+        assert_eq!(failure.shortfall, ReseedShortfall::HelperMissing);
+        assert!(failure.reason.contains("also failed"), "{}", failure.reason);
+    }
+
+    #[test]
+    fn a_reseed_that_succeeds_needs_no_mix() {
+        reseed_or_mix(
+            &TOKEN,
+            |_| Ok(()),
+            |_| panic!("the helper already added the token"),
+        )
+        .expect("reseeded");
+    }
+
+    #[test]
     fn only_the_helper_uid_is_trusted_on_the_helper_socket() {
         check_helper_peer(crate::guest_mount::CRNG_RESEED_HELPER_UID).expect("the helper");
         for impostor in [0, crate::guest_mount::WORKLOAD_UID, 990, 1000] {
@@ -484,7 +649,11 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
         let server = std::thread::spawn(move || {
             let mut kernel = FakeKernel::default();
-            serve_connections(listener.incoming().take(2), &mut kernel);
+            serve_connections(
+                listener.incoming().take(2),
+                &mut kernel,
+                CONNECTION_DEADLINE,
+            );
             kernel
         });
 

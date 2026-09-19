@@ -114,6 +114,72 @@ connection into an untrusted child.
 - [x] W1a.4 Host tests, zero-warning clippy, Linux-gated compilation, the full
       workspace suite, and repository gates pass.
 
+## W1b — Reseed helper hardening, and resume refuses a guest that did not reseed (#3431)
+
+**Problem.** Five items from the W1 security review missed its merge: the
+helper's seccomp allowlist permitted an executable `mmap`; the privileged test
+gates passed silently when not root; a plain resume neither showed nor audited
+the reseed outcome; one idle connection could wedge the listening helper; and
+the threat-model wording understated what a compromised agent can do. A plain
+resume also only warned when the guest did not reseed, though the same sealed
+snapshot can be resumed more than once.
+
+- [x] W1b.1 `mmap` is allowed only without `PROT_EXEC`, like `mprotect`;
+      forked-child filter tests assert an executable `mmap` and an
+      `mprotect` to `PROT_EXEC` are killed with `SIGSYS`.
+- [x] W1b.2 The privileged gates use `geteuid()` and panic when
+      `MVM_GUEST_PRIVILEGED_TESTS=1` is set without root.
+- [x] W1b.3 A plain resume prints and audits its reseed outcome; the
+      `ResumeOutcome::reseed` doc is corrected.
+- [x] W1b.4 Accepted helper connections are held to one total budget
+      (`CONNECTION_DEADLINE`), re-armed as the receive and send timeout
+      before every call (`setsockopt` allowed only for
+      `SO_RCVTIMEO`/`SO_SNDTIMEO`); an idle connector and a connector that
+      trickles one byte at a time are both dropped and the next reseed is
+      served.
+- [x] W1b.5 The threat-model wording states the 16 chosen, credited bytes per
+      request, in the module doc and the W1 delivery note.
+- [x] W1b.6 A plain resume whose guest does not confirm a reseed is refused:
+      a reported shortfall (with the fork path's guidance), an agent that
+      never became reachable, a failed or unacknowledged signal, and an
+      unsynced clock alike. Its VMM is stopped through a verified stop whose
+      failure is reported, the machine stays paused (it is marked resumed
+      only after the reseed is confirmed), and the refusal is recorded as a
+      `ResumeRefused` entry in the local audit log. A warm resume that did
+      not rotate goes through the same refusal (the VM stopped through the
+      backend's `stop`), with its own retry guidance, since a warm start
+      carries no shortfall. A failed reseed still mixes the token in through
+      `/dev/urandom` and reports `reseeded: false`. An admitted resume's
+      `WorkloadWake` entry, carrying the reseed outcome, is written by the
+      shared local backend, so every client surface records it.
+- [x] W1b.9 A resumed guest ends admitted or stopped however the resume
+      ends, except for a kill that cannot be caught: the exchange is held to
+      a 15-second deadline; SIGINT, SIGTERM and SIGHUP run a cleanup
+      registered with `handle_registry::on_interrupt` that stops the
+      restored VMM and records the refusal, settled against the admission
+      so exactly one of them acts; a SIGKILL or out-of-memory kill leaves
+      the guest running until the next state-touching command, whose
+      reconcile stops a paused machine's Firecracker that neither
+      `fc.paused` nor `fc.admitted` accounts for, re-checking under the
+      machine's resume lock; resumes of one machine are serialized by that
+      lock; the registry is written under its lock and a failed write is an
+      error; and a resume request that errors tears the VMM down.
+- [x] W1b.10 An encrypted snapshot is decrypted into a private staging
+      directory that is removed after the load, so the sealed ciphertext is
+      never modified, a refused resume can be retried, and no decrypted
+      guest memory stays on disk; abandoned staging directories are removed.
+- [x] W1b.11 The Firecracker restore teardown, and the restore's stop of a
+      previous VMM, signal a recorded pid only if it is the Firecracker
+      serving this VM's API socket.
+- [x] W1b.12 Decrypted restore staging is removed by the interrupt cleanup,
+      and abandoned staging by every restore and by reconcile.
+- [ ] W1b.7 Live witness on Firecracker/KVM: resuming a sealed snapshot of an
+      image without the reseed helper is refused, and the snapshot stays
+      resumable.
+- [ ] W1b.8 Record a resume refusal as a chain-signed entry on the per-tenant
+      audit log. Today it is recorded only in the local, unsigned,
+      best-effort log, so it is not an enforced claim.
+
 ## W2 — Exclusive machine create (#3379)
 
 **Problem.** `persist_definition` (`crates/mvm-client/src/launch/mod.rs:532-546`)

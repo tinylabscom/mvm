@@ -139,6 +139,10 @@
       W3.7 (issue #3430) keeps every file mvm
       injects into a container-layer rootfs root-owned whatever a layer
       declares, on both the in-process and the builder-VM writer.
+      W1b (issue #3431) hardens the reseed
+      helper and makes a resume whose guest does not confirm a reseed a
+      refusal rather than a warning; its live Firecracker refusal witness and
+      a chain-signed refusal entry are open.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed

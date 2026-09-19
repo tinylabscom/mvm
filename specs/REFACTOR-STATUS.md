@@ -107,6 +107,17 @@ Last updated: 2026-09-19
         descriptor-closing hook, shared vsock sockets are close-on-exec, and
         real Linux cold-entrypoint and process-RPC witnesses pass. Public
         release remains gated on clearance.
+  - [ ] W1b — issue #3431: W1b.1–W1b.6 done (no executable memory in the
+        reseed helper, fail-loud privileged gates, a total per-connection
+        budget, the corrected threat model, and a resume whose guest does not
+        confirm a reseed is stopped, left paused and recorded in the local
+        audit log); W1b.9–W1b.12 done (a bounded admission window, SIGINT,
+        SIGTERM and SIGHUP cleanup, an `fc.admitted` record reconcile trusts,
+        a per-machine resume lock, locked registry writes, retryable encrypted
+        snapshots whose staging is removed on interrupt, and no signal to a
+        pid that is not this VM's Firecracker). Open: W1b.7, the
+        live Firecracker refusal witness, and W1b.8, a chain-signed refusal
+        entry.
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.

@@ -85,7 +85,7 @@ mod linux {
         SeccompRule, TargetArch,
     };
 
-    use super::super::protocol::{KernelEntropy, serve, serve_connections};
+    use super::super::protocol::{CONNECTION_DEADLINE, KernelEntropy, serve, serve_connections};
     use super::super::{HELPER_ARG, HELPER_FD, HELPER_SOCKET, install_helper};
     use super::HelperTransport;
 
@@ -197,7 +197,7 @@ mod linux {
                 let mut entropy = DevRandom::open()?;
                 let listener = bind_private_listener(Path::new(HELPER_SOCKET))?;
                 install_filter()?;
-                serve_connections(listener.incoming(), &mut entropy);
+                serve_connections(listener.incoming(), &mut entropy, CONNECTION_DEADLINE);
                 Err(io::Error::other("the listener stopped accepting"))
             }
         }
@@ -254,9 +254,9 @@ mod linux {
             libc::SYS_close,
             // The allocator. Formatting an error allocates; glibc grows the
             // heap with `brk` and falls back to `mmap`, musl's allocator uses
-            // `brk`, `mmap`, `munmap`, `mremap` and `madvise`.
+            // `brk`, `mmap`, `munmap`, `mremap` and `madvise`. `mmap` itself is
+            // argument-filtered below.
             libc::SYS_brk,
-            libc::SYS_mmap,
             libc::SYS_munmap,
             libc::SYS_mremap,
             libc::SYS_madvise,
@@ -294,17 +294,45 @@ mod linux {
         // On aarch64 glibc's `fcntl64` is the `fcntl` syscall, as it is on
         // x86_64. Only the flag read is allowed.
         rules.insert(libc::SYS_fcntl, vec![arg_equals(1, libc::F_GETFD as u64)?]);
-        // musl's allocator makes pages of a new metadata area writable with
-        // `mprotect`. Allowed only without `PROT_EXEC`, so the helper can never
-        // make memory executable.
-        rules.insert(
-            libc::SYS_mprotect,
-            vec![SeccompRule::new(vec![SeccompCondition::new(
+        // The allocator maps anonymous memory with `mmap`, and musl's makes
+        // pages of a new metadata area writable with `mprotect`. Both are
+        // allowed only without `PROT_EXEC` in their protection argument, the
+        // third for each. Together with `mremap`, which cannot change a
+        // mapping's protection, that leaves the helper no syscall that maps or
+        // marks memory executable: every page it can run is one it was exec'd
+        // with. `pkey_mprotect` and `remap_file_pages` are not allowed at all.
+        let without_exec = || {
+            SeccompCondition::new(
                 2,
                 SeccompCmpArgLen::Dword,
                 SeccompCmpOp::MaskedEq(libc::PROT_EXEC as u64),
                 0,
-            )?])?],
+            )
+            .and_then(|condition| SeccompRule::new(vec![condition]))
+        };
+        rules.insert(libc::SYS_mmap, vec![without_exec()?]);
+        rules.insert(libc::SYS_mprotect, vec![without_exec()?]);
+        // The listening helper holds each accepted connection to one total
+        // deadline, re-armed as the receive and send timeout before every
+        // call, so a peer that goes quiet or trickles bytes cannot hold the
+        // one-at-a-time loop past it. Only those two socket-level options.
+        let socket_option = |name: libc::c_int| {
+            SeccompRule::new(vec![
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    libc::SOL_SOCKET as u64,
+                )?,
+                SeccompCondition::new(2, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, name as u64)?,
+            ])
+        };
+        rules.insert(
+            libc::SYS_setsockopt,
+            vec![
+                socket_option(libc::SO_RCVTIMEO)?,
+                socket_option(libc::SO_SNDTIMEO)?,
+            ],
         );
         BpfProgram::try_from(SeccompFilter::new(
             rules,
@@ -462,6 +490,130 @@ mod linux {
         fn the_helper_filter_compiles() {
             let program = helper_filter().expect("the allowlist is a valid filter");
             assert!(!program.is_empty());
+        }
+
+        /// How a probe run under the helper's filter ended.
+        #[derive(Debug, PartialEq, Eq)]
+        enum Ended {
+            Exited(i32),
+            KilledBy(i32),
+        }
+
+        /// Run `probe` in a forked child that has installed the helper's
+        /// filter, and report how the child ended. A syscall the filter
+        /// refuses kills the child with `SIGSYS`.
+        ///
+        /// Forking keeps the kill away from the test process. The child only
+        /// installs the filter, runs the probe and exits, none of which
+        /// allocates, so it never touches a lock another test thread held at
+        /// the fork.
+        fn under_filter(probe: impl FnOnce()) -> Ended {
+            let program = helper_filter().expect("the allowlist is a valid filter");
+            // SAFETY: the child calls only async-signal-safe syscalls and
+            // leaves with `_exit`, never returning into the test harness.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork: {}", io::Error::last_os_error());
+            if pid == 0 {
+                if seccompiler::apply_filter(&program).is_err() {
+                    // SAFETY: ends the forked child without running any
+                    // destructor or handler inherited from the test process.
+                    unsafe { libc::_exit(111) };
+                }
+                probe();
+                // SAFETY: as above.
+                unsafe { libc::_exit(0) };
+            }
+            let mut status = 0;
+            // SAFETY: waits for the child forked above; `status` is a valid
+            // out-pointer.
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            assert_eq!(waited, pid, "waitpid: {}", io::Error::last_os_error());
+            if libc::WIFSIGNALED(status) {
+                Ended::KilledBy(libc::WTERMSIG(status))
+            } else {
+                Ended::Exited(libc::WEXITSTATUS(status))
+            }
+        }
+
+        fn map_anonymous(prot: libc::c_int) {
+            // SAFETY: a fresh private anonymous mapping; nothing is read or
+            // written through the result, and the child exits right after.
+            unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    prot,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
+            }
+        }
+
+        #[test]
+        fn the_filter_refuses_an_executable_mapping() {
+            assert_eq!(
+                under_filter(|| map_anonymous(libc::PROT_READ | libc::PROT_WRITE)),
+                Ended::Exited(0),
+                "the allocator's own mappings stay allowed"
+            );
+            assert_eq!(
+                under_filter(|| map_anonymous(libc::PROT_READ | libc::PROT_EXEC)),
+                Ended::KilledBy(libc::SIGSYS),
+                "the helper must not be able to map executable memory"
+            );
+        }
+
+        #[test]
+        fn the_filter_refuses_making_a_mapping_executable() {
+            assert_eq!(
+                under_filter(|| {
+                    // SAFETY: a fresh private anonymous mapping, reprotected
+                    // and never dereferenced.
+                    unsafe {
+                        let page = libc::mmap(
+                            std::ptr::null_mut(),
+                            4096,
+                            libc::PROT_READ | libc::PROT_WRITE,
+                            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                            -1,
+                            0,
+                        );
+                        libc::mprotect(page, 4096, libc::PROT_READ | libc::PROT_EXEC);
+                    }
+                }),
+                Ended::KilledBy(libc::SIGSYS)
+            );
+        }
+
+        #[test]
+        fn the_filter_allows_only_the_connection_deadlines_as_socket_options() {
+            let (socket, _peer) = UnixStream::pair().expect("socket pair");
+            let fd = socket.as_raw_fd();
+            let set = move |name: libc::c_int| {
+                let value = libc::timeval {
+                    tv_sec: 1,
+                    tv_usec: 0,
+                };
+                // SAFETY: `fd` is an open socket for the life of the child,
+                // and `value` is a `timeval` of the size passed.
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        name,
+                        (&value as *const libc::timeval).cast(),
+                        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                    );
+                }
+            };
+            assert_eq!(under_filter(|| set(libc::SO_RCVTIMEO)), Ended::Exited(0));
+            assert_eq!(under_filter(|| set(libc::SO_SNDTIMEO)), Ended::Exited(0));
+            assert_eq!(
+                under_filter(|| set(libc::SO_RCVBUF)),
+                Ended::KilledBy(libc::SIGSYS),
+                "no other socket option is reachable"
+            );
         }
     }
 }

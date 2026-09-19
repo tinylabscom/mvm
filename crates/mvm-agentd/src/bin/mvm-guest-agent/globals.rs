@@ -28,16 +28,17 @@ pub(crate) static GENID_RESEEDER: Mutex<mvm_agentd::genid::GenIdReseeder> = Mute
 );
 
 /// Dispatch a token delivered on `PostRestore` to the resident reseeder, which
-/// reseeds through this guest's CRNG reseed helper. The reseeder only records a
-/// token after a reseed succeeds, so a lock poisoned mid-call holds a state
-/// that is still safe to use.
+/// reseeds through this guest's CRNG reseed helper, or mixes the token into the
+/// input pool when it cannot. The reseeder only records a token after a reseed
+/// succeeds, so a lock poisoned mid-call holds a state that is still safe to
+/// use.
 pub(crate) fn reseed_on_post_restore(
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> mvm_agentd::genid::GenIdAction {
     GENID_RESEEDER
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .on_post_restore_token(token, mvm_agentd::crng_reseed::reseed_via_helper)
+        .on_post_restore_token(token, mvm_agentd::crng_reseed::reseed_for_restore)
 }
 
 /// Counts shutdown signals delivered. ≥2 means the operator has

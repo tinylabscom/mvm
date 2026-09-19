@@ -54,6 +54,12 @@ pub enum Drift {
     /// A runtime state dir on disk with no registry record and no live
     /// owning process. Reap it.
     OrphanStateNoRecord { dir: String },
+    /// A paused record whose Firecracker is running with no pause marker: a
+    /// resume restored it and resumed its vCPUs, then ended before the guest
+    /// confirmed it reseeded (the resuming process was killed or crashed).
+    /// The guest is running on random state it has already used. Stop it and
+    /// keep the record paused; its sealed snapshot is untouched.
+    UnadmittedResume { name: String },
 }
 
 /// Cheap, side-effect-free observations convergence makes. The real impl
@@ -65,6 +71,13 @@ pub trait RuntimeView {
     /// Is the supervisor process recorded in that state alive? Consulted
     /// only when [`RuntimeView::state_present`] is true.
     fn process_alive(&self, reg: &VmRegistration) -> bool;
+    /// Whether the machine `name` has a live Firecracker that neither a pause
+    /// nor an admission accounts for — the state a resume leaves between
+    /// resuming vCPUs and admitting the guest. Consulted only for paused
+    /// records. Backends other than Firecracker never have it.
+    fn unadmitted_resume(&self, _name: &str) -> bool {
+        false
+    }
     /// Basenames of runtime state dirs on disk that have no record in
     /// `known` **and** no live owning process — i.e. true orphans, safe to
     /// reap. A dir with a live process is an in-flight or specially-managed
@@ -78,6 +91,11 @@ pub trait ReconcileActions {
     fn tear_down(&self, name: &str, reg: &VmRegistration) -> Result<(), String>;
     /// Reap an orphan state dir (basename) that has no record.
     fn reap_orphan(&self, dir: &str) -> Result<(), String>;
+    /// Stop the Firecracker of a resume that was never admitted. `Ok(false)`
+    /// when there is nothing to stop after all: a resume of `name` is still in
+    /// progress in another process, which owns the outcome, or the state has
+    /// changed since it was classified.
+    fn stop_unadmitted(&self, name: &str) -> Result<bool, String>;
 }
 
 /// What a convergence pass observed and did. Serializable for
@@ -92,6 +110,8 @@ pub struct ConvergeReport {
     pub stale_record_dropped: Vec<String>,
     /// Orphan state dirs (no record) that were reaped.
     pub orphan_state_reaped: Vec<String>,
+    /// Paused records whose never-admitted resumed guest was stopped.
+    pub unadmitted_resume_stopped: Vec<String>,
     /// Non-fatal errors. Fail-open: recorded here, never returned, so a
     /// bookkeeping hiccup can't block the command that triggered the sweep.
     pub errors: Vec<String>,
@@ -103,6 +123,7 @@ impl ConvergeReport {
         self.dead_process_reaped.len()
             + self.stale_record_dropped.len()
             + self.orphan_state_reaped.len()
+            + self.unadmitted_resume_stopped.len()
     }
 
     /// No drift healed and no errors — reality already matched the registry.
@@ -124,6 +145,12 @@ pub fn classify(registry: &VmNameRegistry, view: &dyn RuntimeView) -> Vec<Drift>
         let reg = &registry.vms[name];
         // An intentionally-paused record (sealed snapshot awaiting
         // `mvmctl resume`) has a dead process by design — never reap it.
+        // A paused record whose VMM is running unpaused is a resume that
+        // never finished admitting its guest.
+        if reg.paused && view.unadmitted_resume(name) {
+            drifts.push(Drift::UnadmittedResume { name: name.clone() });
+            continue;
+        }
         if reg.paused {
             drifts.push(Drift::Live { name: name.clone() });
             continue;
@@ -191,6 +218,19 @@ pub fn sweep(
                     Err(e) => report.errors.push(format!("tear down {name}: {e}")),
                 }
             }
+            Drift::UnadmittedResume { name } => {
+                if opts.dry_run {
+                    report.unadmitted_resume_stopped.push(name);
+                    continue;
+                }
+                match actions.stop_unadmitted(&name) {
+                    Ok(true) => report.unadmitted_resume_stopped.push(name),
+                    Ok(false) => report.live.push(name),
+                    Err(e) => report
+                        .errors
+                        .push(format!("stop unadmitted resume {name}: {e}")),
+                }
+            }
             Drift::OrphanStateNoRecord { dir } => {
                 if opts.dry_run {
                     report.orphan_state_reaped.push(dir);
@@ -245,6 +285,12 @@ impl RuntimeView for FsRuntimeView {
     fn process_alive(&self, reg: &VmRegistration) -> bool {
         state_dir_has_live_process(Path::new(&reg.vm_dir))
     }
+    fn unadmitted_resume(&self, name: &str) -> bool {
+        // The markers live in the machine's state directory, derived from its
+        // name. The record's `vm_dir` is not used: some registrations leave it
+        // empty, which would probe paths relative to the working directory.
+        crate::vm::admission::is_unaccounted(&self.vms_root.join(name))
+    }
     fn orphan_dirs(&self, known: &BTreeSet<String>) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.vms_root) else {
             return Vec::new();
@@ -270,16 +316,53 @@ impl RuntimeView for FsRuntimeView {
     }
 }
 
+/// Stops a machine's Firecracker given its state directory.
+pub type StopVmm = fn(&Path) -> anyhow::Result<()>;
+
+/// The production [`StopVmm`]: the restore teardown, which stops the process
+/// only if it is the Firecracker serving this state directory's API socket.
+fn stop_firecracker_in(state_dir: &Path) -> anyhow::Result<()> {
+    use crate::vm::instance_snapshot::{FirecrackerIO, SnapshotIO};
+    FirecrackerIO::new(state_dir.join("fc.socket")).teardown_paused()
+}
+
 /// Real-filesystem [`ReconcileActions`] rooted at the same `vms` dir.
 pub struct FsReconcileActions {
     vms_root: PathBuf,
+    /// The registry an unadmitted-resume stop re-reads once it holds the
+    /// machine's resume lock. `None` skips that re-read.
+    registry_path: Option<PathBuf>,
+    stop_vmm: StopVmm,
 }
 
 impl FsReconcileActions {
     pub fn new(vms_root: impl Into<PathBuf>) -> Self {
         Self {
             vms_root: vms_root.into(),
+            registry_path: None,
+            stop_vmm: stop_firecracker_in,
         }
+    }
+
+    /// Re-read `registry_path` before stopping an unadmitted resume.
+    pub fn with_registry(mut self, registry_path: impl Into<PathBuf>) -> Self {
+        self.registry_path = Some(registry_path.into());
+        self
+    }
+
+    /// Stop Firecracker with `stop_vmm` instead of the real teardown.
+    pub fn with_stop_vmm(mut self, stop_vmm: StopVmm) -> Self {
+        self.stop_vmm = stop_vmm;
+        self
+    }
+
+    /// Whether the registry still records `name` as paused.
+    fn still_paused(&self, name: &str) -> Result<bool, String> {
+        let Some(path) = &self.registry_path else {
+            return Ok(true);
+        };
+        let registry = VmNameRegistry::load(path).map_err(|e| format!("{e:#}"))?;
+        Ok(registry.lookup(name).is_some_and(|record| record.paused))
     }
 }
 
@@ -289,6 +372,23 @@ impl ReconcileActions for FsReconcileActions {
     }
     fn reap_orphan(&self, dir: &str) -> Result<(), String> {
         remove_state_dir(&self.vms_root.join(dir))
+    }
+    fn stop_unadmitted(&self, name: &str) -> Result<bool, String> {
+        use crate::vm::instance_snapshot::try_lock_resume;
+        // A resume in progress holds this lock for its whole admission; its
+        // own outcome decides whether the guest keeps running.
+        let Some(_resuming) = try_lock_resume(name).map_err(|e| format!("{e:#}"))? else {
+            return Ok(false);
+        };
+        // The classification ran before the lock was taken. A resume may have
+        // admitted its guest and released the lock since, so check again now
+        // that no resume can change the answer.
+        let state_dir = self.vms_root.join(name);
+        if !self.still_paused(name)? || !crate::vm::admission::is_unaccounted(&state_dir) {
+            return Ok(false);
+        }
+        (self.stop_vmm)(&state_dir).map_err(|e| format!("{e:#}"))?;
+        Ok(true)
     }
 }
 
@@ -301,6 +401,18 @@ impl ReconcileActions for FsReconcileActions {
 /// Does not emit audit; that belongs to the real entry point [`converge`]
 /// so this stays free of process-global state and hermetically testable.
 pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -> ConvergeReport {
+    // Held for the whole pass, so a record changed by another process between
+    // this load and the save below is not overwritten with a stale copy.
+    let _registry_lock = match crate::vm::name_registry::acquire_registry_lock(registry_path) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let mut report = ConvergeReport::default();
+            report
+                .errors
+                .push(format!("lock registry {}: {e:#}", registry_path.display()));
+            return report;
+        }
+    };
     let mut registry = match VmNameRegistry::load(registry_path) {
         Ok(r) => r,
         Err(e) => {
@@ -313,7 +425,7 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
     };
 
     let view = FsRuntimeView::new(vms_root);
-    let actions = FsReconcileActions::new(vms_root);
+    let actions = FsReconcileActions::new(vms_root).with_registry(registry_path);
     let mut report = sweep(&mut registry, &view, &actions, opts);
 
     let registry_changed =
@@ -343,8 +455,22 @@ pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     let report = converge_at(&registry_path, &vms_root, opts);
     if !opts.dry_run {
         emit_audit(&report);
+        remove_abandoned_restore_staging(&registry_path);
     }
     report
+}
+
+/// Remove restore staging abandoned by a process that died mid-restore, for
+/// every registered machine: each holds decrypted guest memory.
+fn remove_abandoned_restore_staging(registry_path: &Path) {
+    let Ok(registry) = VmNameRegistry::load(registry_path) else {
+        return;
+    };
+    for name in registry.vms.keys() {
+        crate::vm::instance_snapshot::remove_abandoned_staging(&mvm_core::config::instance_dir(
+            name,
+        ));
+    }
 }
 
 /// Reap only *orphan* state dirs under the default `vms` root: dirs with no
@@ -406,6 +532,14 @@ fn emit_audit(report: &ConvergeReport) {
     }
     for dir in &report.orphan_state_reaped {
         mvm_core::audit_emit!(RegistryReconcile, vm: dir.as_str(), "action=orphan_state_no_record");
+    }
+    for name in &report.unadmitted_resume_stopped {
+        mvm_core::audit_emit!(
+            ResumeRefused,
+            vm: name.as_str(),
+            "stopped a resumed guest that never confirmed a reseed: its resume ended \
+             before admitting it; the machine stays paused and its sealed snapshot is kept"
+        );
     }
 }
 
@@ -570,6 +704,12 @@ mod tests {
         reaped: RefCell<Vec<String>>,
         /// vm_dirs whose teardown should fail (drives the retry path).
         fail_teardown: BTreeSet<String>,
+        /// vm_dirs whose Firecracker runs unpaused under a paused record.
+        unadmitted: RefCell<BTreeSet<String>>,
+        /// VM names with a resume in progress in another process.
+        resuming: BTreeSet<String>,
+        /// vm_dirs whose unadmitted guest was stopped.
+        stopped: RefCell<Vec<String>>,
     }
 
     impl RuntimeView for FakeWorld {
@@ -578,6 +718,9 @@ mod tests {
         }
         fn process_alive(&self, reg: &VmRegistration) -> bool {
             self.alive.borrow().contains(&reg.vm_dir)
+        }
+        fn unadmitted_resume(&self, name: &str) -> bool {
+            self.unadmitted.borrow().contains(name)
         }
         fn orphan_dirs(&self, known: &BTreeSet<String>) -> Vec<String> {
             self.on_disk
@@ -604,6 +747,193 @@ mod tests {
             self.reaped.borrow_mut().push(dir.to_string());
             Ok(())
         }
+        fn stop_unadmitted(&self, name: &str) -> Result<bool, String> {
+            if self.resuming.contains(name) {
+                return Ok(false);
+            }
+            self.unadmitted.borrow_mut().remove(name);
+            self.stopped.borrow_mut().push(name.to_string());
+            Ok(true)
+        }
+    }
+
+    fn paused_registry(name: &str, dir: &str) -> VmNameRegistry {
+        let mut reg = registry_with(&[(name, dir)]);
+        reg.set_paused(name, true).unwrap();
+        reg
+    }
+
+    /// A paused record whose Firecracker runs unpaused is a resume that
+    /// never admitted its guest (the resuming process died): the guest is
+    /// stopped, the record kept paused, and a second pass finds nothing.
+    #[test]
+    fn sweep_stops_a_resumed_guest_that_was_never_admitted() {
+        let mut reg = paused_registry("vm1", "/s/vm1");
+        let world = FakeWorld {
+            present: RefCell::new(["/s/vm1".to_string()].into()),
+            alive: RefCell::new(["/s/vm1".to_string()].into()),
+            unadmitted: RefCell::new(["vm1".to_string()].into()),
+            ..Default::default()
+        };
+        let report = sweep(&mut reg, &world, &world, &ConvergeOpts::default());
+        assert_eq!(report.unadmitted_resume_stopped, vec!["vm1".to_string()]);
+        assert_eq!(*world.stopped.borrow(), vec!["vm1".to_string()]);
+        let record = reg.lookup("vm1").expect("the record is kept");
+        assert!(record.paused, "and stays paused");
+        let again = sweep(&mut reg, &world, &world, &ConvergeOpts::default());
+        assert!(again.unadmitted_resume_stopped.is_empty(), "idempotent");
+    }
+
+    /// A resume still admitting its guest in another process is left to
+    /// that process.
+    #[test]
+    fn sweep_leaves_a_resume_in_progress_alone() {
+        let mut reg = paused_registry("vm1", "/s/vm1");
+        let world = FakeWorld {
+            unadmitted: RefCell::new(["vm1".to_string()].into()),
+            resuming: ["vm1".to_string()].into(),
+            ..Default::default()
+        };
+        let report = sweep(&mut reg, &world, &world, &ConvergeOpts::default());
+        assert!(report.unadmitted_resume_stopped.is_empty());
+        assert_eq!(report.live, vec!["vm1".to_string()]);
+        assert!(world.stopped.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_reports_an_unadmitted_resume_without_stopping_it() {
+        let mut reg = paused_registry("vm1", "/s/vm1");
+        let world = FakeWorld {
+            unadmitted: RefCell::new(["vm1".to_string()].into()),
+            ..Default::default()
+        };
+        let report = sweep(&mut reg, &world, &world, &ConvergeOpts { dry_run: true });
+        assert_eq!(report.unadmitted_resume_stopped, vec!["vm1".to_string()]);
+        assert!(world.stopped.borrow().is_empty());
+    }
+
+    /// The filesystem view probes the machine's state directory under the
+    /// `vms` root, by name. A registration with an empty `vm_dir` (as some
+    /// write) must not send it probing the working directory.
+    #[test]
+    fn the_fs_view_probes_the_state_dir_by_name_not_the_record_vm_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vm_dir = dir.path().join("vm1");
+        std::fs::create_dir(&vm_dir).unwrap();
+        let reg = paused_registry("vm1", "");
+        let view = FsRuntimeView::new(dir.path());
+        assert!(!view.unadmitted_resume("vm1"), "no VMM at all");
+        // This test's own process stands in for a live Firecracker.
+        std::fs::write(vm_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
+        assert!(view.unadmitted_resume("vm1"));
+        let drifts = classify(&reg, &view);
+        assert_eq!(
+            drifts,
+            vec![Drift::UnadmittedResume {
+                name: "vm1".to_string()
+            }]
+        );
+        crate::vm::admission::record_admitted(&vm_dir).unwrap();
+        assert!(
+            !view.unadmitted_resume("vm1"),
+            "an admitted guest is not a resume"
+        );
+    }
+
+    /// Serializes the tests below, which point `MVM_HOME` at a temporary
+    /// directory because the resume lock lives under it.
+    struct IsolatedHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _env: TestEnv,
+        dir: tempfile::TempDir,
+    }
+
+    impl IsolatedHome {
+        fn new() -> Self {
+            let lock = crate::vm::DATA_DIR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut env = TestEnv::new();
+            env.set("MVM_HOME", dir.path());
+            Self {
+                _lock: lock,
+                _env: env,
+                dir,
+            }
+        }
+
+        /// A paused record for `vm1` whose state dir holds a live, unaccounted
+        /// `fc.pid`, and the actions over it with a recording stop.
+        fn unadmitted_vm1(&self) -> (PathBuf, FsReconcileActions) {
+            let vms_root = self.dir.path().join("vms");
+            let state_dir = vms_root.join("vm1");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(state_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
+            let registry_path = self.dir.path().join("vm-names.json");
+            paused_registry("vm1", "").save(&registry_path).unwrap();
+            let actions = FsReconcileActions::new(&vms_root)
+                .with_registry(&registry_path)
+                .with_stop_vmm(record_stop);
+            (registry_path, actions)
+        }
+    }
+
+    thread_local! {
+        static STOPPED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_stop(state_dir: &Path) -> anyhow::Result<()> {
+        STOPPED.with(|stopped| stopped.borrow_mut().push(state_dir.to_path_buf()));
+        Ok(())
+    }
+
+    fn stops() -> Vec<PathBuf> {
+        STOPPED.with(|stopped| std::mem::take(&mut *stopped.borrow_mut()))
+    }
+
+    #[test]
+    fn an_unadmitted_resume_is_stopped_through_the_real_lock() {
+        let home = IsolatedHome::new();
+        let (_, actions) = home.unadmitted_vm1();
+        let _ = stops();
+        assert_eq!(actions.stop_unadmitted("vm1"), Ok(true));
+        assert_eq!(stops().len(), 1);
+    }
+
+    /// A resume in progress in another process holds the machine's resume
+    /// lock; reconcile must not stop the guest that resume is admitting.
+    #[test]
+    fn a_held_resume_lock_keeps_reconcile_away() {
+        let home = IsolatedHome::new();
+        let (_, actions) = home.unadmitted_vm1();
+        let _ = stops();
+        let resuming = crate::vm::instance_snapshot::lock_resume("vm1").expect("lock");
+        assert_eq!(actions.stop_unadmitted("vm1"), Ok(false));
+        assert!(stops().is_empty(), "nothing is stopped under a held lock");
+        drop(resuming);
+    }
+
+    /// A resume that admitted its guest after the classification: the
+    /// re-check under the lock sees the admission and stops nothing.
+    #[test]
+    fn a_guest_admitted_after_classification_is_not_stopped() {
+        let home = IsolatedHome::new();
+        let (registry_path, actions) = home.unadmitted_vm1();
+        let _ = stops();
+        crate::vm::admission::record_admitted(&home.dir.path().join("vms").join("vm1")).unwrap();
+        assert_eq!(actions.stop_unadmitted("vm1"), Ok(false));
+        std::fs::remove_file(home.dir.path().join("vms/vm1/fc.admitted")).unwrap();
+        crate::vm::name_registry::update_registry(&registry_path, |reg| {
+            reg.set_paused("vm1", false)
+        })
+        .unwrap();
+        assert_eq!(
+            actions.stop_unadmitted("vm1"),
+            Ok(false),
+            "no longer paused"
+        );
+        assert!(stops().is_empty());
     }
 
     #[test]
