@@ -3,7 +3,8 @@
 #
 # Usage: ./scripts/download-qemu-wasm-smoke-pack.sh [output-dir] [tag]
 #   output-dir: Where to place the unpacked pack (default: ./qemu-wasm-smoke-pack)
-#   tag:        The boot-image tag to download from (default: latest)
+#   tag:        The boot-image tag to download from (default: the tag pinned by
+#               images.lock)
 #
 # NOTE: The qemu-wasm-smoke-pack is NOT currently published to GitHub releases.
 # This script exists as a template but you'll need to build the pack using
@@ -15,18 +16,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-$ROOT_DIR/qemu-wasm-smoke-pack}"
-TAG="${2:-}"
+# Default to the locked pin rather than the newest published release: which
+# bytes this pack is built from must be a property of the tree, not of whoever
+# cut an image most recently.
+TAG="${2:-$("$SCRIPT_DIR/locked-image-tag.sh")}"
 
 REPO="${GITHUB_REPOSITORY:-tinylabscom/mvm}"
 
 echo "=== Downloading qemu-wasm-smoke-pack ==="
 echo "Output directory: $OUTPUT_DIR"
 echo "Repository: $REPO"
-if [ -n "$TAG" ]; then
-  echo "Tag: $TAG"
-else
-  echo "Tag: (latest)"
-fi
+echo "Tag: $TAG"
 
 # Check if gh is installed
 if ! command -v gh >/dev/null 2>&1; then
@@ -39,23 +39,6 @@ if ! gh auth status >/dev/null 2>&1; then
   echo "ERROR: Not logged in to GitHub. Run: gh auth login" >&2
   exit 1
 fi
-
-# Find the latest boot-image tag if not specified
-if [ -z "$TAG" ]; then
-  echo "Fetching latest boot-image tag..."
-  TAG=$(gh release list --repo "$REPO" --limit 100 --json tagName --jq '
-    [ .[].tagName
-      | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-      | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
-    | sort_by(.v) | last | .tag // empty')
-
-  if [ -z "$TAG" ]; then
-    echo "ERROR: No boot-image/v* tag found" >&2
-    exit 1
-  fi
-fi
-
-echo "Using tag: $TAG"
 
 # Check if the release exists
 if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then

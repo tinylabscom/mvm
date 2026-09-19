@@ -235,10 +235,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         build_job.contains("needs: no-kvm-bootstrap")
             && build_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
-            && build_job.contains(&format!(
-                "/tmp/mvmctl-source-under-test image boot update --tag {} --force",
-                mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG
-            ))
+            && build_job.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
+            && build_job.contains(
+                r#"/tmp/mvmctl-source-under-test image boot update --tag "$image_tag" --force"#
+            )
             && build_job.contains(REQUIRED_SOURCE_KERNEL)
             && build_job.contains(REQUIRED_SOURCE_KERNEL_VERIFY)
             && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)

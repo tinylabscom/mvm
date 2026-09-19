@@ -136,7 +136,7 @@ fn download_release_asset(url: &str, dest: &Path) -> Result<()> {
 /// The bare semver is what `release_trust`'s boot image identity template
 /// interpolates, so it is derived here rather than re-split at each call site.
 pub(crate) fn boot_image_release() -> Result<(String, String)> {
-    let tag = mvm_core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let tag = mvm_core::config::default_boot_image_tag();
     let version = tag.rsplit_once("/v").map(|(_, v)| v).with_context(|| {
         format!("boot image tag {tag:?} is not of the form `boot-image/v<semver>`")
     })?;

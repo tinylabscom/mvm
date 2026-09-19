@@ -172,6 +172,10 @@
       against the lock before the bytes are parsed, the detached signature under
       the locked identity next, then structure, lock fields, on-disk artifact
       size and digest, and revocation keyed on the locked signer.
+      Slice W3c checks in `crates/mvm-core/images.lock` (repository, boot-image
+      tag, Stage 0 kernel tag and per-arch digests); config, Stage 0, three
+      workflows and the smoke-pack script read it, both `latest` selections are
+      gone, and `xtask check-image-lock` refuses a copied or enumerated tag.
       Slice W3d puts that verifier behind `mvmctl image boot verify`, which
       reads the manifest, bundle, lock and artifact directory, names the stage
       that refused and exits nonzero on refusal. The older

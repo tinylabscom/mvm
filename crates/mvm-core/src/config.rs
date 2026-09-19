@@ -6,22 +6,32 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
     None => "v1.14.1",
 };
 
-/// The boot image release the CLI expects, overridable at build time via
-/// `MVM_BOOT_IMAGE_TAG`.
+/// The boot image release the CLI expects: the tag pinned by
+/// `crates/mvm-core/images.lock`, overridable at build time via `MVM_BOOT_IMAGE_TAG`.
 ///
 /// The boot image ships on its own counter (`boot-image/vN`) so a rootfs or
 /// kernel fix does not have to wait for a CLI release. This is the whole tag
 /// rather than a bare version, because it is spliced straight into a release
 /// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
 ///
-/// Downloaders and the merge-queue boot witnesses must stay on this same
-/// published tag. Advancing the constant before the release exists turns every
-/// fresh install's first boot into a 404; advancing only one consumer makes CI
-/// validate a different image from the one users receive.
-pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
-    Some(t) => t,
-    None => "boot-image/v0.1.5",
-};
+/// Every downloader, workflow and boot witness reads this one pin — directly,
+/// or through `scripts/locked-image-tag.sh` where no Rust is available.
+/// Advancing it before the release exists turns every fresh install's first
+/// boot into a 404; a copy left behind makes CI validate a different image from
+/// the one users receive, which is what `xtask check-image-lock` refuses.
+///
+/// The build-time override stays because `nix/images/default-tenant/flake.nix`
+/// reads `MVM_BOOT_IMAGE_TAG`: a build can point at an unpublished tag without
+/// editing the lock, and the lock is what every unset build gets.
+pub fn default_boot_image_tag() -> &'static str {
+    match option_env!("MVM_BOOT_IMAGE_TAG") {
+        Some(tag) => tag,
+        None => crate::image_set::image_train_lock()
+            .boot_image
+            .release_tag
+            .as_str(),
+    }
+}
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch

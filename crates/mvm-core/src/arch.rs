@@ -6,7 +6,10 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// `Ord` so an architecture can key an ordered map. The image lock's per-arch
+// pins are one, and a deterministic key order is what makes the file's
+// rendering reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuestArch {
     X86_64,

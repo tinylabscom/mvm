@@ -43,6 +43,7 @@ mod check_guest_entropy_seed;
 mod check_guest_images_no_builder_tools;
 mod check_guest_init_parity;
 mod check_honesty;
+mod check_image_lock;
 pub(crate) mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
@@ -171,6 +172,10 @@ fn main() -> Result<()> {
         Some("check-deferrals") => {
             let workspace = workspace_root();
             check_deferrals::run(&workspace)
+        }
+        Some("check-image-lock") => {
+            let workspace = workspace_root();
+            check_image_lock::run(&workspace)
         }
         Some("check-honesty") => {
             let workspace = workspace_root();
@@ -479,7 +484,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -523,6 +528,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-honesty                         Verify no open/some-true claim is asserted as established in docs"
+            );
+            eprintln!(
+                "  check-image-lock                        Assert every workflow, script and test reads the boot image pin from images.lock rather than copying it"
             );
             eprintln!(
                 "  check-builder-shell-job-sites           Plan 204 WS-D: freeze the set of files that construct a legacy builder shell-job request"
