@@ -1,0 +1,252 @@
+//! Route one dotted method to the [`MvmClient`] call it names.
+//!
+//! Every method takes one JSON request object and answers with one JSON reply.
+//! Request types refuse unknown fields, so a binding that sends a field this
+//! library does not know about hears so, rather than having it silently
+//! dropped.
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use mvm_core::client::MvmClient;
+use mvm_core::client::dto::{LogOpts, MachineFilter, MachineId};
+use serde::{Deserialize, Serialize};
+
+use crate::status::Outcome;
+
+/// Lists machines. Request: a `MachineFilter`, or an empty body for all.
+/// Reply: an array of `MachineState`.
+pub const MACHINE_LIST: &str = "machine.list";
+/// Inspects one machine. Request: `{"id": ...}`. Reply: a `MachineState`.
+pub const MACHINE_INSPECT: &str = "machine.inspect";
+/// Returns a machine's captured console output. Request: `{"id": ...,
+/// "tail_lines": n?}`. Reply: `{"data_b64": ...}`.
+pub const MACHINE_LOGS: &str = "machine.logs";
+/// Reports what the backend can do. Request: empty. Reply: a
+/// `BackendCapabilityReport`.
+pub const BACKEND_CAPABILITIES: &str = "backend.capabilities";
+
+/// Every method this library answers.
+pub const METHODS: [&str; 4] = [
+    MACHINE_LIST,
+    MACHINE_INSPECT,
+    MACHINE_LOGS,
+    BACKEND_CAPABILITIES,
+];
+
+/// Whether `method` is one this library answers, checked before a client is
+/// built so an unknown method costs nothing.
+pub(crate) fn is_known(method: &str) -> bool {
+    METHODS.contains(&method)
+}
+
+/// A request naming one machine.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineRef {
+    id: String,
+}
+
+/// A `machine.logs` request. There is no `follow`: following a log is a
+/// stream, and a single call returns once.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogsRequest {
+    id: String,
+    #[serde(default)]
+    tail_lines: Option<u32>,
+}
+
+/// A request that carries nothing.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+/// Console bytes, which need not be UTF-8.
+#[derive(Debug, Serialize)]
+struct LogsReply {
+    data_b64: String,
+}
+
+/// Answer `method` on `client`.
+pub(crate) async fn dispatch(client: &dyn MvmClient, method: &str, request: &[u8]) -> Outcome {
+    match answer(client, method, request).await {
+        Ok(outcome) | Err(outcome) => outcome,
+    }
+}
+
+async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<Outcome, Outcome> {
+    Ok(match method {
+        MACHINE_LIST => {
+            let filter: MachineFilter = parse_or_default(request)?;
+            Outcome::ok(&client.list_machines(filter).await?)
+        }
+        MACHINE_INSPECT => {
+            let target: MachineRef = parse(request)?;
+            Outcome::ok(&client.inspect_machine(&MachineId(target.id)).await?)
+        }
+        MACHINE_LOGS => {
+            let target: LogsRequest = parse(request)?;
+            let opts = LogOpts {
+                follow: false,
+                tail_lines: target.tail_lines,
+            };
+            let bytes = client.machine_logs(&MachineId(target.id), opts).await?;
+            Outcome::ok(&LogsReply {
+                data_b64: B64.encode(bytes),
+            })
+        }
+        BACKEND_CAPABILITIES => {
+            let _: Empty = parse_or_default_empty(request)?;
+            Outcome::ok(&client.backend_capabilities().await?)
+        }
+        other => return Err(Outcome::invalid_input(&format!("unknown method `{other}`"))),
+    })
+}
+
+/// Parse `request` as `T`.
+fn parse<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, Outcome> {
+    serde_json::from_slice(request)
+        .map_err(|e| Outcome::invalid_input(&format!("request did not parse: {e}")))
+}
+
+/// Parse `request` as `T`, reading an empty body as `T::default()`.
+fn parse_or_default<T: serde::de::DeserializeOwned + Default>(
+    request: &[u8],
+) -> Result<T, Outcome> {
+    if request.is_empty() {
+        return Ok(T::default());
+    }
+    parse(request)
+}
+
+/// Parse a request that must carry nothing: an empty body or `{}`.
+fn parse_or_default_empty(request: &[u8]) -> Result<Empty, Outcome> {
+    if request.is_empty() {
+        return Ok(Empty {});
+    }
+    parse(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::{MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_NOT_FOUND, MVM_HOSTLIB_OK};
+    use mvm_core::client::dto::{MachineSpec, MachineState};
+    use mvm_core::client::mock::MockBackend;
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    fn with_machine(name: &str) -> (MockBackend, MachineState) {
+        let client = MockBackend::default();
+        let spec = MachineSpec::builder(name, "oci:alpine:3.20")
+            .expect("image parses")
+            .build();
+        let state = run(client.run_machine(spec)).expect("mock runs it");
+        (client, state)
+    }
+
+    fn body(outcome: &Outcome) -> serde_json::Value {
+        serde_json::from_slice(&outcome.body).expect("body is JSON")
+    }
+
+    #[test]
+    fn machine_list_answers_every_machine_for_an_empty_request() {
+        let (client, state) = with_machine("alpha");
+        let outcome = run(dispatch(&client, MACHINE_LIST, b""));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let listed: Vec<MachineState> = serde_json::from_slice(&outcome.body).unwrap();
+        assert_eq!(listed, vec![state]);
+    }
+
+    #[test]
+    fn machine_list_applies_the_filter() {
+        let (client, _) = with_machine("alpha");
+        let outcome = run(dispatch(&client, MACHINE_LIST, br#"{"name":"beta"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome), serde_json::json!([]));
+    }
+
+    #[test]
+    fn machine_inspect_answers_the_named_machine() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_INSPECT, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let inspected: MachineState = serde_json::from_slice(&outcome.body).unwrap();
+        assert_eq!(inspected, state);
+    }
+
+    /// A client error reaches the binding as the client's own code.
+    #[test]
+    fn inspecting_an_absent_machine_is_not_found() {
+        let client = MockBackend::default();
+        let outcome = run(dispatch(&client, MACHINE_INSPECT, br#"{"id":"nope"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+        assert_eq!(body(&outcome)["code"], "NOT_FOUND");
+        assert_eq!(body(&outcome)["retryable"], false);
+    }
+
+    #[test]
+    fn machine_logs_are_returned_as_base64() {
+        let (client, state) = with_machine("alpha");
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "tail_lines": 10 })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_LOGS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome), serde_json::json!({ "data_b64": "" }));
+    }
+
+    /// Following a log is a stream, which one call cannot return.
+    #[test]
+    fn machine_logs_refuses_follow() {
+        let (client, state) = with_machine("alpha");
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "follow": true })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_LOGS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn backend_capabilities_accepts_an_empty_request_and_nothing_else() {
+        let client = MockBackend::default();
+        for request in [&b""[..], b"{}"] {
+            let outcome = run(dispatch(&client, BACKEND_CAPABILITIES, request));
+            assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{request:?}");
+        }
+        let outcome = run(dispatch(&client, BACKEND_CAPABILITIES, br#"{"x":1}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    /// A field this library does not know is refused, not dropped.
+    #[test]
+    fn an_unknown_request_field_is_refused() {
+        let client = MockBackend::default();
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_INSPECT,
+            br#"{"id":"m","extra":true}"#,
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        assert_eq!(body(&outcome)["code"], "INVALID_INPUT");
+    }
+
+    #[test]
+    fn an_unknown_method_is_refused() {
+        let client = MockBackend::default();
+        assert!(!is_known("machine.shell"));
+        let outcome = run(dispatch(&client, "machine.shell", b"{}"));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn every_listed_method_is_known() {
+        for method in METHODS {
+            assert!(is_known(method), "{method}");
+        }
+    }
+}

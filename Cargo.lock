@@ -3268,6 +3268,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-hostlib"
+version = "0.18.0-rc.2"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "mvm-client",
+ "mvm-core",
+ "mvm-vmm",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mvm-http"
 version = "0.18.0-rc.2"
 dependencies = [

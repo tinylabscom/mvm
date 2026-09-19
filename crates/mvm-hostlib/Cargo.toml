@@ -1,0 +1,31 @@
+[package]
+name = "mvm-hostlib"
+description = "Host library C ABI (libmvm_hostlib) — the MvmClient surface, loaded in-process by the language SDKs instead of running mvmctl."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# `cdylib` is the artifact the Python and TypeScript SDKs load. `lib` lets the
+# SDK error taxonomy and the tests reference the status codes as constants
+# instead of restating them.
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# The local backend behind the ABI. Nothing depends on this crate, so linking
+# the whole client closure here cannot form a cycle.
+mvm-client.workspace = true
+mvm-core = { workspace = true, features = ["client"] }
+# The process declarations a library embedder makes before resolving or
+# spawning any helper.
+mvm-vmm.workspace = true
+base64.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true
