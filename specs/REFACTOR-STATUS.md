@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
 ## In progress
 
@@ -162,8 +162,12 @@ Last updated: 2026-09-18
             Rust consumers W5 must replace.
       - [x] W4a #3362: guest recipes exported from `nix/flake.nix`; image
             flakes consume them with byte-identical derivations.
-      - [ ] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input.
+      - [x] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input
+            (tinylabscom/mvm-images#4).
       - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
+            Comparison done, every difference explained; x86_64 Firecracker
+            boots and builds, HVF boots; outstanding: aarch64 Firecracker boot
+            and a completed HVF builder build. Found #3499, #3500, #3502.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
