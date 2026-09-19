@@ -238,6 +238,9 @@ pub struct HvfSupervisorConfig {
     /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
     #[serde(default)]
     pub broker_socket: Option<PathBuf>,
+    /// Per-VM view-only display sink. The guest can only dial out to it.
+    #[serde(default)]
+    pub display_socket: Option<PathBuf>,
     /// Additional host-dial sockets: telemetry, dev-only console channels and
     /// declared TCP ingress forwards. Telemetry does not require console or
     /// ingress grants. An empty list binds no extra guest ports.
@@ -324,6 +327,7 @@ mod tests {
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
+            display_socket: Some("/state/hvf-display.sock".into()),
             console_data_sockets: vec![],
             builder_control_sockets: vec![],
             exclusive_image_lock: None,
@@ -372,6 +376,7 @@ mod tests {
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.egress_relay_socket, None);
         assert_eq!(cfg.broker_socket, None);
+        assert_eq!(cfg.display_socket, None);
         assert_eq!(cfg.pause_state, None);
         assert_eq!(cfg.handoff_socket, None);
         assert_eq!(cfg.handoff_root, None);
@@ -450,6 +455,7 @@ mod tests {
             substitution_socket: None,
             egress_relay_socket: None,
             broker_socket: None,
+            display_socket: None,
             builder_control_sockets: vec![],
             exclusive_image_lock: None,
             console_data_sockets: vec![

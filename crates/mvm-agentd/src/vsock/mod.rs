@@ -119,6 +119,12 @@ pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 /// NOTE: exposing it end-to-end needs the host-side proxy port-allowlist to admit it.
 pub const EGRESS_PORT: u32 = mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT;
 
+/// View-only display frames dial this host port. The host exposes it only for
+/// a plan carrying `host.display.view.v1`; no host-to-guest listener shares it.
+pub const DISPLAY_PORT: u32 = mvm_contract::stream::DISPLAY_FRAME_PORT;
+
+const _: () = assert!(DISPLAY_PORT == 5255);
+
 // A compile-time proof rather than a test: the guest dials this port and the
 // host binds it from `mvm_net::GuestService::NetworkFlow`. Both derive from the
 // contract constant, so drift is not expressible — this pins the value the

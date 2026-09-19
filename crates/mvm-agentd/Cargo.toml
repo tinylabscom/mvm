@@ -16,6 +16,10 @@ path = "src/bin/mvm-builder-agent.rs"
 name = "mvm-guest-agent"
 path = "src/bin/mvm-guest-agent.rs"
 
+[[bin]]
+name = "mvm-display-bridge"
+path = "src/bin/mvm-display-bridge.rs"
+
 # Small static-musl privilege-drop helper used by the Nix-built guest init.
 # It has a deliberately narrow flag surface and no dependency on util-linux.
 [[bin]]

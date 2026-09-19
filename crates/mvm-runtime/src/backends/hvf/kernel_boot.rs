@@ -320,6 +320,8 @@ pub struct HostChannels {
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
     pub broker_socket: Option<PathBuf>,
+    /// Per-VM view-only display frame sink.
+    pub display_socket: Option<PathBuf>,
     /// Additional host-dial listeners, including telemetry and admitted console
     /// data channels. Telemetry is present independently of console grants.
     pub console_data_sockets: Vec<(u32, PathBuf)>,
@@ -777,6 +779,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 egress_relay: channels.egress_relay,
                 trusted_builder_egress: channels.trusted_builder_egress,
                 broker_socket: channels.broker_socket,
+                display_socket: channels.display_socket,
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
@@ -839,6 +842,7 @@ struct RunInputs {
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
+    display_socket: Option<PathBuf>,
     /// Additional host-dial listeners, including telemetry and console channels.
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
@@ -1482,6 +1486,7 @@ unsafe fn run(
         egress_relay,
         trusted_builder_egress,
         broker_socket,
+        display_socket,
         console_data_sockets,
         builder_control_sockets,
         console_log,
@@ -1747,6 +1752,10 @@ unsafe fn run(
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
             }
+            if let Some(display) = display_socket.as_ref() {
+                v.set_display_activity(egress_active.clone());
+                v.set_display_endpoint(display);
+            }
             // Bind the explicitly supplied telemetry, console and builder
             // listeners through the shared host-dial bridge. Telemetry does not
             // enable a console or grant network access. The activity counter
@@ -1861,11 +1870,13 @@ unsafe fn run(
                 v.set_agent_activity(egress_active.clone());
                 v.set_substitution_activity(egress_active.clone());
                 v.set_broker_activity(egress_active.clone());
+                v.set_display_activity(egress_active.clone());
                 v.set_host_dial_activity(egress_active.clone());
                 let bindings = crate::vmm::vsock::VsockHostBindings {
                     agent_socket: agent_socket.clone(),
                     network_endpoint: egress_relay.clone().or_else(|| substitution_socket.clone()),
                     broker_endpoint: broker_socket.clone(),
+                    display_endpoint: display_socket.clone(),
                     console_sockets: console_data_sockets.clone(),
                 };
                 v.rebind_host_channels(&bindings, Arc::new(GicSpi))

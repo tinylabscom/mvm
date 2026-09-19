@@ -31,6 +31,9 @@ pub mod console;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
+/// Fixed-method Chrome DevTools screencast bridge. It emits view-only frames
+/// to the host and has no host-to-CDP command path.
+pub mod display_bridge;
 /// Shared SOCKS5/HTTP parsing helpers for the FlowMux egress adapter.
 #[cfg(feature = "addons")]
 pub(crate) mod egress_client;

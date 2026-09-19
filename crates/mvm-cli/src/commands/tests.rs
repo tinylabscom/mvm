@@ -5460,6 +5460,20 @@ fn machine_logs_parses() {
 }
 
 #[test]
+fn machine_display_parses_as_a_view_only_machine_command() {
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "display", "myvm"]).unwrap();
+    let Commands::Machine(machine) = cli.command else {
+        panic!("expected machine group")
+    };
+    match machine.action {
+        machine::MachineAction::Vm(vm::group::VmCmd::Display(args)) => {
+            assert_eq!(args.name, "myvm")
+        }
+        _ => panic!("expected machine display action"),
+    }
+}
+
+#[test]
 fn machine_console_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "machine", "console", "myvm"]).unwrap();
     let Commands::Machine(mg) = cli.command else {

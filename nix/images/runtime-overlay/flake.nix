@@ -373,13 +373,14 @@
             # Staging tree — the eventual filesystem root inside the
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
-            # /agent, /seccomp-apply, /netinit, /runner,
+            # /agent, /display-bridge, /seccomp-apply, /netinit, /runner,
             # /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging"
 
             cp ${guest}/bin/mvm-guest-agent "$staging/agent"
+            cp ${guest}/bin/mvm-display-bridge "$staging/display-bridge"
             cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner "$staging/runner"
