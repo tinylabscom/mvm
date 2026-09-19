@@ -24,6 +24,7 @@ pub(super) const GC_ROOTS_DIR: &str = "/nix/var/nix/gcroots";
 
 /// The seed's `.reginfo`, copied out of the root disk before the persistent
 /// store is bound over `/nix` and hides it.
+#[cfg(target_os = "linux")]
 pub(super) const SEED_REGINFO_STASH: &str = "/run/mvm-stage0-seed.reginfo";
 
 /// The collection threshold, in KiB of used space, read off the kernel
@@ -65,6 +66,7 @@ pub(super) fn output_root(mode: &str) -> Option<PathBuf> {
 }
 
 /// The root pinning one seed component (`nix`, `cacert`).
+#[cfg(target_os = "linux")]
 pub(super) fn seed_root(component: &str) -> PathBuf {
     Path::new(GC_ROOTS_DIR).join(format!("mvm-stage0-seed-{component}"))
 }

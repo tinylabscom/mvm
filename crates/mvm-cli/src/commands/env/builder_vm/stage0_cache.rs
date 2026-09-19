@@ -56,39 +56,6 @@ impl std::fmt::Display for Stage0FailureStage {
     }
 }
 
-/// Extract libkrunfw's bundled TSI-patched kernel into the host cache
-/// and return the on-disk path. Only available when `libkrun-sys` is
-/// compiled in (the default on macOS + Linux libkrun hosts) — without
-/// that feature the FFI is dead code and the caller falls back.
-///
-/// Currently unused on the main path; reserved for wiring the
-/// initramfs Stage 0 dispatch (the initramfs path needs a kernel and
-/// libkrunfw is where we get it).
-#[cfg(all(feature = "builder-vm", feature = "libkrun-sys"))]
-#[allow(dead_code)]
-fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
-    let cache_dir =
-        std::path::PathBuf::from(format!("{}/libkrunfw", mvm_core::config::mvm_cache_dir()));
-    let target = cache_dir.join("vmlinux");
-    let bundled = libkrun_sys::extract_bundled_kernel(&target)
-        .map_err(|e| anyhow::anyhow!("libkrunfw kernel extraction: {e}"))?;
-    ui::info(&format!(
-        "Extracted libkrunfw kernel ({} bytes) to {}",
-        bundled.size,
-        bundled.path.display()
-    ));
-    Ok(bundled.path)
-}
-
-#[cfg(all(feature = "builder-vm", not(feature = "libkrun-sys")))]
-#[allow(dead_code)]
-fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
-    anyhow::bail!(
-        "libkrunfw kernel extraction requires the `libkrun-sys` feature; \
-         rebuild `mvmctl` with `--features libkrun-sys` on a host with libkrun installed."
-    )
-}
-
 /// Short prefix of the source fingerprint for audit
 /// `fingerprint_prefix=` field. 8 hex chars are enough to disambiguate
 /// against unrelated build runs without exposing the full digest.

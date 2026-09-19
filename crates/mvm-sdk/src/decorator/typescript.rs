@@ -327,8 +327,7 @@ fn eval_value(node: Node, source: &[u8], path: &Path, kwarg: &str) -> Result<Val
                     })
             }
         }
-        "true" => Ok(Value::Bool(true)),
-        "false" => Ok(Value::Bool(false)),
+        "true" | "false" => Ok(Value::Bool),
         "null" | "undefined" => Ok(Value::None),
         "array" => {
             let mut items = Vec::new();

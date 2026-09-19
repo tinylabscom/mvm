@@ -14,7 +14,6 @@ pub fn mvmctl() -> Command {
 ///
 /// Exit code 2 is Clap's parse-error code.  A runtime failure (exit 1) is
 /// acceptable in E2E tests running without a Lima VM present.
-#[allow(dead_code)]
 pub fn assert_parse_ok(args: &[&str]) {
     let assert = mvmctl().args(args).assert();
     let code = assert.get_output().status.code().unwrap_or(-1);

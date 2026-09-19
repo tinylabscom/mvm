@@ -185,17 +185,13 @@ fn build_glob_set(patterns: &[String], default: &[String]) -> Result<GlobSet, So
 enum EntryKind {
     File,
     Symlink,
-    /// Reserved for future use; the `tree_hash` format admits a `d` kind but
-    /// v0.1 does not emit directory entries (empty dirs are not preserved).
-    #[allow(dead_code)]
-    Directory,
 }
 
 struct TreeEntry {
     relative_path: String,
     kind: EntryKind,
     mode: u32,
-    /// SHA-256 hex for files, target string for symlinks, empty for dirs.
+    /// SHA-256 hex for files, target string for symlinks.
     content_record: Vec<u8>,
 }
 
@@ -335,7 +331,6 @@ fn compute_tree_hash(entries: &[TreeEntry]) -> String {
         let kind_byte = match entry.kind {
             EntryKind::File => b'f',
             EntryKind::Symlink => b'l',
-            EntryKind::Directory => b'd',
         };
         hasher.update([kind_byte, b' ']);
         hasher.update(format!("{:04o}", entry.mode).as_bytes());

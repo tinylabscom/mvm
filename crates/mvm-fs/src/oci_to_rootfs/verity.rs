@@ -367,11 +367,9 @@ fn run_veritysetup_format(
 /// output is a block of "key:value" lines; we look for the
 /// `Root hash:` line and return its trimmed hex value (lowercase).
 ///
-/// Compiled on every host so the unit tests can exercise it
-/// without `veritysetup` installed; on non-Linux production
-/// builds the function is unreachable, which clippy flags
-/// without the `cfg_attr` below.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Linux calls it after running `veritysetup`; the unit tests exercise it
+/// on every host without `veritysetup` installed.
+#[cfg(any(target_os = "linux", test))]
 fn parse_root_hash(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         // Be permissive about case (`Root hash` vs `Roothash`)

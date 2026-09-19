@@ -60,20 +60,19 @@ fn archive_bytes() -> Vec<u8> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Expected {
-    #[allow(dead_code)]
-    description: String,
+    /// Prose for a human reader of the sidecar; required, never asserted.
+    #[serde(rename = "description")]
+    _description: serde::de::IgnoredAny,
     host_pubkey_hex: String,
     integrity: String,
     inclusion: String,
     completeness: String,
     exit_code: i32,
-    #[allow(dead_code)]
     negatives: Vec<Negative>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct Negative {
     name: String,
     mutation: String,
@@ -144,6 +143,35 @@ fn regenerate_the_frozen_archive_vector() {
         "refusing to overwrite a committed vector without MVM_REGENERATE_VECTORS=1"
     );
     std::fs::write(ARCHIVE_PATH, build_vector_archive()).expect("write the frozen archive");
+}
+
+/// The sidecar's negatives are the mutations a conforming verifier must
+/// reject. Each one is exercised by a test below; this keeps that set and the
+/// sidecar's list from drifting apart in either direction.
+#[test]
+fn the_sidecar_declares_exactly_the_negatives_exercised_here() {
+    let declared: BTreeMap<String, String> = expected()
+        .negatives
+        .into_iter()
+        .map(|negative| {
+            assert!(
+                !negative.mutation.trim().is_empty(),
+                "negative `{}` describes no mutation",
+                negative.name
+            );
+            (negative.name, negative.fails)
+        })
+        .collect();
+    let exercised: BTreeMap<String, String> = [
+        ("tampered-manifest", "integrity"),
+        ("missing-member", "integrity"),
+        ("digest-drift", "integrity"),
+        ("proof-moved-to-another-leaf", "inclusion"),
+    ]
+    .into_iter()
+    .map(|(name, fails)| (name.to_string(), fails.to_string()))
+    .collect();
+    assert_eq!(declared, exercised);
 }
 
 #[test]

@@ -25,10 +25,8 @@
 //! **Module shape.** Cross-platform so `cargo test` on macOS hosts
 //! exercises the JSON writer without paying for a Linux cross-
 //! compile. The Linux-only `linux` module in `main.rs` is the only
-//! caller; macOS / non-Linux builds compile this module but never
-//! call into it. `#[allow(dead_code)]` at the `mod` site in `main.rs`
-//! handles the workspace-ergonomics dead-code warning the same way
-//! `install` and `proxy` are handled.
+//! caller, so the `mod` site compiles this module on other hosts only
+//! for tests.
 
 use std::time::Instant;
 

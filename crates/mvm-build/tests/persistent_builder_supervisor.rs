@@ -274,7 +274,6 @@ fn shutdown_writes_shutdown_request_and_consumes_bye() {
 // Suppress the unused-import warning when running under feature
 // gates that don't actually pull DispatchOutcome — keeps clippy
 // silent without `#[allow]`.
-#[allow(dead_code)]
 fn _force_use(_: DispatchOutcome) {}
 
 /// Recording fake for `BuilderAuditSink`.

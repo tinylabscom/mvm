@@ -1,29 +1,34 @@
-// The vsock leaf (`sys`) is Linux-only, so the accept loop lives behind a
-// Linux `main`; the request-handling helpers stay compiled (but unused) off
-// Linux so the workspace still builds on macOS dev hosts.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
+// The vsock leaf (`sys`) is Linux-only, so the accept loop and every helper
+// it reaches compile only on Linux. Elsewhere `main` just says so.
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
 use mvm_agentd::builder_agent::{
     HostVmRequest, HostVmResponse, load_security_policy, validate_build_attr, validate_flake_ref,
 };
 #[cfg(target_os = "linux")]
 use mvm_agentd::vsock::sys;
 
+#[cfg(target_os = "linux")]
 const PORT: u32 = mvm_agentd::builder_agent::BUILDER_AGENT_PORT;
 
 /// Accept-queue depth for the builder-agent listener.
+#[cfg(target_os = "linux")]
 const LISTEN_BACKLOG: i32 = 16;
 
+#[cfg(target_os = "linux")]
 fn child_command(program: &str) -> Command {
     let mut command = Command::new(program);
     mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
     command
 }
 
+#[cfg(target_os = "linux")]
 fn handle_client(conn: OwnedFd) {
     let file = std::fs::File::from(conn);
     let mut reader = BufReader::new(file);
@@ -112,6 +117,7 @@ fn handle_client(conn: OwnedFd) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn write_resp(reader: &mut BufReader<std::fs::File>, resp: HostVmResponse) {
     let writer = reader.get_mut();
     if let Err(e) = writeln!(
@@ -127,6 +133,7 @@ fn write_resp(reader: &mut BufReader<std::fs::File>, resp: HostVmResponse) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_mount(
     reader: &mut BufReader<std::fs::File>,
     dev: &str,
@@ -150,6 +157,7 @@ fn ensure_mount(
 }
 
 /// Find the nix binary, searching well-known install locations.
+#[cfg(target_os = "linux")]
 fn find_nix_bin() -> Option<String> {
     let candidates = [
         "/nix/var/nix/profiles/default/bin/nix",
@@ -187,6 +195,7 @@ fn find_nix_bin() -> Option<String> {
 }
 
 /// Return PATH prefix that includes the directory containing nix.
+#[cfg(target_os = "linux")]
 fn nix_path_prefix() -> String {
     if let Some(nix_bin) = find_nix_bin()
         && let Some(dir) = std::path::Path::new(&nix_bin).parent()
@@ -197,6 +206,7 @@ fn nix_path_prefix() -> String {
     "/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin".to_string()
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
     // Check if nix is already available.
     if find_nix_bin().is_some() {
@@ -265,6 +275,7 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_nix_conf() {
     let conf = "experimental-features = nix-command flakes\n";
     if let Err(e) = std::fs::create_dir_all("/etc/nix") {
@@ -281,6 +292,7 @@ fn ensure_nix_conf() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_build(
     reader: &mut BufReader<std::fs::File>,
     flake_ref: &str,

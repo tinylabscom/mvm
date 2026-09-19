@@ -25,12 +25,10 @@ use std::process::ExitCode;
 mod build_config;
 
 #[cfg(any(target_os = "linux", test))]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[path = "stage0-init/store_gc.rs"]
 mod store_gc;
 
 #[cfg(any(target_os = "linux", test))]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[path = "stage0-init/seed.rs"]
 mod seed;
 

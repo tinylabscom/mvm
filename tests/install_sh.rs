@@ -141,17 +141,20 @@ fn stub_mvmctl(version: &str) -> String {
 
 /// Where a fake release places its entitlement profiles. Real releases through
 /// v0.17.0 shipped `Resources`; install.sh has always written `Assets` itself.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntitlementsLayout {
     Assets,
+    #[cfg(target_os = "macos")]
     Resources,
     /// Distinct content in each location, so a test can tell which one won.
+    #[cfg(target_os = "macos")]
     Both,
+    #[cfg(target_os = "macos")]
     Missing,
     /// mvmctl has its normal assets/ profile; mvm-supervisor.entitlements is
     /// at neither location, isolating the supervisor's already-entitled /
     /// builtin-fallback path from mvmctl's own signing.
+    #[cfg(target_os = "macos")]
     SupervisorMissing,
 }
 
@@ -160,14 +163,17 @@ const SUPERVISOR_ENTITLEMENTS: &[u8] = b"<plist><key>com.apple.security.hypervis
 // Only ever written under resources/ in a release that also carries the real
 // profile under assets/, so a test can assert assets/ won without inspecting
 // the fake codesign log.
+#[cfg(target_os = "macos")]
 const MVMCTL_ENTITLEMENTS_RESOURCES_DECOY: &[u8] =
     b"<plist><key>decoy-should-not-be-installed-mvmctl</key></plist>\n";
+#[cfg(target_os = "macos")]
 const SUPERVISOR_ENTITLEMENTS_RESOURCES_DECOY: &[u8] =
     b"<plist><key>decoy-should-not-be-installed-supervisor</key></plist>\n";
 // A well-formed plist, unlike MVMCTL_ENTITLEMENTS above: the already-entitled
 // tests drive real codesign end to end (fake_codesign only logs args and
 // never parses them), and real codesign refuses to sign with an entitlements
 // file it cannot parse as a plist.
+#[cfg(target_os = "macos")]
 const VALID_MVMCTL_ENTITLEMENTS_PLIST: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
     <plist version=\"1.0\"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>\n";
@@ -279,6 +285,7 @@ impl Release {
                     0o644,
                 );
             }
+            #[cfg(target_os = "macos")]
             EntitlementsLayout::Resources => {
                 append(
                     format!("{dir}/resources/mvmctl.entitlements"),
@@ -291,6 +298,7 @@ impl Release {
                     0o644,
                 );
             }
+            #[cfg(target_os = "macos")]
             EntitlementsLayout::Both => {
                 append(
                     format!("{dir}/assets/mvmctl.entitlements"),
@@ -313,9 +321,11 @@ impl Release {
                     0o644,
                 );
             }
+            #[cfg(target_os = "macos")]
             EntitlementsLayout::Missing => {
                 append(format!("{dir}/assets/NOTICE"), b"no profiles\n", 0o644);
             }
+            #[cfg(target_os = "macos")]
             EntitlementsLayout::SupervisorMissing => {
                 // Well-formed, unlike MVMCTL_ENTITLEMENTS above: these tests
                 // drive real codesign (to exercise already_entitled against a

@@ -56,18 +56,16 @@ pub const HELPER_ALLOWLIST: &[&str] = &[
 /// The parsed shape of a kwarg's value. Lowered to IR types by
 /// [`lower_to_workload`].
 ///
-/// `Bool`/`Float` are accepted at the parser level so future helpers
-/// can take them (e.g. fractional cpu shares); v1 lowering doesn't
-/// consume them but the shape is reserved so adding a helper that
-/// does isn't a parser change. `dead_code` allow covers that
-/// future-proofing window.
-#[allow(dead_code)]
+/// `Bool` and `Float` parse so that a helper handed one can refuse it by
+/// kwarg name (for example a retired flag) instead of the whole
+/// decorator failing as a non-literal. No helper consumes a boolean's
+/// value, so `Bool` carries none.
 #[derive(Debug, Clone)]
 pub enum Value {
     Str(String),
     Int(i64),
     Float(f64),
-    Bool(bool),
+    Bool,
     None,
     List(Vec<Value>),
     Dict(BTreeMap<String, Value>),

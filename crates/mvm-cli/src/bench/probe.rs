@@ -20,7 +20,6 @@ const PROBE_MEM_MIB: u32 = 2048;
 /// the canonical runtime image, NOT the interactive rootfs.
 // Fields are read by the live `boot_measure_once` + the HostDescriptor
 // kernel-sha; until then only the test reads them.
-#[allow(dead_code)]
 pub struct ProbeImage {
     pub kernel: String,
     pub rootfs: String,
@@ -30,7 +29,6 @@ pub struct ProbeImage {
 /// same way `mvmctl up` does. No artifact override flags: the bench
 /// measures the real runtime launch path, so it pins to one canonical
 /// target (a `HostDescriptor`-comparable baseline).
-#[allow(dead_code)]
 pub fn resolve_probe_image() -> Result<ProbeImage> {
     // Bench baseline boots the published, admitted prod default image.
     let (kernel, rootfs) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
@@ -46,7 +44,6 @@ pub fn resolve_probe_image() -> Result<ProbeImage> {
 /// `Some(tempdir)` so they never touch the real user's home. Drives the
 /// real claim-8 admission path — the bench must never benchmark a boot
 /// that bypasses admission.
-#[allow(dead_code)]
 pub fn admit_probe_plan(
     rootfs: &std::path::Path,
     vm_name: &str,

@@ -170,11 +170,9 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
 /// error — we'd otherwise pass nonsense to libkrun and watch it
 /// fail late with an opaque rc.
 ///
-/// Always-on so unit tests can exercise it without the `libkrun-sys`
-/// feature. `configure_pre_net` is the only non-test caller and is
-/// gated behind that feature, so the dead-code allow keeps the
-/// non-feature library build quiet.
-#[cfg_attr(not(feature = "libkrun-sys"), allow(dead_code))]
+/// `configure_pre_net`, the only non-test caller, needs the `libkrun-sys`
+/// feature; the unit tests exercise it without that feature.
+#[cfg(any(feature = "libkrun-sys", test))]
 fn validate_boot_config(ctx: &KrunContext) -> Result<(), Error> {
     let has_kernel = ctx.kernel_path.is_some();
     let has_rootfs = ctx.rootfs_path.is_some();

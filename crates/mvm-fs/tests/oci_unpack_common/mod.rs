@@ -3,12 +3,8 @@
 //! so each hostile-input class can be constructed once and asserted
 //! against `ImageStaging::apply_layer`.
 //!
-//! Not a real `#[test]` file — just helpers re-exported into the
-//! attack-class tests via `mod oci_unpack_common;` at the top of
-//! each.
-
-#![allow(dead_code)]
-
+//! Not a real `#[test]` file — helpers pulled into
+//! `oci_unpack_attacks.rs` via `mod oci_unpack_common;`.
 use std::path::Path;
 use tar::{Builder, EntryType, Header};
 
@@ -84,13 +80,6 @@ pub fn add_entry_of_type(builder: &mut Builder<Vec<u8>>, path: &str, entry_type:
 /// Finish the tar builder and return the in-memory bytes.
 pub fn finish(builder: Builder<Vec<u8>>) -> Vec<u8> {
     builder.into_inner().expect("finish tar")
-}
-
-/// Build a single-entry tar with one regular file.
-pub fn simple_file_tar(path: &str, contents: &[u8]) -> Vec<u8> {
-    let mut b = Builder::new(Vec::new());
-    add_file(&mut b, path, contents);
-    finish(b)
 }
 
 /// Construct an in-memory tar from a list of unchecked entries.

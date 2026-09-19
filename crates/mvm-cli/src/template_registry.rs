@@ -39,8 +39,6 @@ pub enum TemplateSource {
 /// Raw remote index shape.
 #[derive(Debug, Deserialize)]
 struct RemoteIndex {
-    #[allow(dead_code)]
-    schema_version: u32,
     templates: Vec<RemoteIndexEntry>,
 }
 
