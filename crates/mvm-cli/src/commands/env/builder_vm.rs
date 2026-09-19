@@ -17,6 +17,7 @@ mod kernel;
 #[cfg(test)]
 mod published_fetch_tests;
 mod sdk_sidecar;
+mod setpriv_source;
 mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
