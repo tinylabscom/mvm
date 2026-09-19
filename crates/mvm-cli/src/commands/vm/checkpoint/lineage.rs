@@ -41,11 +41,20 @@ pub struct SignedChainAnchor {
     /// creation. The namespace tag (`checkpoint` / `image`) keeps the checkpoint
     /// and image key spaces structurally disjoint in one map, rather than
     /// relying on their raw id/digest strings happening not to collide.
-    recorded: std::collections::HashMap<String, CheckpointDigest>,
+    recorded: std::collections::HashMap<String, RecordedCreation>,
     /// Host-lifecycle chains whose signatures did not verify, in the order
     /// encountered. Non-empty turns a lookup miss from "never audited" into
     /// "cannot tell" — see the type docs.
     unverifiable: Vec<std::path::PathBuf>,
+}
+
+/// What a signed creation entry recorded about one record.
+#[derive(Debug, Clone)]
+struct RecordedCreation {
+    /// The content-address the entry recorded.
+    digest: CheckpointDigest,
+    /// The tenant whose chain the entry was signed into.
+    tenant: String,
 }
 
 /// Namespace tag for a checkpoint-id key in [`SignedChainAnchor::recorded`].
@@ -136,7 +145,7 @@ impl SignedChainAnchor {
     /// tell, which is an `Err` rather than a `None`. Both refuse the record, so
     /// this changes no verdict — it changes what the operator is told to do
     /// about it.
-    fn lookup(&self, key: &str) -> Result<Option<CheckpointDigest>> {
+    fn lookup(&self, key: &str) -> Result<Option<RecordedCreation>> {
         if let Some(recorded) = self.recorded.get(key) {
             return Ok(Some(recorded.clone()));
         }
@@ -169,7 +178,7 @@ impl SignedChainAnchor {
 /// the node's identity *is* its content-address — so it keys the digest under
 /// itself.
 fn index_creation_digest(
-    recorded: &mut std::collections::HashMap<String, CheckpointDigest>,
+    recorded: &mut std::collections::HashMap<String, RecordedCreation>,
     envelope: &mvm_hostd::supervisor::SignedEnvelope,
 ) -> Result<()> {
     use mvm_hostd::audit::emitter::checkpoint_audit as k;
@@ -193,7 +202,10 @@ fn index_creation_digest(
     if let (Some(id), Some(digest)) = (labels.get(id_key), labels.get(digest_key)) {
         recorded.insert(
             anchor_key(namespace, id),
-            CheckpointDigest::parse(digest.clone())?,
+            RecordedCreation {
+                digest: CheckpointDigest::parse(digest.clone())?,
+                tenant: envelope.entry.tenant.0.clone(),
+            },
         );
     }
     Ok(())
@@ -201,7 +213,15 @@ fn index_creation_digest(
 
 impl CheckpointChainAnchor for SignedChainAnchor {
     fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>> {
-        self.lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))
+        Ok(self
+            .lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))?
+            .map(|recorded| recorded.digest))
+    }
+
+    fn recorded_creation_tenant(&self, meta: &CheckpointMeta) -> Result<Option<String>> {
+        Ok(self
+            .lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))?
+            .map(|recorded| recorded.tenant))
     }
 }
 
@@ -210,7 +230,9 @@ impl CheckpointChainAnchor for SignedChainAnchor {
 /// digest the `image.created` entry recorded, under the image namespace.
 impl ImageChainAnchor for SignedChainAnchor {
     fn recorded_creation_digest(&self, node: &ImageNode) -> Result<Option<CheckpointDigest>> {
-        self.lookup(&anchor_key(IMAGE_NS, node.node_digest.as_str()))
+        Ok(self
+            .lookup(&anchor_key(IMAGE_NS, node.node_digest.as_str()))?
+            .map(|recorded| recorded.digest))
     }
 }
 
@@ -357,6 +379,43 @@ mod tests {
         assert!(
             !msg.contains(mvm_runtime::lineage::NO_SIGNED_ENTRY),
             "must not also claim the record was never audited: {msg}"
+        );
+    }
+
+    /// The tenant a checkpoint belongs to is the one whose signed chain carries
+    /// its creation entry, read from the entry itself rather than from the
+    /// chain's file name or the record on disk.
+    #[test]
+    fn the_recorded_tenant_is_the_one_the_creation_entry_was_signed_under() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("acme")
+            .plan_id("plan-lineage-tenant")
+            .build();
+        let record = meta("cp-acme");
+        let emitter = AuditEmitter::new(load_or_init().unwrap().signing).unwrap();
+        emitter
+            .emit_checkpoint_created(
+                &plan,
+                "cp-acme",
+                "fs_quick",
+                record.compute_meta_digest().as_str(),
+                record.vm_name.as_str(),
+            )
+            .unwrap();
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        assert_eq!(
+            CheckpointChainAnchor::recorded_creation_tenant(&anchor, &record).unwrap(),
+            Some("acme".to_string())
+        );
+        assert_eq!(
+            CheckpointChainAnchor::recorded_creation_tenant(&anchor, &meta("cp-absent")).unwrap(),
+            None,
+            "no creation entry, no owning tenant"
         );
     }
 

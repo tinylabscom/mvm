@@ -209,6 +209,22 @@ extern "C" fn on_resume_signal(_: libc::c_int) {
     PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The verified saved state the launcher handed over, when this boot is a
+/// restore.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn restore_image_from(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> anyhow::Result<Option<mvm_runtime::backends::hvf::snapshot::RestoreImage>> {
+    use mvm_vmm::host::restore_image::adopt_inherited;
+    let Some(fds) = cfg.restore_descriptors()? else {
+        return Ok(None);
+    };
+    Ok(Some(mvm_runtime::backends::hvf::snapshot::RestoreImage {
+        ram: adopt_inherited(fds.ram)?,
+        frame: adopt_inherited(fds.frame)?,
+    }))
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
     use std::io::{Read, Write};
@@ -255,6 +271,14 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = &cfg.pause_state {
         let _ = std::fs::remove_file(path);
     }
+
+    // Adopt the verified saved state before anything else can open a file, so
+    // no descriptor number is reused out from under it.
+    let restore = restore_image_from(&cfg)?;
+    let ready_marker = restore
+        .as_ref()
+        .and(cfg.pid_file.parent())
+        .map(mvm_vmm::host::hvf_supervisor::restore_ready_path);
 
     if !cfg.kernel.is_file() {
         anyhow::bail!("kernel {} is not a readable file", cfg.kernel.display());
@@ -403,8 +427,8 @@ fn main() -> anyhow::Result<()> {
                 snapshot_request: cfg.snapshot_request.clone(),
                 snapshot_ram: cfg.snapshot_ram.clone(),
                 snapshot_frame: cfg.snapshot_frame.clone(),
-                restore_ram: cfg.restore_ram.clone(),
-                restore_frame: cfg.restore_frame.clone(),
+                restore,
+                ready_marker,
                 handoff_socket: cfg.handoff_socket.clone(),
                 handoff_root: cfg.handoff_root.clone(),
                 handoff_verify_key: cfg.handoff_verify_key.clone(),

@@ -25,6 +25,7 @@ pub mod private_file;
 pub mod process_exit;
 pub mod process_liveness;
 pub mod process_usage;
+pub mod restore_image;
 pub mod runtime_meta;
 pub mod shell;
 pub mod snapshot_upper;

@@ -147,6 +147,14 @@ impl WarmClaimAnchor {
 }
 
 impl CheckpointChainAnchor for WarmClaimAnchor {
+    fn recorded_creation_tenant(&self, meta: &CheckpointMeta) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .verdict
+            .as_ref()
+            .filter(|(id, _)| *id == meta.id.to_string())
+            .map(|_| "local".to_string()))
+    }
+
     fn recorded_creation_digest(
         &self,
         meta: &CheckpointMeta,

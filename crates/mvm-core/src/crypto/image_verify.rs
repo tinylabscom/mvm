@@ -144,13 +144,20 @@ pub fn verify_signed_payload_under_any_identity(
 /// Stream a file through SHA-256 and return the lowercase hex digest.
 #[tracing::instrument(name = "sha256_file.uncached", skip_all, fields(path = %path.display()))]
 pub fn sha256_file(path: &Path) -> io::Result<String> {
-    use io::Read as _;
-    let mut file = fs::File::open(path)?;
+    sha256_reader(fs::File::open(path)?)
+}
+
+/// Stream any reader through SHA-256 and return the lowercase hex digest.
+///
+/// For callers that must hash an already-open descriptor rather than reopen a
+/// path: a check over a name can be satisfied by one file and the use handed
+/// another.
+pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut read_total: u64 = 0;
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -257,6 +264,26 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Hashing an open reader gives the same digest as hashing the file by
+    /// path, across a buffer boundary, and the empty input hashes to the
+    /// well-known empty digest.
+    #[test]
+    fn sha256_reader_agrees_with_sha256_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let bytes: Vec<u8> = (0..200_000_u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let by_path = sha256_file(&path).unwrap();
+        let by_reader = sha256_reader(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(by_reader, by_path);
+        assert_eq!(sha256_reader(bytes.as_slice()).unwrap(), by_path);
+        assert_eq!(
+            sha256_reader(std::io::empty()).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     #[test]
     fn sha256_file_cached_matches_uncached_and_invalidates_on_change() {
