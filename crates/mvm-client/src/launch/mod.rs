@@ -11,7 +11,9 @@
 pub mod grants_report;
 pub mod machine_start;
 pub mod persistent;
+pub mod profile;
 mod request;
+pub mod run_spec;
 pub mod runtime_overlay;
 pub mod runtime_source;
 pub mod start_params;

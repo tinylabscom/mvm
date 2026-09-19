@@ -324,8 +324,12 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
         there is one persistent machine lifecycle. Fold fleet-signed plans and
         assurance campaigns into the one admission rather than keeping
         `mvm_hostd::run::admit_and_boot_local` as a second path for them.
-  - [ ] Witness: one request yields the same signed plan whether it enters
-        through `mvmctl machine run` or through `mvm_client::launch`.
+  - [x] Witness that one request persists one spec whichever surface makes
+        it: `machine_run_and_the_library_persist_the_same_spec_for_the_same_request`.
+        The spec is built by `mvm_client::launch::run_spec::RunSpec` and started
+        by `machine_start::start_machine_spec` on both surfaces, so the plan
+        admitted from it is shared by construction. The library's start host,
+        `EmbedderStartHost`, never builds.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.

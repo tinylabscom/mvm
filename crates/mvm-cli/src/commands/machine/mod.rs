@@ -558,88 +558,50 @@ fn machine_run_spec(
     name: String,
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
+    use mvm_client::launch::run_spec::{RunSource, RunSpec, missing_source};
+
     validate_machine_name(&name)?;
-    let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
-        let deployment = resolve_local_deployment(path)?;
-        (None, None, Some(deployment.directory.display().to_string()))
+    let source = if let Some(path) = &args.run.deployment {
+        RunSource::Deployment(path.clone())
     } else if let Some(slot) = resolved_manifest_slot {
         // Flake was pre-built; store the slot hash as the manifest source.
-        (None, Some(slot.to_string()), None)
+        RunSource::Manifest(slot.to_string())
     } else if let Some(m) = &args.run.manifest {
-        // Manifest-backed: store the manifest ref.
-        (None, Some(m.clone()), None)
+        RunSource::Manifest(m.clone())
     } else if let Some(img) = &args.run.image {
-        // Image-backed: store the OCI ref.
-        (Some(img.clone()), None, None)
+        RunSource::Image(img.clone())
     } else if args.run.runtime_pack {
-        // The verified runtime pack is its own source; recorded via
-        // `runtime_pack: true` below, not `image`/`manifest`.
-        (None, None, None)
+        RunSource::RuntimePack
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
-        // Test escape: kernel + rootfs from env vars; no persistent source.
-        (None, None, None)
+        RunSource::DirectBoot
     } else {
-        bail!(
-            "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
-                 `--runtime-pack` to create machine {name:?}"
-        );
+        return Err(missing_source(&name));
     };
-    let config = mvm_core::user_config::load(None);
-    let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
-    let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: args.run.cpu_limit,
-        timeout_secs: args.run.timeout,
-        allow_host: &args.run.allow_host,
-        peer: &args.run.peer,
-        net: args.run.net,
-        network_preset: args.run.network_preset,
-        grants_file: args.run.grants_file.as_deref(),
-        // A persistent `machine run` names its source on the command line and
-        // reads no project manifest; `machine create` is the verb that sources
-        // a `[grants]` table.
-        manifest: None,
-        config: &config,
-        ai: ai.as_ref(),
-    })?;
-    let (net, allow_host) = super::shared::persisted_run_network(
-        args.run.net,
-        args.run.network_preset,
-        &args.run.allow_host,
+    let mut spec = RunSpec::builder(name, source, args.run.profile.into())
+        .cpus(args.run.cpus)
+        .memory(args.run.memory.clone())
+        .ports(args.port.clone())
+        .net(args.run.net)
+        .network_preset(args.run.network_preset)
+        .allow_host(args.run.allow_host.clone())
+        .peer(args.run.peer.clone())
+        .cpu_limit_millicores(args.run.cpu_limit)
+        .timeout_secs(args.run.timeout)
+        .grants_file(args.run.grants_file.clone())
+        .ai_token_budget(args.run.ai_token_budget)
+        .into_machine_spec()?;
+    // What only the CLI can express.
+    spec.volumes = machine_run_volume_specs(args)?;
+    spec.agent_verb = args.run.agent_verb.clone();
+    spec.caller_commitment = args.run.caller_commitment.clone();
+    spec.health_check = crate::exec::build_healthcheck(
+        args.healthcheck.as_deref(),
+        args.health_interval,
+        args.health_timeout,
+        args.health_retries,
+        args.health_start_period,
     );
-    let _ = validate_machine_memory(&args.run.memory, None)?;
-    let profile = run_profile_name(args.run.profile).to_string();
-    Ok(MachineSpec {
-        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-        name,
-        image,
-        manifest,
-        deployment,
-        resolved_digest: None,
-        runtime_pack: args.run.runtime_pack,
-        net,
-        allow_host,
-        peer: Vec::new(),
-        ai,
-        ports: args.port.clone(),
-        cpus: args.run.cpus,
-        memory: args.run.memory.clone(),
-        mem_initial: None,
-        profile,
-        volumes: machine_run_volume_specs(args)?,
-        init: Vec::new(),
-        agent_verb: args.run.agent_verb.clone(),
-        caller_commitment: args.run.caller_commitment.clone(),
-        created_at: Some(mvm_core::time::utc_now()),
-        last_started_at: None,
-        health_check: crate::exec::build_healthcheck(
-            args.healthcheck.as_deref(),
-            args.health_interval,
-            args.health_timeout,
-            args.health_retries,
-            args.health_start_period,
-        ),
-        grants: resolved.plan_grants,
-    })
+    Ok(spec)
 }
 
 #[derive(ClapArgs, Debug, Clone)]

@@ -56,6 +56,47 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
     })
 }
 
+/// The CLI and the host library persist the same spec for the same request.
+///
+/// The spec is what the plan is admitted from, so a field one of them derived
+/// differently would admit a different plan under the same inputs. The request
+/// here is the one the SDK makes: an image, a name, a profile, a port, and an
+/// egress allowance.
+#[test]
+fn machine_run_and_the_library_persist_the_same_spec_for_the_same_request() {
+    use mvm_client::launch::profile::RunProfile as Profile;
+    use mvm_client::launch::run_spec::{RunSource, RunSpec};
+
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:3.20",
+        "--name",
+        "web",
+        "--profile",
+        "dev",
+        "--port",
+        "8080:80",
+        "--allow-host",
+        "api.example.com:443",
+        "-d",
+    ])
+    .expect("parse");
+    let mut from_cli = machine_run_spec(&args, "web".to_string(), None).expect("cli spec");
+    let mut from_library =
+        RunSpec::builder("web", RunSource::Image("alpine:3.20".into()), Profile::Dev)
+            .cpus(args.run.cpus)
+            .memory(args.run.memory.clone())
+            .ports(vec!["8080:80".into()])
+            .allow_host(vec!["api.example.com:443".into()])
+            .into_machine_spec()
+            .expect("library spec");
+    // The only field that is expected to differ: when each was written.
+    from_cli.created_at = None;
+    from_library.created_at = None;
+    assert_eq!(from_cli, from_library);
+}
+
 fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {
     parse(argv).map(|action| match action {
         MachineAction::Fork(f) => f,
