@@ -64,11 +64,13 @@ pub trait SnapshotIO {
     /// restore execute.
     fn resume(&self) -> Result<()>;
 
-    /// Best-effort teardown of a VMM left paused by
+    /// Best-effort teardown of a VMM started by
     /// [`load_snapshot_paused`](Self::load_snapshot_paused) — used
     /// when the device-model guard refuses the restore, so the
-    /// never-resumed VMM does not linger. Errors here are swallowed
-    /// by the caller; this exists to clean up, not to report status.
+    /// never-resumed VMM does not linger, and when a resumed guest is
+    /// refused afterwards for not reseeding, so it does not keep running on
+    /// random state it has already used. Errors here are swallowed or
+    /// reported by the caller; this exists to clean up, not to report status.
     fn teardown_paused(&self) -> Result<()>;
 }
 
@@ -145,9 +147,23 @@ pub fn guarded_fork_load_paused<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) ->
 ///
 /// Every load path funnels through here, so adding a new way to load a snapshot
 /// cannot silently bypass the guard.
+///
+/// A resume that reports an error may still have taken effect: a request that
+/// timed out on the client side can be applied by the VMM anyway, leaving a
+/// guest running that no caller admitted. So a failed resume tears the VMM
+/// down before the error is returned.
 fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     guard_loaded_device_model(io)?;
-    io.resume().with_context(|| "resume after restore")
+    if let Err(error) = io.resume() {
+        let error = error.context("resume after restore");
+        return Err(match io.teardown_paused() {
+            Ok(()) => error,
+            Err(teardown) => error.context(format!(
+                "stopping the VMM afterwards also failed: {teardown:#}"
+            )),
+        });
+    }
+    Ok(())
 }
 
 fn guard_loaded_device_model<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
@@ -183,6 +199,7 @@ pub struct CannedIO {
     pub vmstate_bytes: Vec<u8>,
     pub mem_bytes: Vec<u8>,
     restored_network_interfaces: usize,
+    resume_fails: bool,
     calls: std::cell::RefCell<Vec<&'static str>>,
 }
 
@@ -193,6 +210,7 @@ impl CannedIO {
             vmstate_bytes: vmstate_bytes.into(),
             mem_bytes: mem_bytes.into(),
             restored_network_interfaces: 0,
+            resume_fails: false,
             calls: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -201,6 +219,13 @@ impl CannedIO {
     /// device-model guard's refusal.
     pub fn with_network_interfaces(mut self, n: usize) -> Self {
         self.restored_network_interfaces = n;
+        self
+    }
+
+    /// Make `resume` report an error, as a resume request that timed out
+    /// does, so a test can drive the failed-resume path.
+    pub fn with_failing_resume(mut self) -> Self {
+        self.resume_fails = true;
         self
     }
 
@@ -230,6 +255,9 @@ impl SnapshotIO for CannedIO {
     }
     fn resume(&self) -> Result<()> {
         self.calls.borrow_mut().push("resume");
+        if self.resume_fails {
+            anyhow::bail!("PATCH /vm timed out");
+        }
         Ok(())
     }
     fn teardown_paused(&self) -> Result<()> {
@@ -274,5 +302,32 @@ mod tests {
                 "teardown_paused",
             ]
         );
+    }
+
+    /// A resume that errors may still have been applied, so the VMM is torn
+    /// down before the error surfaces; nothing is left running unadmitted.
+    #[test]
+    fn a_failed_resume_tears_the_vmm_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = CannedIO::new(b"vmstate", b"memory").with_failing_resume();
+        let error = guarded_load_resume(&io, dir.path()).expect_err("the resume failed");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert_eq!(
+            io.calls(),
+            vec![
+                "load_paused",
+                "restored_device_model",
+                "resume",
+                "teardown_paused"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_resume_that_succeeds_is_not_torn_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = CannedIO::new(b"vmstate", b"memory");
+        guarded_load_resume(&io, dir.path()).expect("resumed");
+        assert!(!io.calls().contains(&"teardown_paused"));
     }
 }

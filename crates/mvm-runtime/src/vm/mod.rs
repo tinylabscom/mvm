@@ -10,6 +10,7 @@
 // template/tenant lifecycle, name + volume registries, and the host-side
 // rootfs snapshot helper.
 
+pub mod admission;
 pub mod exec_builder;
 pub mod instance_snapshot;
 pub mod lease;

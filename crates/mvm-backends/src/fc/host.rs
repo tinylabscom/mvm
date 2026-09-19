@@ -303,6 +303,61 @@ pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
     Ok(result.trim() == "yes")
 }
 
+/// Whether `pid` is the Firecracker serving the API socket `api_socket`.
+///
+/// Stronger than [`is_firecracker_pid_running`], which accepts any Firecracker:
+/// a pid file left from before a reboot can name a pid that now belongs to
+/// another VM's Firecracker. Every Firecracker mvm starts is given its own
+/// socket with `--api-sock`, so the socket on its command line identifies
+/// which VM it serves. Callers that are about to signal a recorded pid use this.
+pub fn is_firecracker_for_socket(pid: u32, api_socket: &Path) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+        if !comm_path_is_firecracker(&proc_dir.join("comm"))? {
+            return Ok(false);
+        }
+        let cmdline = match std::fs::read(proc_dir.join("cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read /proc/{pid}/cmdline"));
+            }
+        };
+        let args: Vec<String> = cmdline
+            .split(|byte| *byte == 0)
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect();
+        Ok(args_serve_api_socket(&args, api_socket))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let listing = run_in_vm_stdout(&format!(
+            r#"[ "$(cat /proc/{pid}/comm 2>/dev/null)" = "firecracker" ] && tr '\0' '\n' < /proc/{pid}/cmdline || true"#,
+        ))?;
+        let args: Vec<String> = listing.lines().map(str::to_string).collect();
+        Ok(args_serve_api_socket(&args, api_socket))
+    }
+}
+
+/// Whether a Firecracker command line passes `api_socket` to `--api-sock`,
+/// either as the next argument or as `--api-sock=<path>`.
+fn args_serve_api_socket(args: &[String], api_socket: &Path) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--api-sock" {
+            return args
+                .next()
+                .is_some_and(|value| Path::new(value) == api_socket);
+        }
+        if let Some(value) = arg.strip_prefix("--api-sock=") {
+            return Path::new(value) == api_socket;
+        }
+    }
+    false
+}
+
 #[cfg(target_os = "linux")]
 fn comm_path_is_firecracker(path: &std::path::Path) -> Result<bool> {
     match std::fs::read_to_string(path) {
@@ -591,6 +646,48 @@ impl FcForkRestorer {
 
 #[cfg(test)]
 mod tests {
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn the_api_socket_on_the_command_line_identifies_the_vm() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        let spawned = args(&[
+            "firecracker",
+            "--api-sock",
+            "/state/vms/vm-a/fc.socket",
+            "--enable-pci",
+        ]);
+        assert!(args_serve_api_socket(&spawned, mine));
+        let equals = args(&["firecracker", "--api-sock=/state/vms/vm-a/fc.socket"]);
+        assert!(args_serve_api_socket(&equals, mine));
+    }
+
+    /// A recycled pid that now names another VM's Firecracker is not this VM's.
+    #[test]
+    fn another_vms_firecracker_is_not_this_vms() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        let other = args(&["firecracker", "--api-sock", "/state/vms/vm-b/fc.socket"]);
+        assert!(!args_serve_api_socket(&other, mine));
+        assert!(!args_serve_api_socket(
+            &args(&["firecracker", "--api-sock"]),
+            mine
+        ));
+        assert!(!args_serve_api_socket(&args(&["firecracker"]), mine));
+        assert!(!args_serve_api_socket(&args(&[]), mine));
+    }
+
+    /// The real process-table read: this test process is not Firecracker, so
+    /// it serves no socket, whatever its pid.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_process_that_is_not_firecracker_serves_no_socket() {
+        let socket = std::path::Path::new("/nonexistent/fc.socket");
+        assert!(!super::is_firecracker_for_socket(std::process::id(), socket).unwrap());
+    }
+
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use mvm_vmm::checkpoint::VmFullControl as _;

@@ -39,7 +39,7 @@ use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
-    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, SnapshotIO,
+    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, PostRestoreSignal, SnapshotIO,
     VsockPostRestoreSignal, VsockPrimedSignalSource, await_primed_barrier, describe_missing_reseed,
     pause_and_seal, signal_post_restore, verify_and_resume,
 };
@@ -204,14 +204,22 @@ impl LocalBackend {
         };
         match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
             Ok(outcome) => {
+                let reseed = match warm_resume_reseed_verdict(outcome.reseed) {
+                    Ok(summary) => summary,
+                    Err(why) => {
+                        return Err(refuse_resume(name, &why, || {
+                            backend.stop(&VmId(name.to_string()))
+                        }));
+                    }
+                };
                 // FC keeps its pid across pause/resume, so the marker must be
                 // cleared explicitly on a successful warm resume.
                 let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
-                set_registry_resumed(name);
+                set_registry_resumed(name)?;
                 // A warm resume restores live memory, not a sealed snapshot, so it
                 // carries no epoch/lengths — only the reseed summary.
                 Ok(ResumeOutcome {
-                    reseed: Some(outcome.reseed.resume_summary().to_string()),
+                    reseed: Some(reseed),
                     ..Default::default()
                 })
             }
@@ -231,31 +239,30 @@ impl LocalBackend {
             backend
                 .resume(&VmId(name.to_string()))
                 .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-            set_registry_resumed(name);
+            set_registry_resumed(name)?;
             return Ok(ResumeOutcome::default());
         }
 
         let io = self.snapshot_io_for(backend, name)?;
-        // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
-        // epoch is below the persisted high-water mark before restoring anything.
-        // Called unchanged — this is the security property of resume.
+        if !Self::is_mock_backend(backend) {
+            let (sidecar, reseed) =
+                resume_sealed(name, &*io, post_restore_signal(name), RESUME_ADMISSION)?;
+            // Report the verified snapshot's epoch + artifact lengths so the
+            // caller's WorkloadWake audit entry carries the same detail the
+            // pause did.
+            return Ok(ResumeOutcome {
+                epoch: sidecar.epoch,
+                vmstate_len: sidecar.vmstate_len,
+                mem_len: sidecar.mem_len,
+                reseed: Some(reseed),
+            });
+        }
+        // The mock has no guest agent to reseed, so its restore is the whole
+        // resume.
         let sidecar = verify_and_resume(name, &*io)
             .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-
-        // FC keeps the same pid across pause/resume, so a stale fc.paused would
-        // keep matching the live pid — clear it now vCPUs are running again.
-        let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
-
-        // Mark resumed before signaling the guest so a post-restore failure below
-        // leaves the registry consistent (the VM *is* up) and the operator can
-        // simply re-run resume.
-        set_registry_resumed(name);
-
-        let reseed = if Self::is_mock_backend(backend) {
-            None
-        } else {
-            Some(resume_reseed_summary(&signal_guest_post_restore(name)?))
-        };
+        let reseed = None;
+        set_registry_resumed(name)?;
         // Report the verified snapshot's epoch + artifact lengths so the caller's
         // WorkloadWake audit entry carries the same detail the pause did.
         Ok(ResumeOutcome {
@@ -267,29 +274,150 @@ impl LocalBackend {
     }
 }
 
-/// Deliver the host-side PostRestore signal to a resumed guest. Mints a fresh
-/// generation token so the guest rotates its VMGenID and reseeds its CSPRNG (two
-/// clones of one snapshot must not draw identical randomness), audits the vsock
-/// RPC, then sends it — failing closed if the guest does not acknowledge (its
-/// config/secret drives may still be unmounted).
-/// Summarize the reseed for a plain resume.
+/// Restore a machine's sealed snapshot and admit its guest, or refuse it.
 ///
-/// A plain resume brings back the one VM that was paused; there is no sibling
-/// restored from the same memory, so a guest that could not reseed is reported
-/// rather than refused. Forks and warm claims, which do create siblings, refuse
-/// it instead.
-fn resume_reseed_summary(outcome: &PostRestoreOutcome) -> String {
-    use mvm_core::vm_backend::ReseedStatus;
-    if outcome.reseeded {
-        return ReseedStatus::Rotated.resume_summary().to_string();
+/// From just before the restore until the guest is admitted or refused, an
+/// interrupt runs a cleanup that stops the restored VMM and records the
+/// refusal. The guest is admitted by recording `fc.admitted` next to its
+/// `fc.pid`, and only then is the machine marked resumed; the admission record
+/// is what reconcile trusts, so a failed registry write cannot make an admitted
+/// guest look unadmitted.
+fn resume_sealed<S: PostRestoreSignal + Send + 'static>(
+    name: &str,
+    io: &dyn SnapshotIO,
+    signal: S,
+    timeouts: AdmissionTimeouts,
+) -> Result<(mvm_core::crypto::snapshot_hmac::IntegritySidecar, String)> {
+    let claim = AdmissionClaim::default();
+    let _interrupt = arm_interrupted_admission(name, &claim);
+    // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
+    // epoch is below the persisted high-water mark before restoring anything.
+    // Called unchanged — this is the security property of resume.
+    let sidecar = verify_and_resume(name, io)
+        .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
+
+    let state_dir = vm_state_dir(name);
+    // The pause marker names the process the restore just replaced; it no
+    // longer describes this VM.
+    if let Err(error) = mvm_runtime::vm::admission::clear_paused(&state_dir) {
+        tracing::warn!(vm = %name, error = %format!("{error:#}"), "could not clear the pause marker");
     }
-    let why = describe_missing_reseed(outcome.reseed_shortfall, outcome.detail.as_deref());
-    tracing::warn!(detail = %why, "resumed guest did not reseed its kernel generator");
-    format!("{}: {why}", ReseedStatus::NotRotated.resume_summary())
+    let reseed = admit_resumed_guest(
+        name,
+        signal,
+        timeouts,
+        &claim,
+        || mvm_runtime::vm::admission::record_admitted(&state_dir),
+        || io.teardown_paused(),
+    )?;
+    set_registry_resumed(name).map_err(|e| {
+        backend_err(format!(
+            "VM {name:?} resumed and its guest reseeded and was admitted, but {e}"
+        ))
+    })?;
+    Ok((sidecar, reseed))
 }
 
-fn signal_guest_post_restore(name: &str) -> Result<PostRestoreOutcome> {
-    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+/// Who settled a resume's admission first: the resume, or an interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Pending,
+    Admitted,
+    Refused,
+}
+
+/// The one decision a resume's admission ends in, shared between the resume
+/// and its interrupt cleanup so exactly one of them acts: an interrupt after
+/// the admission stops nothing, and a refusal is recorded once.
+#[derive(Clone)]
+struct AdmissionClaim(std::sync::Arc<std::sync::Mutex<Decision>>);
+
+impl Default for AdmissionClaim {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            Decision::Pending,
+        )))
+    }
+}
+
+impl AdmissionClaim {
+    fn decision(&self) -> std::sync::MutexGuard<'_, Decision> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Settle the admission as refused. `true` if this call settled it, and
+    /// its caller now owns stopping the VMM and recording the refusal.
+    fn refuse(&self) -> bool {
+        let mut decision = self.decision();
+        if *decision != Decision::Pending {
+            return false;
+        }
+        *decision = Decision::Refused;
+        true
+    }
+
+    /// Settle the admission as admitted once `record` has recorded it.
+    /// `Ok(false)` if an interrupt refused it first. A failed `record` leaves
+    /// it pending and returns the error. The decision is held while `record`
+    /// runs, so an interrupt cannot land between the record and the decision.
+    fn admit(&self, record: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<bool> {
+        let mut decision = self.decision();
+        if *decision != Decision::Pending {
+            return Ok(false);
+        }
+        record()?;
+        *decision = Decision::Admitted;
+        Ok(true)
+    }
+}
+
+/// Register the interrupt cleanup for a resume whose admission `claim`
+/// tracks. It stops the restored VMM and records the refusal only if the
+/// admission is still pending when the interrupt arrives.
+fn arm_interrupted_admission(
+    name: &str,
+    claim: &AdmissionClaim,
+) -> mvm_runtime::handle_registry::InterruptCleanup {
+    let owned = name.to_string();
+    let claim = claim.clone();
+    mvm_runtime::handle_registry::on_interrupt(&format!("resume of {name}"), move || {
+        if claim.refuse() {
+            stop_interrupted_admission(&owned);
+        }
+    })
+}
+
+/// Deliver the post-restore signal to a resumed guest and admit the resume only
+/// if the guest confirms it reseeded; otherwise stop its VMM and refuse.
+///
+/// A plain resume can restore the same sealed memory image more than once:
+/// the epoch check refuses only an older snapshot, and resume reloads the
+/// snapshot into a fresh VMM whether or not the last one is still running. A
+/// guest that did not reseed would draw again on random state it has already
+/// used, nonces and keys included — the clone problem in time rather than in
+/// space. So every way of not confirming a reseed is refused the same way: a
+/// reported shortfall, an agent that never became reachable, a failed or
+/// unacknowledged signal, and a clock that did not resync. The workload shares
+/// its agent's uid, so it can stall the agent on purpose; a refusal is what
+/// keeps that from leaving it running on reused state.
+///
+/// The whole exchange is held to `timeouts`: the signal runs on its own thread,
+/// and a guest that has not answered by the deadline is refused, so the time
+/// an unadmitted guest runs is bounded by the deadline rather than by the
+/// transport's own connect retries and read timeouts. That thread is then
+/// abandoned: it ends when its own connect retries and read timeout run out, or
+/// sooner if stopping the VMM closes a connection it is reading from, and its
+/// late answer is dropped.
+fn admit_resumed_guest<S: PostRestoreSignal + Send + 'static>(
+    name: &str,
+    signal: S,
+    timeouts: AdmissionTimeouts,
+    claim: &AdmissionClaim,
+    record_admission: impl FnOnce() -> anyhow::Result<()>,
+    stop: impl FnOnce() -> anyhow::Result<()>,
+) -> Result<String> {
     // The verb-emits-at-least-one-audit invariant extends to the vsock messages a
     // verb dispatches; this records the PostRestore RPC alongside where it fires.
     mvm_core::audit_emit!(
@@ -298,16 +426,179 @@ fn signal_guest_post_restore(name: &str) -> Result<PostRestoreOutcome> {
         "scope=rpc,direction=in,kind=vsock,verb={verb}",
         verb = "post-restore",
     );
-    signal_post_restore(
-        name,
-        &VsockPostRestoreSignal {
-            token,
-            hostname: Some(name.to_string()),
-            grant_envelope: None,
+    let delivered = signal_within(name, signal, timeouts);
+    let why = match resume_reseed_verdict(delivered) {
+        Ok(summary) => match claim.admit(record_admission) {
+            Ok(true) => return Ok(summary),
+            Ok(false) => return Err(interrupted_resume(name)),
+            Err(error) => {
+                format!("the guest reseeded, but its admission could not be recorded ({error:#})")
+            }
         },
-        POST_RESTORE_READY_TIMEOUT,
-    )
-    .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))
+        Err(why) => why,
+    };
+    if claim.refuse() {
+        Err(refuse_resume(name, &why, stop))
+    } else {
+        Err(interrupted_resume(name))
+    }
+}
+
+/// The error a resume returns when its interrupt cleanup settled the
+/// admission first; that cleanup already stopped the VMM and recorded it.
+fn interrupted_resume(name: &str) -> MvmError {
+    backend_err(format!(
+        "the resume of VM {name:?} was interrupted; its VMM was stopped and the refusal recorded"
+    ))
+}
+
+/// How long a resumed guest has to confirm its reseed: `ready` for its agent
+/// to become reachable, then `reply` for the post-restore exchange itself.
+#[derive(Debug, Clone, Copy)]
+struct AdmissionTimeouts {
+    ready: std::time::Duration,
+    reply: std::time::Duration,
+}
+
+impl AdmissionTimeouts {
+    /// The most time a resumed guest runs before it is admitted or refused.
+    fn deadline(self) -> std::time::Duration {
+        self.ready + self.reply
+    }
+}
+
+/// The production admission budget: five seconds for the agent to come up,
+/// ten for the exchange. Fifteen seconds is the bound the documentation
+/// states for how long a refused guest can have run.
+const RESUME_ADMISSION: AdmissionTimeouts = AdmissionTimeouts {
+    ready: POST_RESTORE_READY_TIMEOUT,
+    reply: std::time::Duration::from_secs(10),
+};
+
+/// Deliver the post-restore signal on a separate thread and wait for its
+/// outcome no longer than `timeouts` allows.
+fn signal_within<S: PostRestoreSignal + Send + 'static>(
+    name: &str,
+    signal: S,
+    timeouts: AdmissionTimeouts,
+) -> anyhow::Result<PostRestoreOutcome> {
+    let (sender, outcome) = std::sync::mpsc::channel();
+    let owned = name.to_string();
+    std::thread::Builder::new()
+        .name("post-restore".to_string())
+        .spawn(move || {
+            // The receiver is gone once the deadline has passed; the late
+            // outcome has nowhere to go and is dropped.
+            let _ = sender.send(signal_post_restore(&owned, &signal, timeouts.ready));
+        })
+        .map_err(|error| anyhow::anyhow!("starting the post-restore exchange: {error}"))?;
+    let deadline = timeouts.deadline();
+    outcome.recv_timeout(deadline).unwrap_or_else(|_| {
+        Err(anyhow::anyhow!(
+            "the guest did not answer the post-restore signal within {deadline:?}"
+        ))
+    })
+}
+
+/// The interrupt cleanup for a resume in flight: stop the restored VMM, keep
+/// the machine paused, and record the refusal, as a refused admission does.
+fn stop_interrupted_admission(name: &str) {
+    let stop = || -> anyhow::Result<()> {
+        let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(name)?;
+        FirecrackerIO::new(firecracker_socket(&vm_dir)).teardown_paused()
+    };
+    let _ = refuse_resume(
+        name,
+        "the resume was interrupted before the guest confirmed a reseed",
+        stop,
+    );
+}
+
+/// The resume summary if the guest confirmed a reseed, or why it did not.
+fn resume_reseed_verdict(
+    delivered: anyhow::Result<PostRestoreOutcome>,
+) -> std::result::Result<String, String> {
+    use mvm_core::vm_backend::ReseedStatus;
+    match delivered {
+        Ok(outcome) if outcome.reseeded => Ok(ReseedStatus::Rotated.resume_summary().to_string()),
+        Ok(outcome) => Err(describe_missing_reseed(
+            outcome.reseed_shortfall,
+            outcome.detail.as_deref(),
+        )),
+        Err(error) => Err(format!(
+            "the guest did not confirm a reseed ({error:#}); retry the resume"
+        )),
+    }
+}
+
+/// Refuse a resume whose guest did not reseed: stop its VMM with `stop`, mark
+/// the machine paused again, and record the refusal under its own audit kind.
+///
+/// The sealed snapshot is not touched, so the resume can be retried; the retry
+/// restores the snapshot into a fresh VMM and must reseed in turn.
+fn refuse_resume(name: &str, why: &str, stop: impl FnOnce() -> anyhow::Result<()>) -> MvmError {
+    let stopped = match stop() {
+        Ok(()) => "its VMM was stopped".to_string(),
+        Err(error) => format!("stopping its VMM also failed ({error:#}); stop it before retrying"),
+    };
+    let kept_paused = match set_registry_paused(name, true) {
+        Ok(()) => String::new(),
+        Err(error) => format!(" (marking it paused also failed: {error})"),
+    };
+    let refusal = format!(
+        "refusing to resume VM {name:?}: {why}; {stopped}, and its sealed snapshot is kept{kept_paused}"
+    );
+    tracing::warn!(vm = %name, detail = %refusal, "refused a resume whose guest did not reseed");
+    mvm_core::audit_emit!(ResumeRefused, vm: name, "{refusal}");
+    backend_err(refusal)
+}
+
+/// Admit a warm resume only if the guest rotated its generation identity, or
+/// the backend's warm start involves no restored memory to rotate from; the
+/// reason for a refusal otherwise.
+///
+/// Refused on the same ground as a plain resume: live memory restored without
+/// a reseed repeats random state the guest has already used. An undelivered
+/// token is refused too, since nothing says the guest rotated.
+fn warm_resume_reseed_verdict(
+    reseed: mvm_core::vm_backend::ReseedStatus,
+) -> std::result::Result<String, String> {
+    use mvm_core::vm_backend::ReseedStatus;
+    match reseed {
+        ReseedStatus::Rotated | ReseedStatus::NotApplicable => {
+            Ok(reseed.resume_summary().to_string())
+        }
+        ReseedStatus::NotRotated | ReseedStatus::Undelivered => Err(format!(
+            "the warm start did not reseed the guest ({}); retry the resume",
+            reseed.resume_summary()
+        )),
+    }
+}
+
+/// The detail of the `WorkloadWake` entry an admitted resume records: the
+/// verified snapshot's epoch and lengths for a plain resume, the backend for a
+/// warm one, and in both cases what happened to the guest's random state.
+fn wake_audit_detail(warm: bool, backend: &str, outcome: &ResumeOutcome) -> String {
+    let reseed = outcome.reseed.as_deref().unwrap_or("no reseed requested");
+    if warm {
+        format!("warm_start backend={backend} {reseed}")
+    } else {
+        format!(
+            "epoch={} vmstate={} mem={} {reseed}",
+            outcome.epoch, outcome.vmstate_len, outcome.mem_len
+        )
+    }
+}
+
+/// The production post-restore signal for a resume: a fresh generation token,
+/// so the guest rotates its VMGenID and reseeds its CSPRNG, and the machine's
+/// name as the guest hostname.
+fn post_restore_signal(name: &str) -> VsockPostRestoreSignal {
+    VsockPostRestoreSignal {
+        token: mvm_core::crypto::vmgenid::fresh_generation_token(name).token,
+        hostname: Some(name.to_string()),
+        grant_envelope: None,
+    }
 }
 
 /// The primed-barrier timeout to enforce before sealing, or `None` when the
@@ -327,41 +618,43 @@ fn firecracker_socket(vm_dir: &str) -> PathBuf {
     PathBuf::from(format!("{vm_dir}/fc.socket"))
 }
 
-/// Stamp the live Firecracker pid into an `fc.paused` marker so the quiesce gate
-/// can distinguish paused from running (FC keeps its pid across a pause, so
-/// pid-liveness alone cannot tell them apart). Guarded on `fc.pid` existing, so
-/// only Firecracker VMs get the marker; a write failure is logged, not fatal —
-/// the pause itself already succeeded.
-fn write_fc_paused_marker(name: &str) {
-    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
-        && let Ok(pid) = std::fs::read_to_string(&fc_pid_path)
-        && let Err(e) = std::fs::write(vm_state_dir(name).join("fc.paused"), pid.trim())
-    {
-        tracing::warn!(error = %e, vm = %name, "could not write fc.paused marker (pause succeeded)");
-    }
+/// Record the pause in the VM's state directory: stamp the live Firecracker
+/// pid into `fc.paused`, so the quiesce gate can tell paused from running (FC
+/// keeps its pid across a pause, so liveness alone cannot) and reconcile can
+/// tell a paused VMM from an unadmitted resume, and withdraw the previous
+/// admission. A VM with no `fc.pid` is not Firecracker and gets no marker. A
+/// failure is an error: reconcile acts on this marker's absence.
+fn write_fc_paused_marker(name: &str) -> Result<()> {
+    mvm_runtime::vm::admission::record_paused(&vm_state_dir(name)).map_err(|e| {
+        backend_err(format!(
+            "VM {name:?} was paused and sealed, but recording the pause failed: {e:#}"
+        ))
+    })
 }
 
-/// Flip the persistent name-registry `paused` flag for `name`. Best-effort: a
-/// missing or unreadable registry is ignored (a direct-boot VM carries no entry,
-/// and the pause/resume this follows already succeeded regardless).
-fn set_registry_paused(name: &str, paused: bool) {
+/// Flip the persistent name-registry `paused` flag for `name`, under the
+/// registry lock. A machine with no entry (a direct-boot VM) is not an error;
+/// a registry that cannot be locked, read or written is, since reconcile acts
+/// on this flag.
+fn set_registry_paused(name: &str, paused: bool) -> Result<()> {
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
-        let _ = registry.set_paused(name, paused);
-        let _ = registry.save(&registry_path);
-    }
+    mvm_runtime::vm::name_registry::update_registry(&registry_path, |registry| {
+        registry.set_paused(name, paused).map(|_| ())
+    })
+    .map_err(|e| backend_err(format!("updating the registry for VM {name:?}: {e:#}")))
 }
 
 /// Mark `name` resumed in the name registry and refresh its idle tracking so the
-/// freshly-woken VM isn't immediately re-slept by the idle reaper. Best-effort,
-/// same rationale as [`set_registry_paused`].
-fn set_registry_resumed(name: &str) {
+/// freshly-woken VM isn't immediately re-slept by the idle reaper. Same locking
+/// and error rules as [`set_registry_paused`].
+fn set_registry_resumed(name: &str) -> Result<()> {
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
-        let _ = registry.set_paused(name, false);
-        let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
-        let _ = registry.save(&registry_path);
-    }
+    mvm_runtime::vm::name_registry::update_registry(&registry_path, |registry| {
+        registry.set_paused(name, false)?;
+        registry.touch_last_active(name, mvm_core::time::utc_now())?;
+        Ok(())
+    })
+    .map_err(|e| backend_err(format!("updating the registry for VM {name:?}: {e:#}")))
 }
 
 impl Default for LocalBackend {
@@ -874,7 +1167,7 @@ impl MvmClient for LocalBackend {
             backend
                 .pause(&VmId(name.clone()))
                 .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
-            set_registry_paused(name, true);
+            set_registry_paused(name, true)?;
             return Ok(PauseOutcome::default());
         }
 
@@ -882,8 +1175,8 @@ impl MvmClient for LocalBackend {
         let sidecar = pause_and_seal(name, &*io)
             .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
 
-        write_fc_paused_marker(name);
-        set_registry_paused(name, true);
+        write_fc_paused_marker(name)?;
+        set_registry_paused(name, true)?;
 
         Ok(PauseOutcome {
             epoch: sidecar.epoch,
@@ -894,14 +1187,24 @@ impl MvmClient for LocalBackend {
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
         let backend = self.lifecycle_backend_for(&id.0);
+        // One resume of a machine at a time, held until its guest is admitted
+        // or refused: a second resume must not restore over a guest the first
+        // is still admitting, or stop the VMM the first is waiting on.
+        let _resuming = mvm_runtime::vm::instance_snapshot::lock_resume(&id.0)
+            .map_err(|e| backend_err(format!("{e:#}")))?;
         // `warm` routes through the backend's live-memory warm-start path (fails
         // closed on a disk-only backend); the default plain path verifies +
         // restores the sealed snapshot and signals the guest.
-        if opts.warm {
+        let outcome = if opts.warm {
             self.warm_resume(&backend, &id.0)
         } else {
             self.plain_resume(&backend, &id.0)
-        }
+        }?;
+        // Recorded here rather than by each caller, so a resume from any
+        // surface leaves the same entry, carrying the reseed outcome.
+        let detail = wake_audit_detail(opts.warm, backend.kind().as_str(), &outcome);
+        mvm_core::audit_emit!(WorkloadWake, vm: &id.0, "{detail}");
+        Ok(outcome)
     }
 
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
@@ -1037,30 +1340,413 @@ mod tests {
     #[cfg(feature = "test-support")]
     use mvm_core::util::test_env::TestEnv;
 
-    /// A plain resume reports a guest that could not reseed instead of failing
-    /// the resume, and says what to do about it.
-    #[test]
-    fn a_resume_without_a_reseed_is_reported_with_the_fix() {
-        let outcome = PostRestoreOutcome {
-            acknowledged: true,
-            detail: Some("restore reseed unavailable: no helper".into()),
-            reseeded: false,
-            clock_resynced: true,
-            reseed_shortfall: Some(
-                mvm_runtime::vm::instance_snapshot::ReseedShortfall::HelperMissing,
-            ),
-        };
-        let summary = resume_reseed_summary(&outcome);
-        assert!(summary.contains("NOT rotated"), "{summary}");
-        assert!(summary.contains("rebuild the image"), "{summary}");
+    use mvm_runtime::vm::instance_snapshot::ReseedShortfall;
 
-        let rotated = PostRestoreOutcome {
-            reseeded: true,
-            detail: None,
-            reseed_shortfall: None,
-            ..outcome
+    /// How a fake resumed guest answers the post-restore signal.
+    #[derive(Clone, Copy)]
+    enum Guest {
+        /// The agent never becomes reachable (stopped, wedged, or slow).
+        Unreachable,
+        /// The signal is sent and the RPC fails.
+        RpcFails,
+        /// The guest answers but does not acknowledge the restore.
+        NoAck,
+        /// The guest acknowledges but did not resync its wall clock.
+        ClockNotResynced,
+        /// The guest acknowledges and reports it did not reseed.
+        NotReseeded(ReseedShortfall),
+        /// The guest acknowledges and reseeded.
+        Reseeded,
+        /// The exchange hangs well past any admission budget.
+        Hangs,
+    }
+
+    impl PostRestoreSignal for Guest {
+        fn probe_ready(&self, _: &str) -> bool {
+            !matches!(self, Guest::Unreachable)
+        }
+
+        fn post_restore(&self, _: &str) -> anyhow::Result<PostRestoreOutcome> {
+            let replied = |acknowledged, clock_resynced, reseeded, reseed_shortfall| {
+                Ok(PostRestoreOutcome {
+                    acknowledged,
+                    detail: Some("from the fake guest".to_string()),
+                    reseeded,
+                    clock_resynced,
+                    reseed_shortfall,
+                })
+            };
+            match *self {
+                Guest::Unreachable => unreachable!("never probed ready"),
+                Guest::RpcFails => anyhow::bail!("vsock connection reset"),
+                Guest::NoAck => replied(false, true, false, None),
+                Guest::ClockNotResynced => replied(true, false, true, None),
+                Guest::NotReseeded(shortfall) => replied(true, true, false, Some(shortfall)),
+                Guest::Reseeded => replied(true, true, true, None),
+                Guest::Hangs => {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    replied(true, true, true, None)
+                }
+            }
+        }
+    }
+
+    const QUICK: AdmissionTimeouts = AdmissionTimeouts {
+        ready: std::time::Duration::from_millis(20),
+        reply: std::time::Duration::from_millis(200),
+    };
+
+    fn verdict(guest: Guest) -> std::result::Result<String, String> {
+        resume_reseed_verdict(signal_within("vm-a", guest, QUICK))
+    }
+
+    /// A guest whose exchange never finishes is refused at the admission
+    /// deadline, not after the transport's own timeouts.
+    #[test]
+    fn a_guest_that_does_not_answer_is_refused_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let why = verdict(Guest::Hangs).expect_err("refused");
+        assert!(why.contains("did not answer"), "{why}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "refused after {:?}, not at the deadline",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_production_admission_deadline_is_the_documented_fifteen_seconds() {
+        assert_eq!(
+            RESUME_ADMISSION.deadline(),
+            std::time::Duration::from_secs(15)
+        );
+    }
+
+    /// Every way a resumed guest can fail to confirm a reseed is a refusal,
+    /// not only a reported shortfall: a stalled agent, a failed RPC, an
+    /// unacknowledged signal and an unsynced clock included.
+    #[test]
+    fn every_unconfirmed_reseed_is_refused() {
+        for (guest, expect) in [
+            (Guest::Unreachable, "did not become reachable"),
+            (Guest::RpcFails, "vsock connection reset"),
+            (Guest::NoAck, "did not acknowledge"),
+            (Guest::ClockNotResynced, "wall clock"),
+            (
+                Guest::NotReseeded(ReseedShortfall::HelperMissing),
+                "rebuild the image",
+            ),
+            (
+                Guest::NotReseeded(ReseedShortfall::Failed),
+                "retry the restore",
+            ),
+        ] {
+            let why = verdict(guest).expect_err("refused");
+            assert!(why.contains(expect), "{why}");
+        }
+    }
+
+    /// A reported shortfall is refused with the fork path's own words.
+    #[test]
+    fn a_reported_shortfall_uses_the_fork_paths_guidance() {
+        let why = verdict(Guest::NotReseeded(ReseedShortfall::HelperMissing)).unwrap_err();
+        assert_eq!(
+            why,
+            describe_missing_reseed(
+                Some(ReseedShortfall::HelperMissing),
+                Some("from the fake guest")
+            )
+        );
+    }
+
+    #[test]
+    fn a_confirmed_reseed_is_admitted() {
+        assert_eq!(verdict(Guest::Reseeded).as_deref(), Ok("VMGenID rotated"));
+    }
+
+    #[test]
+    fn a_warm_resume_without_a_rotation_is_refused() {
+        use mvm_core::vm_backend::ReseedStatus;
+        for admitted in [ReseedStatus::Rotated, ReseedStatus::NotApplicable] {
+            assert!(warm_resume_reseed_verdict(admitted).is_ok());
+        }
+        for refused in [ReseedStatus::NotRotated, ReseedStatus::Undelivered] {
+            let why = warm_resume_reseed_verdict(refused).unwrap_err();
+            assert!(why.contains("did not reseed"), "{why}");
+        }
+    }
+
+    #[test]
+    fn the_wake_entry_carries_the_reseed_outcome() {
+        let plain = ResumeOutcome {
+            epoch: 3,
+            vmstate_len: 12,
+            mem_len: 8,
+            reseed: Some("VMGenID rotated".to_string()),
         };
-        assert!(!resume_reseed_summary(&rotated).contains("NOT"));
+        assert_eq!(
+            wake_audit_detail(false, "firecracker", &plain),
+            "epoch=3 vmstate=12 mem=8 VMGenID rotated"
+        );
+        let warm = ResumeOutcome {
+            reseed: Some("VMGenID rotated".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            wake_audit_detail(true, "hvf", &warm),
+            "warm_start backend=hvf VMGenID rotated"
+        );
+        assert!(
+            wake_audit_detail(false, "firecracker", &ResumeOutcome::default())
+                .ends_with("no reseed requested")
+        );
+    }
+
+    /// The side effects of a refusal, against an isolated `MVM_HOME`: the VMM
+    /// is stopped, the machine is paused in the registry rather than resumed,
+    /// and the refusal is audited under its own kind.
+    #[cfg(feature = "test-support")]
+    fn refusal_side_effects(guest: Guest) -> (bool, String, String) {
+        let data = IsolatedDataDir::new();
+        let registry_path = mvm_runtime::vm::name_registry::registry_path();
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register("vm-a", "/vms/vm-a", "default", None, 0)
+            .expect("register");
+        registry.save(&registry_path).expect("save registry");
+
+        let stopped = std::cell::Cell::new(false);
+        let refusal = admit_resumed_guest(
+            "vm-a",
+            guest,
+            QUICK,
+            &AdmissionClaim::default(),
+            || Ok(()),
+            || {
+                stopped.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("refused")
+        .to_string();
+
+        let paused = VmNameRegistry::load(&registry_path)
+            .expect("registry")
+            .lookup("vm-a")
+            .map(|record| record.paused)
+            .unwrap_or(false);
+        assert!(paused, "a refused machine is paused, not resumed");
+        let log = std::fs::read_to_string(mvm_core::policy::audit::default_audit_log())
+            .unwrap_or_default();
+        drop(data);
+        (stopped.get(), refusal, log)
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_refused_resume_stops_the_vmm_pauses_the_machine_and_is_audited() {
+        for guest in [
+            Guest::Unreachable,
+            Guest::RpcFails,
+            Guest::NoAck,
+            Guest::ClockNotResynced,
+            Guest::NotReseeded(ReseedShortfall::Failed),
+            Guest::Hangs,
+        ] {
+            let (stopped, refusal, log) = refusal_side_effects(guest);
+            assert!(stopped, "the VMM must not keep running: {refusal}");
+            assert!(refusal.contains("its VMM was stopped"), "{refusal}");
+            assert!(refusal.contains("sealed snapshot is kept"), "{refusal}");
+            assert!(log.contains("\"resume_refused\""), "{log}");
+            assert!(!log.contains("\"vm_stop\""), "not an ordinary stop: {log}");
+        }
+    }
+
+    /// Registers `name` in the isolated registry, unpaused.
+    #[cfg(feature = "test-support")]
+    fn register(name: &str) -> std::path::PathBuf {
+        let registry_path = mvm_runtime::vm::name_registry::registry_path();
+        let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
+        registry
+            .register(name, &format!("/vms/{name}"), "default", None, 0)
+            .expect("register");
+        registry.save(&registry_path).expect("save registry");
+        registry_path
+    }
+
+    #[cfg(feature = "test-support")]
+    fn is_paused(registry_path: &std::path::Path, name: &str) -> bool {
+        VmNameRegistry::load(registry_path)
+            .expect("registry")
+            .lookup(name)
+            .is_some_and(|record| record.paused)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn audit_log() -> String {
+        std::fs::read_to_string(mvm_core::policy::audit::default_audit_log()).unwrap_or_default()
+    }
+
+    /// An interrupt while a resume is admitting its guest runs the cleanup
+    /// the resume armed: the machine is left paused and the refusal is
+    /// recorded, exactly as a refused admission would be.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn an_interrupt_during_admission_stops_and_records_the_resume() {
+        let _data = IsolatedDataDir::new();
+        let registry_path = register("vm-int");
+        let claim = AdmissionClaim::default();
+        let _armed = arm_interrupted_admission("vm-int", &claim);
+        let processed = mvm_runtime::handle_registry::stop_all_attached();
+        assert!(processed.contains(&"resume of vm-int".to_string()));
+        assert!(is_paused(&registry_path, "vm-int"), "left paused");
+        let log = audit_log();
+        assert!(log.contains("\"resume_refused\""), "{log}");
+        assert!(log.contains("interrupted"), "{log}");
+        assert!(
+            !claim.refuse(),
+            "the interrupt settled it; no second refusal"
+        );
+    }
+
+    /// An interrupt that lands after the guest was admitted, but before the
+    /// resume withdrew its cleanup, stops nothing and records nothing.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn an_interrupt_after_admission_leaves_the_guest_running() {
+        let _data = IsolatedDataDir::new();
+        let registry_path = register("vm-late");
+        let claim = AdmissionClaim::default();
+        let _armed = arm_interrupted_admission("vm-late", &claim);
+        assert!(claim.admit(|| Ok(())).expect("admitted"));
+        mvm_runtime::handle_registry::stop_all_attached();
+        assert!(!is_paused(&registry_path, "vm-late"), "not refused");
+        assert!(!audit_log().contains("\"resume_refused\""));
+    }
+
+    #[test]
+    fn an_admission_is_settled_exactly_once() {
+        let claim = AdmissionClaim::default();
+        assert!(claim.refuse(), "the first refusal settles it");
+        assert!(!claim.refuse(), "a second refusal is not recorded again");
+        assert!(
+            !claim.admit(|| Ok(())).expect("no error"),
+            "refused stays refused"
+        );
+
+        let admitted = AdmissionClaim::default();
+        assert!(admitted.admit(|| Ok(())).expect("admitted"));
+        assert!(!admitted.refuse(), "an admitted guest is not refused");
+
+        let unrecorded = AdmissionClaim::default();
+        unrecorded
+            .admit(|| anyhow::bail!("disk full"))
+            .expect_err("a failed record is not an admission");
+        assert!(unrecorded.refuse(), "and it can still be refused");
+    }
+
+    /// A guest that reseeded but whose admission could not be recorded is
+    /// refused, and the reason says so rather than blaming the guest.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn an_admission_that_cannot_be_recorded_is_refused_for_that_reason() {
+        let _data = IsolatedDataDir::new();
+        register("vm-rec");
+        let refusal = admit_resumed_guest(
+            "vm-rec",
+            Guest::Reseeded,
+            QUICK,
+            &AdmissionClaim::default(),
+            || anyhow::bail!("no space left on device"),
+            || Ok(()),
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(refusal.contains("could not be recorded"), "{refusal}");
+        assert!(refusal.contains("no space left"), "{refusal}");
+    }
+
+    /// Answers the post-restore signal as a guest that reseeded, recording
+    /// which interrupt cleanups were registered while it was being asked.
+    #[cfg(feature = "test-support")]
+    struct CleanupObservingGuest(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[cfg(feature = "test-support")]
+    impl PostRestoreSignal for CleanupObservingGuest {
+        fn probe_ready(&self, _: &str) -> bool {
+            true
+        }
+        fn post_restore(&self, _: &str) -> anyhow::Result<PostRestoreOutcome> {
+            *self.0.lock().unwrap() = mvm_runtime::handle_registry::pending_interrupt_cleanups();
+            Guest::Reseeded.post_restore("")
+        }
+    }
+
+    /// A sealed resume keeps its interrupt cleanup armed while the guest is
+    /// being admitted, records the admission next to `fc.pid`, marks the
+    /// machine resumed, and withdraws the cleanup once it returns.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_sealed_resume_is_interruptible_until_it_admits_its_guest() {
+        let _data = IsolatedDataDir::new();
+        let registry_path = register("vm-seal");
+        let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
+        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-seal", &canned).expect("sealed");
+        let state_dir = vm_state_dir("vm-seal");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
+        set_registry_paused("vm-seal", true).unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_, reseed) = resume_sealed(
+            "vm-seal",
+            &canned,
+            CleanupObservingGuest(std::sync::Arc::clone(&seen)),
+            QUICK,
+        )
+        .expect("admitted");
+        assert_eq!(reseed, "VMGenID rotated");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .contains(&"resume of vm-seal".to_string()),
+            "an interrupt during admission would have stopped the VMM"
+        );
+        assert!(
+            !mvm_runtime::handle_registry::pending_interrupt_cleanups()
+                .contains(&"resume of vm-seal".to_string()),
+            "the cleanup is withdrawn once the guest is admitted"
+        );
+        assert!(
+            state_dir.join("fc.admitted").exists(),
+            "the admission is recorded"
+        );
+        assert!(
+            !is_paused(&registry_path, "vm-seal"),
+            "and the machine is resumed"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_refusal_whose_stop_fails_says_so() {
+        let _data = IsolatedDataDir::new();
+        let refusal = admit_resumed_guest(
+            "vm-a",
+            Guest::NoAck,
+            QUICK,
+            &AdmissionClaim::default(),
+            || Ok(()),
+            || anyhow::bail!("still running after SIGTERM and SIGKILL"),
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refusal.contains("stopping its VMM also failed"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("still running"), "{refusal}");
+        assert!(!refusal.contains("its VMM was stopped"), "{refusal}");
     }
 
     #[test]

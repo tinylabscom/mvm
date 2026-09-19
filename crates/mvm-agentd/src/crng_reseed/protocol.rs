@@ -7,6 +7,8 @@
 //! being read as the answer to the next request.
 
 use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use mvm_core::crypto::vmgenid::GENID_BYTES;
 
@@ -148,16 +150,106 @@ pub fn serve(stream: &mut (impl Read + Write), entropy: &mut impl KernelEntropy)
     }
 }
 
-/// Serve connections one at a time. A connection that fails is logged and
-/// closed; the helper keeps accepting.
-pub fn serve_connections<S: Read + Write>(
+/// How long a listening helper gives one connection, in total, from the moment
+/// it is accepted. The agent writes its request as soon as it connects and the
+/// reseed answers at once, so a connection still open after this long is either
+/// finished or not the agent; either way it gives way to the next one.
+pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(1);
+
+/// A connection whose reads and writes can be bounded in time.
+pub trait Deadline {
+    /// Fail any single read or write that blocks longer than `limit`.
+    fn set_deadline(&self, limit: Duration) -> io::Result<()>;
+}
+
+impl Deadline for UnixStream {
+    fn set_deadline(&self, limit: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(limit))?;
+        self.set_write_timeout(Some(limit))
+    }
+}
+
+/// A connection held to one absolute deadline across all of its reads and
+/// writes.
+///
+/// A socket timeout alone bounds each call, not the connection: a peer that
+/// sends one byte just inside every timeout would keep the connection open
+/// indefinitely. Before each call the remaining time is computed from the
+/// deadline and set as that call's timeout, and once it has run out every call
+/// fails with `TimedOut`.
+struct Budgeted<S> {
+    stream: S,
+    until: Instant,
+}
+
+impl<S: Deadline> Budgeted<S> {
+    fn new(stream: S, budget: Duration) -> Self {
+        Self {
+            stream,
+            until: Instant::now() + budget,
+        }
+    }
+
+    fn arm(&self) -> io::Result<()> {
+        let remaining = self.until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the connection used up its time",
+            ));
+        }
+        self.stream.set_deadline(remaining)
+    }
+}
+
+impl<S: Read + Deadline> Read for Budgeted<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.arm()?;
+        self.stream.read(buf)
+    }
+}
+
+impl<S: Write + Deadline> Write for Budgeted<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.arm()?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// Serve connections one at a time, each given `budget` in total.
+///
+/// One at a time means a connection that sends nothing, or sends a byte at a
+/// time, would hold every later reseed behind it; the budget is what stops
+/// that. A connection that fails, running out of time included, is logged and
+/// closed, and the helper keeps accepting. An agent whose connection was
+/// dropped this way reconnects.
+pub fn serve_connections<S: Read + Write + Deadline>(
     incoming: impl Iterator<Item = io::Result<S>>,
     entropy: &mut impl KernelEntropy,
+    budget: Duration,
 ) {
     for connection in incoming {
-        let result = connection.and_then(|mut stream| serve(&mut stream, entropy));
-        if let Err(error) = result {
-            eprintln!("mvm-guest-agent: CRNG reseed helper connection ended: {error}");
+        let result =
+            connection.and_then(|stream| serve(&mut Budgeted::new(stream, budget), entropy));
+        match result {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                eprintln!(
+                    "mvm-guest-agent: CRNG reseed helper dropped a connection open past {budget:?}"
+                );
+            }
+            Err(error) => {
+                eprintln!("mvm-guest-agent: CRNG reseed helper connection ended: {error}");
+            }
         }
     }
 }
@@ -184,8 +276,6 @@ fn read_frame_or_close(stream: &mut impl Read, frame: &mut [u8]) -> io::Result<b
 
 #[cfg(test)]
 pub(super) mod tests {
-    use std::os::unix::net::UnixStream;
-
     use super::*;
 
     /// Records the order of kernel calls and fails the step it is told to.
@@ -336,5 +426,106 @@ pub(super) mod tests {
             kernel.calls.is_empty(),
             "nothing is added from a partial request"
         );
+    }
+
+    /// A peer that connects and never sends is dropped at the deadline, and
+    /// the connection queued behind it is served.
+    #[test]
+    fn an_idle_connection_gives_way_to_the_next_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("helper.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let server = std::thread::spawn(move || {
+            let mut kernel = FakeKernel::default();
+            serve_connections(
+                listener.incoming().take(2),
+                &mut kernel,
+                Duration::from_millis(200),
+            );
+            kernel
+        });
+
+        let idle = UnixStream::connect(&path).expect("idle connector");
+        let mut agent = UnixStream::connect(&path).expect("agent connects behind it");
+        agent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        agent.write_all(&encode_request(1, &TOKEN)).unwrap();
+        let mut frame = [0u8; REPLY_BYTES];
+        agent
+            .read_exact(&mut frame)
+            .expect("the agent is answered once the idle connection is dropped");
+        assert_eq!(
+            decode_reply(&frame),
+            Some(Reply {
+                id: 1,
+                outcome: Ok(())
+            })
+        );
+        drop(agent);
+        let kernel = server.join().expect("helper thread");
+        assert_eq!(kernel.calls, vec!["add 7 credit 128", "reseed"]);
+        drop(idle);
+    }
+
+    /// A peer that sends one byte at a time, each well inside a single read's
+    /// timeout, is still dropped once the connection's total budget is spent,
+    /// and the connection queued behind it is served.
+    #[test]
+    fn a_trickling_connection_gives_way_at_its_total_budget() {
+        let budget = Duration::from_millis(300);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("helper.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let server = std::thread::spawn(move || {
+            let mut kernel = FakeKernel::default();
+            serve_connections(listener.incoming().take(2), &mut kernel, budget);
+            kernel
+        });
+
+        let mut trickler = UnixStream::connect(&path).expect("trickler connects first");
+        let request = encode_request(9, &TOKEN);
+        let started = Instant::now();
+        let trickle = std::thread::spawn(move || {
+            // One byte per 100 ms would take over two seconds to finish the
+            // request, seven times the budget; each byte arrives well inside
+            // any single read's timeout.
+            for byte in &request[..REQUEST_BYTES - 1] {
+                if trickler.write_all(std::slice::from_ref(byte)).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let mut agent = UnixStream::connect(&path).expect("agent connects behind it");
+        agent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        agent.write_all(&encode_request(1, &TOKEN)).unwrap();
+        let mut frame = [0u8; REPLY_BYTES];
+        agent
+            .read_exact(&mut frame)
+            .expect("the agent is answered once the trickler's budget runs out");
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(100) * (REQUEST_BYTES as u32 - 1),
+            "the agent waited {waited:?}, as long as the trickle itself"
+        );
+        assert_eq!(
+            decode_reply(&frame),
+            Some(Reply {
+                id: 1,
+                outcome: Ok(())
+            })
+        );
+        drop(agent);
+        let kernel = server.join().expect("helper thread");
+        assert_eq!(
+            kernel.calls,
+            vec!["add 7 credit 128", "reseed"],
+            "only the agent's request reached the kernel"
+        );
+        trickle.join().expect("trickler thread");
     }
 }
