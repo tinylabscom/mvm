@@ -8,6 +8,7 @@ mod console_smoke;
 mod guest_ram;
 mod hv_impl;
 mod kernel_boot;
+mod page_release;
 mod smp;
 pub mod snapshot;
 mod sys;

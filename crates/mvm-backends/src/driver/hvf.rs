@@ -444,6 +444,13 @@ impl VmmDriver for HvfDriver {
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
             resource_controls: ResourceControls::for_backend(BackendKind::Hvf),
+            // The in-house device model carries a balloon that only accepts
+            // free page reports: the guest gives freed memory back on its own.
+            // It never inflates toward a target, so `balloon_set_target` has
+            // nothing to act on and `balloon` stays false; the reclaim
+            // controller correctly skips this backend.
+            free_page_reporting: true,
+            balloon: false,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
         }
@@ -1224,6 +1231,11 @@ mod tests {
         assert_eq!(d.name(), "hvf");
         assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
+        assert!(d.capabilities().free_page_reporting);
+        assert!(
+            !d.capabilities().balloon,
+            "a reporting-only device has no inflate target to drive"
+        );
         assert_eq!(d.snapshot_capability(), SnapshotCapability::SaveRestore);
         assert_eq!(d.security_profile().tier, "Tier 2");
     }

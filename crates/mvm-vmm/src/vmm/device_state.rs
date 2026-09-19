@@ -29,6 +29,8 @@ pub enum DeviceKind {
     VirtioRng,
     /// virtio-mmio socket transport.
     VirtioVsock,
+    /// virtio-mmio balloon accepting free page reports.
+    VirtioBalloon,
     /// Future or unrecognized device kind.
     Unknown(u16),
 }
@@ -41,6 +43,7 @@ impl DeviceKind {
             3 => Self::VirtioFs,
             4 => Self::VirtioRng,
             5 => Self::VirtioVsock,
+            6 => Self::VirtioBalloon,
             _ => Self::Unknown(value),
         }
     }
@@ -52,6 +55,7 @@ impl DeviceKind {
             Self::VirtioFs => 3,
             Self::VirtioRng => 4,
             Self::VirtioVsock => 5,
+            Self::VirtioBalloon => 6,
             Self::Unknown(value) => value,
         }
     }
@@ -475,6 +479,23 @@ pub fn restore_device_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_kind_wire_codes_are_stable_and_round_trip() {
+        let kinds = [
+            (DeviceKind::Pl011, 1),
+            (DeviceKind::VirtioBlk, 2),
+            (DeviceKind::VirtioFs, 3),
+            (DeviceKind::VirtioRng, 4),
+            (DeviceKind::VirtioVsock, 5),
+            (DeviceKind::VirtioBalloon, 6),
+        ];
+        for (kind, code) in kinds {
+            assert_eq!(kind.to_u16(), code);
+            assert_eq!(DeviceKind::from_u16(code), kind);
+        }
+        assert_eq!(DeviceKind::from_u16(7), DeviceKind::Unknown(7));
+    }
 
     #[test]
     fn container_roundtrips_multiple_records() {
