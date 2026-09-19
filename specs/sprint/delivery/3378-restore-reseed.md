@@ -72,8 +72,15 @@ before exec. Without that, the helper inherited the agent's vsock listener and
 the live activation connection, because neither was close-on-exec. Both now are
 (`SOCK_CLOEXEC`, `accept4`).
 
-What a compromise buys: a compromised agent can make the helper reseed more
-often. A workload can do less: it cannot signal the helper, change its limits,
+What a compromise buys: a compromised agent can make the helper reseed as often
+as it likes, and every request adds 16 bytes of the agent's choosing to the
+input pool credited as 128 bits of entropy. The credit is deliberate — the host
+token is the reseed's only fresh input, and kernels before 5.18 skip a forced
+reseed without it — and chosen bytes cannot cancel what the pool already holds.
+The count matters only before the generator first initializes, where it could
+have the kernel declare itself seeded early; every restore is long past that.
+(Corrected by #3431; the first version of this note said the agent could cause
+more reseeds "and nothing else".) A workload can do less: it cannot signal the helper, change its limits,
 or trace it, and on mkGuest it cannot reach its socket unless it shares the
 agent's group. A dead helper makes the next restore report `reseeded: false`,
 which a fork or claim refuses.
@@ -95,8 +102,8 @@ that boots our agent.
 
 An mkGuest image built before this change has no helper in its `/init`. Booted
 with the new runtime overlay, its agent reports `helper_missing`, so forks and
-warm claims of it are refused with the rebuild instruction, and a plain resume
-reports it. The universal initramfs carries the helper as soon as it is rebuilt.
+warm claims of it are refused with the rebuild instruction. A plain resume
+originally only reported it; since #3431 it is refused the same way. The universal initramfs carries the helper as soon as it is rebuilt.
 `fc_warm_pool_live`'s rootfs must be rebuilt for the same reason; its doc
 comment says so.
 
