@@ -478,6 +478,21 @@ pub fn acquire_registry_lock(registry_path: &Path) -> Result<VmNameRegistryLock>
     Ok(VmNameRegistryLock { _file: file })
 }
 
+/// Load the registry at `registry_path` under its lock, apply `change`, and
+/// save it, all while the lock is held, so a concurrent writer can neither
+/// interleave with the change nor have its own change lost. Every error —
+/// taking the lock, reading, the change itself, writing — is returned.
+pub fn update_registry<T>(
+    registry_path: &Path,
+    change: impl FnOnce(&mut VmNameRegistry) -> Result<T>,
+) -> Result<T> {
+    let _lock = acquire_registry_lock(registry_path)?;
+    let mut registry = VmNameRegistry::load(registry_path)?;
+    let result = change(&mut registry)?;
+    registry.save(registry_path)?;
+    Ok(result)
+}
+
 /// Best-effort host-observed readiness update: load the registry, set the
 /// machine's readiness + change timestamp, save. Never gates control flow — a
 /// failure is logged and swallowed. Shared by the CLI lifecycle recorders and
@@ -970,6 +985,33 @@ mod tests {
             registry_lock_path(&path),
             PathBuf::from("/tmp/mvm/vm-names.json.lock")
         );
+    }
+
+    #[test]
+    fn update_registry_applies_the_change_and_saves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+        let mut reg = VmNameRegistry::default();
+        reg.register("vm1", "/d/vm1", "default", None, 0).unwrap();
+        reg.save(&path).unwrap();
+
+        let changed = update_registry(&path, |reg| reg.set_paused("vm1", true)).unwrap();
+        assert!(changed);
+        assert!(
+            VmNameRegistry::load(&path)
+                .unwrap()
+                .lookup("vm1")
+                .unwrap()
+                .paused
+        );
+    }
+
+    #[test]
+    fn update_registry_reports_an_unreadable_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+        std::fs::write(&path, "not json").unwrap();
+        update_registry(&path, |reg| reg.set_paused("vm1", true)).expect_err("unreadable");
     }
 
     #[test]

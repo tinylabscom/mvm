@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use mvm_core::crypto::snapshot_hmac::{MEM_FILENAME, VMSTATE_FILENAME};
 
-use mvm_vmm::host::shell::{run_in_vm, shell_quote};
 use mvm_vmm::snapshot::SnapshotIO;
 
 /// `SnapshotIO` impl that talks to a live Firecracker over its
@@ -77,6 +76,21 @@ impl FirecrackerIO {
         }
     }
 
+    /// Stop the Firecracker recorded in `vm_dir/fc.pid`, if it is the one
+    /// serving this handle's API socket, and wait until it is gone.
+    fn stop_own_vmm(&self, vm_dir: &Path) -> Result<()> {
+        let name = vm_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| vm_dir.display().to_string());
+        stop_restored_vmm(
+            &name,
+            &vm_dir.join("fc.pid"),
+            |pid| super::is_firecracker_for_socket(pid, &self.socket_path),
+            crate::driver::fc::terminate_firecracker_pid,
+        )
+    }
+
     fn ensure_socket(&self) -> Result<()> {
         if !self.socket_path.exists() {
             bail!(
@@ -98,20 +112,15 @@ impl FirecrackerIO {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
         let socket_str = self.socket_path.to_string_lossy();
-        let pid_file = vm_dir.join("fc.pid");
-        let pid_file_str = pid_file.to_string_lossy();
 
         // Firecracker refuses `/snapshot/load` on a VMM that has already
         // started a microVM. If a previous pause left the process alive, stop
         // it; if it already exited, just start a fresh blank VMM. Either way
-        // resume from the sealed snapshot rather than assuming a live API.
-        if super::host::is_vm_running(&pid_file_str)? {
-            let q_pid = shell_quote(&pid_file_str);
-            run_in_vm(&format!(
-                "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
-            ))
+        // resume from the sealed snapshot rather than assuming a live API. Only
+        // this VM's own Firecracker is ever signalled: a pid left from before
+        // a reboot may name another process now.
+        self.stop_own_vmm(vm_dir)
             .with_context(|| "stopping paused Firecracker before snapshot restore")?;
-        }
         super::start_vm_firecracker_scoped(
             &vm_dir.to_string_lossy(),
             &socket_str,
@@ -208,21 +217,161 @@ impl SnapshotIO for FirecrackerIO {
     }
 
     fn teardown_paused(&self) -> Result<()> {
-        // Best-effort: this restore attempt's fresh FC process must not
-        // linger paused once the guard has refused it — a NIC-carrying VMM
-        // sitting paused is exactly the state this guard exists to prevent
-        // from ever resuming. Never surfaced to the caller (`verify_and_resume_from_dir`
-        // discards this `Result`), so any failure here is logged, not propagated.
-        let Some(vm_dir) = self.socket_path.parent() else {
-            return Ok(());
-        };
-        let pid_file = vm_dir.join("fc.pid");
-        if !pid_file.exists() {
-            return Ok(());
-        }
-        let pid_file_str = pid_file.to_string_lossy();
-        let q_pid = shell_quote(&pid_file_str);
-        let _ = run_in_vm(&format!("sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null"));
+        // This restore attempt's fresh Firecracker must not outlive a refusal:
+        // a NIC-carrying VMM sitting paused is exactly the state the
+        // device-model guard exists to prevent from ever resuming, and a
+        // resumed guest that did not reseed must not keep running on its
+        // snapshot's random state. The result is the stop's own, so a caller
+        // that reports "stopped" has a stopped process behind it.
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
+        self.stop_own_vmm(vm_dir)?;
+        // The API socket is dead with its process; the next restore starts a
+        // fresh VMM that binds a new one.
+        let _ = std::fs::remove_file(&self.socket_path);
         Ok(())
+    }
+}
+
+/// Stop the Firecracker a snapshot restore started, recorded in `pid_file`.
+///
+/// No marker means no VMM was started, so there is nothing to stop. A marker
+/// that cannot be read is an error rather than a guess. A recorded pid that
+/// `is_ours` does not confirm as this VM's Firecracker is never signalled: the
+/// VMM is already gone and the pid may since have been reused, by an unrelated
+/// process or by another VM's Firecracker, so only the stale marker is
+/// removed. Otherwise `terminate` is the verified stop: it
+/// succeeds only once that pid is gone, and removes the marker then.
+fn stop_restored_vmm(
+    name: &str,
+    pid_file: &Path,
+    is_ours: impl FnOnce(u32) -> Result<bool>,
+    terminate: impl FnOnce(&str, u32, &Path) -> Result<()>,
+) -> Result<()> {
+    let recorded = match std::fs::read_to_string(pid_file) {
+        Ok(recorded) => recorded,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", pid_file.display()));
+        }
+    };
+    let pid = recorded
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("parsing the Firecracker pid in {}", pid_file.display()))?;
+    if !is_ours(pid)
+        .with_context(|| format!("checking whether pid {pid} is still this VM's Firecracker"))?
+    {
+        let _ = std::fs::remove_file(pid_file);
+        return Ok(());
+    }
+    terminate(name, pid, pid_file)
+        .with_context(|| format!("stopping the restored Firecracker for VM '{name}'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_that_started_no_vmm_has_nothing_to_stop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stop_restored_vmm(
+            "vm-a",
+            &dir.path().join("fc.pid"),
+            |_| panic!("no marker, nothing to probe"),
+            |_, _, _| panic!("no marker, no process to stop"),
+        )
+        .expect("nothing to stop");
+    }
+
+    #[test]
+    fn the_recorded_pid_is_the_one_stopped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242\n").unwrap();
+        let mut stopped = None;
+        stop_restored_vmm(
+            "vm-a",
+            &pid_file,
+            |_| Ok(true),
+            |name, pid, _| {
+                stopped = Some((name.to_string(), pid));
+                Ok(())
+            },
+        )
+        .expect("stopped");
+        assert_eq!(stopped, Some(("vm-a".to_string(), 4242)));
+    }
+
+    #[test]
+    fn a_stop_that_fails_is_reported_not_swallowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242").unwrap();
+        let error = stop_restored_vmm(
+            "vm-a",
+            &pid_file,
+            |_| Ok(true),
+            |_, _, _| bail!("still running after SIGTERM and SIGKILL"),
+        )
+        .expect_err("a surviving process is an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("still running"), "{message}");
+        assert!(message.contains("vm-a"), "{message}");
+    }
+
+    #[test]
+    fn an_unreadable_marker_is_an_error_not_a_guess() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "not-a-pid").unwrap();
+        stop_restored_vmm(
+            "vm-a",
+            &pid_file,
+            |_| panic!("an unparsable pid is never probed"),
+            |_, _, _| panic!("an unparsable pid is never signalled"),
+        )
+        .expect_err("refused");
+    }
+
+    /// A recorded pid that no longer names a Firecracker process may have
+    /// been reused by an unrelated process, so it is never signalled; the
+    /// stale marker is removed and the VMM counts as already stopped.
+    #[test]
+    fn a_recycled_pid_is_never_signalled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242").unwrap();
+        let mut probed = None;
+        stop_restored_vmm(
+            "vm-a",
+            &pid_file,
+            |pid| {
+                probed = Some(pid);
+                Ok(false)
+            },
+            |_, _, _| panic!("a pid that is not Firecracker must not be signalled"),
+        )
+        .expect("already stopped");
+        assert_eq!(probed, Some(4242));
+        assert!(!pid_file.exists(), "the stale marker is removed");
+    }
+
+    #[test]
+    fn a_liveness_probe_that_fails_is_an_error_not_a_kill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242").unwrap();
+        stop_restored_vmm(
+            "vm-a",
+            &pid_file,
+            |_| bail!("cannot read /proc"),
+            |_, _, _| panic!("an unknown pid is never signalled"),
+        )
+        .expect_err("refused");
+        assert!(pid_file.exists(), "the marker is kept for a retry");
     }
 }

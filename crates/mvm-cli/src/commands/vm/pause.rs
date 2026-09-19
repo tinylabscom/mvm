@@ -4,9 +4,10 @@
 //! `LocalBackend` from `--hypervisor`, and drive `pause_machine` /
 //! `resume_machine`. The facade owns the snapshot machinery — the seal/verify
 //! round-trip (including the replay refusal that gates every resume), the
-//! `fc.paused` marker, the name-registry flags, and the guest PostRestore signal.
-//! The CLI keeps only the cross-cutting wrappers: the success line and the
-//! `WorkloadSleep` / `WorkloadWake` audit entries.
+//! `fc.paused` marker, the name-registry flags, the guest PostRestore signal,
+//! and the `WorkloadWake` and `ResumeRefused` audit entries, so a resume from
+//! any client surface records them. The CLI keeps only the success line and the
+//! `WorkloadSleep` audit entry.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -95,6 +96,13 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
     Ok(())
 }
 
+/// The reseed clause for a plain resume. A backend that resumes vCPUs in place
+/// reloads no memory image and asks the guest for no reseed, so it reports
+/// none, and the line says so rather than leaving the field out.
+fn plain_resume_reseed(outcome: &mvm_core::client::dto::ResumeOutcome) -> &str {
+    outcome.reseed.as_deref().unwrap_or("no reseed requested")
+}
+
 pub(in crate::commands) fn run_resume(
     _cli: &Cli,
     args: ResumeArgs,
@@ -126,16 +134,35 @@ pub(in crate::commands) fn run_resume(
         // is the reseed summary rather than epoch/lengths.
         let reseed = outcome.reseed.as_deref().unwrap_or("no reseed reported");
         println!("{}: warm-started (live-memory resume, {reseed})", args.name);
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "warm_start backend={} {reseed}", args.hypervisor);
     } else {
-        // Plain resume — carry the verified snapshot's epoch + artifact lengths
-        // into the WorkloadWake entry, at parity with the pause's WorkloadSleep.
+        // Plain resume — the verified snapshot's epoch + artifact lengths, and
+        // whether the guest rotated its random state. The backend records the
+        // same in its WorkloadWake entry. A resume whose guest did not reseed
+        // never gets here; it was refused.
+        let reseed = plain_resume_reseed(&outcome);
         println!(
-            "{}: resumed (epoch {}, vmstate {} B, mem {} B)",
+            "{}: resumed (epoch {}, vmstate {} B, mem {} B, {reseed})",
             args.name, outcome.epoch, outcome.vmstate_len, outcome.mem_len
         );
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "epoch={} vmstate={} mem={}",
-            outcome.epoch, outcome.vmstate_len, outcome.mem_len);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::client::dto::ResumeOutcome;
+
+    #[test]
+    fn a_plain_resume_line_always_says_what_happened_to_the_reseed() {
+        let rotated = ResumeOutcome {
+            reseed: Some("VMGenID rotated".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(plain_resume_reseed(&rotated), "VMGenID rotated");
+        assert_eq!(
+            plain_resume_reseed(&ResumeOutcome::default()),
+            "no reseed requested"
+        );
+    }
 }

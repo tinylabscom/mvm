@@ -143,6 +143,31 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
     Ok(sidecar)
 }
 
+/// The lock file that serializes resumes of one machine:
+/// `<mvm_home>/instances/<vm-name>/resume.lock`.
+fn resume_lock_path(vm_name: &str) -> PathBuf {
+    mvm_core::config::instance_dir(vm_name).join("resume")
+}
+
+/// Hold the per-machine resume lock, blocking until any other resume of the
+/// same machine has finished.
+///
+/// A resume holds it from before the snapshot is restored until its guest is
+/// admitted or refused. That keeps a second resume from restoring over a
+/// guest the first is still admitting, and lets a reconcile tell a resume in
+/// progress from one whose process died.
+pub fn lock_resume(vm_name: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
+    mvm_core::util::atomic_io::FileLock::acquire(&resume_lock_path(vm_name))
+        .with_context(|| format!("locking resume of VM {vm_name:?}"))
+}
+
+/// Take the per-machine resume lock only if no resume of the machine holds it.
+/// `None` means a resume is in progress.
+pub fn try_lock_resume(vm_name: &str) -> Result<Option<mvm_core::util::atomic_io::FileLock>> {
+    mvm_core::util::atomic_io::FileLock::try_acquire(&resume_lock_path(vm_name))
+        .with_context(|| format!("checking for a resume of VM {vm_name:?} in progress"))
+}
+
 /// Verify + load one VM's own instance snapshot (`~/.mvm/instances/<vm-name>/snapshot/`).
 /// Thin wrapper around [`verify_and_resume_from_dir`] for the common case
 /// where the sealed envelope lives at the canonical per-VM path; the fork and
@@ -206,13 +231,28 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
         Err(e) => return Err(map_verify_error(e, dir)),
     };
 
-    // HMAC verify passed → the artifacts on disk are the bytes that
-    // were sealed. If they're AES-GCM-encrypted (MVSE magic),
-    // decrypt them in place before handing to Firecracker.
-    decrypt_artifacts_if_encrypted(dir)
+    // HMAC verify passed → the artifacts on disk are the bytes that were
+    // sealed. If they're AES-GCM-encrypted (MVSE magic), they are decrypted
+    // into a private staging directory and loaded from there, so the sealed
+    // ciphertext is never modified and a later resume verifies it again. The
+    // staging directory is removed when this function returns, whether the
+    // load succeeded or not.
+    // Staging left behind by a process that died mid-restore holds decrypted
+    // guest memory; remove it on every restore, encrypted or not.
+    remove_abandoned_staging(dir.parent().unwrap_or(dir));
+    let staged = stage_artifacts_for_load(dir)
         .with_context(|| format!("decrypting snapshot artifacts at {}", dir.display()))?;
+    // An interrupt exits without running destructors, so the staging
+    // directory would outlive it; remove it from the interrupt path too.
+    let _remove_on_interrupt = staged.as_ref().map(|staged| {
+        let path = staged.path().to_path_buf();
+        crate::handle_registry::on_interrupt("restore staging", move || {
+            let _ = std::fs::remove_dir_all(&path);
+        })
+    });
+    let load_dir = staged.as_ref().map_or(dir, |staged| staged.path());
 
-    guarded_load_resume(io, dir)?;
+    guarded_load_resume(io, load_dir)?;
     Ok(sidecar)
 }
 
@@ -286,15 +326,32 @@ fn encrypt_artifacts_if_keyed(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Decrypt `vmstate.bin` and `mem.bin` in place when they carry the
-/// MVSE magic. Refuses to fall through silently when a DEK *is*
-/// configured but the artifacts are unencrypted (downgrade attack
-/// or v1-shape leftover); set `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1`
-/// to bypass during the one-time v1 → v2 migration.
-fn decrypt_artifacts_if_encrypted(dir: &Path) -> Result<()> {
+/// Prefix of the private directory a restore decrypts sealed artifacts into.
+/// The owning process's pid follows it, so a directory left behind by a
+/// process that died mid-restore can be told from one still in use.
+const RESTORE_STAGING_PREFIX: &str = ".restore-";
+
+/// Prepare the artifacts in `dir` for loading, decrypting them into a private
+/// staging directory when they carry the MVSE magic.
+///
+/// Returns `None` when the sealed files can be loaded as they are, and the
+/// staging directory otherwise: a sibling of `dir`, mode 0700, holding mode
+/// 0600 copies of both artifacts with the encrypted ones decrypted. The sealed
+/// files are never modified, because the HMAC seal covers the ciphertext: a
+/// snapshot decrypted in place would fail verification on every later resume,
+/// and would leave decrypted guest memory on disk. Dropping the returned
+/// directory removes the plaintext.
+///
+/// Refuses to fall through silently when a DEK *is* configured but the
+/// artifacts are unencrypted (downgrade attack or v1-shape leftover); set
+/// `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` to bypass during the one-time v1 → v2
+/// migration.
+fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
     let provider = snapshot_key_provider();
     let dek_opt = provider.get_data_key(SNAPSHOT_TENANT_ID).ok();
 
+    let mut present = Vec::new();
+    let mut any_encrypted = false;
     for name in [VMSTATE_FILENAME, MEM_FILENAME] {
         let p = dir.join(name);
         if !p.exists() {
@@ -302,10 +359,7 @@ fn decrypt_artifacts_if_encrypted(dir: &Path) -> Result<()> {
         }
         let is_encrypted = snapshot_encryption::probe(&p)?.is_some();
         match (is_encrypted, &dek_opt) {
-            (true, Some(dek)) => {
-                snapshot_encryption::decrypt_file_in_place(&p, dek.expose_secret())
-                    .with_context(|| format!("decrypting {}", p.display()))?;
-            }
+            (true, Some(_)) => any_encrypted = true,
             (true, None) => {
                 bail!(
                     "{} is AES-GCM encrypted but no tenant DEK is configured — \
@@ -322,14 +376,66 @@ fn decrypt_artifacts_if_encrypted(dir: &Path) -> Result<()> {
                         p.display()
                     );
                 }
-                // No-op — operator opted in to the migration escape.
+                // Operator opted in to the migration escape.
             }
             (false, None) => {
-                // Unencrypted artifact, no DEK configured. Resume normally.
+                // Unencrypted artifact, no DEK configured.
             }
         }
+        present.push((name, is_encrypted));
     }
-    Ok(())
+    let Some(dek) = dek_opt.filter(|_| any_encrypted) else {
+        return Ok(None);
+    };
+
+    let parent = dir.parent().unwrap_or(dir);
+    let staged = tempfile::Builder::new()
+        .prefix(&format!("{RESTORE_STAGING_PREFIX}{}-", std::process::id()))
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "creating a restore staging directory in {}",
+                parent.display()
+            )
+        })?;
+    for (name, is_encrypted) in present {
+        let copy = staged.path().join(name);
+        std::fs::copy(dir.join(name), &copy)
+            .with_context(|| format!("staging {name} for restore"))?;
+        std::fs::set_permissions(&copy, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .with_context(|| format!("restricting {}", copy.display()))?;
+        if is_encrypted {
+            snapshot_encryption::decrypt_file_in_place(&copy, dek.expose_secret())
+                .with_context(|| format!("decrypting {}", dir.join(name).display()))?;
+        }
+    }
+    Ok(Some(staged))
+}
+
+/// Remove restore staging directories in `parent` whose owning process is
+/// gone. A process killed mid-restore, or one built to abort on panic, cannot
+/// remove its own, and each one holds decrypted guest memory. A directory whose
+/// owner is still alive belongs to a restore in progress and is left alone.
+/// Every restore runs this, and so does reconcile, for each machine's instance
+/// directory.
+pub fn remove_abandoned_staging(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(owner) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(RESTORE_STAGING_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if !mvm_vmm::host::process_liveness::pid_is_alive(owner) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -504,6 +610,22 @@ mod tests {
 
     fn canned() -> CannedIO {
         CannedIO::new(b"vmstate-bytes".to_vec(), b"memory-image".to_vec())
+    }
+
+    #[test]
+    fn a_resume_in_progress_holds_the_machine_resume_lock() {
+        let _g = DataDirGuard::new();
+        let held = lock_resume("vm-lock").expect("locked");
+        assert!(
+            try_lock_resume("vm-lock").expect("probe").is_none(),
+            "a resume in progress is visible"
+        );
+        assert!(
+            try_lock_resume("vm-other").expect("probe").is_some(),
+            "the lock is per machine"
+        );
+        drop(held);
+        assert!(try_lock_resume("vm-lock").expect("probe").is_some());
     }
 
     #[test]
@@ -838,18 +960,193 @@ mod tests {
         assert_eq!(raw, b"vmstate-bytes");
     }
 
+    /// Loads through [`CannedIO`], recording what the VMM would have read at
+    /// load time: the directory and the bytes of both artifacts in it.
+    struct LoadProbe {
+        inner: CannedIO,
+        loaded: std::cell::RefCell<Option<Loaded>>,
+    }
+
+    /// The directory a load read from, and the vmstate and memory bytes in it.
+    type Loaded = (PathBuf, Vec<u8>, Vec<u8>);
+
+    impl LoadProbe {
+        fn new() -> Self {
+            Self {
+                inner: canned(),
+                loaded: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    impl SnapshotIO for LoadProbe {
+        fn create_snapshot(&self, dir: &Path) -> Result<()> {
+            self.inner.create_snapshot(dir)
+        }
+        fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
+            *self.loaded.borrow_mut() = Some((
+                dir.to_path_buf(),
+                std::fs::read(dir.join(VMSTATE_FILENAME))?,
+                std::fs::read(dir.join(MEM_FILENAME))?,
+            ));
+            self.inner.load_snapshot_paused(dir)
+        }
+        fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()> {
+            self.inner.load_snapshot_for_fork_paused(dir)
+        }
+        fn restored_network_interface_count(&self) -> Result<usize> {
+            self.inner.restored_network_interface_count()
+        }
+        fn resume(&self) -> Result<()> {
+            self.inner.resume()
+        }
+        fn teardown_paused(&self) -> Result<()> {
+            self.inner.teardown_paused()
+        }
+    }
+
+    /// No `.restore-*` staging directory is left beside the sealed snapshot.
+    fn staging_dirs(vm: &str) -> Vec<PathBuf> {
+        let parent = snapshot_dir(vm).parent().unwrap().to_path_buf();
+        std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(RESTORE_STAGING_PREFIX))
+            })
+            .collect()
+    }
+
     #[test]
     fn verify_and_resume_round_trips_encrypted_snapshot() {
         let mut g = DataDirGuard::new();
         g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         let sealed = pause_and_seal("vm-rt", &canned()).unwrap();
-        let verified = verify_and_resume("vm-rt", &canned()).unwrap();
+        let probe = LoadProbe::new();
+        let verified = verify_and_resume("vm-rt", &probe).unwrap();
         assert_eq!(verified, sealed);
-        // After resume, the artifacts should be decrypted in place
-        // (Firecracker reads plaintext bytes).
-        let dir = snapshot_dir("vm-rt");
-        let pt = std::fs::read(dir.join(VMSTATE_FILENAME)).unwrap();
-        assert_eq!(pt, b"vmstate-bytes");
+        // The VMM read plaintext, from a private staging directory rather
+        // than the sealed one.
+        let (load_dir, vmstate, mem) = probe.loaded.borrow().clone().expect("loaded");
+        assert_eq!(vmstate, b"vmstate-bytes");
+        assert_eq!(mem, b"memory-image");
+        assert_ne!(load_dir, snapshot_dir("vm-rt"));
+    }
+
+    /// The sealed ciphertext is never modified, so a resume that is refused
+    /// or torn down can be retried and verifies again; and no decrypted
+    /// artifact is left on disk after either resume.
+    #[test]
+    fn an_encrypted_snapshot_resumes_again_and_leaves_no_plaintext() {
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        let sealed = pause_and_seal("vm-again", &canned()).unwrap();
+        let dir = snapshot_dir("vm-again");
+        let ciphertext = std::fs::read(dir.join(MEM_FILENAME)).unwrap();
+
+        verify_and_resume("vm-again", &canned()).expect("first resume");
+        assert_eq!(
+            std::fs::read(dir.join(MEM_FILENAME)).unwrap(),
+            ciphertext,
+            "the sealed file is untouched"
+        );
+        assert!(staging_dirs("vm-again").is_empty(), "no plaintext left");
+
+        let again = verify_and_resume("vm-again", &canned()).expect("the retry verifies again");
+        assert_eq!(again, sealed);
+        assert!(staging_dirs("vm-again").is_empty(), "no plaintext left");
+    }
+
+    /// A load that fails still removes the decrypted staging copies.
+    #[test]
+    fn a_failed_load_leaves_no_plaintext() {
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        pause_and_seal("vm-fail", &canned()).unwrap();
+        let refusing = canned().with_network_interfaces(1);
+        verify_and_resume("vm-fail", &refusing).expect_err("the device-model guard refuses");
+        assert!(staging_dirs("vm-fail").is_empty(), "no plaintext left");
+        verify_and_resume("vm-fail", &canned()).expect("still verifies");
+    }
+
+    /// Loads through [`CannedIO`] and interrupts the process mid-load, as
+    /// Ctrl-C would: the cleanups the SIGINT handler runs are run while the
+    /// staging directory exists.
+    struct InterruptedLoad(CannedIO);
+
+    impl SnapshotIO for InterruptedLoad {
+        fn create_snapshot(&self, dir: &Path) -> Result<()> {
+            self.0.create_snapshot(dir)
+        }
+        fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
+            assert!(dir.exists(), "the staging directory exists during the load");
+            crate::handle_registry::stop_all_attached();
+            assert!(!dir.exists(), "the interrupt removed the decrypted copies");
+            bail!("interrupted")
+        }
+        fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()> {
+            self.0.load_snapshot_for_fork_paused(dir)
+        }
+        fn restored_network_interface_count(&self) -> Result<usize> {
+            self.0.restored_network_interface_count()
+        }
+        fn resume(&self) -> Result<()> {
+            self.0.resume()
+        }
+        fn teardown_paused(&self) -> Result<()> {
+            self.0.teardown_paused()
+        }
+    }
+
+    /// An interrupt exits without destructors, so it must remove the staging
+    /// directory itself.
+    #[test]
+    fn an_interrupt_mid_load_removes_the_plaintext() {
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        pause_and_seal("vm-int", &canned()).unwrap();
+        verify_and_resume("vm-int", &InterruptedLoad(canned())).expect_err("interrupted");
+        assert!(staging_dirs("vm-int").is_empty(), "no plaintext left");
+    }
+
+    /// Abandoned staging is removed on every restore, not only on one that
+    /// decrypts: a restore with no tenant key still cleans up after an
+    /// earlier, keyed one.
+    #[test]
+    fn an_unencrypted_restore_still_removes_abandoned_staging() {
+        let mut g = DataDirGuard::new();
+        g.env.remove("MVM_TENANT_KEY_LOCAL");
+        pause_and_seal("vm-plain-stale", &canned()).unwrap();
+        let parent = snapshot_dir("vm-plain-stale")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let abandoned = parent.join(format!("{RESTORE_STAGING_PREFIX}{}-x", i32::MAX));
+        std::fs::create_dir(&abandoned).unwrap();
+        verify_and_resume("vm-plain-stale", &canned()).expect("resumed");
+        assert!(!abandoned.exists());
+    }
+
+    /// A staging directory abandoned by a process that died mid-restore is
+    /// removed by the next restore; one owned by a live process is not.
+    #[test]
+    fn an_abandoned_staging_directory_is_removed() {
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        pause_and_seal("vm-stale", &canned()).unwrap();
+        let parent = snapshot_dir("vm-stale").parent().unwrap().to_path_buf();
+        // No process has this pid: it is above the kernel's pid limit.
+        let abandoned = parent.join(format!("{RESTORE_STAGING_PREFIX}{}-x", i32::MAX));
+        // This test's own process is alive for the whole test.
+        let live = parent.join(format!("{RESTORE_STAGING_PREFIX}{}-x", std::process::id()));
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        verify_and_resume("vm-stale", &canned()).expect("resumed");
+        assert!(!abandoned.exists(), "the abandoned plaintext is removed");
+        assert!(live.exists(), "a live owner's staging is left alone");
     }
 
     #[test]

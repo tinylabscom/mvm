@@ -1,7 +1,7 @@
 //! The CRNG reseed helper as a real process: the agent binary started in helper
 //! mode, confined by its own seccomp allowlist.
 //!
-//! The first test runs as any user. Without `CAP_SYS_ADMIN` the kernel refuses
+//! The unprivileged tests run as any user. Without `CAP_SYS_ADMIN` the kernel refuses
 //! the ioctls, which is the point: the helper must answer that refusal and keep
 //! serving rather than be killed by its own filter. The privileged tests start
 //! the helper exactly as the guest does and inspect the running process; they
@@ -21,10 +21,38 @@ const AGENT: &str = env!("CARGO_BIN_EXE_mvm-guest-agent");
 const SETPRIV: &str = env!("CARGO_BIN_EXE_mvm-setpriv");
 const TOKEN: [u8; 16] = [0x5a; 16];
 
+/// Whether a privileged test asked for with `MVM_GUEST_PRIVILEGED_TESTS=1` may
+/// run with effective uid `euid`. Asking without root is an error, not a skip:
+/// CI sets the variable under `sudo`, and an escalation that silently failed
+/// would otherwise report a pass that asserted nothing.
+///
+/// The library's own privilege witnesses carry the same gate; a `cfg(test)`
+/// helper there is not visible to this integration test, so it is not shared.
+fn privileged_run(requested: Option<&str>, euid: u32) -> Result<bool, String> {
+    match (requested, euid) {
+        (Some("1"), 0) => Ok(true),
+        (Some("1"), euid) => Err(format!(
+            "MVM_GUEST_PRIVILEGED_TESTS=1 is set but this test runs as euid {euid}; \
+             run it as root or unset the variable"
+        )),
+        _ => Ok(false),
+    }
+}
+
 fn privileged() -> bool {
-    std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() == Ok("1")
-        // SAFETY: getuid has no preconditions.
-        && unsafe { libc::getuid() } == 0
+    let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    privileged_run(requested.as_deref(), euid).unwrap_or_else(|refusal| panic!("{refusal}"))
+}
+
+#[test]
+fn a_privileged_run_without_root_fails_instead_of_skipping() {
+    assert_eq!(privileged_run(None, 1000), Ok(false));
+    assert_eq!(privileged_run(Some("0"), 1000), Ok(false));
+    assert_eq!(privileged_run(Some("1"), 0), Ok(true));
+    let refusal = privileged_run(Some("1"), 1000).unwrap_err();
+    assert!(refusal.contains("euid 1000"), "{refusal}");
 }
 
 /// Put the agent binary behind world-traversable test-only path components.
@@ -272,7 +300,11 @@ fn the_helper_started_by_a_shell_init_listens_and_is_trusted_by_uid() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    // A connection that never sends must not hold the helper: it is dropped
+    // at the helper's deadline and the agent's reseed behind it is served.
+    let idle = std::os::unix::net::UnixStream::connect(socket).expect("idle connector");
     let result = mvm_agentd::crng_reseed::reseed_via_helper(&TOKEN);
+    drop(idle);
     let pid = child.id();
     let mode = std::os::unix::fs::PermissionsExt::mode(
         &std::fs::metadata(socket)
