@@ -39,19 +39,26 @@ shared 1.14.1 stayed in place for other sessions.
   collected (`9307380 -> 2157948 KiB`, `4200660 -> 1352460 KiB`) and reported
   `the store disk does not support discard`. The gate sent no field the old
   binary would refuse. Store image afterwards: **11,509,456 KiB allocated**.
-- **Firecracker 1.17.0, same store:** exit 0; collected
-  `9307456 -> 2157972 KiB`, then `trimmed 66172858368 bytes of freed store
-  blocks`. Store image afterwards: **2,538,376 KiB allocated** (apparent size
-  unchanged at 64 GiB).
+- **Firecracker 1.17.0:** exit 0; built to `9307456 KiB` used, collected to
+  `2157972 KiB`, then `trimmed 66172858368 bytes of freed store blocks`. Store
+  image afterwards: **2,538,376 KiB allocated** (apparent size unchanged at
+  64 GiB).
 
-## Found on the way
+Both runs started from a freshly formatted store and made the same cold build,
+peaking at ~9.3 GB used. Without discard the file kept that high-water mark
+plus the kernel build's (11.5 GB); with it, the blocks freed after the peak went
+back to the host. (The second run started fresh because the test script
+removed the store's host-side `.stage0-seed` marker along with the builder
+image, which makes the host reformat the store; that was the script, not the
+collection.)
 
-The 1.17 run rebuilt all 454 builder-image derivations instead of reusing the
-store. The workload-kernel Stage 0 boots a different seed (the built builder
-image, nix 2.31.5) against the same persistent store as the image Stage 0
-(the nix tarball seed, nix 2.34.7). Both root their seed under one fixed name,
-so the kernel run's collection deleted the other seed and the next image
-bootstrap reseeded cold. That is a #3360 defect, fixed separately.
+Two warm bootstraps on 1.17 then kept the store and its marker and removed
+only the built outputs. The image Stage 0 built nothing and collected
+`2621520 -> 2053612 KiB`; the workload-kernel Stage 0 built its 4 derivations
+and collected to `1352484 KiB`; a second image Stage 0 straight after that was
+still warm (no derivations). Every run trimmed, and the store image stayed at
+1.7–2.4 GB allocated. So one Stage 0 flavour's collection does not unroot what
+the other needs.
 
 ## Not done
 
