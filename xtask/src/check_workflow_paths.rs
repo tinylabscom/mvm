@@ -950,6 +950,10 @@ mod tests {
         assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
         assert!(guest.contains("Boot the tree-built image"));
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
+        assert!(
+            guest.contains("nix build --rebuild"),
+            "the image job must rebuild the filesystem derivations and compare their bytes"
+        );
 
         let website = workflow("website.yml");
         assert!(

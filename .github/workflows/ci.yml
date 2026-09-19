@@ -1425,6 +1425,26 @@ jobs:
           echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
             >> "$GITHUB_ENV"
 
+      - name: Rebuild the image filesystems and require identical bytes
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          # Rebuild each derivation that writes ext4 or dm-verity bytes and let
+          # Nix compare the result with the first build: a random UUID or hash
+          # seed fails the step with "may not be deterministic". Only these
+          # derivations are rebuilt; everything they depend on is reused.
+          image="./nix/images/default-tenant#packages.x86_64-linux.default"
+          overlay="./nix/images/runtime-overlay#packages.x86_64-linux.default"
+          image_fs=$(nix path-info --impure -r --derivation "$image" \
+            | grep -E -- '-(ext4-fs\.img|mvm-rootfs-[^/]*\.ext4)\.drv$')
+          for drv in \
+            $(nix path-info --impure --derivation "$image") \
+            $image_fs \
+            $(nix path-info --derivation "$overlay"); do
+            echo "rebuilding $drv"
+            nix build --rebuild --no-link "$drv^*"
+          done
+
       - name: Install firecracker
         if: needs.scope.outputs.nix == 'true'
         env:
