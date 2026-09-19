@@ -445,8 +445,9 @@ pub struct ResumeOpts {
 }
 
 /// What a `resume_machine` did — the detail the caller renders in its success
-/// line and, crucially, the chain-signed `WorkloadWake` audit entry, at parity
-/// with [`PauseOutcome`]. Plain data, REST-satisfiable.
+/// line, and the detail of the `WorkloadWake` entry the local backend writes to
+/// its local audit log, at parity with [`PauseOutcome`]. Plain data,
+/// REST-satisfiable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeOutcome {
@@ -460,8 +461,11 @@ pub struct ResumeOutcome {
     /// Length in bytes of the restored `mem.bin` (plain resume); `0` for warm.
     #[serde(default)]
     pub mem_len: u64,
-    /// The warm-start reseed summary (whether the guest rotated its VMGenID and
-    /// reseeded). `Some` for a warm resume, `None` for a plain verify-and-resume.
+    /// Whether the guest rotated its VMGenID and reseeded its kernel generator.
+    /// `Some` for a warm resume and for a plain resume that restored a sealed
+    /// snapshot into a guest with an agent; `None` when nothing asked the guest
+    /// to reseed (a backend-native vCPU resume, or the hermetic mock). A resume
+    /// whose guest did not reseed is refused rather than reported here.
     #[serde(default)]
     pub reseed: Option<String>,
 }

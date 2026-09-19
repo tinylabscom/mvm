@@ -62,6 +62,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             report.orphan_state_reaped.join(", "),
         ));
     }
+    if !report.unadmitted_resume_stopped.is_empty() {
+        ui::info(&format!(
+            "{prefix}stop {} resumed guest(s) whose resume never confirmed a reseed: {}",
+            report.unadmitted_resume_stopped.len(),
+            report.unadmitted_resume_stopped.join(", "),
+        ));
+    }
     for err in &report.errors {
         ui::warn(&format!("reconcile: {err}"));
     }

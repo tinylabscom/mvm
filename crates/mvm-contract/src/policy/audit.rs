@@ -91,6 +91,10 @@ pub enum LocalAuditKind {
     /// supervisor-driven snapshot suspend/resume.
     WorkloadWake,
     WorkloadSleep,
+    /// A resume refused because the guest did not confirm it reseeded its
+    /// random generator. Its VMM was stopped and the machine left paused; kept
+    /// apart from `VmStop` so a refusal can be told from an ordinary stop.
+    ResumeRefused,
     // --- Egress L7 ---
     /// Host CA for hypervisor-level L7 egress interception was
     /// rotated. Rotation is explicit, not implicit; every rotation
@@ -899,6 +903,7 @@ mod tests {
             (LocalAuditKind::ArtifactFetch, "artifact_fetch"),
             (LocalAuditKind::WorkloadWake, "workload_wake"),
             (LocalAuditKind::WorkloadSleep, "workload_sleep"),
+            (LocalAuditKind::ResumeRefused, "resume_refused"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();
@@ -1197,6 +1202,7 @@ mod tests {
             LocalAuditKind::ArtifactFetch,
             LocalAuditKind::WorkloadWake,
             LocalAuditKind::WorkloadSleep,
+            LocalAuditKind::ResumeRefused,
             // Egress L7.
             LocalAuditKind::EgressCaRotated,
             // Lifecycle integrity gap-fillers.

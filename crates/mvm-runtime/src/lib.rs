@@ -63,6 +63,7 @@ pub mod driver;
 // Firecracker host mechanics moved to mvm-backends::fc; re-exported so
 // `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
 pub use mvm_backends::fc::host as firecracker;
+pub mod handle_registry;
 /// The HVF end of the checkpoint restore seams (fork into a fresh identity,
 /// same-identity resume) — the counterpart of the capture control the HVF
 /// driver hands back through `vm_full_control`.

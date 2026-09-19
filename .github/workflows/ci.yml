@@ -921,7 +921,7 @@ jobs:
           lib=$(awk '$1 == "lib" { print $2 }' <<<"$executables")
           helper=$(awk '$1 == "test" { print $2 }' <<<"$executables")
           sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$helper" --test-threads=1 2>&1 | tee helper.log
-          grep -q "3 passed" helper.log
+          grep -q "test result: ok. 4 passed" helper.log
           for witness in harden_init_process_narrows_bounding_set_and_sets_no_new_privs \
                          drop_guest_agent_privilege_reaches_the_agent_identity_from_root \
                          drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root; do

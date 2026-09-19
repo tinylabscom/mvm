@@ -742,8 +742,10 @@ fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
 
 fn install_signal_handler() {
     let pids = Arc::clone(&CHILD_PIDS);
-    if let Err(e) = crate::signal::set_ctrlc_handler(move || {
-        if IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+    if let Err(e) = crate::signal::set_ctrlc_handler(move |signal| {
+        // The console forwards Ctrl-C to the guest; a request to terminate
+        // still terminates.
+        if signal == libc::SIGINT && IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         let stage0_active = env::builder_vm::stage0_active_in_process();
@@ -755,7 +757,7 @@ fn install_signal_handler() {
                 }
             }
         }
-        mvm_observability::exit_after_interrupt(130);
+        mvm_observability::exit_after_interrupt(128 + signal);
     }) {
         tracing::warn!("failed to install signal handler: {e}");
     }
