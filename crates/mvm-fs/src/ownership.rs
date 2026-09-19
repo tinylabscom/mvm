@@ -9,10 +9,17 @@
 //! Layers stack: a later layer's entry replaces an earlier one's owner, a
 //! whiteout drops the owners of everything it removes, and an opaque marker
 //! drops the owners of a directory's lower-layer contents. A path no layer
-//! declared — a parent directory the tar stream implied but never listed, or a
-//! file the runtime injected afterwards — stays root-owned.
+//! declared — a parent directory the tar stream implied but never listed —
+//! stays root-owned.
+//!
+//! A path the runtime injects after the layers are stacked is not merely
+//! undeclared: a layer is free to name it, and the owner it declares would
+//! otherwise land on the injected file. [`OwnerTable::apply`] therefore takes
+//! the set of paths the image builder owns ([`RootOwnedPaths`]) and forces
+//! those back to root, so an image cannot take the account databases its guest
+//! resolves uids through away from root.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use crate::ext4::{Node, Owner};
@@ -160,22 +167,33 @@ impl OwnerTable {
         self.owners.values().all(Owner::is_root)
     }
 
-    /// Number of paths carrying a non-root owner.
+    /// Number of paths that would carry a non-root owner once applied: those
+    /// the table gives a non-root owner and `root_owned` does not claim back.
     #[must_use]
-    pub fn non_root_count(&self) -> usize {
+    pub fn non_root_count(&self, root_owned: &RootOwnedPaths) -> usize {
         self.owners
-            .values()
-            .filter(|owner| !owner.is_root())
+            .iter()
+            .filter(|(path, owner)| !owner.is_root() && !root_owned.claims(path))
             .count()
     }
 
-    /// Set the owner of each node the table names. A node it does not name
-    /// keeps the owner it already carries — root for a walked host tree.
-    pub fn apply(&self, nodes: &mut [Node]) {
-        if self.owners.is_empty() {
+    /// Set the owner of each node the table names, except the nodes
+    /// `root_owned` claims for the image builder. A node the table does not
+    /// name keeps the owner it already carries — root for a walked host tree.
+    ///
+    /// The claimed nodes are set to root rather than skipped: a node can reach
+    /// the image carrying a layer's owner without the table naming it (an
+    /// unpack defers a node it could not place on the host tree, owner
+    /// included), and skipping would let that owner through.
+    pub fn apply(&self, nodes: &mut [Node], root_owned: &RootOwnedPaths) {
+        if self.owners.is_empty() && root_owned.is_empty() {
             return;
         }
         for node in nodes {
+            if root_owned.claims(node.path()) {
+                node.set_owner(Owner::ROOT);
+                continue;
+            }
             if let Some(owner) = self.owners.get(node.path()) {
                 node.set_owner(*owner);
             }
@@ -202,6 +220,90 @@ impl OwnerTable {
         for path in doomed {
             self.owners.remove(&path);
         }
+    }
+}
+
+/// The guest paths the image builder owns, whose inodes are root-owned in the
+/// built image whatever the layers declared.
+///
+/// The runtime writes into the unpacked tree after the layers are stacked: the
+/// account databases naming the workload uid, the wrapper the guest boots, the
+/// trust policy it enforces, the mount points it needs. An image is free to
+/// ship a file at any of those paths, and its layer declares an owner for it —
+/// so without this set, an image chooses who owns the built `/etc/passwd`.
+///
+/// Two shapes, because the two differ in what they claim below themselves:
+/// a path claims exactly one node, a tree claims a directory and everything
+/// beneath it. Mount points are paths — an image's own content under `/tmp`
+/// keeps the owner its layer declared — while the directories that exist only
+/// to hold injected files are trees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RootOwnedPaths {
+    paths: BTreeSet<String>,
+    trees: BTreeSet<String>,
+}
+
+impl RootOwnedPaths {
+    /// Claim nothing: every node keeps the owner its layer declared. What a
+    /// tree not built from an image's layers, and so carrying nothing
+    /// injected, passes.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Claim exactly the node at `path`.
+    #[must_use]
+    pub fn with_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.paths.insert(guest_key(path.as_ref()));
+        self
+    }
+
+    /// Claim the directory at `dir` and every node beneath it.
+    #[must_use]
+    pub fn with_tree(mut self, dir: impl AsRef<Path>) -> Self {
+        self.trees.insert(guest_key(dir.as_ref()));
+        self
+    }
+
+    /// Whether `guest_path` is claimed, directly or by an enclosing tree.
+    #[must_use]
+    pub fn claims(&self, guest_path: &str) -> bool {
+        if self.paths.contains(guest_path) {
+            return true;
+        }
+        self.trees.iter().any(|tree| {
+            tree == "/"
+                || guest_path == tree
+                || guest_path
+                    .strip_prefix(tree.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+
+    /// [`Self::claims`] for a path in any spelling a tar header uses —
+    /// `./etc/passwd`, `etc//passwd/` — normalized to the guest key first.
+    #[must_use]
+    pub fn claims_path(&self, path: impl AsRef<Path>) -> bool {
+        self.claims(&guest_key(path.as_ref()))
+    }
+
+    /// Whether nothing is claimed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.trees.is_empty()
+    }
+
+    /// The single nodes claimed, guest-absolute, in sorted order. For a writer
+    /// that cannot consult [`Self::claims`] per node and has to name the
+    /// paths instead.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.paths.iter().map(String::as_str)
+    }
+
+    /// The claimed trees, guest-absolute, in sorted order.
+    pub fn trees(&self) -> impl Iterator<Item = &str> {
+        self.trees.iter().map(String::as_str)
     }
 }
 
@@ -356,9 +458,123 @@ mod tests {
                 owner: Owner::ROOT,
             },
         ];
-        table.apply(&mut nodes);
+        table.apply(&mut nodes, &RootOwnedPaths::none());
         assert_eq!(nodes[0].owner(), SVC);
         assert_eq!(nodes[1].owner(), Owner::ROOT);
+    }
+
+    fn file(path: &str, owner: Owner) -> Node {
+        Node::File {
+            path: path.into(),
+            data: Vec::new(),
+            mode: 0o644,
+            xattrs: Vec::new(),
+            owner,
+        }
+    }
+
+    #[test]
+    fn a_claimed_path_stays_root_owned_whatever_the_layer_declared() {
+        let table = table_of(&[layer(|l| {
+            l.record_leaf(Path::new("etc/passwd"), OTHER);
+            l.record_leaf(Path::new("etc/hosts"), OTHER);
+        })]);
+        let claimed = RootOwnedPaths::none().with_path("etc/passwd");
+        let mut nodes = vec![
+            file("/etc/passwd", Owner::ROOT),
+            file("/etc/hosts", Owner::ROOT),
+        ];
+        table.apply(&mut nodes, &claimed);
+        assert_eq!(nodes[0].owner(), Owner::ROOT);
+        assert_eq!(
+            nodes[1].owner(),
+            OTHER,
+            "a path the builder does not claim keeps its declared owner"
+        );
+    }
+
+    #[test]
+    fn a_claimed_node_arriving_already_owned_is_set_back_to_root() {
+        // A deferred node carries the owner its layer declared, without the
+        // table naming the path, so skipping instead of setting would let it
+        // through.
+        let mut nodes = vec![file("/etc/group", SVC)];
+        OwnerTable::new().apply(&mut nodes, &RootOwnedPaths::none().with_path("etc/group"));
+        assert_eq!(nodes[0].owner(), Owner::ROOT);
+    }
+
+    #[test]
+    fn a_claimed_tree_covers_its_contents_and_a_path_does_not() {
+        let claimed = RootOwnedPaths::none()
+            .with_tree("usr/lib/mvm")
+            .with_path("tmp");
+        assert!(claimed.claims("/usr/lib/mvm"));
+        assert!(claimed.claims("/usr/lib/mvm/wrappers/oci-entrypoint"));
+        assert!(
+            !claimed.claims("/usr/lib/mvmx"),
+            "a sibling sharing the name as a prefix is not beneath the tree"
+        );
+        assert!(claimed.claims("/tmp"));
+        assert!(
+            !claimed.claims("/tmp/image-content"),
+            "an image's own content under a claimed mount point keeps its owner"
+        );
+        assert!(RootOwnedPaths::none().is_empty());
+        assert!(!claimed.is_empty());
+    }
+
+    #[test]
+    fn the_claimed_paths_and_trees_are_enumerable_as_guest_keys() {
+        let claimed = RootOwnedPaths::none()
+            .with_path("./tmp/")
+            .with_path("etc/passwd")
+            .with_tree("usr/lib/mvm");
+        assert_eq!(claimed.paths().collect::<Vec<_>>(), ["/etc/passwd", "/tmp"]);
+        assert_eq!(claimed.trees().collect::<Vec<_>>(), ["/usr/lib/mvm"]);
+        assert_eq!(RootOwnedPaths::none().paths().count(), 0);
+    }
+
+    #[test]
+    fn tar_spellings_of_a_claimed_path_share_the_guest_key() {
+        let claimed = RootOwnedPaths::none()
+            .with_path("./etc/passwd")
+            .with_tree("./etc/mvm/");
+        assert!(claimed.claims("/etc/passwd"));
+        assert!(claimed.claims("/etc/mvm/verb-trust.json"));
+    }
+
+    /// A writer that cannot place owners refuses on the count; a non-root
+    /// owner the builder claims back is not one it would lose.
+    #[test]
+    fn a_claimed_non_root_owner_is_not_counted() {
+        let table = table_of(&[layer(|l| {
+            l.record_leaf(Path::new("etc/passwd"), OTHER);
+            l.record_dir(Path::new("data"), SVC);
+        })]);
+        assert_eq!(table.non_root_count(&RootOwnedPaths::none()), 2);
+        assert_eq!(
+            table.non_root_count(&RootOwnedPaths::none().with_path("etc/passwd")),
+            1
+        );
+        assert_eq!(
+            table.non_root_count(
+                &RootOwnedPaths::none()
+                    .with_path("etc/passwd")
+                    .with_tree("data")
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn a_claim_matches_any_tar_spelling_of_the_path() {
+        let claimed = RootOwnedPaths::none()
+            .with_path("etc/passwd")
+            .with_tree("etc/mvm");
+        for spelling in ["./etc/passwd", "etc//passwd", "/etc/passwd/", "etc/mvm/./x"] {
+            assert!(claimed.claims_path(spelling), "{spelling}");
+        }
+        assert!(!claimed.claims_path("./etc/hosts"));
     }
 
     #[test]
@@ -367,13 +583,13 @@ mod tests {
             l.record_leaf(Path::new("etc/passwd"), Owner::ROOT)
         })]);
         assert!(root.is_root_only());
-        assert_eq!(root.non_root_count(), 0);
+        assert_eq!(root.non_root_count(&RootOwnedPaths::none()), 0);
         let mixed = table_of(&[layer(|l| {
             l.record_leaf(Path::new("etc/passwd"), Owner::ROOT);
             l.record_dir(Path::new("data"), SVC);
         })]);
         assert!(!mixed.is_root_only());
-        assert_eq!(mixed.non_root_count(), 1);
+        assert_eq!(mixed.non_root_count(&RootOwnedPaths::none()), 1);
     }
 
     #[test]

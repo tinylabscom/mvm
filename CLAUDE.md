@@ -557,9 +557,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     via the memory-safe pure-Rust writer (`mvm_build::rootfs::
 materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
     `mkfs` mechanism while preserving its roothash guarantee, and
-    auto-falls-back to the builder VM for trees the writer can't
-    faithfully emit, e.g. ones carrying `security.capability`
-    xattrs) — and persists provenance metadata (registry host, repo, supplied
+    auto-falls-back to the builder VM for trees too large or fragmented
+    for it; the builder VM carries no extended attributes, so a tree
+    carrying `security.capability` or ACL xattrs that falls back is
+    refused rather than emitted without them) — and persists provenance metadata (registry host, repo, supplied
     reference, resolved manifest digest, layer digest list, trust
     policy, cosign verdict). `mvmctl run --image` admits an
     `ExecutionPlan` (claim 8 path) and then emits a

@@ -200,11 +200,15 @@ pub fn write_mark(tree_root: &Path, evidence: &SealEvidence<'_>) -> Result<()> {
     let signature = evidence.signer.sign(&mark_bytes);
     let mark_dir = tree_root.join("mvm");
     std::fs::create_dir_all(&mark_dir).with_context(|| format!("create {}", mark_dir.display()))?;
-    std::fs::write(mark_dir.join("provenance.json"), &mark_bytes)
+    // Fresh inodes, like every other file the runtime writes into the tree: a
+    // file left at either path keeps none of its mode, extended attributes or
+    // hard links.
+    crate::oci_runtime_inject::write_file(&mark_dir.join("provenance.json"), &mark_bytes, 0o644)
         .context("write /mvm/provenance.json")?;
-    std::fs::write(
-        mark_dir.join("provenance.sig"),
-        format!("{}\n", hex::encode(signature.to_bytes())),
+    crate::oci_runtime_inject::write_file(
+        &mark_dir.join("provenance.sig"),
+        format!("{}\n", hex::encode(signature.to_bytes())).as_bytes(),
+        0o644,
     )
     .context("write /mvm/provenance.sig")?;
     tracing::info!(
@@ -328,6 +332,39 @@ mod tests {
             .with_image_digest("sha256:abc123")
             .with_created("2026-09-02T00:00:00Z")
             .build()
+    }
+
+    /// A file already at the mark's path — hard-linked to an image file,
+    /// setuid, carrying an attribute — is replaced, not written into.
+    #[test]
+    fn the_mark_is_written_as_fresh_inodes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("mvm")).unwrap();
+        let mark = dir.path().join("mvm/provenance.json");
+        let sig = dir.path().join("mvm/provenance.sig");
+        let image_file = dir.path().join("image-file");
+        std::fs::write(&image_file, b"image bytes").unwrap();
+        std::fs::hard_link(&image_file, &mark).unwrap();
+        std::fs::write(&sig, b"stale").unwrap();
+        std::fs::set_permissions(&sig, std::fs::Permissions::from_mode(0o4777)).unwrap();
+
+        write_mark(dir.path(), &evidence(&test_key())).unwrap();
+
+        assert_ne!(
+            std::fs::metadata(&mark).unwrap().ino(),
+            std::fs::metadata(&image_file).unwrap().ino()
+        );
+        assert_eq!(std::fs::read(&image_file).unwrap(), b"image bytes");
+        for path in [&mark, &sig] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                0o644,
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub struct InjectAndMaterializeRequest<'a> {
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
     evidence: Option<SealEvidence<'a>>,
+    reuse_published: bool,
 }
 
 impl<'a> InjectAndMaterializeRequest<'a> {
@@ -47,6 +48,7 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             deferred_nodes: Vec::new(),
             owners: mvm_fs::ownership::OwnerTable::new(),
             evidence: None,
+            reuse_published: false,
         }
     }
 }
@@ -61,6 +63,7 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
     evidence: Option<SealEvidence<'a>>,
+    reuse_published: bool,
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
@@ -94,6 +97,17 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
     /// hash is computed (so the mark is tamper-evident under verified
     /// boot) and an in-toto/DSSE provenance sidecar is written beside
     /// the sealed image. Ignored for unsealed requests.
+    /// Keep a complete, matching build already published at the output
+    /// instead of rebuilding it, deciding under the output lock. Only for an
+    /// output whose path names its content — the image digest, the guest
+    /// runtime and the variant — so that "complete and matching" means "this
+    /// image". A reader's view of a published set is then never replaced
+    /// under it: nothing rebuilds a set that is complete.
+    pub fn reuse_published(mut self, reuse_published: bool) -> Self {
+        self.reuse_published = reuse_published;
+        self
+    }
+
     pub fn evidence(mut self, evidence: Option<SealEvidence<'a>>) -> Self {
         self.evidence = evidence;
         self
@@ -110,7 +124,118 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             deferred_nodes: self.deferred_nodes,
             owners: self.owners,
             evidence: self.evidence,
+            reuse_published: self.reuse_published,
         }
+    }
+}
+
+/// Hold `root`'s tree exclusively against every other writer and reader that
+/// takes this lock, across processes.
+///
+/// An image's unpacked tree lives once in the cache and is injected in place,
+/// so two runs of one image share it. Without the lock a dev run's clearing of
+/// `/etc/mvm` and rewriting of `variant` and `/etc/passwd` can land between a
+/// prod run's post-injection check and its image walk, and the sealed image
+/// then carries `variant=dev` and no trust policy. Everything that removes,
+/// unpacks, injects into or copies from a tree takes this lock first; nothing
+/// holds it while taking another tree's lock in the other order.
+///
+/// The lock file sits beside the tree as `<name>.tree.lock`, so it survives
+/// the tree being removed and re-unpacked under it.
+pub fn lock_unpacked_tree(root: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_beside(root, "tree")
+}
+
+/// Hold the materialized image at `output` exclusively.
+///
+/// The lock file lives outside the image's directory, in a `.locks`
+/// directory beside it (see [`output_lock_key`]). Removing an image removes
+/// its directory whole, and a lock file inside it would go too: a run already
+/// waiting would then hold a lock on the unlinked file while the next run
+/// took one on a new file, and both would build.
+fn lock_output(output: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    take_lock(&output_lock_key(output)?, output, "output")
+}
+
+/// `<dir>/../.locks/<dir name>.<file name>.output.key` for an output at
+/// `<dir>/<file name>`; the lock file itself replaces the `key` extension.
+fn output_lock_key(output: &Path) -> Result<std::path::PathBuf> {
+    let file = output
+        .file_name()
+        .with_context(|| format!("{} has no name to lock", output.display()))?;
+    let dir = output
+        .parent()
+        .with_context(|| format!("{} has no directory to lock", output.display()))?;
+    let dir_name = dir
+        .file_name()
+        .with_context(|| format!("{} has no name to lock", dir.display()))?;
+    let locks = dir
+        .parent()
+        .with_context(|| format!("{} has no parent for its lock", dir.display()))?
+        .join(".locks");
+    let mut key = dir_name.to_os_string();
+    key.push(".");
+    key.push(file);
+    key.push(".output.key");
+    Ok(locks.join(key))
+}
+
+fn lock_beside(path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
+    take_lock(&lock_key(path, role)?, path, role)
+}
+
+/// Take the lock at `key` for `path` in `role`, saying so when another holder
+/// makes this wait: a run that stops while another materializes the same
+/// image would otherwise look hung.
+fn take_lock(key: &Path, path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
+    let context = || format!("lock {} ({role})", path.display());
+    if let Some(held) =
+        mvm_core::util::atomic_io::FileLock::try_acquire(key).with_context(context)?
+    {
+        return Ok(held);
+    }
+    tracing::info!(
+        path = %path.display(),
+        role,
+        "another run is materializing this image; waiting for it"
+    );
+    mvm_core::util::atomic_io::FileLock::acquire(key).with_context(context)
+}
+
+/// The path [`mvm_core::util::atomic_io::FileLock`] turns into the lock file
+/// for `path` in `role`. It replaces the last extension with `lock`, so the
+/// key carries a throwaway one: `rootfs` locks as `rootfs.tree.lock` and
+/// `rootfs.ext4` as `rootfs.ext4.output.lock`, and no two roles or names can
+/// land on one file — which in one process would deadlock.
+fn lock_key(path: &Path, role: &str) -> Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no name to lock", path.display()))?;
+    let mut key = name.to_os_string();
+    key.push(format!(".{role}.key"));
+    Ok(path.with_file_name(key))
+}
+
+/// An unpacked tree's lock and the lock on the image being built from it,
+/// taken together in one order.
+///
+/// `inject_and_materialize_holding` takes `&HeldTreeLocks`, so the borrow
+/// keeps both locks alive until that call returns. That is all the type
+/// guarantees: it does not make the code inside the call use them, and a
+/// caller holding the value may keep it longer than the call.
+pub struct HeldTreeLocks {
+    _tree: mvm_core::util::atomic_io::FileLock,
+    _output: mvm_core::util::atomic_io::FileLock,
+}
+
+impl HeldTreeLocks {
+    /// Take the tree's lock, then the output's. Every holder of both takes
+    /// them in this order.
+    pub fn acquire(tree: &Path, output: &Path) -> Result<Self> {
+        Ok(Self {
+            _tree: lock_unpacked_tree(tree)?,
+            _output: lock_output(output)?,
+        })
     }
 }
 
@@ -127,7 +252,20 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// Guest binaries resolve from the invoking source checkout's content-keyed
 /// cache or an existing compatibility cache. The host executable does not carry
 /// workload binaries.
+///
+/// The tree and the output are locked before any work starts and stay locked
+/// until it returns ([`HeldTreeLocks`]): the injection, the post-injection
+/// check, the walk, the seal and the publish all read or write one or the
+/// other.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
+    let held = HeldTreeLocks::acquire(request.unpacked_root, request.output)?;
+    inject_and_materialize_holding(request, &held)
+}
+
+fn inject_and_materialize_holding(
+    request: InjectAndMaterializeRequest<'_>,
+    _held: &HeldTreeLocks,
+) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
         unpacked_root,
@@ -138,7 +276,23 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         deferred_nodes,
         owners,
         evidence,
+        reuse_published,
     } = request;
+    let rootfs_dir = output
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
+    std::fs::create_dir_all(rootfs_dir)
+        .with_context(|| format!("create {}", rootfs_dir.display()))?;
+    // Decided under the output lock: a caller's own reuse check ran before it
+    // took the lock, and another run may have published this set since. A
+    // complete, matching set is never rebuilt, so one a reader has chosen is
+    // never swapped out beneath it.
+    if reuse_published && published_build_matches(output, sealed) {
+        return Ok(());
+    }
+    remove_stale_builds(rootfs_dir)?;
+    crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
+        .context("admit the image's deferred layer nodes")?;
     let bins = resolve_guest_binaries(cache_root)?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
@@ -151,25 +305,43 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     let seal_started = chrono::Utc::now().to_rfc3339();
     maybe_write_provenance_mark(unpacked_root, sealed, evidence.as_ref())?;
 
+    // The whole artifact set — image, verity tree, root hash, provenance, and
+    // last the guest sidecar — is built in a scratch directory beside the
+    // output and published into place only once it is complete. Built in place,
+    // a run that died part-way left a partial image next to the previous
+    // build's sidecars, and every later run reused it and failed at dm-verity.
+    let staging = tempfile::Builder::new()
+        .prefix(ROOTFS_BUILD_PREFIX)
+        .tempdir_in(rootfs_dir)
+        .with_context(|| format!("create a build dir in {}", rootfs_dir.display()))?;
+    let staged_output =
+        staging.path().join(output.file_name().ok_or_else(|| {
+            anyhow::anyhow!("rootfs path has no file name: {}", output.display())
+        })?);
+
     // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     materialize_run_rootfs(
-        &MaterializeExt4Input::new(unpacked_root.to_path_buf(), output.to_path_buf(), tree_size)
-            .with_deferred_nodes(deferred_nodes)
-            .with_owners(owners),
+        &MaterializeExt4Input::new(
+            unpacked_root.to_path_buf(),
+            staged_output.clone(),
+            tree_size,
+        )
+        .with_deferred_nodes(deferred_nodes)
+        .with_owners(owners),
     )?;
 
     // `--prod`: seal the rootfs before the sidecar is written. If this fails we
     // surface it and never write a `sealed` sidecar over a rootfs that can't
     // verity-boot.
     if sealed {
-        seal_rootfs_for_run(output)?;
+        seal_rootfs_for_run(&staged_output)?;
         if let Some(evidence) = &evidence {
-            let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(output)
+            let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(&staged_output)
                 .context("hash sealed rootfs for provenance sidecar")?;
             crate::intoto::write_sidecar(
-                output,
+                &staged_output,
                 &subject_sha256,
                 evidence,
                 &seal_started,
@@ -181,13 +353,113 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
 
     // The sidecar lives next to rootfs.ext4 so the backend's admit_runtime_overlay_contract
     // gate reads it at start.
-    let rootfs_dir = output
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
     oci_run_sidecar(unpacked_root, label, sealed, entrypoint)
-        .write_to_dir(rootfs_dir)
-        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+        .write_to_dir(staging.path())
+        .with_context(|| format!("write OCI sidecar in {}", staging.path().display()))?;
+    publish_rootfs_build(staging.path(), rootfs_dir)?;
     Ok(())
+}
+
+/// Prefix of the scratch directory an image is built in beside its output.
+const ROOTFS_BUILD_PREFIX: &str = ".rootfs-build-";
+
+/// Remove scratch build directories a run that died left in `rootfs_dir`.
+/// Called under the output lock, so none of them belongs to a live build.
+fn remove_stale_builds(rootfs_dir: &Path) -> Result<()> {
+    for entry in
+        std::fs::read_dir(rootfs_dir).with_context(|| format!("list {}", rootfs_dir.display()))?
+    {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(ROOTFS_BUILD_PREFIX)
+            && entry.file_type()?.is_dir()
+        {
+            std::fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove stale build {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Move a complete artifact set from `staging` into `rootfs_dir`.
+///
+/// The guest sidecar is what marks a set complete: a reuse check requires it
+/// (see [`rootfs_build_is_complete`]). So the published sidecar is removed
+/// before anything else is replaced, every other file is renamed into place,
+/// and the new sidecar is renamed in last. A run that dies at any point leaves
+/// either the old set whole or a set with no sidecar, which is rebuilt.
+fn publish_rootfs_build(staging: &Path, rootfs_dir: &Path) -> Result<()> {
+    let sidecar = crate::builder_vm::SIDECAR_FILENAME;
+    // On disk before the published set is touched, so a crash after a rename
+    // cannot leave a published name pointing at data that never reached it.
+    for entry in
+        std::fs::read_dir(staging).with_context(|| format!("list {}", staging.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::File::open(entry.path())
+                .and_then(|file| file.sync_all())
+                .with_context(|| format!("flush {}", entry.path().display()))?;
+        }
+    }
+    match std::fs::remove_file(rootfs_dir.join(sidecar)) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("retire the sidecar in {}", rootfs_dir.display()));
+        }
+    }
+    for entry in
+        std::fs::read_dir(staging).with_context(|| format!("list {}", staging.display()))?
+    {
+        let entry = entry?;
+        if entry.file_name() == sidecar || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let target = rootfs_dir.join(entry.file_name());
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("publish {}", target.display()))?;
+    }
+    std::fs::rename(staging.join(sidecar), rootfs_dir.join(sidecar))
+        .with_context(|| format!("publish the sidecar in {}", rootfs_dir.display()))
+}
+
+/// Whether the artifact set beside `rootfs` finished publishing: its guest
+/// sidecar, renamed in last by [`publish_rootfs_build`], is there and reads.
+pub fn rootfs_build_is_complete(rootfs: &Path) -> bool {
+    rootfs.is_file()
+        && rootfs.parent().is_some_and(|dir| {
+            matches!(
+                crate::builder_vm::GuestSidecar::read_from_dir(dir),
+                Ok(Some(_))
+            )
+        })
+}
+
+/// Whether the set published at `rootfs` is a finished build of this variant:
+/// complete ([`rootfs_build_is_complete`]), with its verity tree and root
+/// hash, and a sidecar recording `sealed` exactly when `sealed` is asked for.
+/// Read under the output lock to mean anything.
+pub fn published_build_matches(rootfs: &Path, sealed: bool) -> bool {
+    let Some(dir) = rootfs.parent() else {
+        return false;
+    };
+    rootfs_build_is_complete(rootfs)
+        && dir.join("rootfs.verity").is_file()
+        && dir.join("rootfs.roothash").is_file()
+        && matches!(
+            crate::builder_vm::GuestSidecar::read_from_dir(dir),
+            Ok(Some(sidecar)) if sidecar.sealed == sealed
+        )
+}
+
+/// Hold the output lock of the image at `rootfs`, for a caller that decides
+/// whether to reuse it: no build can be publishing while the lock is held.
+pub fn lock_rootfs_output(rootfs: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_output(rootfs)
 }
 
 /// Write the signed provenance mark into the tree being sealed, when the
@@ -442,42 +714,88 @@ pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
 /// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
     let input = input.clone().with_verity();
+    match run_in_process_materializer(&input)? {
+        InProcessOutcome::Materialized => Ok(()),
+        InProcessOutcome::UseBuilderVm(route) => materialize_run_rootfs_builder_vm(&input, &route),
+    }
+}
 
-    #[cfg(feature = "pure-mkfs")]
-    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        match crate::rootfs::materialize_ext4_pure(&input) {
-            Ok(_) => return Ok(()),
-            // Auto-fallback: the in-process writer structurally can't emit a
-            // faithful image — too large / too fragmented / a directory over one
-            // block, or the tree carries an xattr the writer can't represent — so
-            // retry via the builder VM, which has no such limits and whose
-            // `cp -a` preserves xattrs. Logged, never silent.
-            Err(e) if e.pure_should_fall_back() => {
-                tracing::warn!(
-                    error = %e,
-                    "in-process rootfs materialize needs the builder VM; falling back"
-                );
-                // fall through to the builder-VM path below
-            }
-            // A malformed tree or I/O failure is genuine — surface it, no retry.
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("materialize {} in-process", input.output.display()));
-            }
+/// What the in-process attempt settled: either the image is written, or the
+/// builder VM runs next and this is why.
+enum InProcessOutcome {
+    // Unreachable without the in-process writer compiled in, where the builder
+    // VM is the only materializer there is.
+    #[cfg_attr(not(feature = "pure-mkfs"), allow(dead_code))]
+    Materialized,
+    UseBuilderVm(crate::rootfs::BuilderVmRoute),
+}
+
+/// Run the in-process writer unless the builder VM was asked for outright.
+///
+/// A genuine failure — a malformed tree, an I/O error — surfaces here and is
+/// never retried. Only a structural limit of the in-process writer routes on,
+/// and it carries its own message so the refusal that may follow can name the
+/// real cause instead of a setting nobody touched.
+#[cfg(feature = "pure-mkfs")]
+fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
+    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_some() {
+        return Ok(InProcessOutcome::UseBuilderVm(
+            crate::rootfs::BuilderVmRoute::Selected,
+        ));
+    }
+    match crate::rootfs::materialize_ext4_pure(input) {
+        Ok(_) => Ok(InProcessOutcome::Materialized),
+        // The in-process writer structurally can't emit a faithful image —
+        // too large / too fragmented / a directory over one block, or an
+        // xattr too big for it — so retry via the builder VM, which has no
+        // size limits. That writer carries no extended attributes, so a tree
+        // that has any is refused there, naming this failure. Logged, never
+        // silent.
+        Err(e) if e.pure_should_fall_back() => {
+            tracing::warn!(
+                error = %e,
+                "in-process rootfs materialize needs the builder VM; falling back"
+            );
+            Ok(InProcessOutcome::UseBuilderVm(
+                crate::rootfs::BuilderVmRoute::PureFallback {
+                    because: e.to_string(),
+                },
+            ))
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("materialize {} in-process", input.output.display()))
         }
     }
-    materialize_run_rootfs_builder_vm(&input)
+}
+
+/// Without the in-process writer compiled in, the builder VM is the only
+/// materializer there is.
+#[cfg(not(feature = "pure-mkfs"))]
+fn run_in_process_materializer(_input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
+    Ok(InProcessOutcome::UseBuilderVm(
+        crate::rootfs::BuilderVmRoute::Selected,
+    ))
 }
 
 #[cfg(feature = "builder-vm")]
-fn materialize_run_rootfs_builder_vm(input: &MaterializeExt4Input) -> Result<()> {
-    crate::rootfs::materialize_ext4(input, &crate::rootfs::MaterializeExt4Options::default())
-        .map(|_| ())
-        .with_context(|| format!("materialize {} via builder VM", input.output.display()))
+fn materialize_run_rootfs_builder_vm(
+    input: &MaterializeExt4Input,
+    route: &crate::rootfs::BuilderVmRoute,
+) -> Result<()> {
+    crate::rootfs::materialize_ext4(
+        input,
+        &crate::rootfs::MaterializeExt4Options::default(),
+        route,
+    )
+    .map(|_| ())
+    .with_context(|| format!("materialize {} via builder VM", input.output.display()))
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn materialize_run_rootfs_builder_vm(_input: &MaterializeExt4Input) -> Result<()> {
+fn materialize_run_rootfs_builder_vm(
+    _input: &MaterializeExt4Input,
+    _route: &crate::rootfs::BuilderVmRoute,
+) -> Result<()> {
     anyhow::bail!(
         "no rootfs materializer compiled in: enable the `pure-mkfs` or `builder-vm` feature"
     )
@@ -579,6 +897,288 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seed `cache_root` with stand-in guest binaries, so a test that reaches
+    /// binary resolution by mistake fails in milliseconds instead of
+    /// cross-compiling the guest runtime.
+    fn seed_stub_guest_binaries(cache_root: &Path) {
+        let source = crate::guest_agent_build::guest_binary_source().unwrap();
+        let layout = crate::guest_agent_build::GuestAgentLayout::under(
+            cache_root,
+            source.cache_key(),
+            mvm_core::arch::GuestArch::host(),
+        );
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        for bin in [
+            &layout.agent,
+            &layout.netinit,
+            &layout.egress_client,
+            &layout.entrypoint_runner,
+        ] {
+            std::fs::write(bin, b"\x7fELF-stub").unwrap();
+        }
+    }
+
+    fn hostile_request<'a>(
+        cache_root: &'a Path,
+        root: &'a Path,
+        output: &'a Path,
+    ) -> InjectAndMaterializeRequest<'a> {
+        InjectAndMaterializeRequest::builder(cache_root, root, output, "hostile")
+            .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+                path: "/etc/passwd".to_string(),
+                target: "/srv/accounts".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            }])
+            .build()
+    }
+
+    /// The production entry point refuses a deferred layer node at an
+    /// injected path before it touches the tree or resolves a single guest
+    /// binary, so the refusal is not something a later step can undo.
+    #[test]
+    fn a_deferred_node_at_an_injected_path_stops_the_run_before_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("out/rootfs.ext4");
+        let err = inject_and_materialize(hostile_request(tmp.path(), &root, &output))
+            .expect_err("a layer must not replace the account database");
+        assert!(format!("{err:#}").contains("/etc/passwd"), "{err:#}");
+        assert!(!root.join("etc").exists(), "nothing was injected");
+        assert!(!output.exists());
+    }
+
+    /// Two runs of one image share its unpacked tree. A run waits for the
+    /// tree's lock before doing anything at all, so another run holding it —
+    /// mid-injection, mid-walk — cannot have the tree changed under it.
+    #[test]
+    fn a_run_waits_for_the_tree_lock_before_touching_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("out/rootfs.ext4");
+
+        let held = lock_unpacked_tree(&root).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let (cache, root, output) = (tmp.path().to_path_buf(), root.clone(), output.clone());
+            std::thread::spawn(move || {
+                let result = inject_and_materialize(hostile_request(&cache, &root, &output));
+                done_tx.send(format!("{:#}", result.unwrap_err())).unwrap();
+            })
+        };
+
+        assert!(
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the run proceeded while another held the tree"
+        );
+        drop(held);
+        let err = done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the run proceeds once the lock is released");
+        assert!(err.contains("/etc/passwd"), "{err}");
+        worker.join().unwrap();
+    }
+
+    fn write_set(dir: &Path, tag: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in ["rootfs.ext4", "rootfs.verity", "rootfs.roothash"] {
+            std::fs::write(dir.join(file), tag).unwrap();
+        }
+        crate::builder_vm::GuestSidecar::for_oci_run(tag, false, true)
+            .write_to_dir(dir)
+            .unwrap();
+    }
+
+    /// A finished build replaces the old set whole, sidecar last.
+    #[test]
+    fn a_published_build_replaces_the_previous_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("rootfs");
+        write_set(&live, "old");
+        let staging = tmp.path().join("rootfs/.rootfs-build-x");
+        write_set(&staging, "new");
+
+        publish_rootfs_build(&staging, &live).unwrap();
+
+        assert_eq!(std::fs::read(live.join("rootfs.ext4")).unwrap(), b"new");
+        assert_eq!(std::fs::read(live.join("rootfs.verity")).unwrap(), b"new");
+        assert!(rootfs_build_is_complete(&live.join("rootfs.ext4")));
+    }
+
+    /// A publish that fails part-way — here one file cannot be renamed over a
+    /// directory — leaves no sidecar, so the half-replaced set is never reused
+    /// and the next run builds it again.
+    #[test]
+    fn a_publish_that_dies_part_way_leaves_a_set_that_is_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("rootfs");
+        write_set(&live, "old");
+        assert!(rootfs_build_is_complete(&live.join("rootfs.ext4")));
+        let staging = tmp.path().join("staging");
+        write_set(&staging, "new");
+        std::fs::write(staging.join("blocker"), b"x").unwrap();
+        std::fs::create_dir_all(live.join("blocker/occupied")).unwrap();
+
+        publish_rootfs_build(&staging, &live).expect_err("the rename over a directory fails");
+
+        assert!(
+            !rootfs_build_is_complete(&live.join("rootfs.ext4")),
+            "a half-published set must not read as complete"
+        );
+    }
+
+    /// A build killed before it published leaves only its scratch directory,
+    /// which the next build removes.
+    #[test]
+    fn a_stale_build_directory_is_removed_by_the_next_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("rootfs");
+        std::fs::create_dir_all(dir.join(".rootfs-build-dead/sub")).unwrap();
+        std::fs::write(dir.join(".rootfs-build-dead/rootfs.ext4"), b"partial").unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"live").unwrap();
+
+        remove_stale_builds(&dir).unwrap();
+
+        assert!(!dir.join(".rootfs-build-dead").exists());
+        assert_eq!(std::fs::read(dir.join("rootfs.ext4")).unwrap(), b"live");
+    }
+
+    /// The locks the whole materialization runs under are held for exactly as
+    /// long as their proof lives: a second holder of either waits, and both
+    /// are free again once it is gone.
+    #[test]
+    fn held_tree_locks_exclude_other_holders_until_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("rootfs");
+        let output = tmp.path().join("out/rootfs.ext4");
+        let try_both = || {
+            let tree_free =
+                mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&tree, "tree").unwrap())
+                    .unwrap()
+                    .is_some();
+            let output_free = mvm_core::util::atomic_io::FileLock::try_acquire(
+                &output_lock_key(&output).unwrap(),
+            )
+            .unwrap()
+            .is_some();
+            (tree_free, output_free)
+        };
+
+        let held = HeldTreeLocks::acquire(&tree, &output).unwrap();
+        assert_eq!(try_both(), (false, false), "both are held");
+        drop(held);
+        assert_eq!(try_both(), (true, true), "both are released");
+    }
+
+    #[test]
+    fn the_tree_lock_is_exclusive_and_named_for_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        let held = lock_unpacked_tree(&root).unwrap();
+        assert!(tmp.path().join("rootfs.tree.lock").is_file());
+        assert!(
+            mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&root, "tree").unwrap())
+                .unwrap()
+                .is_none(),
+            "a second holder must wait"
+        );
+        drop(held);
+        assert!(
+            mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&root, "tree").unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A tree and the image built from it never share a lock file: one run
+    /// holds both, and flock on a second descriptor of the same file would
+    /// wait on itself. The image's lock lives outside the image's directory,
+    /// so removing that directory cannot take the lock with it.
+    #[test]
+    fn the_output_lock_lives_outside_the_directory_it_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = lock_unpacked_tree(&tmp.path().join("rootfs")).unwrap();
+        let image_dir = tmp.path().join("images/abc-tag-dev");
+        let output = lock_output(&image_dir.join("rootfs.ext4")).unwrap();
+        assert!(tmp.path().join("rootfs.tree.lock").is_file());
+        let lock_file = tmp
+            .path()
+            .join("images/.locks/abc-tag-dev.rootfs.ext4.output.lock");
+        assert!(lock_file.is_file());
+        assert!(!lock_file.starts_with(&image_dir));
+        drop((tree, output));
+    }
+
+    /// Under the output lock, a complete build of the asked-for variant that
+    /// is already published is kept, not rebuilt: a reader that chose it is
+    /// never handed a different set beneath it. The request here would fail
+    /// the moment it did any work, so success means nothing was redone.
+    #[test]
+    fn a_complete_matching_build_is_kept_under_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("out/rootfs.ext4");
+        write_set(output.parent().unwrap(), "published");
+
+        let reusing = |reuse: bool| {
+            let request = InjectAndMaterializeRequest::builder(tmp.path(), &root, &output, "x")
+                .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+                    path: "/etc/passwd".to_string(),
+                    target: "/srv/accounts".to_string(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
+                }])
+                .reuse_published(reuse)
+                .build();
+            inject_and_materialize(request)
+        };
+
+        reusing(true).expect("a complete dev build is kept");
+        assert_eq!(std::fs::read(&output).unwrap(), b"published");
+        assert!(
+            reusing(false).is_err(),
+            "without reuse the request does its work, and is refused"
+        );
+
+        // The sealed variant is not the dev build that is published.
+        let sealed = InjectAndMaterializeRequest::builder(tmp.path(), &root, &output, "x")
+            .sealed(true)
+            .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+                path: "/etc/passwd".to_string(),
+                target: "/srv/accounts".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            }])
+            .reuse_published(true)
+            .build();
+        assert!(inject_and_materialize(sealed).is_err());
+    }
+
+    /// The real entry point clears a build directory a killed run left behind
+    /// before it builds.
+    #[test]
+    fn inject_and_materialize_removes_a_stale_build_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("out/rootfs.ext4");
+        let stale = output.parent().unwrap().join(".rootfs-build-killed");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("rootfs.ext4"), b"partial").unwrap();
+
+        inject_and_materialize(hostile_request(tmp.path(), &root, &output))
+            .expect_err("the hostile request is refused after the cleanup");
+
+        assert!(!stale.exists(), "the killed run's build directory is gone");
+    }
 
     /// Build an unpacked-rootfs tree whose `lib/` carries `loader`.
     fn tree_with_loader(loader: &str) -> tempfile::TempDir {

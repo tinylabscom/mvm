@@ -580,6 +580,169 @@ fn layer_owners_survive_unpack_and_materialize() {
     assert_eq!(owner_of(&fs, "/home/wide"), Owner::ROOT);
 }
 
+/// A layer that names the files the runtime injects after the layers are
+/// stacked, claiming each for an account of its own.
+fn hostile_layer(attacker: Owner) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for path in [
+        "etc/passwd",
+        "etc/group",
+        "etc/mvm/verb-trust.json",
+        "usr/lib/mvm/wrappers/oci-entrypoint",
+        "srv/app.conf",
+    ] {
+        builder
+            .append(
+                &owned_header(path, tar::EntryType::Regular, attacker, 0),
+                std::io::empty(),
+            )
+            .unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+/// An image cannot take the files mvm injects away from root by declaring an
+/// owner for them — `/etc/passwd` and `/etc/group` most of all, since a guest
+/// resolving its uid through an image-owned account database is the elevation
+/// path a sealed rootfs exists to close.
+#[test]
+fn a_layer_cannot_own_the_files_the_runtime_injects() {
+    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
+    use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
+    use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
+
+    let attacker = Owner::new(1000, 1000);
+    let root_dir = tempfile::tempdir().unwrap();
+    let report = unpack_layer(
+        hostile_layer(attacker).as_slice(),
+        root_dir.path(),
+        &UnpackOptions::default(),
+    )
+    .unwrap();
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    let mut owners = OwnerTable::new();
+    owners.absorb(&report.ownership);
+
+    let injected = RootOwnedPaths::none()
+        .with_path("etc/passwd")
+        .with_path("etc/group")
+        .with_tree("etc/mvm")
+        .with_tree("usr/lib/mvm");
+    let options = MaterializeOptions::builder()
+        .owners(owners)
+        .root_owned(injected)
+        .build();
+    let fs = mount(build_ext4_pure(root_dir.path(), &options).unwrap().0);
+
+    for path in [
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/mvm/verb-trust.json",
+        "/usr/lib/mvm/wrappers/oci-entrypoint",
+    ] {
+        assert_eq!(
+            owner_of(&fs, path),
+            Owner::ROOT,
+            "{path} is the runtime's, whatever the layer declared"
+        );
+    }
+    assert_eq!(
+        owner_of(&fs, "/srv/app.conf"),
+        attacker,
+        "a path the runtime does not inject keeps the owner its layer declared"
+    );
+}
+
+fn link_header(path: &str, kind: tar::EntryType, target: &str, owner: Owner) -> tar::Header {
+    let mut header = owned_header(path, kind, owner, 0);
+    header.set_link_name(target).unwrap();
+    header.set_cksum();
+    header
+}
+
+fn layer_of(entries: Vec<tar::Header>) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for header in entries {
+        builder.append(&header, std::io::empty()).unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+/// Layers stack, and the claim holds through every way a layer can declare a
+/// path: a hard link from an image path onto the account database, whose
+/// header owns both names; a whiteout and re-add; and an opaque directory that
+/// clears the lower layer and re-adds it under another owner. Whatever the
+/// last word on `/etc/passwd` was, the built inode is root's — and so is
+/// `/etc`, which a layer re-declared too — while the image's own link keeps
+/// the owner its layer gave it.
+#[test]
+fn no_stacking_of_layers_can_own_a_claimed_path() {
+    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer_with_prior_paths};
+    use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
+    use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let first = Owner::new(1000, 1000);
+    let second = Owner::new(2000, 2000);
+    let layers = [
+        layer_of(vec![
+            owned_header("etc/", tar::EntryType::Directory, first, 0),
+            owned_header("etc/passwd", tar::EntryType::Regular, first, 0),
+            owned_header("etc/group", tar::EntryType::Regular, first, 0),
+            owned_header("srv/", tar::EntryType::Directory, first, 0),
+            link_header("srv/accounts", tar::EntryType::Link, "etc/passwd", first),
+        ]),
+        layer_of(vec![
+            owned_header("etc/.wh.passwd", tar::EntryType::Regular, Owner::ROOT, 0),
+            owned_header("etc/passwd", tar::EntryType::Regular, second, 0),
+        ]),
+        layer_of(vec![
+            owned_header("etc/", tar::EntryType::Directory, second, 0),
+            owned_header("etc/.wh..wh..opq", tar::EntryType::Regular, Owner::ROOT, 0),
+            owned_header("etc/passwd", tar::EntryType::Regular, second, 0),
+            owned_header("etc/group", tar::EntryType::Regular, second, 0),
+        ]),
+    ];
+
+    let root_dir = tempfile::tempdir().unwrap();
+    let mut prior: HashSet<PathBuf> = HashSet::new();
+    let mut owners = OwnerTable::new();
+    for layer in &layers {
+        let report = unpack_layer_with_prior_paths(
+            layer.as_slice(),
+            root_dir.path(),
+            &UnpackOptions::default(),
+            &prior,
+        )
+        .unwrap();
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        prior.extend(report.paths_written.iter().cloned());
+        owners.absorb(&report.ownership);
+    }
+    assert_eq!(
+        owners.owner_of("/etc/passwd"),
+        second,
+        "the table's last word on the database is the top layer's, not root"
+    );
+
+    let claimed = RootOwnedPaths::none()
+        .with_path("etc")
+        .with_path("etc/passwd")
+        .with_path("etc/group");
+    let options = MaterializeOptions::builder()
+        .owners(owners)
+        .root_owned(claimed)
+        .build();
+    let fs = mount(build_ext4_pure(root_dir.path(), &options).unwrap().0);
+
+    for path in ["/etc", "/etc/passwd", "/etc/group"] {
+        assert_eq!(owner_of(&fs, path), Owner::ROOT, "{path}");
+    }
+    assert_eq!(owner_of(&fs, "/srv/accounts"), first);
+    assert_eq!(owner_of(&fs, "/srv"), first);
+}
+
 /// Ownership is content, not host state: the same layer materializes to the
 /// same bytes every time.
 #[test]

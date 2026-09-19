@@ -425,7 +425,13 @@ pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
         let from = entry.path();
         let to = dst.join(&raw);
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Copied as a link. `fs::copy` follows it, which read whatever the
+            // link named on the host — for an image tree, a link such as
+            // `../../../.ssh/id_ed25519` carried a host file into the guest.
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if file_type.is_dir() {
             copy_dir_filtered(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
@@ -1389,6 +1395,36 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    /// A link in the staged tree stays a link. Following it read whatever it
+    /// named on the host, so an image's `srv/k -> ../../../.ssh/id_ed25519`
+    /// carried the host key into the guest image.
+    #[test]
+    fn filtered_work_input_copies_a_symlink_as_a_link_and_never_reads_its_target() {
+        let host = tempfile::TempDir::new().unwrap();
+        let secret = host.path().join("id_ed25519");
+        std::fs::write(&secret, b"host private key").unwrap();
+        let source = host.path().join("image");
+        std::fs::create_dir_all(source.join("srv")).unwrap();
+        std::os::unix::fs::symlink(&secret, source.join("srv/k")).unwrap();
+        std::os::unix::fs::symlink("/does/not/exist", source.join("srv/dangling")).unwrap();
+
+        let staged = stage_filtered_work_input(&source).unwrap();
+
+        let link = staged.path().join("srv/k");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), secret);
+        assert_eq!(
+            std::fs::read_link(staged.path().join("srv/dangling")).unwrap(),
+            Path::new("/does/not/exist"),
+            "a dangling link is carried, not an error"
+        );
+    }
 
     #[test]
     fn filtered_work_input_excludes_mutable_mvm_state() {
