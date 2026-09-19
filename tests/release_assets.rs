@@ -220,7 +220,6 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
     for step in [
         "Sign release tarballs, checksum manifests, and SBOM",
         "Attest build provenance for the release tarballs (release-provenance)",
-        "Sign image manifests (plan 36)",
         "Trigger crates.io publish workflow",
         "Trigger kernel build + publish workflow",
     ] {
@@ -234,6 +233,23 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
              refs/tags identity, and must not publish or trigger anything real"
         );
     }
+}
+
+/// The release must not carry a signing step for per-variant image manifests.
+///
+/// Nothing writes a `*-image-*.manifest.json`, and nothing reads one: the
+/// per-variant verifier was retired in favour of image sets. A step signing that
+/// glob always took its empty branch and reported success, which reads like a
+/// signature the release does not make. Image sets are signed where they are
+/// published, not here.
+#[test]
+fn the_release_does_not_sign_image_manifests_nothing_produces() {
+    let workflow = release_workflow();
+    assert!(
+        !workflow.contains("-image-*.manifest.json"),
+        "release.yml signs or publishes `*-image-*.manifest.json`, which no job \
+         produces; a step over that glob always succeeds having signed nothing"
+    );
 }
 
 /// The published asset list must not name the same file twice.
