@@ -14,6 +14,12 @@ publishes the frame by atomic rename after the RAM file is synced.
 `restore_hvf_vm` clones `memory.bin` and the frame into the VM's state
 directory, which must be owner-only and on a local filesystem. It opens each
 clone read-only, removes its name, hashes it against the digest the checkpoint
+`restore_hvf_vm` first sets the VM's state directory (and every directory
+above it inside the mvm home) to `0700`, then clones `memory.bin` and the frame
+into it. The directory must be owned by this user, carry no group or other
+permission bits, have no ACL entry that grants access, and be on a local
+filesystem; each clone is narrowed to `0600` before it is opened, because a
+clone keeps its source's mode. It opens each clone read-only, removes its name, hashes it against the digest the checkpoint
 recorded, and passes the supervisor only those two descriptors. The supervisor
 refuses saved state named without descriptors, or a descriptor that still has a
 name or is open for writing, and maps the RAM `MAP_PRIVATE` before the
@@ -33,6 +39,9 @@ successful restore of a VM that was already gone.
 
 The bytes mapped are the bytes verified, as against other users and against
 later edits or replacement of the checkpoint. It is **not** a guarantee against
+later edits or replacement of the checkpoint. Other users are kept out of the
+clone's short-lived name by the owner-only, ACL-free directory and the clone's
+`0600` mode, not by where the mvm home happens to be. It is **not** a guarantee against
 a process running as the same user. Such a process can open the clone for
 writing in the few system calls between its creation and the removal of its
 name — for the whole copy on a filesystem that cannot clone — and a
@@ -118,6 +127,53 @@ after which the supervisor is SIGKILLed:
 Separately, every restore after a stopped restored run fails with `File exists`
 unless `machine stop` is run a second time. That is already on `main` and is
 not addressed here.
+**Spawn to ready, and stop, on the final tree** (after the rebase onto W4's
+free page reporting; 1-minute load 108–247). Spawn → ready is the time from
+starting the supervisor to its `restore.ready` marker, logged by every restore.
+It was 74–375 ms, with 1 GiB and 4 GiB overlapping, so it does not grow with
+guest RAM; the fixed 30 s `RESTORE_READY_TIMEOUT` leaves two orders of
+magnitude of headroom over the worst value seen, for the supervisor's
+self-signing on its first launch after a rebuild and for a heavily loaded host.
+Stop still never copies the image. The supervisor's resident size on this tree
+is higher than in the earlier run (28 MiB and 46 MiB against 19 MiB). The
+earlier run was on a base without W4's free-page reporting device; the cause of
+the difference was not investigated.
+
+| guest RAM | run | load avg (1/5/15 min) just before | spawn → ready | supervisor RSS 5 s after restore | peak supervisor RSS during stop | `machine stop` wall time |
+|---|---|---|---|---|---|---|
+| 1G | 1 | 236.42 174.29 161.99 | 89 ms | 28 MiB | 28 MiB | 1.10 s |
+| 1G | 2 | 236.12 187.53 167.94 | 375 ms | 28 MiB | 28 MiB | 0.87 s |
+| 1G | 3 | 191.81 182.81 167.38 | 136 ms | 28 MiB | 28 MiB | 0.54 s |
+| 1G | 4 | 197.75 186.64 170.02 | 91 ms | 28 MiB | 28 MiB | 0.63 s |
+| 1G | 5 | 154.62 177.25 167.36 | 239 ms | 28 MiB | 29 MiB | 0.72 s |
+| 1G | 6 | 161.65 174.49 167.14 | 228 ms | 28 MiB | 28 MiB | 0.94 s |
+| 1G | 7 | 173.55 172.29 166.73 | 85 ms | 28 MiB | 28 MiB | 0.79 s |
+| 1G | 8 | 220.40 184.99 171.95 | 299 ms | 28 MiB | 28 MiB | 2.96 s |
+| 4G | 1 | 246.76 223.59 193.90 | 172 ms | 46 MiB | 46 MiB | 1.65 s |
+| 4G | 2 | 214.94 220.01 198.28 | 78 ms | 45 MiB | 46 MiB | 0.84 s |
+| 4G | 3 | 176.77 207.98 196.39 | 74 ms | 45 MiB | 46 MiB | 1.06 s |
+| 4G | 4 | 126.80 185.74 188.93 | 116 ms | 45 MiB | 46 MiB | 1.04 s |
+| 4G | 5 | 131.27 170.21 182.54 | 164 ms | 46 MiB | 46 MiB | 1.61 s |
+| 4G | 6 | 129.81 156.10 174.73 | 151 ms | 45 MiB | 45 MiB | 1.66 s |
+| 4G | 7 | 191.48 161.43 171.42 | 112 ms | 45 MiB | 46 MiB | 0.81 s |
+| 4G | 8 | 108.67 145.28 164.63 | 106 ms | 45 MiB | 46 MiB | 0.81 s |
+
+Between runs the harness removed the checkpoint's own files from the stopped
+VM's state directory, because of two state-directory problems that are already
+on `main` and are not addressed here. First, a restore after a stopped restored
+run fails with `File exists` while cloning `rootfs.ext4`. Second, a second
+`machine stop` clears that directory but also removes the per-VM
+`flowmux-identity.ext4` disk, after which every restore fails with "HVF restore
+needs disk image …/flowmux-identity.ext4, which is not on disk".
+
+## Known limits
+
+- The verification does not hold against a process running as the same user
+  (W5.7).
+- Memory a restored guest frees is not returned to the host while it runs. Its
+  RAM is a private file mapping, which free page reporting skips
+  (`RamBacking::PrivateFile`), and nothing owns remapping written pages back to
+  anonymous memory (W5.8).
 
 ## Tests
 
@@ -133,6 +189,15 @@ not addressed here.
   non-local filesystems, encrypted images, named or writable inherited
   descriptors, a scope launcher that would drop the descriptors, and a named
   copy outliving its guard.
+- Refused inputs: symlinked sources, restore directories other users can
+  enter or write, an ACL that grants access (both through an injected probe
+  and a real `chmod +a` on macOS), non-local filesystems (through an injected
+  probe, and the Linux allowlist refusing Ceph, AFS, Lustre, GFS2, OCFS2, Coda,
+  NCP, NFS, CIFS and FUSE), encrypted images, named or writable inherited
+  descriptors, a scope launcher that would drop the descriptors, and a named
+  copy outliving its guard. A world-writable source still yields a `0600`
+  copy; a copy that cannot be opened leaves no name; a name that cannot be
+  removed is reported.
 - Cross-tenant restore and fork refusals, and the signed chain reporting the
   creating tenant.
 - The full CI gate list; the commands are in the PR.

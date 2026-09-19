@@ -125,6 +125,8 @@ Last updated: 2026-09-19
         reported only once the supervisor has applied it. RAM is no longer
         held in the supervisor during a restore, and stopping a restored guest
         no longer copies its image. W5.7 (sandbox supervisors) is open.
+        no longer copies its image. W5.7 (sandbox supervisors) and W5.8
+        (return memory a restored guest frees) are open.
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.

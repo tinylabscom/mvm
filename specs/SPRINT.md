@@ -153,6 +153,8 @@
         guests; a cross-tenant restore or fork is refused as a policy guard.
         W5.7, sandboxing supervisors so the verification also holds against
         same-user processes, is open. Measurements are in the PR and in
+        same-user processes, and W5.8, returning memory a restored guest
+        frees, are open. Measurements are in the PR and in
         `specs/sprint/delivery/3382-hvf-cow-restore.md`.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
