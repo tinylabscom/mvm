@@ -838,26 +838,108 @@ fn builder_vm_stage0_promotion_keeps_existing_valid_cache() {
     validate_builder_vm_stage0_artifacts(&final_dir).expect("existing cache should remain valid");
 }
 
+/// The `Cargo.lock` of the synthetic workspace: `mvm-agentd` depends on
+/// `mvm-core` and `libc`, `mvm-core` on `serde`, and the unrelated crate on
+/// `clap`. `tempfile` is only `mvm-agentd`'s dev-dependency.
+fn synthetic_cargo_lock(libc: &str, clap: &str) -> String {
+    format!(
+        r#"version = 4
+
+[[package]]
+name = "mvm-agentd"
+version = "0.1.0"
+dependencies = ["libc", "mvm-core", "tempfile"]
+
+[[package]]
+name = "mvm-core"
+version = "0.1.0"
+dependencies = ["serde"]
+
+[[package]]
+name = "mvm-unrelated"
+version = "0.1.0"
+dependencies = ["clap"]
+
+[[package]]
+name = "libc"
+version = "{libc}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "libc-{libc}"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "serde"
+
+[[package]]
+name = "clap"
+version = "{clap}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "clap-{clap}"
+
+[[package]]
+name = "tempfile"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "tempfile"
+"#
+    )
+}
+
+fn write_synthetic_crate(tmp: &std::path::Path, name: &str, deps: &str) {
+    let dir = tmp.join("crates").join(name);
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir crate src");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n{deps}"),
+    )
+    .expect("write crate manifest");
+    std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").expect("write crate source");
+}
+
 /// Lay out a synthetic mvm workspace under `tmp` that the
 /// `builder_vm_source_fingerprint` will accept:
 ///
 /// ```text
 /// tmp/
-///   Cargo.lock
+///   Cargo.toml  Cargo.lock
+///   crates/{mvm-agentd,mvm-core,mvm-unrelated}/{Cargo.toml,src/lib.rs}
 ///   nix/lib/mkguest.nix
 ///   nix/images/builder-vm/{flake.nix,flake.lock}
 /// ```
 ///
-/// In-VM binary identity now rides on the embedded host-binary
-/// bytes (see `fold_embedded_binary_identity`), so the old per-crate
-/// `crates/<name>/{Cargo.toml,src}` stubs are gone. `nix/lib` is
-/// present because the flake imports it (Layer 3) and the dir-walker
-/// skip tests exercise it.
+/// The crates are there for layer 4: the flake compiles `mvm-setpriv` from
+/// `mvm-agentd`, so its closure (`mvm-core` included) is part of the key and
+/// `mvm-unrelated` is not. `nix/lib` is present because the flake imports it
+/// (layer 3) and the dir-walker skip tests exercise it.
 ///
 /// Returns the path of the `nix/images/builder-vm/` dir — the
 /// argument the fingerprint function expects.
 fn write_builder_vm_workspace(tmp: &std::path::Path) -> std::path::PathBuf {
-    std::fs::write(tmp.join("Cargo.lock"), "# stub Cargo.lock\n").expect("write Cargo.lock");
+    std::fs::write(
+        tmp.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n\
+         libc = \"0.2\"\nclap = \"4\"\n\n[profile.release]\nlto = true\n",
+    )
+    .expect("write root manifest");
+    std::fs::write(
+        tmp.join("Cargo.lock"),
+        synthetic_cargo_lock("0.2.0", "4.0.0"),
+    )
+    .expect("write Cargo.lock");
+    write_synthetic_crate(
+        tmp,
+        "mvm-agentd",
+        "[dependencies]\nlibc.workspace = true\nmvm-core = { path = \"../mvm-core\" }\n\n\
+         [dev-dependencies]\ntempfile = \"3\"\n",
+    );
+    write_synthetic_crate(tmp, "mvm-core", "[dependencies]\nserde = \"1\"\n");
+    write_synthetic_crate(
+        tmp,
+        "mvm-unrelated",
+        "[dependencies]\nclap.workspace = true\n",
+    );
 
     let nix_lib = tmp.join("nix/lib");
     std::fs::create_dir_all(&nix_lib).expect("mkdir nix/lib");
@@ -866,6 +948,133 @@ fn write_builder_vm_workspace(tmp: &std::path::Path) -> std::path::PathBuf {
     let flake = tmp.join("nix/images/builder-vm");
     write_builder_vm_flake(&flake, "{ outputs = _: {}; }", Some("{\"nodes\":{}}"));
     flake
+}
+
+/// A described edit to the synthetic workspace, applied at its root.
+type WorkspaceEdit = (&'static str, fn(&std::path::Path));
+
+/// The fingerprint of the synthetic workspace at `flake`, after `edit` has run
+/// against its root.
+fn fingerprint_after(flake: &std::path::Path, edit: impl FnOnce(&std::path::Path)) -> String {
+    let root = flake
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("workspace root above nix/images/builder-vm");
+    edit(root);
+    builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint")
+}
+
+/// `mvm-setpriv` is compiled by the flake from `mvm-agentd`, so an edit to that
+/// crate, to a workspace crate it depends on, or to a lock entry it resolves
+/// changes the image and must change the key.
+#[test]
+fn builder_vm_source_fingerprint_changes_with_setpriv_source() {
+    let edits: [WorkspaceEdit; 5] = [
+        ("an mvm-agentd source edit", |root| {
+            std::fs::write(root.join("crates/mvm-agentd/src/lib.rs"), "pub fn g() {}\n")
+                .expect("edit");
+        }),
+        ("a new file beside mvm-agentd's src", |root| {
+            std::fs::create_dir_all(root.join("crates/mvm-agentd/data")).expect("mkdir");
+            std::fs::write(root.join("crates/mvm-agentd/data/table.txt"), "x").expect("write");
+        }),
+        ("an edit to mvm-core, which mvm-agentd depends on", |root| {
+            std::fs::write(root.join("crates/mvm-core/src/lib.rs"), "pub fn g() {}\n")
+                .expect("edit");
+        }),
+        ("a bump of a locked crate mvm-agentd reaches", |root| {
+            std::fs::write(
+                root.join("Cargo.lock"),
+                synthetic_cargo_lock("0.2.1", "4.0.0"),
+            )
+            .expect("edit");
+        }),
+        ("a release-profile change", |root| {
+            let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read");
+            std::fs::write(
+                root.join("Cargo.toml"),
+                manifest.replace("lto = true", "lto = false"),
+            )
+            .expect("edit");
+        }),
+    ];
+    for (what, edit) in edits {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let flake = write_builder_vm_workspace(tmp.path());
+        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
+
+        let after = fingerprint_after(&flake, edit);
+
+        assert_ne!(before, after, "{what} must change the builder cache key");
+    }
+}
+
+/// The reason the whole lockfile is not hashed: a bump or an edit outside the
+/// closure `mvm-setpriv` is built from cannot change the image.
+#[test]
+fn builder_vm_source_fingerprint_ignores_changes_outside_the_setpriv_closure() {
+    let edits: [WorkspaceEdit; 4] = [
+        ("a bump of a crate only mvm-unrelated uses", |root| {
+            std::fs::write(
+                root.join("Cargo.lock"),
+                synthetic_cargo_lock("0.2.0", "4.1.0"),
+            )
+            .expect("edit");
+        }),
+        ("an edit to a crate mvm-agentd does not reach", |root| {
+            std::fs::write(
+                root.join("crates/mvm-unrelated/src/lib.rs"),
+                "pub fn g() {}\n",
+            )
+            .expect("edit");
+        }),
+        ("an mvm-agentd integration test", |root| {
+            std::fs::create_dir_all(root.join("crates/mvm-agentd/tests")).expect("mkdir");
+            std::fs::write(
+                root.join("crates/mvm-agentd/tests/t.rs"),
+                "#[test] fn t() {}\n",
+            )
+            .expect("write");
+        }),
+        (
+            "a workspace dependency only mvm-unrelated declares",
+            |root| {
+                let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read");
+                std::fs::write(
+                    root.join("Cargo.toml"),
+                    manifest.replace("clap = \"4\"", "clap = \"4.1\""),
+                )
+                .expect("edit");
+            },
+        ),
+    ];
+    for (what, edit) in edits {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let flake = write_builder_vm_workspace(tmp.path());
+        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
+
+        let after = fingerprint_after(&flake, edit);
+
+        assert_eq!(
+            before, after,
+            "{what} must not change the builder cache key"
+        );
+    }
+}
+
+/// A tree without the crate the flake compiles `mvm-setpriv` from is not one
+/// the flake could build; the key refuses rather than silently hashing less.
+#[test]
+fn builder_vm_source_fingerprint_refuses_a_workspace_without_mvm_agentd() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flake = write_builder_vm_workspace(tmp.path());
+    std::fs::remove_dir_all(tmp.path().join("crates/mvm-agentd")).expect("remove crate");
+
+    let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
+        .expect_err("a missing mvm-agentd must not produce a key");
+
+    assert!(err.to_string().contains("mvm-agentd"), "{err}");
 }
 
 #[test]
@@ -960,30 +1169,6 @@ fn every_nix_import_of_the_shipped_builder_flake_is_fingerprinted() {
             "{flake} imports {import}, which the builder source fingerprint does not hash"
         );
     }
-}
-
-#[test]
-fn builder_vm_source_fingerprint_is_unaffected_by_cargo_lock() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-    // The builder-VM flake forbids `buildRustPackage`; no flake artifact
-    // consumes the workspace lockfile. The only baked Rust is the
-    // embedded host binaries, whose identity rides on the byte-hash layer
-    // (a rebuilt binary changes its sha256). A `cargo update` therefore
-    // must NOT invalidate the builder-VM cache key.
-    std::fs::write(
-        tmp.path().join("Cargo.lock"),
-        "# stub Cargo.lock — updated\n",
-    )
-    .expect("rewrite Cargo.lock");
-    let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-    assert_eq!(
-        first, second,
-        "a workspace Cargo.lock edit must not invalidate the builder-vm cache key"
-    );
 }
 
 #[test]

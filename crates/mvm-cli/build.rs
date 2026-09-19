@@ -131,17 +131,21 @@ impl EmbedCache {
     /// cannot affect them, yet re-ran the whole script on every edit to the
     /// crate under active development. Anything reachable is still watched,
     /// because the set is taken from the manifest graph rather than named by
-    /// hand.
+    /// hand. Each crate's watched files are exactly the ones its key hashes, so
+    /// an edit that would move the key always re-runs the script. The watch is
+    /// per file because cargo does not reliably re-trigger a directory-level
+    /// `rerun-if-changed` on a content edit to a file already in it.
     fn emit_rerun(&self) {
         for member in &self.watched {
             let Some(dir) = self.graph.dirs.get(member) else {
                 continue;
             };
-            emit_rerun_for_tree(&dir.join("src"));
-            println!(
-                "cargo:rerun-if-changed={}",
-                dir.join("Cargo.toml").display()
-            );
+            for (path, _) in build_embed_cache::hash_member(&self.workspace_root, dir) {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    self.workspace_root.join(path).display()
+                );
+            }
         }
     }
 }
@@ -209,6 +213,7 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
+    println!("cargo:rerun-if-changed=src/workspace_graph.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
@@ -501,26 +506,6 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
     // graph rather than named here.
     cache.emit_rerun();
     cache.prune();
-}
-
-/// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike
-/// a single directory-level `rerun-if-changed` (which cargo does not reliably
-/// re-trigger on a content edit to an existing file), this forces the build
-/// script — and therefore the embedded-binary cross-compile — to re-run whenever
-/// any watched source file changes. Missing trees are silently skipped (the
-/// dir-level watch already fails soft the same way).
-fn emit_rerun_for_tree(root: &Path) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            emit_rerun_for_tree(&path);
-        } else {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
-    }
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {

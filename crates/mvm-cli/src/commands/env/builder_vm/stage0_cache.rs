@@ -436,13 +436,19 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 /// 3. Every Nix source outside the flake's directory that it imports
 ///    ([`BUILDER_FLAKE_NIX_INPUTS`]): the shared library, the guest recipes,
 ///    the kernel configs, and the runtime-overlay flake.
+/// 4. The Rust source of `mvm-setpriv`, the one Rust binary the flake compiles
+///    itself (`cargo build --package mvm-agentd --bin mvm-setpriv`) rather
+///    than taking from mvmctl's embedded payload: every workspace crate
+///    `mvm-agentd` reaches, the `Cargo.lock` entries of their non-dev
+///    dependency closure, and the root-manifest tables that change how that
+///    closure compiles (see `setpriv_source`).
 ///
-/// The workspace `Cargo.lock` is deliberately not hashed, so an unrelated
-/// dependency bump does not rebuild the builder. The embedded host binaries'
-/// byte hashes are folded into layer 2, and `build.rs` watches `Cargo.lock` and
-/// `crates/mvm-build/src` so changes that affect them rebuild the bytes before
-/// this fingerprint is computed. `mvm-setpriv` is the exception: the flake
-/// compiles it from `mvm-agentd` source, which none of these layers hashes yet.
+/// The workspace `Cargo.lock` as a whole is deliberately not hashed, so a
+/// dependency bump outside those two binaries' closures does not rebuild the
+/// builder. The embedded host binaries' byte hashes are folded into layer 2,
+/// and `build.rs` watches their crates so changes that affect them rebuild the
+/// bytes before this fingerprint is computed; layer 4 takes only the lock
+/// entries `mvm-setpriv` can reach.
 ///
 /// Pre-2026-05 this function only hashed (1), so contributor edits to
 /// the in-VM binaries silently reused the cached `rootfs.ext4`,
@@ -453,7 +459,8 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///
 /// We don't hash the entire workspace. A change to `mvm-cli` doesn't
 /// affect the rootfs and shouldn't invalidate the cache; only the
-/// embedded binaries' bytes carry the in-VM binary identity.
+/// embedded binaries' bytes and `mvm-setpriv`'s source closure carry the
+/// in-VM binary identity.
 ///
 /// ## Hash discipline
 ///
@@ -482,19 +489,14 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
         hash_named_file(&mut hasher, name, &path)?;
     }
 
-    // Layer 2: the embedded host-binary identity — the authoritative
-    // fingerprint of every Rust binary baked into the builder VM
-    // (`mvm-host-vm-init`, `mvm-egress-proxy`). `build.rs` cross-compiles
-    // them and embeds the bytes in mvmctl; Stage 0 installs those bytes into
-    // the rootfs. The builder-VM flake forbids `rustPlatform.buildRustPackage`,
-    // so no flake artifact consumes the workspace `Cargo.lock` — hashing the
-    // embedded bytes already captures the bin source, the `mvm-build` lib,
-    // its dep closure, AND the cross-compile toolchain (a gnu→musl switch
-    // yields different bytes from identical source) in one shot. The
-    // workspace `Cargo.lock` is therefore deliberately NOT hashed: it gates
-    // nothing here, and folding it in busts this cache on unrelated
-    // workspace-wide dep bumps. (`build.rs` reruns the cross-compile when its
-    // real inputs change, so a rebuilt binary's bytes shift this layer.)
+    // Layer 2: the embedded host-binary identity (`mvm-host-vm-init`,
+    // `mvm-egress-proxy`). `build.rs` cross-compiles them and embeds the bytes
+    // in mvmctl; Stage 0 installs those bytes into the rootfs. Hashing the
+    // bytes captures the bin source, the `mvm-build` lib, its dep closure, AND
+    // the cross-compile toolchain (a gnu→musl switch yields different bytes
+    // from identical source) in one shot. (`build.rs` reruns the cross-compile
+    // when its real inputs change, so a rebuilt binary's bytes shift this
+    // layer.)
     for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
         fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
     }
@@ -510,6 +512,10 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
             hash_named_file(&mut hasher, input, &path)?;
         }
     }
+
+    // Layer 4: the one Rust binary the flake compiles from workspace source
+    // itself, so it has no embedded bytes to fold into layer 2.
+    super::setpriv_source::fold_setpriv_source_identity(&mut hasher, &workspace_root)?;
 
     Ok(hex::encode(hasher.finalize()))
 }
