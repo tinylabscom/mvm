@@ -181,6 +181,11 @@
       overlayVeritySalt = "0000000000000000000000000000000000000000000000000000000000000000";
       overlayVerityHashAlgorithm = "sha256";
       overlayVerityHashBlockSize = 4096;
+      # Mirrors `mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID`.
+      # Without it `veritysetup format` writes a random UUID into the hash
+      # device's superblock, so the sidecar bytes differ on every build even
+      # though the root hash does not.
+      overlayVerityUuid = "00000000-0000-0000-0000-000000000003";
 
       # Keep the Nix-built verity baseline on
       # the exact same cryptsetup release as the builder VM's OCI-pull
@@ -316,8 +321,7 @@
                 -t ext4 \
                 -L mvm-sdk-sidecar \
                 -U ${overlayUuid} \
-                -E hash_seed=${overlayHashSeed} \
-                -E no_copy_xattrs \
+                -E hash_seed=${overlayHashSeed},no_copy_xattrs \
                 -b ${toString overlayBlockSize} \
                 -d "$staging" \
                 $out/sdk.ext4
@@ -443,8 +447,7 @@
                 -t ext4 \
                 -L mvm-runtime-overlay \
                 -U ${overlayUuid} \
-                -E hash_seed=${overlayHashSeed} \
-                -E no_copy_xattrs \
+                -E hash_seed=${overlayHashSeed},no_copy_xattrs \
                 -b ${toString overlayBlockSize} \
                 -d "$staging" \
                 $out/overlay.ext4
@@ -461,6 +464,7 @@
                 --hash-block-size=${toString overlayVerityHashBlockSize} \
                 --salt=${overlayVeritySalt} \
                 --hash=${overlayVerityHashAlgorithm} \
+                --uuid=${overlayVerityUuid} \
                 $out/overlay.ext4 \
                 $out/overlay.verity
             )

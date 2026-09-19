@@ -174,6 +174,10 @@ pub const GATES: &[Gate] = &[
         "check-content-address-determinism",
         crate::check_content_address_determinism::run,
     ),
+    (
+        "check-image-reproducibility",
+        crate::check_image_reproducibility::run,
+    ),
     ("check-closure-budget", crate::check_closure_budget::run),
     (
         "check-workspace-dep-inheritance",

@@ -1557,7 +1557,34 @@ let
   # (`${nixpkgs}/...`) rather than the angle-bracket form (`<nixpkgs/...>`)
   # — the latter trips flake pure evaluation ("cannot look up
   # '<nixpkgs/...>' in pure evaluation mode").
+  #
+  # make-ext4-fs pins the filesystem UUID but not the directory hash seed, so
+  # `mkfs.ext4` would draw a random one and two builds of the same tree would
+  # differ in the superblock and every checksum that covers it. It takes no
+  # extra mkfs arguments, so it gets an e2fsprogs whose `mkfs.ext4` always
+  # passes the seed. The seed mirrors
+  # `mvm_fs::oci_to_rootfs::ext4::Mke2fsOptions::default().hash_seed`.
+  rootfsHashSeed = "00000000-0000-0000-0000-000000000002";
+  e2fsprogsPinnedHashSeed =
+    let
+      pinned = pkgs.runCommand "e2fsprogs-pinned-hash-seed"
+        {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        }
+        ''
+          mkdir -p "$out/bin"
+          for tool in ${pkgs.e2fsprogs.bin}/bin/*; do
+            ln -s "$tool" "$out/bin/"
+          done
+          rm "$out/bin/mkfs.ext4"
+          makeWrapper ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 "$out/bin/mkfs.ext4" \
+            --add-flags "-E hash_seed=${rootfsHashSeed}"
+        '';
+    in
+    pinned // { bin = pinned; };
+
   rootfsImageWithGrowthReserve = pkgs.callPackage "${nixpkgs}/nixos/lib/make-ext4-fs.nix" {
+    e2fsprogs = e2fsprogsPinnedHashSeed;
     storePaths = [ rootfsTree ];
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
