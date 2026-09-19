@@ -124,6 +124,10 @@
       only their declared descriptors. The W10 review follow-ups (issue
       #3432) are implemented: detection can no longer outrun the misplaced
       image-reference refusal, and every agent-facing failure carries a code.
+      W1b (issue #3431) hardens the reseed
+      helper and makes a resume whose guest does not confirm a reseed a
+      refusal rather than a warning; its live Firecracker refusal witness and
+      a chain-signed refusal entry are open.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
