@@ -1179,6 +1179,7 @@ mod tests {
             "unit should be the machine name plus a per-boot suffix, got {}",
             argv[5]
         );
+        argv[0] = "<launcher>".to_string();
         argv[5] = "<unit>".to_string();
         let memory_max = format!(
             "MemoryMax={}M",
@@ -1188,7 +1189,7 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "systemd-run",
+                "<launcher>",
                 "--user",
                 "--scope",
                 "--quiet",
@@ -1225,7 +1226,12 @@ mod tests {
             scratch.path(),
         );
         let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
-        assert_eq!(argv[0], "systemd-run");
+        assert_eq!(
+            Path::new(&argv[0])
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("systemd-run")
+        );
         assert!(argv.contains(&"MemoryMax=768M".to_string()), "{argv:?}");
         assert!(!argv.iter().any(|a| a.starts_with("CPUQuota=")), "{argv:?}");
         assert_eq!(

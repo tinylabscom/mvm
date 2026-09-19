@@ -617,7 +617,15 @@ mod tests {
         // Shell-quoted, because Firecracker's launch is a script: the prefix is
         // spliced ahead of the launch line rather than exec'd as argv.
         let prefix = io.restore_scope_prefix(&child_dir, 512);
-        assert!(prefix.starts_with("'systemd-run'"), "{prefix}");
+        let launcher = scratch
+            .path()
+            .join("bin/systemd-run")
+            .canonicalize()
+            .expect("fake launcher has an absolute path");
+        assert!(
+            prefix.starts_with(&format!("'{}'", launcher.display())),
+            "{prefix}"
+        );
         assert!(prefix.contains("'CPUQuota=150%'"), "{prefix}");
         assert!(prefix.contains("'MemoryMax=768M'"), "{prefix}");
         assert!(prefix.contains("'TasksMax=1024'"), "{prefix}");
