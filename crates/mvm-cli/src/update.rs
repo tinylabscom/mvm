@@ -772,71 +772,50 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Verify the cosign signature of a release archive bundle if cosign is available.
+/// Verify a downloaded release archive against the release workflow's signing
+/// identity before anything extracts it.
 ///
-/// Downloads `<archive_name>.bundle` from the release and runs `cosign verify-blob`.
-/// Non-fatal if cosign is not installed — checksum verification still runs.
+/// The Sigstore bundle published beside the archive is checked in-process
+/// against the embedded trust root, so a host without `cosign` gets the same
+/// verdict as one with it. A missing, unparseable, or foreign-signed bundle
+/// refuses the update; the SHA-256 checked before this comes from a manifest
+/// fetched over the same channel, so on its own it says nothing about who
+/// published the archive.
 fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
-    let cosign = match which::which("cosign") {
-        Ok(p) => p,
-        Err(_) => {
-            tracing::warn!(
-                "cosign not found — skipping signature verification. \
-                 Install cosign to enable provenance checking."
-            );
-            return Ok(());
-        }
-    };
-
-    let bundle_name = format!("{}.bundle", archive_name);
-    let bundle_url = format!(
-        "{}/{}/releases/download/{}/{}",
+    let release_base = format!(
+        "{}/{}/releases/download/{}",
         github_download_base(),
         GITHUB_REPO,
-        version,
-        bundle_name
+        version
     );
-    let bundle_path = archive_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(&bundle_name);
-
-    ui::info("Downloading signature bundle...");
-    download_release_asset(&bundle_url, &bundle_path)
-        .context("Failed to download cosign bundle — cannot verify signature")?;
-
-    let output = std::process::Command::new(&cosign)
-        .args([
-            "verify-blob",
-            "--bundle",
-            bundle_path
-                .to_str()
-                .expect("bundle path must be valid UTF-8"),
-            "--certificate-oidc-issuer",
-            "https://token.actions.githubusercontent.com",
-            "--certificate-identity-regexp",
-            &format!(
-                "https://github.com/{repo}/.github/workflows/release.yml@refs/tags/.*",
-                repo = GITHUB_REPO
-            ),
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-        ])
-        .output()
-        .context("Failed to run cosign verify-blob")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Signature verification failed — the archive may not have been built \
-             by the official release pipeline.\ncosign output: {}",
-            stderr.trim()
-        );
-    }
-
+    ui::info("Verifying release signature...");
+    verify_archive_signature_at(&release_base, version, archive_name, archive_path)?;
     ui::success("Signature verified.");
     Ok(())
+}
+
+/// Verify `archive_name` against the bundle published under `release_base`,
+/// accepting only the CLI release workflow at `tag`.
+fn verify_archive_signature_at(
+    release_base: &str,
+    tag: &str,
+    archive_name: &str,
+    archive_path: &Path,
+) -> Result<()> {
+    mvm_build::release_signature::verify_release_archive_signature(
+        &mvm_build::release_signature::ReleaseSignatureRequest {
+            base_url: release_base,
+            asset: archive_name,
+            archive_path,
+            version: strip_v_prefix(tag),
+            train: mvm_build::release_signature::ReleaseTrain::Cli,
+        },
+    )
+    .with_context(|| {
+        format!(
+            "refusing to install {archive_name}: it is not signed by the {tag} release workflow"
+        )
+    })
 }
 
 /// What `update` should do about the release it found.
@@ -1161,6 +1140,7 @@ mod tests {
     }
 
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
@@ -1260,35 +1240,82 @@ mod tests {
 
     // --- signature verification ---
 
-    #[test]
-    fn test_verify_signature_skipped_when_cosign_absent() {
-        // If cosign is not installed, verify_signature returns Ok (non-fatal).
-        // We can't control whether cosign is installed, so we test the which::which behaviour
-        // by checking that verify_signature on a nonsense version returns Ok (no cosign)
-        // or Err only with a cosign-related message (cosign present but download fails).
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let result = verify_signature("v0.0.0-nonexistent", "mvmctl-test.tar.gz", tmp.path());
-        match result {
-            Ok(()) => {} // cosign not installed → warning + Ok
-            Err(e) => {
-                let msg = e.to_string();
-                // cosign installed but download failed — that's still acceptable test behaviour
-                assert!(
-                    msg.contains("cosign") || msg.contains("bundle") || msg.contains("download"),
-                    "unexpected error: {msg}"
-                );
-            }
+    /// Stage a release directory holding `archive` and, optionally, a bundle.
+    fn stage_release(archive: &[u8], bundle: Option<&[u8]>) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SIGNED_ASSET), archive).unwrap();
+        if let Some(bundle) = bundle {
+            let name = mvm_build::release_signature::bundle_asset_name(SIGNED_ASSET);
+            std::fs::write(dir.path().join(name), bundle).unwrap();
         }
+        let base = format!("file://{}", dir.path().display());
+        (dir, base)
+    }
+
+    const SIGNED_ASSET: &str = "mvmctl-aarch64-apple-darwin.tar.gz";
+
+    #[test]
+    fn an_archive_without_a_bundle_is_refused() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let (dir, base) = stage_release(b"archive", None);
+
+        let err = verify_archive_signature_at(
+            &base,
+            "v9.9.9",
+            SIGNED_ASSET,
+            &dir.path().join(SIGNED_ASSET),
+        )
+        .expect_err("an unsigned archive must not install");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains(SIGNED_ASSET), "names the asset: {msg}");
+        assert!(msg.contains("v9.9.9"), "names the release: {msg}");
     }
 
     #[test]
-    fn test_skip_verify_flag_respected() {
-        // When skip_verify is true, verify_signature should not be called.
-        // The skip_verify=true path in update() simply never calls verify_signature.
-        // Verified by code inspection: update() returns early before calling
-        // verify_signature when skip_verify is set.
-        // This test documents the intended semantics.
-        let _ = "skip_verify=true prevents any cosign invocation";
+    fn an_archive_with_a_garbage_bundle_is_refused() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let (dir, base) = stage_release(b"archive", Some(b"not a sigstore bundle"));
+
+        verify_archive_signature_at(
+            &base,
+            "v9.9.9",
+            SIGNED_ASSET,
+            &dir.path().join(SIGNED_ASSET),
+        )
+        .expect_err("a bundle that does not parse must not admit the archive");
+    }
+
+    /// The tag carries a `v`; the identity template adds its own. A real
+    /// release bundle verifying under its real tag proves the two are not
+    /// doubled, which no refusal test can show.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_real_release_bundle_verifies_under_its_tag() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let asset = "builder-vm-aarch64-checksums-sha256.txt";
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1");
+
+        verify_archive_signature_at(
+            &format!("file://{}", dir.display()),
+            "v0.18.0-rc.1",
+            asset,
+            &dir.join(asset),
+        )
+        .expect("the v0.18.0-rc.1 release workflow's own signature must verify");
+
+        let err = verify_archive_signature_at(
+            &format!("file://{}", dir.display()),
+            "v0.18.0",
+            asset,
+            &dir.join(asset),
+        )
+        .expect_err("a signature from another release's workflow must not verify");
+        assert!(format!("{err:#}").contains("v0.18.0"));
     }
 
     // --- checksum verification ---
