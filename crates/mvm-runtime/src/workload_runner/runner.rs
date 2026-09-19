@@ -57,6 +57,7 @@ use mvm_vmm::post_restore::PostRestoreOutcome;
 mod admission;
 mod backend;
 mod broker;
+mod claim_lease;
 mod console_boot;
 mod refusal;
 mod sockets;
@@ -65,6 +66,7 @@ mod warm_claim;
 
 use admission::{admitted_ingress, admitted_network_limits};
 pub use broker::RealBrokerRegistrar;
+use claim_lease::WarmClaimLease;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
@@ -711,11 +713,20 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // checked.
             cpu_grant: plan.grants.as_ref().and_then(|grants| grants.cpu),
         };
-        if preloaded_child_name.is_some() {
-            self.driver.resume_preloaded_child(&fork_request)?;
+        let forked = if preloaded_child_name.is_some() {
+            self.driver.resume_preloaded_child(&fork_request)
         } else {
-            self.driver.fork_standby_child(&fork_request)?;
+            self.driver.fork_standby_child(&fork_request)
+        };
+        if let Err(StandbyError::Unrestorable(reason)) = &forked {
+            tracing::warn!(
+                parent = %handle.id,
+                %reason,
+                "dropping a standby parent this host cannot restore"
+            );
+            cleanup.quarantine();
         }
+        forked?;
         claim_phase!("child_forked");
 
         // Unconditional and best-effort, mirroring `start_workload`: started
@@ -1069,105 +1080,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 error = %e,
                 "stopping a warm-pool VM failed; it may still be running"
             ),
-        }
-    }
-}
-
-/// Release-unless-committed lease for a reserved parent and a partially-built
-/// child. A claim reserves the parent (`mark_claimed`) and then materializes a
-/// child dir; if any later step fails, this guard returns the (verified, healthy)
-/// parent to claimable — so a failed claim never strands warm capacity — and
-/// removes the orphaned child dir. Only a claim that boots the child calls
-/// [`commit`](Self::commit), disarming both. A parent that failed VERIFICATION is
-/// quarantined by removal upstream and never reaches this guard, so releasing
-/// here only ever returns a parent that verified healthy.
-struct WarmClaimLease<'a> {
-    pool: &'a SupervisorStandbyPool,
-    driver: &'a dyn VmmDriver,
-    parent_id: &'a str,
-    child_dir: Option<PathBuf>,
-    preloaded_child: Option<String>,
-    committed: bool,
-}
-
-impl<'a> WarmClaimLease<'a> {
-    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str, driver: &'a dyn VmmDriver) -> Self {
-        Self {
-            pool,
-            driver,
-            parent_id,
-            child_dir: None,
-            preloaded_child: None,
-            committed: false,
-        }
-    }
-
-    /// Track the child dir so an early return after materialize removes it.
-    fn track_child_dir(&mut self, dir: PathBuf) {
-        self.child_dir = Some(dir);
-    }
-
-    /// Track a paused child process so an early claim refusal cannot leave a
-    /// VMM alive after its pool reservation is returned.
-    fn track_preloaded_child(&mut self, vm_name: String) {
-        self.preloaded_child = Some(vm_name);
-    }
-
-    /// The child booted: disarm. The parent stays `Claimed` (the stop/reaper path
-    /// owns it) and the child dir is real state, not an orphan.
-    fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for WarmClaimLease<'_> {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        if let Err(e) = self.pool.mark_idle(self.parent_id) {
-            tracing::warn!(
-                parent = %self.parent_id,
-                error = %e,
-                "returning reserved standby parent to claimable after a failed claim"
-            );
-        }
-        if let Some(vm_name) = &self.preloaded_child {
-            let id = VmId(vm_name.clone());
-            if let Err(error) = self.driver.attach(&id).and_then(|vm| vm.kill()) {
-                tracing::warn!(
-                    vm = %vm_name,
-                    %error,
-                    "stopping preloaded standby child after failed claim"
-                );
-            }
-            // The child is gone either way — killed above, or already dead and
-            // about to lose its state dir below. The record has to stop naming
-            // it: left alone it keeps advertising a paused VMM that no longer
-            // exists, so every later claim refuses on a missing control socket
-            // while the pool still counts the parent as usable capacity. The
-            // parent and its checkpoint are healthy, so demote rather than
-            // remove; the next claim materializes a fresh child from it.
-            if let Err(error) = self.pool.demote_to_saved_state(self.parent_id) {
-                tracing::warn!(
-                    parent = %self.parent_id,
-                    child = %vm_name,
-                    %error,
-                    "could not demote standby to saved-state after its preloaded child was \
-                     destroyed; it will refuse every claim until reaped"
-                );
-            }
-        }
-        if let Some(dir) = &self.child_dir {
-            match std::fs::remove_dir_all(dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(
-                    dir = %dir.display(),
-                    error = %e,
-                    "removing orphaned child dir after a failed claim"
-                ),
-            }
         }
     }
 }
@@ -4262,7 +4174,8 @@ mod tests {
         /// The driver the claim ran on — an `Arc`-shared clone, so the fork,
         /// delivery, and kill records survive the runner it was moved into.
         driver: MockDriver,
-        parent_state: StandbyState,
+        /// `None` once the claim dropped the parent from the pool.
+        parent_state: Option<StandbyState>,
         orphan_child_dirs: usize,
         /// Records every `ConsoleStreamer::start`/`stop` the claim made, so a
         /// test can prove the console follower was wired into `claim_standby`
@@ -4329,10 +4242,33 @@ mod tests {
         HandshakeClaimOutcome {
             result,
             driver: probe,
-            parent_state: pool.load("warm-parent").unwrap().state,
+            parent_state: pool.load("warm-parent").ok().map(|h| h.state),
             orphan_child_dirs: orphan_child_dirs(),
             console_streamer: streamer,
         }
+    }
+
+    #[test]
+    fn a_parent_this_host_cannot_restore_is_dropped_not_returned_to_rotation() {
+        // A standby another VMM version captured: every claim would fail the
+        // same way, so returning it to claimable would cost each later launch a
+        // failed fork until its TTL.
+        let out = claim_with_scripted_handshake(
+            MockDriver::default().refusing_fork_as_unrestorable("snapshot format v8.0.0"),
+        );
+
+        let err = out
+            .result
+            .expect_err("an unrestorable parent cannot be claimed");
+        assert!(matches!(err, StandbyError::Unrestorable(_)), "{err}");
+        assert_eq!(
+            out.parent_state, None,
+            "the parent must be dropped from the pool, not released"
+        );
+        assert_eq!(
+            out.orphan_child_dirs, 0,
+            "the child dir is still cleaned up"
+        );
     }
 
     #[test]
@@ -4349,7 +4285,7 @@ mod tests {
             out.driver.forked_children().is_empty(),
             "grant issuance is checked before a child is resumed"
         );
-        assert_eq!(out.parent_state, StandbyState::Idle);
+        assert_eq!(out.parent_state, Some(StandbyState::Idle));
         assert_eq!(out.orphan_child_dirs, 0);
     }
 
@@ -4406,7 +4342,7 @@ mod tests {
             );
             assert_eq!(
                 out.parent_state,
-                StandbyState::Idle,
+                Some(StandbyState::Idle),
                 "{label}: a child-side failure must return the healthy parent to claimable"
             );
             assert_eq!(

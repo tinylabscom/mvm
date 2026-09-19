@@ -141,8 +141,17 @@ impl FirecrackerIO {
             "resume_vm": false,
         })
         .to_string();
-        super::api_put_socket(&socket_str, "/snapshot/load", &body)
-            .with_context(|| "PUT /snapshot/load")?;
+        if let Err(e) = super::api_put_socket(&socket_str, "/snapshot/load", &body) {
+            let state_file = dir.join(VMSTATE_FILENAME);
+            // Firecracker has already refused before any guest code ran; this
+            // only names the refusal when the state itself could not be decoded.
+            if let Some(undecodable) =
+                super::snapshot_decode::explain_load_failure(&e, &self.socket_path, &state_file)
+            {
+                return Err(e.context(undecodable));
+            }
+            return Err(e).context("PUT /snapshot/load");
+        }
         Ok(())
     }
 }

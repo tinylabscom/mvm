@@ -15,6 +15,7 @@ pub mod io;
 pub mod lifecycle;
 pub mod observe;
 pub mod snapshot;
+pub mod snapshot_decode;
 
 pub use capabilities::*;
 pub use control::*;
@@ -27,6 +28,7 @@ pub use io::*;
 pub use lifecycle::*;
 pub use observe::*;
 pub use snapshot::*;
+pub use snapshot_decode::UndecodableSnapshot;
 
 use anyhow::Result;
 

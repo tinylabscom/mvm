@@ -1088,6 +1088,11 @@ pub enum StandbyError {
     SpawnFailed(String),
     #[error("claim standby: {0}")]
     ClaimFailed(String),
+    /// The standby was captured in a form this host cannot restore — taken by
+    /// a different VMM version, for one. No retry can succeed, so the pool
+    /// drops it rather than returning it to rotation.
+    #[error("claim standby: this host cannot restore it: {0}")]
+    Unrestorable(String),
 }
 
 /// Snapshot of a VM's virtio-balloon state, returned by
