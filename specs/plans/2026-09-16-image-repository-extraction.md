@@ -529,10 +529,13 @@ taken after they land or are abandoned.
 
 Delivery slices, one PR each:
 
-- [ ] W4a (`mvm`) — export the guest recipes and a filtered-source helper from
-      `nix/flake.nix` for Linux systems, and have the in-tree image flakes
-      consume those outputs, so the interface `mvm-images` will pin is the one
-      `mvm` already builds through.
+- [x] W4a (`mvm`) — export the guest recipes from `nix/flake.nix` for Linux
+      systems, and have the in-tree image flakes consume those outputs, so the
+      interface `mvm-images` will pin is the one `mvm` already builds through.
+      Landed as `packages.<linux-system>.*` (agent, static agent, setpriv,
+      runner, egress client, addon DNS, exit report, SDK cdylib glibc/musl) and
+      `lib.<system>.hostBinaries`. For the same source, all 52 image and check
+      `drvPath`s are identical on both systems under the old and new wiring.
 - [ ] W4b (`mvm-images`) — the image flakes, kernel, initramfs and QEMU-wasm
       pack, with every `mvm` import rewritten onto an `mvm` input pinned to an
       exact commit, plus a no-publish build workflow for both architectures.
