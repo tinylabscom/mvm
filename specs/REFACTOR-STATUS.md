@@ -142,7 +142,9 @@ Last updated: 2026-09-18
       gate is now a required constructor argument, and an endpoint with no
       policy denies everything in every egress mode (T15, #3301, #3302). Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
-      transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
+      transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
+      with its versioned ABI and read-only machine methods; the bindings that
+      replace the argv transport are next), MCP (#3262) — whose existing tool surface is now pinned
       by a checked-in contract fixture, so the new tools land as reviewed
       contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
