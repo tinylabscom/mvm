@@ -565,7 +565,11 @@ fn refuse_tree_only_materialization_loss(
             route: route.clone(),
         });
     }
-    let non_root = input.owners.non_root_count();
+    // A path the builder claims is set back to root after the copy, so a
+    // layer owner there is not one this writer loses.
+    let non_root = input
+        .owners
+        .non_root_count(&crate::oci_runtime_inject::injected_root_owned_paths());
     if non_root > 0 {
         return Err(RootfsError::LayerOwnershipUnsupported {
             count: non_root,
@@ -713,6 +717,7 @@ mkdir -p "$MOUNTPOINT"
 mount -t ext4 "$ROOTFS_DEV" "$MOUNTPOINT"
 trap 'umount "$MOUNTPOINT" 2>/dev/null || true' EXIT
 cp -aR /work/. "$MOUNTPOINT"/
+chown -h 0:0 "$MOUNTPOINT"
 {chown_root_owned}sync
 umount "$MOUNTPOINT"
 trap - EXIT
@@ -1202,6 +1207,10 @@ mod tests {
         let claimed = crate::oci_runtime_inject::injected_root_owned_paths();
         let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024, &claimed);
         let copy = script.find("cp -aR /work/.").expect("copies the tree");
+        let image_root = script
+            .find("\nchown -h 0:0 \"$MOUNTPOINT\"\n")
+            .expect("the image root is set back to root, without following a link");
+        assert!(copy < image_root);
         let flush = script.find("\nsync\n").expect("flushes the image");
         for line in [
             "chown_root \"$MOUNTPOINT\"'/etc/passwd'",
@@ -1426,9 +1435,22 @@ mod tree_only_materialization_loss_tests {
     }
 
     fn owners_from_layer(uid: u64) -> mvm_fs::ownership::OwnerTable {
+        owners_at("var/lib/svc/", uid)
+    }
+
+    /// An image whose only non-root owners sit on paths mvm claims loses
+    /// nothing through the tree copy: the script sets those back to root.
+    #[test]
+    fn a_non_root_owner_only_on_claimed_paths_is_not_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = input_in(&dir).with_owners(owners_at("etc/mvm/", 1000));
+        assert!(refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected).is_ok());
+    }
+
+    fn owners_at(path: &str, uid: u64) -> mvm_fs::ownership::OwnerTable {
         let tree = tempfile::tempdir().unwrap();
         let mut header = tar::Header::new_gnu();
-        header.set_path("var/lib/svc/").unwrap();
+        header.set_path(path).unwrap();
         header.set_size(0);
         header.set_mode(0o750);
         header.set_entry_type(tar::EntryType::Directory);

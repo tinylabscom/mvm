@@ -158,9 +158,10 @@ data directory ships owned by its own account boots with root-owned files.
         oracle, including stacked layers (whiteout, opaque directory, hard
         link); a path mvm does not inject keeps its declared owner;
   - [x] the injection refuses an image that makes an injected path, or a
-        directory on the way to one, a symbolic link, and writes every
-        injected file as a fresh inode (no shared hard link, no layer mode or
-        extended attributes);
+        directory on the way to one, a symbolic link or a name the host
+        filesystem folds onto mvm's spelling, empties the mvm-only trees of
+        image content, writes the files it creates (and the provenance mark)
+        as fresh inodes, and checks the result by listing each directory;
   - [x] a deferred layer node at an injected path is refused rather than laid
         over the runtime's file;
   - [x] the builder-VM writer sets the claimed paths back to root after its
@@ -171,12 +172,15 @@ data directory ships owned by its own account boots with root-owned files.
 - [ ] W3.8 Builder-VM input fidelity, found while closing W3.7. An image
       materialized through the builder VM does not keep the tree it was
       given:
-  - [ ] the work-input staging copies a symbolic link's host-resolved target
-        instead of the link, so an absolute link in an image reads a host file
-        into the rootfs (or fails the copy when the target is missing);
+  - [x] the work-input staging copied a symbolic link's host-resolved target
+        instead of the link, so an absolute link in an image read a host file
+        into the rootfs; staging and the input archive now carry links as
+        links (#3430);
   - [ ] the input tar records the host account's uid and gid for every file,
         and the guest extracts and copies them, so every path mvm does not
-        claim is owned by the host account rather than root;
+        claim is owned by the host account rather than root. The image root
+        and every claimed path are set back to root (#3430); the rest is
+        open;
   - [ ] on macOS the unpacker's hard-link fallback removes the link source,
         not the destination, when an earlier layer wrote it, and then refuses
         the link.

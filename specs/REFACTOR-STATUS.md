@@ -92,7 +92,8 @@ Last updated: 2026-09-19
       W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
       the W3.6 live boot is still open. W3.7 done (#3430): files mvm injects
       stay root-owned whatever a layer declares. W3.8 (builder-VM input
-      fidelity: host-resolved symlinks, host uids) is open.
+      fidelity) is partly done: links are carried as links; host uids on
+      unclaimed paths and a macOS unpacker hard-link bug remain open.
       W4 done except W4.5 as written (#3381): HVF returns freed guest memory
       by free page reporting, advertised as `free_page_reporting` rather than
       `balloon`, since there is no inflate target for the controller to set.

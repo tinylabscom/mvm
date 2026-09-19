@@ -54,6 +54,25 @@ pub struct InputTree<'a> {
     pub src: &'a Path,
 }
 
+/// Archive each input tree under its name, storing a symbolic link as a link.
+///
+/// The archiver follows links by default, which reads whatever a link names
+/// on the host. An input tree can be an image's unpacked rootfs, whose links
+/// the image chose — an absolute or climbing target would put a host file
+/// into the guest.
+fn append_input_trees<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    inputs: &[InputTree<'_>],
+) -> Result<()> {
+    builder.follow_symlinks(false);
+    for tree in inputs {
+        builder
+            .append_dir_all(tree.name, tree.src)
+            .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
+    }
+    Ok(())
+}
+
 /// Round `n` up to the next 512-byte sector.
 fn sector_round_up(n: u64) -> u64 {
     n.div_ceil(SECTOR) * SECTOR
@@ -76,11 +95,11 @@ pub fn pack_input_disk(
     let mut buf = Vec::new();
     {
         let mut b = tar::Builder::new(&mut buf);
-        for tree in inputs {
-            b.append_dir_all(tree.name, tree.src)
-                .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
-        }
+        append_input_trees(&mut b, inputs)?;
         if let Some(nar) = closure_nar {
+            // The NAR is one file named by the caller, and may itself be a
+            // link to it; that is the one path archived by what it names.
+            b.follow_symlinks(true);
             // The guest imports a fixed path (`/closure-seed/<CLOSURE_FILE>`), so
             // the tar entry name comes from `CLOSURE_FILE` regardless of what the
             // source NAR happens to be called — otherwise a differently-named
@@ -135,10 +154,7 @@ pub fn repack_input_disk_in_place(inputs: &[InputTree<'_>], image: &Path) -> Res
     let mut buf = Vec::new();
     {
         let mut b = tar::Builder::new(&mut buf);
-        for tree in inputs {
-            b.append_dir_all(tree.name, tree.src)
-                .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
-        }
+        append_input_trees(&mut b, inputs)?;
         b.finish().context("finish dispatch input tar")?;
     }
     if buf.len() as u64 > capacity {
@@ -219,6 +235,48 @@ mod tests {
         assert_eq!(sector_round_up(1), 512);
         assert_eq!(sector_round_up(512), 512);
         assert_eq!(sector_round_up(513), 1024);
+    }
+
+    /// The input archive stores a link as a link. Following it would put the
+    /// bytes of whatever the link names on the host into the guest's input.
+    #[test]
+    fn input_pack_archives_a_symlink_as_a_link_not_its_host_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("host-secret");
+        fs::write(&secret, b"host bytes").unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        std::os::unix::fs::symlink(&secret, work.join("k")).unwrap();
+        let disk = dir.path().join("input.img");
+
+        pack_input_disk(
+            &[InputTree {
+                name: "work",
+                src: &work,
+            }],
+            None,
+            &disk,
+            INPUT_DISK_MIN_BYTES,
+        )
+        .unwrap();
+
+        let mut archive = tar::Archive::new(fs::File::open(&disk).unwrap());
+        let mut saw_link = false;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap() == Path::new("work/k") {
+                assert_eq!(entry.header().entry_type(), tar::EntryType::Symlink);
+                assert_eq!(entry.link_name().unwrap().unwrap(), secret);
+                saw_link = true;
+            }
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut body).unwrap();
+            assert!(
+                !body.windows(10).any(|w| w == b"host bytes"),
+                "the link's host target was read into the archive"
+            );
+        }
+        assert!(saw_link);
     }
 
     #[test]

@@ -39,7 +39,7 @@ That boundary matters for DX and security. The developer gets a normal local com
 - Record requested ref and resolved digest.
 - Verify manifest and blob digests.
 - Apply whiteout, symlink, hardlink, mode, ownership, and size policies during unpack.
-- Expect the files `mvm` adds to an image to be root's. `/etc/passwd`, `/etc/group`, everything under `/etc/mvm`, `/mvm`, and `/usr/lib/mvm`, the mount points, and the directories leading to them are root-owned in the built rootfs whatever owner the image's layers declare. An image that ships one of those paths as a symbolic link, or as something other than a regular file where `mvm` writes one, is refused rather than written through.
+- Expect the paths `mvm` writes to be its own. `/etc/mvm`, `/mvm`, and `/usr/lib/mvm` are emptied of anything the image shipped there before `mvm` writes into them. `/etc/passwd` and `/etc/group` keep the image's entries, but are rewritten as new root-owned files with mode `0644`. Those paths, the mount points `mvm` creates, and the directories leading to them are root-owned in the built rootfs whatever owner the image's layers declare. An image is refused if it ships one of those paths as a symbolic link, as something other than a regular file where `mvm` writes one, or under a name the host filesystem folds onto `mvm`'s spelling (for example `etc/Mvm` on a case-insensitive macOS volume). Images that ship `/data`, `/work`, `/mnt`, `/home`, `/tmp`, or `/dev/shm` as symbolic links are refused for the same reason.
 - Scope caches by workload or deployment boundary.
 - Emit audit events for resolve, fetch, cache hit, materialize, verify, launch, and delete.
 

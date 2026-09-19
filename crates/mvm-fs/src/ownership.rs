@@ -167,12 +167,13 @@ impl OwnerTable {
         self.owners.values().all(Owner::is_root)
     }
 
-    /// Number of paths carrying a non-root owner.
+    /// Number of paths that would carry a non-root owner once applied: those
+    /// the table gives a non-root owner and `root_owned` does not claim back.
     #[must_use]
-    pub fn non_root_count(&self) -> usize {
+    pub fn non_root_count(&self, root_owned: &RootOwnedPaths) -> usize {
         self.owners
-            .values()
-            .filter(|owner| !owner.is_root())
+            .iter()
+            .filter(|(path, owner)| !owner.is_root() && !root_owned.claims(path))
             .count()
     }
 
@@ -278,6 +279,13 @@ impl RootOwnedPaths {
                     .strip_prefix(tree.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
         })
+    }
+
+    /// [`Self::claims`] for a path in any spelling a tar header uses —
+    /// `./etc/passwd`, `etc//passwd/` — normalized to the guest key first.
+    #[must_use]
+    pub fn claims_path(&self, path: impl AsRef<Path>) -> bool {
+        self.claims(&guest_key(path.as_ref()))
     }
 
     /// Whether nothing is claimed.
@@ -535,19 +543,53 @@ mod tests {
         assert!(claimed.claims("/etc/mvm/verb-trust.json"));
     }
 
+    /// A writer that cannot place owners refuses on the count; a non-root
+    /// owner the builder claims back is not one it would lose.
+    #[test]
+    fn a_claimed_non_root_owner_is_not_counted() {
+        let table = table_of(&[layer(|l| {
+            l.record_leaf(Path::new("etc/passwd"), OTHER);
+            l.record_dir(Path::new("data"), SVC);
+        })]);
+        assert_eq!(table.non_root_count(&RootOwnedPaths::none()), 2);
+        assert_eq!(
+            table.non_root_count(&RootOwnedPaths::none().with_path("etc/passwd")),
+            1
+        );
+        assert_eq!(
+            table.non_root_count(
+                &RootOwnedPaths::none()
+                    .with_path("etc/passwd")
+                    .with_tree("data")
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn a_claim_matches_any_tar_spelling_of_the_path() {
+        let claimed = RootOwnedPaths::none()
+            .with_path("etc/passwd")
+            .with_tree("etc/mvm");
+        for spelling in ["./etc/passwd", "etc//passwd", "/etc/passwd/", "etc/mvm/./x"] {
+            assert!(claimed.claims_path(spelling), "{spelling}");
+        }
+        assert!(!claimed.claims_path("./etc/hosts"));
+    }
+
     #[test]
     fn root_only_is_judged_on_recorded_owners() {
         let root = table_of(&[layer(|l| {
             l.record_leaf(Path::new("etc/passwd"), Owner::ROOT)
         })]);
         assert!(root.is_root_only());
-        assert_eq!(root.non_root_count(), 0);
+        assert_eq!(root.non_root_count(&RootOwnedPaths::none()), 0);
         let mixed = table_of(&[layer(|l| {
             l.record_leaf(Path::new("etc/passwd"), Owner::ROOT);
             l.record_dir(Path::new("data"), SVC);
         })]);
         assert!(!mixed.is_root_only());
-        assert_eq!(mixed.non_root_count(), 1);
+        assert_eq!(mixed.non_root_count(&RootOwnedPaths::none()), 1);
     }
 
     #[test]

@@ -144,6 +144,11 @@ fn inject_shape_bytes() -> Vec<u8> {
         out.extend_from_slice(dest.as_bytes());
         out.push(0);
     }
+    for tree in INJECT_TREES {
+        out.extend_from_slice(b"tree:");
+        out.extend_from_slice(tree.as_bytes());
+        out.push(0);
+    }
     out
 }
 
@@ -264,7 +269,9 @@ pub fn injected_root_owned_paths() -> mvm_fs::ownership::RootOwnedPaths {
 /// forcing the symlink itself to root would not stop it.
 pub fn refuse_layer_nodes_at_injected_paths(nodes: &[mvm_fs::ext4::Node]) -> io::Result<()> {
     let claimed = injected_root_owned_paths();
-    match nodes.iter().find(|node| claimed.claims(node.path())) {
+    // Compared as a path, not a string: the unpacker spells a guest path as the
+    // tar header did, `./etc//passwd/` included.
+    match nodes.iter().find(|node| claimed.claims_path(node.path())) {
         Some(node) => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -290,26 +297,36 @@ fn injected_write_paths() -> impl Iterator<Item = &'static str> {
 /// shaped.
 ///
 /// The injection runs on the host, as the invoking user, before the tree is
-/// sealed. A layer is free to ship `/etc/passwd`, `/etc`, `/tmp` or anything
-/// under `/mvm` as a symbolic link, and the unpacker keeps the link target as
-/// written — absolute, or climbing out with `..`. Writing through it would
-/// read and rewrite a file outside the rootfs; even a target inside it would
-/// move the injected file to a path the image's own owners govern. A
-/// non-regular file where a regular one is written (a directory, a FIFO a
+/// sealed. A layer is free to ship `/etc/passwd`, `/etc`, `/tmp` or `/mvm` as
+/// a symbolic link, and the unpacker keeps the link target as written —
+/// absolute, or climbing out with `..`. Writing through it would read and
+/// rewrite a file outside the rootfs; even a target inside it would move the
+/// injected file to a path the image's own owners govern.
+///
+/// A host filesystem that folds names — the macOS default folds case and some
+/// non-ASCII letters — does the same with an alias: an image that ships
+/// `etc/Mvm/` and no `etc/mvm/` has the injection's `etc/mvm/verb-trust.json`
+/// land in the image's directory, and the guest, which does not fold, never
+/// sees `/etc/mvm` at all. Every component therefore has to be on disk under
+/// exactly the name the injection uses.
+///
+/// A non-regular file where a regular one is written (a directory, a FIFO a
 /// read would block on) is refused for the same reason: the injection must
-/// create what it claims, not adopt what it finds.
+/// create what it claims, not adopt what it finds. The mvm-only trees are
+/// exempt from that last check because [`clear_mvm_only_trees`] empties them
+/// before anything is written.
 fn refuse_unsafe_injection_paths(rootfs_dir: &Path) -> io::Result<()> {
     for rel in injected_write_paths() {
-        if let Some(link) = first_symlink_on(rootfs_dir, Path::new(rel))? {
-            return Err(shaped_path_error(&link, "is a symbolic link"));
+        if let Some((at, what)) = first_shaped_component(rootfs_dir, Path::new(rel))? {
+            return Err(shaped_path_error(&at, what));
         }
     }
-    for tree in INJECT_TREES {
-        if let Some(link) = symlink_beneath(&rootfs_dir.join(tree))? {
-            let rel = link.strip_prefix(rootfs_dir).unwrap_or(&link);
-            return Err(shaped_path_error(rel, "is a symbolic link"));
-        }
-    }
+    Ok(())
+}
+
+/// Refuse a non-regular file at an injected destination outside the mvm-only
+/// trees. Runs after those trees are cleared.
+fn refuse_non_regular_destinations(rootfs_dir: &Path) -> io::Result<()> {
     for dest in INJECT_DESTS {
         match std::fs::symlink_metadata(rootfs_dir.join(dest)) {
             Ok(meta) if !meta.file_type().is_file() => {
@@ -334,43 +351,110 @@ fn shaped_path_error(rel: &Path, what: &str) -> io::Error {
     )
 }
 
-/// The first component of `rel` under `root` that is a symbolic link, as a
-/// path relative to `root`. Stops at the first component that does not exist:
-/// nothing beneath it can be a link yet.
-fn first_symlink_on(root: &Path, rel: &Path) -> io::Result<Option<PathBuf>> {
+const IS_A_SYMLINK: &str = "is a symbolic link";
+const IS_AN_ALIAS: &str =
+    "resolves on this host only by folding its name onto a differently spelled entry";
+
+/// The first component of `rel` under `root` that is a symbolic link, or that
+/// the host resolves to an entry spelled differently, as a path relative to
+/// `root` with the reason. Stops at the first component that does not exist:
+/// nothing beneath it can be shaped yet.
+fn first_shaped_component(root: &Path, rel: &Path) -> io::Result<Option<(PathBuf, &'static str)>> {
     let mut walked = PathBuf::new();
     for component in rel.components() {
+        let parent = root.join(&walked);
         walked.push(component);
         match std::fs::symlink_metadata(root.join(&walked)) {
-            Ok(meta) if meta.file_type().is_symlink() => return Ok(Some(walked)),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Ok(Some((walked, IS_A_SYMLINK)));
+            }
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
+        }
+        if !directory_lists_exactly(&parent, component.as_os_str())? {
+            return Ok(Some((walked, IS_AN_ALIAS)));
         }
     }
     Ok(None)
 }
 
-/// Any symbolic link at or beneath `dir`, which is itself known not to be one.
-/// A missing `dir` holds nothing.
-fn symlink_beneath(dir: &Path) -> io::Result<Option<PathBuf>> {
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(at) = stack.pop() {
-        let meta = match std::fs::symlink_metadata(&at) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+/// Whether `dir` holds an entry whose name is byte-for-byte `name`.
+fn directory_lists_exactly(dir: &Path, name: &std::ffi::OsStr) -> io::Result<bool> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        names.push(entry?.file_name());
+    }
+    Ok(lists_exactly(names, name))
+}
+
+/// The comparison [`directory_lists_exactly`] makes, over names already read.
+/// Byte equality, deliberately: any folding here would reintroduce the alias
+/// the check exists to catch.
+fn lists_exactly(
+    names: impl IntoIterator<Item = std::ffi::OsString>,
+    name: &std::ffi::OsStr,
+) -> bool {
+    names.into_iter().any(|listed| listed.as_os_str() == name)
+}
+
+/// Empty the trees only mvm writes, so nothing the image shipped there — an
+/// entrypoint marker, a runtime config, hooks, probes — survives next to what
+/// the injection writes. A tree is recreated with an explicit mode, so the
+/// result does not depend on the host's umask.
+fn clear_mvm_only_trees(rootfs_dir: &Path) -> io::Result<()> {
+    for tree in INJECT_TREES {
+        let path = rootfs_dir.join(tree);
+        match std::fs::symlink_metadata(&path) {
+            // Removing a directory never follows a link inside it, and the
+            // tree's own path was checked not to be one.
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path)?,
+            Ok(_) => std::fs::remove_file(&path)?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
-        };
-        if meta.file_type().is_symlink() {
-            return Ok(Some(at));
         }
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(&at)? {
-                stack.push(entry?.path());
-            }
+        ensure_dir(rootfs_dir, tree, 0o755)?;
+    }
+    Ok(())
+}
+
+/// Every path the injection always writes, which must exist afterwards under
+/// exactly its own spelling.
+fn always_written_paths() -> impl Iterator<Item = &'static str> {
+    INJECT_DIRS
+        .iter()
+        .map(|(rel, _mode)| *rel)
+        .chain(INJECT_TREES.iter().copied())
+        .chain(ACCOUNT_DATABASES)
+        .chain([ENTRYPOINT_RUNNER_DEST, "etc/mvm/variant", "etc/mvm/name"])
+}
+
+/// Check the tree after injection the way the image writer will read it: by
+/// listing each directory. Every path the injection always writes has to be
+/// listed under its exact spelling, and no path it may write can resolve
+/// through a link or an alias. This is the backstop for the refusal made
+/// before injection — a write that landed anywhere else fails here, not in
+/// the guest.
+fn verify_injected_spelling(rootfs_dir: &Path) -> io::Result<()> {
+    for rel in injected_write_paths() {
+        if let Some((at, what)) = first_shaped_component(rootfs_dir, Path::new(rel))? {
+            return Err(shaped_path_error(&at, what));
         }
     }
-    Ok(None)
+    for rel in always_written_paths() {
+        let mut dir = rootfs_dir.to_path_buf();
+        for component in Path::new(rel).components() {
+            if !directory_lists_exactly(&dir, component.as_os_str())? {
+                return Err(io::Error::other(format!(
+                    "injection wrote /{rel}, but {} does not list {:?} under that spelling",
+                    dir.display(),
+                    component.as_os_str()
+                )));
+            }
+            dir.push(component);
+        }
+    }
+    Ok(())
 }
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
@@ -401,6 +485,8 @@ pub fn inject_mvm_runtime(
     }
 
     refuse_unsafe_injection_paths(rootfs_dir)?;
+    clear_mvm_only_trees(rootfs_dir)?;
+    refuse_non_regular_destinations(rootfs_dir)?;
 
     for (rel, mode) in INJECT_DIRS {
         ensure_dir(rootfs_dir, rel, *mode)?;
@@ -483,6 +569,8 @@ pub fn inject_mvm_runtime(
         }
     }
 
+    verify_injected_spelling(rootfs_dir)?;
+
     Ok(InjectedPaths {
         agent: agent_dest,
         netinit: netinit_dest,
@@ -514,7 +602,7 @@ const ACCOUNT_DATABASES: [&str; 2] = ["etc/passwd", "etc/group"];
 /// hard link an image file shares with it. `create_new` also refuses to follow
 /// a symbolic link that appeared at `path`, so the write cannot land outside
 /// the tree however the path came to be shaped.
-fn write_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), io::Error> {
+pub(crate) fn write_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), io::Error> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
@@ -738,22 +826,182 @@ mod tests {
         );
     }
 
-    /// A link anywhere beneath a tree only mvm writes, including names no
-    /// table lists yet: the provenance mark is written there after injection.
+    /// Whatever the image shipped inside a tree only mvm writes is gone after
+    /// injection: an entrypoint marker of its own, a runtime config, hooks, a
+    /// link where the provenance mark goes. Only mvm-authored content remains,
+    /// and a link there is removed, never followed.
     #[test]
-    fn a_symlink_beneath_an_mvm_only_tree_is_refused() {
+    fn image_content_in_an_mvm_only_tree_is_cleared() {
         let shaped = shaped_root();
-        std::fs::create_dir_all(shaped.root.join("mvm")).unwrap();
-        std::os::unix::fs::symlink(
-            shaped.outside.join("mark"),
-            shaped.root.join("mvm/provenance.json"),
+        let outside_mark = shaped.outside.join("mark");
+        std::fs::write(&outside_mark, b"host bytes").unwrap();
+        for dir in ["mvm", "etc/mvm/hooks", "usr/lib/mvm/wrappers"] {
+            std::fs::create_dir_all(shaped.root.join(dir)).unwrap();
+        }
+        std::os::unix::fs::symlink(&outside_mark, shaped.root.join("mvm/provenance.json")).unwrap();
+        for (path, body) in [
+            ("etc/mvm/entrypoint", "/bin/sh\n"),
+            ("etc/mvm/image-runtime.json", "{}"),
+            ("etc/mvm/agent.json", "{}"),
+            ("etc/mvm/hooks/before_start", "#!/bin/sh\n"),
+            ("usr/lib/mvm/wrappers/image-tool", "x"),
+        ] {
+            std::fs::write(shaped.root.join(path), body).unwrap();
+        }
+
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
+
+        for gone in [
+            "mvm/provenance.json",
+            "etc/mvm/entrypoint",
+            "etc/mvm/image-runtime.json",
+            "etc/mvm/agent.json",
+            "etc/mvm/hooks",
+            "usr/lib/mvm/wrappers/image-tool",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(shaped.root.join(gone)).is_err(),
+                "/{gone} is the image's, and must not survive"
+            );
+        }
+        assert_eq!(std::fs::read(&outside_mark).unwrap(), b"host bytes");
+        assert!(shaped.root.join(ENTRYPOINT_RUNNER_DEST).is_file());
+    }
+
+    /// The trees the injection creates do not take their mode from the host
+    /// umask.
+    #[test]
+    fn the_mvm_only_trees_are_created_with_an_explicit_mode() {
+        let shaped = shaped_root();
+        std::fs::create_dir_all(shaped.root.join("etc/mvm")).unwrap();
+        std::fs::set_permissions(
+            shaped.root.join("etc/mvm"),
+            std::fs::Permissions::from_mode(0o777),
         )
         .unwrap();
 
-        assert!(
-            refusal(&shaped)
-                .to_string()
-                .contains("/mvm/provenance.json")
+        inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
+
+        for tree in INJECT_TREES {
+            assert_eq!(
+                std::fs::metadata(shaped.root.join(tree))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o755,
+                "/{tree}"
+            );
+        }
+    }
+
+    /// Whether `dir`'s filesystem resolves `alias` to an entry created as
+    /// `real` — the macOS default does for case, and for some non-ASCII
+    /// letters. Leaves `dir` as it found it.
+    fn folds(dir: &Path, real: &str, alias: &str) -> bool {
+        let probe = dir.join(real);
+        std::fs::write(&probe, b"").unwrap();
+        let folded = std::fs::symlink_metadata(dir.join(alias)).is_ok();
+        std::fs::remove_file(&probe).unwrap();
+        folded
+    }
+
+    /// Plant `planted_rel`, whose component `alias` inside `parent_rel` is
+    /// another spelling of mvm's `mvm_name`, and inject. On a host that folds
+    /// the two names the injection must refuse, naming the fold; on one that
+    /// does not they are distinct entries, nothing aliases, and injection
+    /// writes mvm's own spelling beside the image's.
+    fn injection_refuses_the_alias(
+        parent_rel: &str,
+        alias: &str,
+        mvm_name: &str,
+        planted_rel: &str,
+    ) {
+        let shaped = shaped_root();
+        let parent = shaped.root.join(parent_rel);
+        std::fs::create_dir_all(&parent).unwrap();
+        // The image ships only its own spelling.
+        if directory_lists_exactly(&parent, mvm_name.as_ref()).unwrap() {
+            std::fs::remove_dir_all(parent.join(mvm_name)).unwrap();
+        }
+        let aliases = folds(&parent, alias, mvm_name);
+        let planted = shaped.root.join(planted_rel);
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"image\n").unwrap();
+
+        let result = inject_mvm_runtime(&shaped.root, &shaped.bins, None, true);
+
+        if aliases {
+            let err = result.expect_err("an alias of an injected path must be refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("folding its name"), "{err}");
+        } else {
+            eprintln!(
+                "host filesystem does not fold {alias:?} onto {mvm_name:?}; the refusal is \
+                 proven by lists_exactly_is_byte_equality instead"
+            );
+            result.expect("distinct names on a non-folding filesystem");
+            assert!(directory_lists_exactly(&parent, mvm_name.as_ref()).unwrap());
+        }
+    }
+
+    /// The reported case: `etc/Mvm/` and no `etc/mvm/`. On a folding host the
+    /// sealed trust policy would have landed in the image's directory and the
+    /// guest would have had no `/etc/mvm/verb-trust.json` at all.
+    #[test]
+    fn an_ascii_case_alias_of_an_injected_directory_is_refused() {
+        injection_refuses_the_alias("etc", "Mvm", "mvm", "etc/Mvm/verb-trust.json");
+    }
+
+    /// Folding is not only ASCII case: U+017F LATIN SMALL LETTER LONG S folds
+    /// to `s`.
+    #[test]
+    fn a_non_ascii_fold_alias_of_an_account_database_is_refused() {
+        injection_refuses_the_alias("etc", "pa\u{17f}swd", "passwd", "etc/pa\u{17f}swd");
+    }
+
+    /// A parent directory aliases just as well: `Etc/` receives every file
+    /// mvm writes under `/etc`.
+    #[test]
+    fn a_case_alias_of_a_parent_directory_is_refused() {
+        injection_refuses_the_alias("", "Etc", "etc", "Etc/hosts");
+    }
+
+    /// The comparison itself, independent of what the host filesystem folds:
+    /// only a byte-identical name counts as listed.
+    #[test]
+    fn lists_exactly_is_byte_equality() {
+        let listed = |names: &[&str], want: &str| {
+            lists_exactly(
+                names.iter().map(std::ffi::OsString::from),
+                std::ffi::OsStr::new(want),
+            )
+        };
+        assert!(listed(&["passwd", "group"], "passwd"));
+        assert!(!listed(&["Mvm"], "mvm"));
+        assert!(!listed(&["Etc"], "etc"));
+        assert!(!listed(&["pa\u{17f}swd"], "passwd"));
+        // NFD and NFC spellings of the same name are different bytes.
+        assert!(!listed(&["cafe\u{301}"], "caf\u{e9}"));
+        assert!(!listed(&[], "passwd"));
+    }
+
+    /// The check the refusal makes, on a host tree: a component that resolves
+    /// only by folding is reported, one listed exactly is not.
+    #[test]
+    fn first_shaped_component_reports_an_alias_only_when_the_host_folds() {
+        let shaped = shaped_root();
+        std::fs::create_dir_all(shaped.root.join("usr/lib/Mvm")).unwrap();
+        let found =
+            first_shaped_component(&shaped.root, Path::new("usr/lib/mvm/wrappers")).unwrap();
+        if folds(&shaped.root.join("usr/lib"), "Probe", "probe") {
+            assert_eq!(found, Some((PathBuf::from("usr/lib/mvm"), IS_AN_ALIAS)));
+        } else {
+            assert_eq!(found, None);
+        }
+        assert_eq!(
+            first_shaped_component(&shaped.root, Path::new("usr/lib")).unwrap(),
+            None
         );
     }
 
@@ -833,6 +1081,16 @@ mod tests {
         // Skip the xattr half where the host filesystem cannot hold one.
         let planted = xattr::set(&group, "user.mvm.planted", b"layer").is_ok()
             && xattr::set(&variant, "user.mvm.planted", b"layer").is_ok();
+        // Every host this runs on in practice holds user attributes; macOS
+        // always does, so the half below is never skipped there.
+        #[cfg(target_os = "macos")]
+        assert!(planted, "APFS must hold a user extended attribute");
+        if !planted {
+            eprintln!(
+                "SKIPPED the extended-attribute half: this host filesystem refused a user \
+                 attribute"
+            );
+        }
 
         inject_mvm_runtime(&shaped.root, &shaped.bins, None, false).expect("inject");
 
@@ -1081,6 +1339,13 @@ mod tests {
             assert!(
                 shape.windows(dest.len()).any(|w| w == dest.as_bytes()),
                 "layout digest omits destination {dest}"
+            );
+        }
+        for tree in INJECT_TREES {
+            let tagged = format!("tree:{tree}");
+            assert!(
+                shape.windows(tagged.len()).any(|w| w == tagged.as_bytes()),
+                "layout digest omits tree {tree}"
             );
         }
     }
