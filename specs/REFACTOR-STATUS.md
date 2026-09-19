@@ -16,7 +16,8 @@ Last updated: 2026-09-18
       and limits. This does not enable the independent telemetry service.
       W2a typed contract and peer-pinned worker transport pass 21 focused tests,
       host workspace tests, clippy, Linux cross-check, seeded fuzz smoke and all
-      69 repository gates; queued delivery is pending.
+      69 repository gates. PR #3449 landed through the merge queue as
+      `a126a8299679b3c0a0b1022dc3bedca1504ce14f`.
       `specs/sprint/delivery/3421-telemetry-transport.md` records the scope.
       No runtime listener, source capture or VM-generation binding is enabled.
       W3b prepared-record handoff passes nine new component tests, including a

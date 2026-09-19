@@ -37,6 +37,9 @@ this component and remain part of the supervised worker integration.
 
 ## Local component validation complete; delivery pending
 
+PR #3464 carries this handoff, rebased onto the merged transport foundation
+after #3449 landed. Final PR and merge-group checks remain required.
+
 The six new queue tests initially failed to compile before implementation. They
 now pass, along with a seventh queue test for atomic close, two new encrypted
 transport tests and the existing nine transport tests (18 total). They cover limits, FIFO/reuse, held-lock contention,

@@ -214,6 +214,7 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         workspace tests, clippy, Linux cross-compilation, seeded fuzz smoke and
         all 69 repository gates pass. Scope and delivery evidence are recorded in
         [the validation record](../sprint/delivery/3421-telemetry-transport.md).
+        Foundation PR #3449 merged through the queue; runtime W2 remains open.
   - [ ] W2b — Provision backend endpoints and bind each connection's expected
         guest key to authoritative VM/boot/generation registration. Prove actual
         service routing and restore isolation before enabling collection.
