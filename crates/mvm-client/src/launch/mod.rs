@@ -9,6 +9,7 @@
 //! as metadata-only sidecars before any boot.
 
 pub mod grants_report;
+pub mod machine_start;
 pub mod persistent;
 mod request;
 pub mod runtime_overlay;

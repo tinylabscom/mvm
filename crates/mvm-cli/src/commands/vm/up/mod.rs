@@ -25,9 +25,6 @@ pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
 pub(in crate::commands) use mvm_client::launch::persistent::load_workload_ir;
-pub(in crate::commands) use mvm_client::launch::persistent::{
-    PersistentImageStartParams, start_persistent_oci_machine,
-};
 pub(crate) use mvm_client::launch::persistent::{
     persistent_oci_effective_initrd, persists_plan_before_start,
 };
