@@ -193,6 +193,7 @@ mod tests {
                 "/img/vmlinux",
                 "/state/w/runtime/v.sock",
                 "/state/w",
+                mvm_backends::fc::FcCapabilities::default(),
             )
             .into_iter()
             .filter(|p| p.path != "/boot-source")

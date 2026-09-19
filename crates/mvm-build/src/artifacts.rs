@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mvm_core::build_env::BuildEnvironment;
-use mvm_core::config::{ARCH, fc_version, fc_version_short};
+use mvm_core::config::{ARCH, FC_CI_ASSETS_VERSION, fc_version};
 use mvm_core::pool::pool_artifacts_dir;
 use mvm_vmm::host::aux_bin::HostProcess;
 
@@ -138,11 +138,11 @@ pub(crate) fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()>
         "sudo apt-get update -qq && sudo apt-get install -y -qq wget curl squashfs-tools e2fsprogs",
     )?;
 
-    let fc_short = fc_version_short();
+    let fc_short = FC_CI_ASSETS_VERSION;
     let fc_full = fc_version();
     let mut download_ctx = BTreeMap::new();
     download_ctx.insert("builder_dir", BUILDER_DIR.to_string());
-    download_ctx.insert("fc_short", fc_short);
+    download_ctx.insert("fc_short", fc_short.to_string());
     download_ctx.insert("fc_full", fc_full);
     download_ctx.insert("arch", ARCH.to_string());
     download_ctx.insert("agent_src", agent_bin);

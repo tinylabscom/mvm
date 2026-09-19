@@ -29,7 +29,7 @@ use mvm_core::vm_backend::{
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
-    FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
+    FcCapabilities, FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
     read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
@@ -39,7 +39,7 @@ use mvm_vmm::driver::traits::{
     StandbyParentSpawn, VmmDriver,
 };
 use mvm_vmm::host::boot_config::{
-    balloon_body, boot_source_body, drive_body, logger_body, machine_config_body, vsock_body,
+    FcDrive, balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
 };
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
@@ -187,7 +187,12 @@ pub struct FcApiPut {
 /// device nodes line up with the verity slot model the cmdline names
 /// (`mvm.data=/dev/vda mvm.hash=/dev/vdb …`). The lowest-slot block is the root
 /// device; every block carries its own read-only policy verbatim.
-fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
+///
+/// Every writable block offers the guest discard when the running Firecracker
+/// supports it, so a guest trim releases host blocks. That grants a guest
+/// nothing it lacked: a drive it can write is one it could already zero, and a
+/// punched hole is zeroes that cost no disk.
+fn fc_drive_puts(blocks: &[BlockDev], caps: FcCapabilities) -> Vec<FcApiPut> {
     let mut ordered: Vec<&BlockDev> = blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     ordered
@@ -197,12 +202,14 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
             let drive_id = format!("blk{}", block.slot);
             // The lowest-slot block (first PUT) is the root device; each block
             // keeps its own read-only policy. Body shape shared with the raw path.
-            let body = drive_body(
-                &drive_id,
-                &block.source.to_string_lossy(),
-                index == 0,
-                block.read_only,
-            );
+            let body = FcDrive {
+                drive_id: &drive_id,
+                path_on_host: &block.source.to_string_lossy(),
+                is_root_device: index == 0,
+                is_read_only: block.read_only,
+                discard: caps.block_discard,
+            }
+            .body();
             FcApiPut {
                 path: format!("/drives/{drive_id}"),
                 body,
@@ -222,6 +229,7 @@ pub fn fc_config_api_puts(
     kernel_for_boot: &str,
     vsock_uds: &str,
     log_dir: &str,
+    caps: FcCapabilities,
 ) -> Vec<FcApiPut> {
     let mut puts = Vec::new();
 
@@ -269,7 +277,7 @@ pub fn fc_config_api_puts(
         body: "{}".to_string(),
     });
 
-    puts.extend(fc_drive_puts(&spec.blocks));
+    puts.extend(fc_drive_puts(&spec.blocks, caps));
 
     puts.push(FcApiPut {
         path: "/vsock".to_string(),
@@ -288,6 +296,27 @@ pub fn fc_config_api_puts(
     }
 
     puts
+}
+
+/// What the Firecracker serving `socket` supports. A failed probe boots
+/// without the optional features rather than failing: each is an optimisation
+/// the guest reports missing, and sending one an older Firecracker rejects
+/// would fail the boot outright.
+fn running_fc_capabilities(socket: &str) -> FcCapabilities {
+    match FcCapabilities::probe(Path::new(socket)) {
+        Ok(caps) => {
+            if !caps.block_discard {
+                tracing::debug!(
+                    "this Firecracker predates block discard; guest trims will not return host disk"
+                );
+            }
+            caps
+        }
+        Err(e) => {
+            tracing::warn!("could not read the Firecracker version ({e:#}); offering no discard");
+            FcCapabilities::default()
+        }
+    }
 }
 
 /// The host UDS Firecracker connects *out* to when the guest dials
@@ -956,13 +985,16 @@ impl VmmDriver for FcDriver {
         crate::fc::adopt_api_socket(&socket)
             .context("adopting the Firecracker API socket for the invoking user")?;
 
-        // Drive the NIC-less API config sequence.
+        // Drive the NIC-less API config sequence, asking only for what the
+        // Firecracker behind this socket supports.
+        let caps = running_fc_capabilities(&socket);
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
         let puts = fc_config_api_puts(
             spec,
             &kernel_for_boot.to_string_lossy(),
             &vsock_uds,
             &abs_dir,
+            caps,
         );
         for put in &puts {
             api_put_socket(&socket, &put.path, &put.body)
@@ -1353,7 +1385,13 @@ mod tests {
     }
 
     fn config_puts(spec: &VmmSpec) -> Vec<FcApiPut> {
-        fc_config_api_puts(spec, "/img/vmlinux", "/state/w/runtime/v.sock", "/state/w")
+        fc_config_api_puts(
+            spec,
+            "/img/vmlinux",
+            "/state/w/runtime/v.sock",
+            "/state/w",
+            FcCapabilities::default(),
+        )
     }
 
     fn body_for<'a>(puts: &'a [FcApiPut], path: &str) -> &'a str {
@@ -1523,6 +1561,39 @@ mod tests {
     }
 
     #[test]
+    fn a_firecracker_with_discard_offers_it_on_writable_drives_only() {
+        let mut store = ro_block("/cache/nix-store-stage0-x86_64.img", 1);
+        store.read_only = false;
+        let blocks = vec![ro_block("/img/rootfs.ext4", 0), store];
+        let caps = FcCapabilities {
+            block_discard: true,
+        };
+
+        let puts = fc_drive_puts(&blocks, caps);
+
+        assert!(!puts[0].body.contains("discard"), "{}", puts[0].body);
+        assert!(
+            puts[1]
+                .body
+                .ends_with(r#""is_read_only": false, "discard": true}"#),
+            "{}",
+            puts[1].body
+        );
+    }
+
+    #[test]
+    fn a_firecracker_without_discard_is_sent_no_discard_field() {
+        // Firecracker before 1.17 rejects unknown drive fields, so the body a
+        // writable store gets there must not mention discard at all.
+        let mut store = ro_block("/cache/nix-store-x86_64.img", 0);
+        store.read_only = false;
+
+        let puts = fc_drive_puts(&[store], FcCapabilities::default());
+
+        assert!(!puts[0].body.contains("discard"), "{}", puts[0].body);
+    }
+
+    #[test]
     fn drives_map_slot_ordered_blocks_to_vda_vdb_vdc_in_order() {
         // Out of slot order to prove sorting: the PUT order (== FC device-letter
         // order) must follow slot order, so slot 0 → first PUT (/dev/vda).
@@ -1531,7 +1602,7 @@ mod tests {
             ro_block("/img/rootfs.verity", 1),
             ro_block("/img/rootfs.ext4", 0),
         ];
-        let puts = fc_drive_puts(&blocks);
+        let puts = fc_drive_puts(&blocks, FcCapabilities::default());
         let paths: Vec<&str> = puts.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(paths, vec!["/drives/blk0", "/drives/blk1", "/drives/blk2"]);
         // The device-letter order the guest sees lines up with BlockDev::device_node.

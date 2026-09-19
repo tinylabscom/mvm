@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::ContentBlob;
 
-use mvm_core::config::{ARCH, fc_version, fc_version_short};
+use mvm_core::config::{ARCH, FC_CI_ASSETS_VERSION, fc_version};
 use mvm_vmm::host::config::*;
 use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
 use mvm_vmm::host::ui;
@@ -118,7 +118,7 @@ fn install_jailer_from_tarball(version: &str) -> Result<()> {
 ///
 /// Downloads run in parallel when both are needed.
 pub fn download_assets() -> Result<()> {
-    let fc_short = fc_version_short();
+    let fc_short = FC_CI_ASSETS_VERSION;
     ui::info("Downloading kernel and rootfs...");
     run_in_vm_visible(&format!(
         r#"

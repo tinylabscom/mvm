@@ -1118,7 +1118,7 @@ jobs:
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
       # is a socket-wait timeout that says nothing about the cause.
-      FC_VERSION: v1.14.1
+      FC_VERSION: v1.17.0
     steps:
       - uses: actions/checkout@v6
 
@@ -1429,7 +1429,7 @@ jobs:
         if: needs.scope.outputs.nix == 'true'
         env:
           # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
-          FC_VERSION: v1.14.1
+          FC_VERSION: v1.17.0
         run: |
           set -euo pipefail
           curl -fL -o firecracker.tgz \
