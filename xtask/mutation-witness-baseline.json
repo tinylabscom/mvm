@@ -278,6 +278,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        16
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -329,10 +336,6 @@
     {
       "number": 7,
       "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
-    },
-    {
-      "number": 16,
-      "why": "every fn: witness lives in test-only code (crates/*/tests/, or a #![cfg(test)] module file), which cargo-mutants does not mutate"
     }
   ],
   "accepted_misses": [

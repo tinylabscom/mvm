@@ -62,3 +62,8 @@ joins claim 16's witnesses in ADR-001 and `model/claims.toml`, and
 - `cargo nextest run --no-fail-fast -p mvm-hostd`: 1955 run, 1955 passed.
 - `cargo clippy -p mvm-hostd --all-targets -- -D warnings`: clean.
 - `xtask check-claim-catalog` and `xtask check-conformance`: clean.
+- `xtask check-all`: the only finding was `check-mutation-witnesses`. Claim 16
+  used to have no mutation surface, because every one of its witnesses lived in
+  test-only code, which `cargo-mutants` does not mutate. The new witness is
+  declared in `supervisor/terminator/flow.rs`, a production file, so that file
+  is now claim 16's surface. The baseline is re-pinned to record it.
