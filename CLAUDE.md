@@ -697,8 +697,8 @@ this row as enforced without it.
 
 20. **Every published release artifact is authenticated under the release
     workflow's identity, directly or through a signed checksum manifest, and
-    the build and fetch paths refuse an artifact whose required signature is
-    missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
+    the build, fetch, and self-update paths refuse an artifact whose required
+    signature is missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
     checksum manifests keyless through GitHub OIDC and publishes bundles
     carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
     root filesystems, and metadata are covered by the signed manifests rather
@@ -714,12 +714,16 @@ this row as enforced without it.
     the hash-skip hatch does not waive the signature
     (`skip_hash_verify_does_not_waive_the_manifest_signature`).
 
-    The three consuming paths do **not** share a posture, which is why the
-    statement names only two of them. `verify_signature` on the self-update
-    path returns `Ok` with a warning when cosign is absent, so there the
-    signature is best-effort and the SHA-256 pin is what holds. ADR-001 carries
-    the "Claim 20 limits" note; do not paraphrase this row as "every path
-    refuses an unsigned release".
+    The self-update path used to be the exception: `verify_signature` shelled
+    out to `cosign` and returned `Ok` with a warning when it was absent. It now
+    calls the same in-process verifier with the CLI release train, so it
+    refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
+    verifies a real one only under its own tag
+    (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
+    `manifest-verify` therefore cannot self-update, and `install.sh`, which runs
+    before any `mvmctl` exists, is still best-effort. ADR-001's "Claim 20
+    limits" note records both; do not paraphrase this row as covering the
+    installer.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation

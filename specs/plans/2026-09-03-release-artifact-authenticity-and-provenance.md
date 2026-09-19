@@ -48,6 +48,9 @@ emergency hatch that admits the manifest while keeping the hash pin.
 Any claim wording has to carry that split, in the shape claim 13 and the
 `Preview` rows already use.
 
+Closed since: `mvmctl env update` verifies the bundle in-process and refuses a
+missing or invalid one, so all three paths now refuse (issue #3272).
+
 ## WS-A — Add the claim for what already ships
 
 No new product code. The witnesses exist.

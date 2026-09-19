@@ -507,6 +507,15 @@ jobs:
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
 
+      # The release signature verifier only exists under `manifest-verify`,
+      # which the default lane never enables, so without this step the tests
+      # that parse a real Sigstore bundle compile to nothing and pass. The
+      # claim 20 ledger cites them; this is the lane that runs them.
+      - name: release signature tests (manifest-verify)
+        run: |
+          cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
+          cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::/)'
+
       # `addons` is off by default so the sealed agent's request path stays
       # synchronous and tokio-free (`check-guest-agent-runtime-free` enforces
       # that, so this must stay a feature rather than move into default). But

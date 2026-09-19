@@ -103,7 +103,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env update`               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
 | `mvmctl env update --check`       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
-| `mvmctl env update --skip-verify` | Skip cosign signature verification                                                                                                                                                                                                                            |
+| `mvmctl env update --skip-verify` | Skip release signature verification                                                                                                                                                                                                                              |
 
 ## Building
 
