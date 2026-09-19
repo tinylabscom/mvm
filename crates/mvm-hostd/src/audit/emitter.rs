@@ -74,6 +74,7 @@ pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 mod session_events;
 
 pub mod checkpoint_audit;
+pub mod drive_audit;
 pub mod grants_audit;
 pub mod wall_clock_audit;
 pub use checkpoint_audit::CheckpointForkedAudit;
@@ -128,13 +129,6 @@ pub mod stream_audit {
     /// Label: the highest `seq` the session had already accepted when the
     /// out-of-order frame arrived.
     pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
-}
-
-/// Wire-stable names for refusal decisions on the grant-gated drive plane.
-pub mod drive_audit {
-    pub const REFUSED_EVENT: &str = "drive.refused";
-    pub const LABEL_VM_NAME: &str = "vm_name";
-    pub const LABEL_REASON: &str = "drive_refusal_reason";
 }
 
 /// The label set for one input refusal: the binding, the reason word, and
@@ -889,26 +883,6 @@ impl AuditEmitter {
             plan,
             stream_audit::INPUT_REFUSED_EVENT,
             input_refused_labels(vm_name, refusal),
-        )
-    }
-
-    /// Emit a payload-free, chain-signed drive refusal.
-    pub fn emit_drive_refused(
-        &self,
-        plan: &ExecutionPlan,
-        vm_name: &str,
-        refusal: mvm_agentd::vsock::DriveRefusal,
-    ) -> Result<()> {
-        self.emit(
-            plan,
-            drive_audit::REFUSED_EVENT,
-            [
-                (drive_audit::LABEL_VM_NAME.to_string(), vm_name.to_string()),
-                (
-                    drive_audit::LABEL_REASON.to_string(),
-                    refusal.reason().to_string(),
-                ),
-            ],
         )
     }
 

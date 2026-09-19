@@ -86,6 +86,9 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod verb_grant_sidecar;
+use verb_grant_sidecar::mint_verb_grant_sidecar;
+
 pub use mvm_core::time::{Clock, SystemClock};
 
 /// Production nonce ledger. Holds a `NonceStore` behind a mutex so
@@ -1197,86 +1200,6 @@ pub fn stash_plan_and_mint_verb_grant(
         write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
     }
     mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)
-}
-
-/// If the plan carries `agent_verbs`, mint a signed `VerbGrantEnvelope` and
-/// write it to `<state_dir>/verb-grant.json` (mode 0600). Absent verbs ⇒ no
-/// file written (grant-less boot). Best-effort key load — the key is created
-/// on first use by `load_or_init_at` against the default keys dir.
-///
-/// The sidecar is consumed by the backend's `verb_grant_cmdline_token` at
-/// launch time and carried to the guest on the kernel cmdline.
-fn mint_verb_grant_sidecar(
-    plan_json: &str,
-    vm_name: &str,
-    state_dir: &std::path::Path,
-) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
-    use mvm_core::plan::SignedExecutionPlan;
-    use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
-
-    // Remove any pre-existing sidecar so that a grant-less re-run of a
-    // reused VM name does not inherit the previous boot's grant.
-    let sidecar_path = state_dir.join("verb-grant.json");
-    match std::fs::remove_file(&sidecar_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(anyhow::Error::from(e)).with_context(|| {
-                format!("remove stale verb-grant sidecar {}", sidecar_path.display())
-            });
-        }
-    }
-
-    // Best-effort parse: a missing or malformed plan_json skips the
-    // sidecar (grant-less boot), matching the fail-open posture of the
-    // other cmdline token producers.
-    let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) else {
-        return Ok(None);
-    };
-    let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) else {
-        return Ok(None);
-    };
-
-    let verbs = plan.agent_verbs.unwrap_or_default();
-    let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
-    if verbs.is_empty() && drive.is_none() {
-        // No verb or drive grant requested — grant-less boot, sidecar already removed.
-        return Ok(None);
-    }
-
-    let keys_dir = mvm_core::config::mvm_keys_dir();
-    let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
-        .context("load host signer for verb-grant mint")?;
-    let keystore = crate::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
-        .context("load Keystore from host-signer key file")?;
-
-    let grant = crate::host_signer::mint_verb_grant(
-        &keystore,
-        vm_name,
-        &plan.nonce,
-        plan.valid_until,
-        verbs,
-        drive,
-    )
-    .context("mint verb grant")?;
-
-    let pubkey_hex: String = keystore
-        .pub_key()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let plan_nonce_hex = plan.nonce.as_hex().to_string();
-
-    let envelope = VerbGrantEnvelope {
-        pubkey_hex,
-        plan_nonce_hex,
-        predecessor_session_id: None,
-        predecessor_plan_nonce_hex: None,
-        grant,
-    };
-    let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
-    write_secret_file(&state_dir.join("verb-grant.json"), &envelope_json)?;
-    Ok(Some(envelope))
 }
 
 /// Admission enforcement: every volume about to be attached must be
