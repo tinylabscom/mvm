@@ -98,6 +98,7 @@ fn start_vm_firecracker_inner(
     clean_vsock: bool,
     scope: &str,
 ) -> Result<()> {
+    ensure_api_socket_fits(abs_socket)?;
     ui::info("Starting Firecracker...");
     run_in_vm_visible(&firecracker_launch_script(
         abs_dir,
@@ -122,9 +123,58 @@ fn start_vm_firecracker_inner(
     // single-digit milliseconds and was rounded up to the tick. Waiting here
     // lets it use the shared backoff, and keeps the shell to the one thing it
     // is needed for: becoming root to exec Firecracker.
-    wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT)?;
+    wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT).map_err(|e| {
+        with_firecracker_stderr(
+            e,
+            &std::path::Path::new(abs_dir).join(FIRECRACKER_STDERR_LOG),
+        )
+    })?;
     ui::info("Firecracker started.");
     Ok(())
+}
+
+/// Where the launch script sends Firecracker's stderr, relative to the VM dir.
+const FIRECRACKER_STDERR_LOG: &str = "firecracker.log";
+
+/// How much of that log a startup failure quotes. Firecracker reports a
+/// refused start in its last few lines; the whole file is left on disk.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Refuse an API socket path the kernel would refuse, before starting a
+/// process that can only exit.
+///
+/// Firecracker reports this itself — "path must be shorter than SUN_LEN" — but
+/// only in its own log, after which the host sees nothing but a socket that
+/// never appears.
+fn ensure_api_socket_fits(abs_socket: &str) -> Result<()> {
+    if !mvm_core::config::fits_unix_socket_path(std::path::Path::new(abs_socket)) {
+        anyhow::bail!(
+            "Firecracker API socket path {abs_socket} is {} bytes, longer than a Unix socket \
+             can be ({} bytes); Firecracker would exit without creating it",
+            abs_socket.len(),
+            mvm_core::config::UNIX_SOCKET_PATH_MAX_BYTES
+        );
+    }
+    Ok(())
+}
+
+/// Attach what Firecracker wrote to stderr to a startup failure.
+///
+/// A Firecracker that refuses to start exits within milliseconds and says why
+/// only in this log. Quoting it here is what turns "the socket did not appear"
+/// into the actual reason, on hosts where nobody can read the file afterwards.
+fn with_firecracker_stderr(err: anyhow::Error, log: &std::path::Path) -> anyhow::Error {
+    match std::fs::read_to_string(log) {
+        Ok(text) if !text.trim().is_empty() => {
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n");
+            err.context(format!("Firecracker stderr ({}):\n{tail}", log.display()))
+        }
+        _ => err.context(format!(
+            "Firecracker wrote nothing to {} before the deadline",
+            log.display()
+        )),
+    }
 }
 
 /// The launch script, built rather than run.
@@ -196,6 +246,13 @@ fn firecracker_launch_script_as(
     };
     let q_dir = shell_quote(abs_dir);
     let q_socket = shell_quote(abs_socket);
+    // The API socket's directory is the VM dir unless the socket was moved to
+    // the short fallback namespace, which nothing else creates.
+    let q_socket_dir = shell_quote(
+        &std::path::Path::new(abs_socket)
+            .parent()
+            .map_or_else(|| abs_dir.to_string(), |p| p.display().to_string()),
+    );
     let q_pid = shell_quote(&format!("{abs_dir}/fc.pid"));
     // `$!` is the scope launcher itself, recorded so the caller can tell a
     // scope that was created from a service manager that never answered. It is
@@ -210,7 +267,7 @@ fn firecracker_launch_script_as(
     };
     format!(
         r#"
-        mkdir -p {q_dir}
+        mkdir -p {q_dir} {q_socket_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
@@ -221,6 +278,7 @@ fn firecracker_launch_script_as(
         q_dir = q_dir,
         q_pid = q_pid,
         q_socket = q_socket,
+        q_socket_dir = q_socket_dir,
         vsock_cleanup = vsock_cleanup,
         scope = scope,
         sudo = sudo,
@@ -377,6 +435,80 @@ mod tests {
         assert!(
             rendered.contains("fc.socket"),
             "unexpected error: {rendered}"
+        );
+    }
+
+    /// The failure the hosted runners hit: Firecracker refused the socket
+    /// path and exited, and the host reported only that the socket never
+    /// appeared. The reason has to be in the error itself.
+    #[test]
+    fn a_socket_that_never_appears_quotes_what_firecracker_said() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        std::fs::write(
+            &log,
+            "Error: RunWithApi(FailedToBindAndRunHttpServer(IOError(Error { kind: \
+             InvalidInput, message: \"path must be shorter than SUN_LEN\" })))\n",
+        )
+        .expect("write log");
+        let err = wait_for_api_socket(
+            &dir.path().join("fc.socket"),
+            std::time::Duration::from_millis(5),
+        )
+        .map_err(|e| with_firecracker_stderr(e, &log))
+        .expect_err("no socket");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("SUN_LEN"), "{rendered}");
+        assert!(rendered.contains("did not appear"), "{rendered}");
+        assert!(rendered.contains(&log.display().to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn a_silent_firecracker_is_reported_as_silent_with_the_log_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        let rendered = format!(
+            "{:#}",
+            with_firecracker_stderr(anyhow::anyhow!("socket did not appear"), &log)
+        );
+        assert!(rendered.contains("wrote nothing"), "{rendered}");
+        assert!(rendered.contains(&log.display().to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn only_the_tail_of_a_long_stderr_log_is_quoted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&log, body).expect("write log");
+        let rendered = format!("{:#}", with_firecracker_stderr(anyhow::anyhow!("x"), &log));
+        assert!(rendered.contains("line 99"), "{rendered}");
+        assert!(!rendered.contains("line 79\n"), "{rendered}");
+    }
+
+    #[test]
+    fn an_api_socket_path_the_kernel_would_refuse_is_refused_before_launch() {
+        let long = format!("/{}/fc.socket", "d".repeat(120));
+        let err = ensure_api_socket_fits(&long).expect_err("too long to bind");
+        assert!(
+            err.to_string().contains("longer than a Unix socket"),
+            "{err}"
+        );
+        ensure_api_socket_fits("/root/.mvm/vms/w/fc.socket").expect("a short path fits");
+    }
+
+    #[test]
+    fn the_launch_script_creates_a_relocated_socket_directory() {
+        let script = firecracker_launch_script_as(
+            "/deep/home/vms/w",
+            "/tmp/mvm-sock/0123456789abcdef/fc.socket",
+            true,
+            "",
+            0,
+        );
+        assert!(
+            script.contains("mkdir -p '/deep/home/vms/w' '/tmp/mvm-sock/0123456789abcdef'"),
+            "{script}"
         );
     }
 

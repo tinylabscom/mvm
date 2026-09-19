@@ -947,10 +947,13 @@ impl VmmDriver for FcDriver {
         let pid_file_str = pid_file.to_string_lossy().into_owned();
         clear_stale_pid_marker_for_start(&pid_file, || crate::fc::is_vm_running(&pid_file_str))?;
 
-        let runtime_dir = state_dir.join("runtime");
+        let abs_dir = state_dir.to_string_lossy().into_owned();
+        // Under the state dir unless that is too deep for a Unix socket, in
+        // which case the API socket, the vsock mux and every guest-dialed
+        // socket move together to the short fallback namespace.
+        let runtime_dir = crate::fc::fc_vsock_runtime_dir(&abs_dir);
         std::fs::create_dir_all(&runtime_dir)
             .map_err(|e| anyhow!("create runtime dir {}: {e}", runtime_dir.display()))?;
-        let abs_dir = state_dir.to_string_lossy().into_owned();
 
         // Convert the workload kernel to an FC-loadable image (x86_64 bzImage →
         // extracted ELF; aarch64 Image passthrough), reusing the same helper the
@@ -972,7 +975,7 @@ impl VmmDriver for FcDriver {
         let boot_started = Instant::now();
 
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
-        let socket = format!("{abs_dir}/fc.socket");
+        let socket = crate::fc::fc_api_socket_path(&abs_dir);
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
         start_vm_firecracker_bounded(
             &abs_dir,

@@ -455,6 +455,9 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
     fn device_anchors(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
         let vm_dir = super::resolve_running_vm_dir(&self.vm_name)
             .with_context(|| format!("resolving VM dir for '{}'", self.vm_name))?;
+        // A fork finds the parent's state dir as the vsock socket's
+        // grandparent, which only holds while the sockets live there.
+        super::ensure_fc_sockets_in_state_dir(&vm_dir, "a Firecracker full-VM snapshot")?;
         let rootfs = self.rootfs_path()?;
         let rootfs_dir = rootfs
             .parent()
@@ -556,6 +559,7 @@ impl FcForkRestorer {
             })?;
         let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
             .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
+        super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
         let mut mappings = Vec::new();
         mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
         if let Some(parent) = anchors.rootfs_verity {
@@ -835,7 +839,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = socket_short_home();
         env.set("MVM_HOME", tmp.path());
 
         let vm_name = "anchor-test";
@@ -879,7 +883,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = socket_short_home();
         env.set("MVM_HOME", tmp.path());
 
         let ctl = FcVmFullControl::new("no-mode-vm");
@@ -888,5 +892,31 @@ mod tests {
             err.to_string().contains("mode.json"),
             "error must mention missing mode.json: {err}"
         );
+    }
+
+    /// A home deep enough to move the sockets out of the state dir cannot be
+    /// snapshotted for a fork, and says so rather than recording anchors a
+    /// fork would remap wrongly.
+    #[test]
+    fn fc_vm_full_control_device_anchors_refuses_relocated_sockets() {
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = socket_short_home();
+        let deep = tmp.path().join("d".repeat(90));
+        env.set("MVM_HOME", &deep);
+
+        let err = FcVmFullControl::new("deep-vm")
+            .device_anchors()
+            .expect_err("relocated sockets must refuse");
+        assert!(err.to_string().contains("MVM_HOME"), "{err}");
+    }
+
+    /// A temporary `MVM_HOME` short enough that Firecracker's sockets stay in
+    /// the state dir. The platform temp dir is not: on macOS it is deep enough
+    /// that they move to the fallback namespace.
+    fn socket_short_home() -> tempfile::TempDir {
+        tempfile::Builder::new().tempdir_in("/tmp").unwrap()
     }
 }
