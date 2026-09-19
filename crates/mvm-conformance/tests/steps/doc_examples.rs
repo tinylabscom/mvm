@@ -84,7 +84,6 @@ struct Manifest {
 #[derive(serde::Deserialize)]
 struct ProseEntry {
     text: String,
-    #[allow(dead_code)]
     reason: String,
 }
 
@@ -93,7 +92,6 @@ struct ProseEntry {
 #[derive(serde::Deserialize)]
 struct NixAttributeEntry {
     name: String,
-    #[allow(dead_code)]
     reason: String,
 }
 
@@ -138,8 +136,17 @@ struct CommandEntry {
 #[derive(serde::Deserialize)]
 struct AbsentEntry {
     path: String,
-    #[allow(dead_code)]
     reason: String,
+}
+
+/// An exception in the tier manifest is only as good as its stated reason, so
+/// an entry without one is refused rather than silently honoured.
+fn require_reason(table: &str, key: &str, reason: &str) {
+    assert!(
+        !reason.trim().is_empty(),
+        "[[{table}]] entry `{key}` in features/suites/s29_doc_examples/tiers.toml \
+         states no reason"
+    );
 }
 
 fn manifest() -> Manifest {
@@ -207,6 +214,7 @@ fn planned_paths() -> BTreeSet<Vec<String>> {
         .into_iter()
         .chain(m.absent)
         .map(|entry| {
+            require_reason("planned/absent", &entry.path, &entry.reason);
             entry
                 .path
                 .split_whitespace()
@@ -977,7 +985,10 @@ fn documented_mkguest_calls_are_valid(_world: &mut CliWorld) {
     let declared: BTreeSet<String> = manifest()
         .nix_attribute
         .into_iter()
-        .map(|entry| entry.name)
+        .map(|entry| {
+            require_reason("nix_attribute", &entry.name, &entry.reason);
+            entry.name
+        })
         .collect();
     for name in &declared {
         assert!(
@@ -1144,7 +1155,10 @@ fn cli_output_names_real_commands(_world: &mut CliWorld) {
     let prose: BTreeSet<String> = manifest()
         .prose
         .into_iter()
-        .map(|entry| entry.text)
+        .map(|entry| {
+            require_reason("prose", &entry.text, &entry.reason);
+            entry.text
+        })
         .collect();
 
     let mut sources = Vec::new();

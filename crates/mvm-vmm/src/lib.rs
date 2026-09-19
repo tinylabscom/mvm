@@ -12,7 +12,6 @@
 //! orchestration in `mvm-runtime`.
 
 pub mod checkpoint;
-pub mod dax;
 pub mod driver;
 pub mod host;
 pub mod hvf_handoff;

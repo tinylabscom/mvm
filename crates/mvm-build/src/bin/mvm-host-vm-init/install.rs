@@ -40,7 +40,10 @@
 //! shell-stub in tests.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 use crate::install_spec::{GateLevel, InstallSpec, Language};
@@ -57,6 +60,7 @@ pub const CONTENT_SUBDIR: &str = "content";
 pub const SBOM_FILENAME: &str = "sbom.cdx.json";
 pub const FETCH_LOG_FILENAME: &str = "fetch.log";
 pub const CVE_FILENAME: &str = "cve.json";
+#[cfg(target_os = "linux")]
 pub const RESULT_FILENAME: &str = "result.json";
 
 /// CycloneDX-1.5 empty stub. Emitted when the SBOM tool is missing
@@ -160,8 +164,10 @@ pub trait CommandRunner {
 /// every byte the installer wrote — including the URLs `uv` /
 /// `pnpm` print to stderr during fetch — into one merged log the
 /// host seals later.
+#[cfg(target_os = "linux")]
 pub struct SystemCommandRunner;
 
+#[cfg(target_os = "linux")]
 impl CommandRunner for SystemCommandRunner {
     fn run_with_env(
         &self,

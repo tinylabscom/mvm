@@ -297,7 +297,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// renders without an unused-import warning (we'll wire it in
 /// when mmap-then-fexecve lands and we need a long-lived
 /// FD for the TOCTOU close).
-#[allow(dead_code)]
 fn _unused_file_import() -> Option<File> {
     None
 }

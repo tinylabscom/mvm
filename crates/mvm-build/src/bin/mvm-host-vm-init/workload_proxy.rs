@@ -52,6 +52,7 @@ pub const WORKLOAD_FORWARD_PORT: u32 = 21472;
 /// misbehaving outer host can't exhaust the host VM's threads / fds by
 /// opening unbounded hop connections; the listener fails closed (drops
 /// the new connection) at the cap.
+#[cfg(target_os = "linux")]
 pub const MAX_CONCURRENT_FORWARDS: usize = 64;
 
 /// Upper bound on the inbound handshake body. A handshake is just
@@ -110,6 +111,7 @@ impl ConnectionLimiter {
     }
 
     /// Current number of live forwarded streams.
+    #[cfg(test)]
     pub fn active_count(&self) -> usize {
         self.active.load(Ordering::Acquire)
     }
@@ -249,6 +251,7 @@ pub fn handle_forward_conn(mut inbound: UnixStream, base: &Path) -> io::Result<(
 /// it: a u32-BE length prefix + `"<workload_id> <port>"`. Exposed so
 /// the host-side `NestingHopTransport` and the tests share one
 /// definition of the wire shape.
+#[cfg(test)]
 pub fn encode_handshake(workload_id: &str, port: u32) -> Vec<u8> {
     let body = format!("{workload_id} {port}");
     let mut out = Vec::with_capacity(4 + body.len());

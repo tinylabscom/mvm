@@ -26,7 +26,6 @@ use mvm_core::protocol::host_time::TimeNowResponse;
 /// `$defs` (`ServiceErrorCode`, `CorrelationId`, `EmitBatchEntryStatus`, …)
 /// are emitted once and the generated clients reference one definition set.
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct BrokerServices {
     service_call: ServiceCall,
     service_response: ServiceResponse,

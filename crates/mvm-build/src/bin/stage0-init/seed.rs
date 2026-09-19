@@ -15,6 +15,7 @@ fn find_seed_bin_in(store: &Path, bin: &str) -> Result<PathBuf, String> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn find_seed_bin(bin: &str) -> Result<PathBuf, String> {
     find_seed_bin_in(Path::new("/nix/store"), bin)
 }
@@ -34,6 +35,7 @@ fn find_seed_cacert_in(store: &Path) -> Result<PathBuf, String> {
     Err("seed store has no nss-cacert ca-bundle.crt".into())
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn find_seed_cacert() -> Result<PathBuf, String> {
     find_seed_cacert_in(Path::new("/nix/store"))
 }

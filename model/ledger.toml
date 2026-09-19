@@ -9,6 +9,4 @@
 #
 # Empty for now. Add a row only when a non-ID claim needs an honesty level.
 
-spec = "mvm/1"
-
 claim = []

@@ -749,7 +749,6 @@ fn install_signal_handler() {
         }
         let stage0_active = env::builder_vm::stage0_active_in_process();
         eprintln!("\n{}", interrupt_cleanup_message(stage0_active));
-        let _ = mvm_runtime::handle_registry::stop_all_attached();
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
                 unsafe {

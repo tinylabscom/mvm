@@ -206,25 +206,13 @@ pub(crate) struct MockState {
 #[derive(Default)]
 pub(crate) struct MockPool {
     pub capacity_bytes: u64,
-    /// Block size kept as metadata for round-trip parity with dm-thin's
-    /// pool layout; not consulted by the mock arithmetic.
-    #[allow(dead_code)]
-    pub block_size: u32,
     pub volumes: std::collections::HashMap<String, MockVolume>,
-    /// Monotonic device id counter — every new volume gets the next
-    /// one. Mirrors dm-thin's metadata-id allocation.
-    pub next_device_id: u32,
 }
 
 #[derive(Default, Clone, Copy)]
 pub(crate) struct MockVolume {
     pub virtual_size_bytes: u64,
     pub used_bytes: u64,
-    /// Device id of the volume this snapshotted from. `None` for
-    /// freshly-created (non-clone) volumes. Phase 2 uses this to
-    /// reconstruct snapshot chains for the supervisor's reaper.
-    #[allow(dead_code)]
-    pub origin: Option<u32>,
 }
 
 impl MockBackend {
@@ -268,7 +256,6 @@ impl DeviceMapperBackend for MockBackend {
         ));
         s.pools.entry(name.to_string()).or_insert(MockPool {
             capacity_bytes: size_bytes,
-            block_size,
             ..MockPool::default()
         });
         Ok(())
@@ -299,13 +286,11 @@ impl DeviceMapperBackend for MockBackend {
         if pool.volumes.contains_key(volume_name) {
             return Err(StorageError::VolumeExists(volume_name.to_string()));
         }
-        pool.next_device_id += 1;
         pool.volumes.insert(
             volume_name.to_string(),
             MockVolume {
                 virtual_size_bytes,
                 used_bytes: 0,
-                origin: None,
             },
         );
         Ok(PathBuf::from(format!("/dev/mapper/{volume_name}")))
@@ -334,14 +319,11 @@ impl DeviceMapperBackend for MockBackend {
         if pool.volumes.contains_key(snapshot_name) {
             return Err(StorageError::VolumeExists(snapshot_name.to_string()));
         }
-        pool.next_device_id += 1;
-        let id = pool.next_device_id;
         pool.volumes.insert(
             snapshot_name.to_string(),
             MockVolume {
                 virtual_size_bytes,
                 used_bytes: 0,
-                origin: Some(id),
             },
         );
         Ok(PathBuf::from(format!("/dev/mapper/{snapshot_name}")))

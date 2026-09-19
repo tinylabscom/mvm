@@ -47,13 +47,6 @@
 //!   the release-build configuration; this module focuses on
 //!   runtime behaviour.
 
-// The boot subcommand body currently exits before invoking
-// `Backend::budget()` — we ship the constants + the lookup helper
-// so the eventual N-run benchmark loop can scaffold against a
-// stable API. The dead-code allow goes once the benchmark loop
-// lands.
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -761,15 +754,6 @@ enum Backend {
     Libkrun,
 }
 
-impl Backend {
-    fn budget(self) -> Duration {
-        match self {
-            Self::Firecracker => FIRECRACKER_BOOT_BUDGET,
-            Self::Libkrun => LIBKRUN_BOOT_BUDGET,
-        }
-    }
-}
-
 // ============================================================================
 // Argument parsing
 // ============================================================================
@@ -1269,12 +1253,6 @@ mod tests {
     fn parse_backend_rejects_unknown() {
         let args = vec!["--backend".to_string(), "vmware".to_string()];
         assert!(parse_backend_arg(&args).is_err());
-    }
-
-    #[test]
-    fn backend_budgets_match_constants() {
-        assert_eq!(Backend::Firecracker.budget(), FIRECRACKER_BOOT_BUDGET);
-        assert_eq!(Backend::Libkrun.budget(), LIBKRUN_BOOT_BUDGET);
     }
 
     // ──────────────────────────────────────────────────────────────

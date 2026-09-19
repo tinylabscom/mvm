@@ -3,7 +3,6 @@
 use schemars::JsonSchema;
 
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct Runtime {
     process_result: mvm_sdk::runtime::RuntimeProcessResult,
     process_event: mvm_sdk::runtime::RuntimeProcessEvent,

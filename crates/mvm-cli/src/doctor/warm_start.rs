@@ -156,14 +156,14 @@ pub(super) fn collect_warm_start_support() -> WarmStartReport {
 /// `<sys_module>/nbd` exists ⇒ the NBD kernel module is loaded. Pure so it's
 /// testable without `/sys`. Only `collect_warm_start_substrate` (Linux) and
 /// the unit tests call it; off Linux the non-test build has no caller.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn nbd_module_loaded_at(sys_module: &std::path::Path) -> bool {
     sys_module.join("nbd").exists()
 }
 
 /// Parse `/proc/sys/vm/nr_hugepages`; > 0 ⇒ hugepages reserved. Pure so it's
 /// testable cross-platform; a non-numeric/empty read is "none reserved".
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn hugetlb_reserved_from(nr_hugepages: &str) -> bool {
     nr_hugepages
         .trim()

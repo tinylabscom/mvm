@@ -30,7 +30,6 @@ pub struct IterationTiming {
 /// control plane Ready.
 // Live probe wiring will construct BootMarks from the real instants
 // captured during the boot sequence.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootMarks {
     pub start: std::time::Instant,
@@ -44,7 +43,6 @@ impl BootMarks {
     /// is `Instant`-difference so it can never go negative for marks
     /// captured in order. Takes `self` by value (`BootMarks` is `Copy`).
     // Live probe wiring is the first non-test caller.
-    #[allow(dead_code)]
     pub fn to_timing(self) -> IterationTiming {
         let ms = |a: std::time::Instant, b: std::time::Instant| {
             b.saturating_duration_since(a).as_secs_f64() * 1000.0

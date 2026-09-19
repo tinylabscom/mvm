@@ -15,9 +15,6 @@
 //! lint. Per-symbol `#[cfg(target_os = "linux")]` would force every
 //! field + impl method to carry the gate; a file-level cfg-attr is
 //! cleaner and still leaves Linux compilation unaffected.
-
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]

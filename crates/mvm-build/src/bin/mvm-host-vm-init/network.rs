@@ -13,6 +13,7 @@
 //! before each dispatch (install → locked, flake build → open so nix
 //! can fetch substitutes and pinned inputs without a proxy).
 
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 /// Dedicated uid the in-VM `mvm-egress-proxy` runs under. The
@@ -34,8 +35,10 @@ pub trait IptablesRunner {
 /// Production runner — shells out to `iptables` on `$PATH`. The
 /// builder-vm rootfs ships busybox iptables via the flake's
 /// `builderPackages` set.
+#[cfg(target_os = "linux")]
 pub struct SystemIptables;
 
+#[cfg(target_os = "linux")]
 impl IptablesRunner for SystemIptables {
     fn run(&self, args: &[&str]) -> Result<(), String> {
         let output = Command::new("iptables")

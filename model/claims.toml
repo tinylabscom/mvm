@@ -34,8 +34,6 @@
 #   fn:NAME   -- a `fn NAME(` must exist under `crates/`
 #   ci:NAME   -- NAME must appear in some `.github/workflows/*` file
 
-spec = "mvm/1"
-
 [[claim]]
 id = "MVM-SEC-01"
 level = "build"

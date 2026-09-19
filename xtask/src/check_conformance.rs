@@ -41,10 +41,7 @@ impl Level {
 
 /// `model/claims.toml` --- the conformance ID register.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Claims {
-    /// Schema tag.
-    pub spec: String,
     /// One row per claim.
     #[serde(default)]
     pub claim: Vec<Claim>,
@@ -68,10 +65,7 @@ pub struct Claim {
 
 /// `model/authorities.toml` --- what this repository cites rather than proves.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Authorities {
-    /// Schema tag.
-    pub spec: String,
     /// One row per cited authority.
     #[serde(default)]
     pub authority: Vec<Authority>,
@@ -79,7 +73,6 @@ pub struct Authorities {
 
 /// A cited authority.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Authority {
     /// Stable identifier.
     pub id: String,
@@ -101,10 +94,7 @@ pub struct Authority {
 
 /// `model/ledger.toml` --- honesty ledger for non-ID claims.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Ledger {
-    /// Schema tag.
-    pub spec: String,
     /// One row per claim.
     #[serde(default)]
     pub claim: Vec<LedgerClaim>,
@@ -171,6 +161,9 @@ impl Model {
         for authority in &self.authorities.authority {
             if authority.citation.trim().is_empty() {
                 bail!("{}: authority citation must not be empty", authority.id);
+            }
+            if authority.statement.trim().is_empty() {
+                bail!("{}: authority statement must not be empty", authority.id);
             }
             if authority.checksum == "none" && authority.checksum_reason.trim().is_empty() {
                 bail!(
@@ -480,7 +473,6 @@ mod tests {
     fn render_is_deterministic() {
         let model = Model {
             claims: Claims {
-                spec: "test".into(),
                 claim: vec![Claim {
                     id: "MVM-TEST-01".into(),
                     level: Level::Build,
@@ -489,14 +481,8 @@ mod tests {
                     witnesses: vec!["fn:test_fn".into()],
                 }],
             },
-            authorities: Authorities {
-                spec: "test".into(),
-                authority: vec![],
-            },
-            ledger: Ledger {
-                spec: "test".into(),
-                claim: vec![],
-            },
+            authorities: Authorities { authority: vec![] },
+            ledger: Ledger { claim: vec![] },
         };
         let rendered = render_conformance(&model);
         assert!(rendered.contains("MVM-TEST-01"));

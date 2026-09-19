@@ -5,8 +5,6 @@
 # with a checksum over the committed artifact when there is one and a stated
 # reason when there is not.
 
-spec = "mvm/1"
-
 [[authority]]
 id = "linux-seccomp"
 name = "Linux seccomp"

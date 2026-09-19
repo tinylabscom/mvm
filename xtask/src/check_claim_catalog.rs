@@ -375,8 +375,6 @@ mod model_sync_tests {
     use super::*;
 
     const MODEL: &str = r#"
-spec = "mvm/1"
-
 [[claim]]
 id = "MVM-SEC-01"
 level = "build"
