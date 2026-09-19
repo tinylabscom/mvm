@@ -138,13 +138,12 @@ binary boots depend on the shell it was started from."""
 [[control]]
 symbol = "read_local_image_set"
 file = "crates/mvm-build/src/image_source/local_set.rs"
-dormant = true
+dormant = false
 why = """
 Reads a set built from a local image checkout and refuses it unless both \
 checkouts still match what its manifest records, every member targets the \
 requested architecture, and every artifact is a regular file with the declared \
 digest. It is the only path that classifies a locally built set, and it always \
-yields `local-dev`. No image consumer reads a local set yet: the builder VM, \
-default image, kernel, overlay and sidecars still build from the in-tree \
-flakes. This entry fails when the first of them is moved onto it, which is the \
-signal to flip it to `dormant = false` so losing that caller is caught."""
+yields `local-dev`. The local image cache calls it on every publish and every \
+lookup; losing that caller would let the cache publish or serve an entry whose \
+bytes nothing verified, under a key that says it matches the checkouts."""

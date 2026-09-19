@@ -230,6 +230,12 @@
       `local_checkouts`; `mvm` reads it with the release parser as `local-dev`
       and refuses a release claim, a stale checkout, the wrong architecture, a
       missing role and a symlinked artifact. Still no consumer reads it.
+      W5 (#3364) slice W5d: a local image cache under
+      `<mvm cache>/local-images/`, keyed on both checkouts' identities, the
+      build target, the guest architecture, the mvm toolchain pins and the
+      flake locks the role evaluates. A set is staged, verified whole, and
+      published by one `rename`; concurrent publishers of a key agree on one
+      entry, and every read re-verifies the entry and evicts it on failure.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

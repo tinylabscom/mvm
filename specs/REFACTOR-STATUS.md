@@ -191,7 +191,10 @@ Last updated: 2026-09-19
       - [x] W5c #3364: local manifest read by the release parser and
             classified `local-dev`; refuses release claims, stale identities,
             wrong arch, missing roles, symlinked artifacts.
-      - [ ] W5d–W5m #3364: cache identity, wrapper, and each in-tree image
+      - [x] W5d #3364: local image cache keyed on both checkouts, target,
+            arch, toolchain pins and flake locks; staged, verified, published
+            by one `rename`; re-verified on read and evicted on failure.
+      - [ ] W5e–W5m #3364: build verb, wrapper, and each in-tree image
             consumer moved onto the selector.
 
 - [x] **Hermetic published-documentation link gate.**

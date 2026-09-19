@@ -82,7 +82,7 @@ impl LocalImageCheckout {
         self.reverify()?;
         let current = LocalCheckouts {
             images: self.identity().clone(),
-            mvm: mvm_checkout_identity(request.mvm_checkout)?,
+            mvm: open_mvm_checkout(request.mvm_checkout)?.1,
         };
         let manifest_bytes = read_manifest(request.set_dir)?;
         let verification = LocalImageSetVerification::new(
@@ -99,9 +99,9 @@ impl LocalImageCheckout {
     }
 }
 
-/// The paired mvm checkout's identity, read now. Held to the same shape as an
-/// image checkout: the canonical root of its own git work tree.
-fn mvm_checkout_identity(given: &Path) -> Result<RepoIdentity, LocalSetError> {
+/// The paired mvm checkout's canonical root and identity, read now. Held to
+/// the same shape as an image checkout: the root of its own git work tree.
+pub(super) fn open_mvm_checkout(given: &Path) -> Result<(PathBuf, RepoIdentity), LocalSetError> {
     let failed = |root: &Path, detail: String| LocalSetError::MvmCheckout {
         root: root.to_path_buf(),
         detail,
@@ -118,7 +118,8 @@ fn mvm_checkout_identity(given: &Path) -> Result<RepoIdentity, LocalSetError> {
             ),
         ));
     }
-    git::probe_identity(&root).map_err(|detail| failed(&root, detail))
+    let identity = git::probe_identity(&root).map_err(|detail| failed(&root, detail))?;
+    Ok((root, identity))
 }
 
 /// The manifest's bytes, from a regular file directly inside the set's

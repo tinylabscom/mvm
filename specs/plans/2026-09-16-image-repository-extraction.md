@@ -690,8 +690,10 @@ Delivery slices, one PR each:
       architecture.
       Landed as `verify_local_image_set`, always `local-dev`; it also refuses
       symlinked artifacts and any release-only field on a local set.
-- [ ] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
+- [x] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
       local outputs.
+      Landed as `LocalImageCache`: verified, then published by one `rename`;
+      re-verified on every read, evicted on failure, only ever `local-dev`.
 - [ ] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
       selected checkout inside the builder VM, plus the `bin/dev` wrapper that
       sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.

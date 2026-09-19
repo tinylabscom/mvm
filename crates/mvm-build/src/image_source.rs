@@ -26,6 +26,8 @@
 //! A set built from the checkout is read back through [`LocalSetRequest`],
 //! which re-verifies the selection, re-reads the paired mvm checkout, and
 //! accepts the set's manifest only if it names exactly those two identities.
+//! [`LocalImageCache`] keeps such sets, keyed on everything they were built
+//! from, so an unchanged pair of checkouts is built once.
 
 use std::path::{Path, PathBuf};
 
@@ -35,9 +37,15 @@ use thiserror::Error;
 
 use crate::artifact_acquisition::DistributionChannel;
 
+mod cache;
 mod git;
 mod local_set;
 
+pub use cache::{
+    CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,
+    ImageBuildRole, ImageBuildTarget, KeyInputs, LOCAL_IMAGE_CACHE_DIR, LocalImageCache,
+    LocalImageCacheError, LocalImageCacheKey, PublishOutcome, StagedEntry, ToolchainPins,
+};
 pub use git::{RepoIdentity, WorktreeState, probe_identity};
 pub use local_set::{LocalSetError, LocalSetRequest};
 
