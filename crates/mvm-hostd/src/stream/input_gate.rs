@@ -540,6 +540,27 @@ impl InputGate {
     /// lapsed), and unless the grant itself can be chain-recorded.
     pub fn open(vm: &str, admitted: &AdmittedPlan) -> Result<InputSession, InputRefusal> {
         let plan = admitted.plan();
+        Self::open_authorized(vm, plan, grants_input(plan))
+    }
+
+    /// Take the same single-writer, secret-scanned input lease under a drive
+    /// grant. A drive session needs no second input token: the one signed drive
+    /// authority covers its program, filesystem bounds, stdin and lifetime.
+    pub fn open_drive(vm: &str, admitted: &AdmittedPlan) -> Result<InputSession, InputRefusal> {
+        let plan = admitted.plan();
+        let authorized = plan
+            .grants
+            .as_ref()
+            .and_then(|grants| grants.drive.as_ref())
+            .is_some();
+        Self::open_authorized(vm, plan, authorized)
+    }
+
+    fn open_authorized(
+        vm: &str,
+        plan: &ExecutionPlan,
+        authorized: bool,
+    ) -> Result<InputSession, InputRefusal> {
         let resolved = resolve(vm);
 
         // No chain, no decision. Checked ahead of the lease so a VM whose
@@ -549,7 +570,7 @@ impl InputGate {
             return Err(InputRefusal::Unauditable);
         };
 
-        if !grants_input(plan) {
+        if !authorized {
             audit_refused(audit.as_ref(), plan, vm, &InputRefusal::NotGranted);
             return Err(InputRefusal::NotGranted);
         }

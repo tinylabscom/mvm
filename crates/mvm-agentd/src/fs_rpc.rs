@@ -31,7 +31,7 @@ use mvm_core::crypto::policy::{
     CanonicalPath, OsCanonicalizer, PathCanonicalizer, PathOp, PathPolicy, PolicyError,
 };
 
-use crate::vsock::{FsEntry, FsEntryKind, FsErrorKind, FsResult, FsStat};
+use crate::vsock::{DriveFileOperation, FsEntry, FsEntryKind, FsErrorKind, FsResult, FsStat};
 
 /// Per-call resource caps. Production agent wires `Caps::production()`
 /// at boot; tests construct tighter caps to exercise the
@@ -603,6 +603,64 @@ pub fn handle_with_defaults(request: FsRequest<'_>) -> FsResult {
     handle_request(&policy, &canon, &caps, &OsFs, request)
 }
 
+/// Execute a drive operation through the same filesystem handler while adding
+/// the grant's workspace roots and byte bounds to its policy. This is the
+/// guest-side second path check; the host performs its own before sending.
+pub fn handle_drive_with_defaults(
+    operation: &DriveFileOperation,
+    grant: &mvm_contract::grants::DriveGrant,
+) -> FsResult {
+    let policy = PathPolicy::default().with_allow_roots(
+        grant
+            .workspace_roots
+            .iter()
+            .map(mvm_contract::grants::WorkspaceRoot::as_str),
+    );
+    let production = Caps::production();
+    let caps = Caps {
+        max_read_bytes: production.max_read_bytes.min(grant.max_bytes_out.get()),
+        max_write_bytes: production.max_write_bytes.min(grant.max_bytes_in.get()),
+        ..production
+    };
+    let request = match operation {
+        DriveFileOperation::Read {
+            path,
+            offset,
+            length,
+            ..
+        } => FsRequest::Read {
+            path,
+            offset: *offset,
+            length: *length,
+        },
+        DriveFileOperation::Write {
+            path,
+            content,
+            mode,
+            create_parents,
+            offset,
+            truncate,
+            ..
+        } => FsRequest::Write {
+            path,
+            content,
+            mode: *mode,
+            create_parents: *create_parents,
+            offset: offset.unwrap_or(0),
+            truncate: *truncate,
+        },
+        DriveFileOperation::List { path, .. } => FsRequest::List { path },
+        DriveFileOperation::Stat {
+            path,
+            follow_symlinks,
+        } => FsRequest::Stat {
+            path,
+            follow_symlinks: *follow_symlinks,
+        },
+    };
+    handle_request(&policy, &OsCanonicalizer, &caps, &OsFs, request)
+}
+
 /// Internal request shape — borrows from the wire `GuestRequest`
 /// variants without pinning the handler to that exact type tree.
 /// The agent dispatch arm constructs one of these and calls
@@ -647,6 +705,7 @@ pub enum FsRequest<'a> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::num::{NonZeroU32, NonZeroU64};
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -657,6 +716,51 @@ mod tests {
         // freely under tempdirs whose canonical paths may live
         // anywhere (`/private/var/folders/...` on macOS).
         PathPolicy::with_extra_deny::<[std::path::PathBuf; 0], std::path::PathBuf>([])
+    }
+
+    fn drive_grant(root: &Path) -> mvm_contract::grants::DriveGrant {
+        use mvm_contract::grants::{DriveGrant, DriveProgramId, WorkspaceRoot};
+
+        DriveGrant::builder()
+            .workspace_root(WorkspaceRoot::parse(root.to_str().unwrap()).unwrap())
+            .program_id(DriveProgramId::parse("agent").unwrap())
+            .max_bytes_in(NonZeroU64::new(64).unwrap())
+            .max_bytes_out(NonZeroU64::new(64).unwrap())
+            .ttl(NonZeroU32::new(30).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drive_file_refused_outside_workspace_roots_after_canonicalization() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tmp();
+        let outside = tmp();
+        let outside_file = outside.path().join("secret");
+        std::fs::write(&outside_file, b"not for the drive").unwrap();
+        let link = workspace.path().join("escape");
+        symlink(&outside_file, &link).unwrap();
+        let grant = drive_grant(workspace.path());
+
+        let result = handle_drive_with_defaults(
+            &DriveFileOperation::Read {
+                path: link.to_str().unwrap().to_string(),
+                offset: None,
+                length: 16,
+                follow_symlinks: true,
+            },
+            &grant,
+        );
+
+        assert!(matches!(
+            result,
+            FsResult::Error {
+                kind: FsErrorKind::PolicyDenied,
+                ..
+            }
+        ));
     }
 
     #[test]

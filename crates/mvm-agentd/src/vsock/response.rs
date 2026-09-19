@@ -239,6 +239,13 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
+    /// One event from the grant-gated drive program. The payload deliberately
+    /// reuses the established bounded entrypoint stream shape; the distinct
+    /// envelope keeps the request/response contract unambiguous.
+    DriveEvent(EntrypointEvent),
+    /// Drive authorization failed before any filesystem access or process
+    /// spawn. The host records this typed reason in its signed audit chain.
+    DriveRefused { reason: DriveRefusal },
     /// The exact active extension invocation accepted cancellation.
     ExtensionCancellationAck,
     /// One event in the streaming response of a DevOnly `Exec` call.
@@ -365,7 +372,8 @@ name_enum! {
     pub enum Verb {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint, RunExtension,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
         PostRestore,
@@ -385,7 +393,7 @@ name_enum! {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExtensionCancellationAck, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
@@ -450,6 +458,8 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::DriveOpen
+            | Self::DriveFile
             | Self::RunExtension
             | Self::FsDiff
             | Self::FsRead
@@ -512,6 +522,7 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::DriveOpen
             | Self::RunExtension
             | Self::RunDetached
             | Self::RunCode
@@ -537,6 +548,7 @@ impl Verb {
             | Self::CancelExtension
             | Self::PostRestore
             | Self::FsDiff
+            | Self::DriveFile
             | Self::StartUnixSocketForward
             | Self::ConsoleClose
             | Self::ConsoleResize
@@ -598,6 +610,8 @@ impl Verb {
             Verb::Exec => stream(&[R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::DriveOpen => stream(&[R::DriveEvent, R::DriveRefused]),
+            Verb::DriveFile => unary(&[R::FsResult, R::DriveRefused]),
             Verb::RunExtension => stream(&[R::EntrypointEvent]),
             Verb::CancelExtension => unary(&[R::ExtensionCancellationAck]),
             Verb::RunDetached => unary(&[R::DetachedStarted]),
@@ -661,6 +675,8 @@ impl GuestResponse {
             GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
             GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
+            GuestResponse::DriveEvent(_) => ResponseVariant::DriveEvent,
+            GuestResponse::DriveRefused { .. } => ResponseVariant::DriveRefused,
             GuestResponse::ExtensionCancellationAck => ResponseVariant::ExtensionCancellationAck,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
@@ -691,9 +707,37 @@ impl GuestResponse {
     pub fn is_stream_terminal(&self) -> bool {
         match self {
             GuestResponse::EntrypointEvent(e) => e.is_terminal(),
+            GuestResponse::DriveEvent(e) => e.is_terminal(),
             GuestResponse::ExecEvent(e) => e.is_terminal(),
             GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
             _ => true,
+        }
+    }
+}
+
+/// Stable reason a drive request was refused. No request content or secret
+/// material is carried back or written to the host audit chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DriveRefusal {
+    NotGranted,
+    ProgramMismatch,
+    OutsideWorkspaceRoots,
+    InputLimitExceeded,
+    OutputLimitExceeded,
+}
+
+impl DriveRefusal {
+    /// Wire-stable reason word used by the chain-signed host refusal record.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NotGranted => "not-granted",
+            Self::ProgramMismatch => "program-mismatch",
+            Self::OutsideWorkspaceRoots => "outside-workspace-roots",
+            Self::InputLimitExceeded => "input-limit-exceeded",
+            Self::OutputLimitExceeded => "output-limit-exceeded",
         }
     }
 }
@@ -708,6 +752,7 @@ pub enum GuestCapability {
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
+    Drive,
     RunExtension,
     FilesystemRpc,
     ProcessRpc,
@@ -751,6 +796,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
+        GuestCapability::Drive,
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
@@ -1024,6 +1070,12 @@ mod tests {
             GuestResponse::ResourceUsageReport { rss_bytes: 4096 },
             GuestResponse::Error {
                 message: "oops".to_string(),
+            },
+            GuestResponse::DriveEvent(EntrypointEvent::Stdout {
+                chunk: b"driven".to_vec(),
+            }),
+            GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots,
             },
             GuestResponse::UnsupportedInProfile {
                 profile: AgentProfile::SealedProd,
@@ -1654,6 +1706,7 @@ mod tests {
         assert_eq!(
             streaming,
             BTreeSet::from([
+                "DriveOpen",
                 "Exec",
                 "ProcWait",
                 "RunCode",

@@ -663,6 +663,7 @@ mod tests {
                 .unwrap(),
             not_after: chrono::Utc::now(),
             verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
+            drive: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {

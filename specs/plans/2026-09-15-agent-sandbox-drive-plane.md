@@ -237,26 +237,26 @@ the admitted addresses into the forward leg or record the gap explicitly.
 
 Issue: [#3260](https://github.com/tinylabscom/mvm/issues/3260).
 
-- [ ] Add `DriveGrant { workspace_roots, program_id, max_bytes_in, max_bytes_out, ttl }`
+- [x] Add `DriveGrant { workspace_roots, program_id, max_bytes_in, max_bytes_out, ttl }`
       to the signed plan's grants (`crates/mvm-contract/src/ir/`,
       `crates/mvm-core/src/plan/`). The program is named by the plan, never by
       the caller and never by the model — the same rule claim 17 already applies
       when it refuses a shell entrypoint.
-- [ ] Add `DriveOpen { program_id, cwd }` streaming `DriveEvent{stdout,stderr,exit}`
+- [x] Add `DriveOpen { program_id, cwd }` streaming `DriveEvent{stdout,stderr,exit}`
       and `DriveFile { Read | Write | List | Stat }` to
       `crates/mvm-agentd/src/vsock/request.rs`, classified ProdSafe in
       `request_policy.rs` **only** behind a present `DriveGrant`.
-- [ ] Implement `DriveFile` by moving the existing `FsRead`/`FsWrite`/`FsList`/
+- [x] Implement `DriveFile` by moving the existing `FsRead`/`FsWrite`/`FsList`/
       `FsStat` handler bodies behind a grant check. The DevOnly variants keep
       their classification untouched, so claim 4's witness set does not move.
-- [ ] Restrict every path to `workspace_roots` at the guest handler, and again
+- [x] Restrict every path to `workspace_roots` at the guest handler, and again
       at the host, before the request is sent.
-- [ ] Route `DriveOpen`'s process launch through the same env-synthesis seam
+- [x] Route `DriveOpen`'s process launch through the same env-synthesis seam
       `invoke.rs` uses, or the substitution placeholder never reaches the agent.
       This is the one non-obvious wiring constraint in the workstream.
-- [ ] Host side is `InputSession` + `StreamReader` + the grant. No new socket, no
+- [x] Host side is `InputSession` + `StreamReader` + the grant. No new socket, no
       new port, no new journal.
-- [ ] Witnesses: `drive_open_refused_without_grant`,
+- [x] Witnesses: `drive_open_refused_without_grant`,
       `drive_file_refused_outside_workspace_roots`,
       `drive_open_receives_substituted_placeholder_not_a_secret`,
       `drive_refusals_are_chain_signed`.

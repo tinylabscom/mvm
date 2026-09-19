@@ -32,6 +32,7 @@ pub mod assurance_session;
 pub mod audit;
 pub mod audit_signer;
 pub mod broker;
+pub mod drive;
 pub mod exit_capture;
 pub mod extension_controller;
 /// Length-prefixed message framing (4-byte BE length + body,
@@ -68,3 +69,4 @@ pub mod run;
 pub mod session_resume;
 pub mod stream;
 pub mod supervisor;
+pub mod workload_env;

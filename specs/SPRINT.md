@@ -10,6 +10,18 @@
 
 ## In progress
 
+- [ ] **Agent sandbox drive plane.**
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`; epic #3275.
+      WS1 (#3260) is complete in PR #3505: signed plans carry a validated,
+      monotonic `DriveGrant`; `DriveOpen` and `DriveFile` reuse the existing
+      stream and file planes; host and guest both enforce workspace roots,
+      byte ceilings and TTL; and process launch uses the shared substituted
+      workload environment without exposing secret values. The four named
+      refusal/substitution/audit witnesses pass alongside the affected agent,
+      host, backend and build suites, workspace check and zero-warning clippy.
+      The PR carries the implementation through queued delivery; the other epic
+      workstreams remain in progress.
+
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.
       Epic #3419; workstreams #3420–#3426.

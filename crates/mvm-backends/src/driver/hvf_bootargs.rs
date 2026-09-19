@@ -54,6 +54,7 @@ mod tests {
                 plan_nonce: nonce,
                 not_after,
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };
