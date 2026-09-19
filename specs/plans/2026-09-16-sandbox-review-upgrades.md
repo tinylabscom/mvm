@@ -346,17 +346,29 @@ while the range is mapped.
 RAM section on every restore, so sibling children share no pages. The kernel is
 already mapped `MAP_PRIVATE | MAP_FIXED` from its file in the same module.
 
-- [ ] W5.1 Page-align the RAM section in the snapshot format.
-- [ ] W5.2 After verification, map the RAM section `MAP_PRIVATE` at the guest
+- [x] W5.1 Page-align the RAM section in the snapshot format.
+- [x] W5.2 After verification, map the RAM section `MAP_PRIVATE` at the guest
       address instead of copying it.
-- [ ] W5.3 Make sure verified bytes cannot change underneath the mapping: map
+- [x] W5.3 Make sure verified bytes cannot change underneath the mapping: map
       from a store the VM's user cannot write, opened with `O_NOFOLLOW`, or
-      clone to a private file first.
-- [ ] W5.4 Share pages only within one tenant's snapshots.
-- [ ] W5.5 Record restore latency and resident size for 1 GiB and 4 GiB
+      clone to a private file first. Done with an unlinked, read-only clone,
+      which holds against other users and against later edits of the
+      checkpoint. It does not hold against a process running as the same user,
+      which can open the clone in the moment before its name is removed; see
+      W5.7.
+- [x] W5.4 Share pages only within one tenant's snapshots. Stricter than
+      asked: restored guests share no pages at all, because each restore maps
+      its own clone. A cross-tenant restore or `vm_full` fork is refused
+      against the tenant the creation entry was signed under.
+- [x] W5.5 Record restore latency and resident size for 1 GiB and 4 GiB
       guests, before and after, in the PR.
-- [ ] W5.6 Test: editing the snapshot file after restore does not change guest
+- [x] W5.6 Test: editing the snapshot file after restore does not change guest
       memory. The existing HVF restore and fork tests still pass.
+- [ ] W5.7 Sandbox HVF supervisors so one cannot list or open another VM's
+      state directory. Every supervisor runs today as the user, unsandboxed,
+      and is handed the path of the host signing key, so a compromised
+      supervisor can already rewrite checkpoints and forge chain entries. Until
+      this lands, W5.3's guarantee excludes same-user processes.
 
 ## W6 — Memory and task limits at spawn (#3383)
 
