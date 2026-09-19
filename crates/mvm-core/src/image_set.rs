@@ -25,6 +25,7 @@ mod error;
 mod identity;
 mod lock;
 mod train_lock;
+mod trust_tier;
 mod validate;
 mod verify;
 
@@ -38,6 +39,7 @@ pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
     PinnedArtifact, Stage0KernelPin, image_train_lock,
 };
+pub use trust_tier::ImageTrustTier;
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
     check_against_lock, check_protocol_compatibility, require_complete, select_member,
