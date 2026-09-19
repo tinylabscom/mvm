@@ -718,13 +718,14 @@ _release-prep VERSION:
         git add install.sh
     fi
     cargo update -w
-    # The runtime-overlay flake pins its version to the workspace version
-    # (check-runtime-overlay-version fails closed on a mismatch), so bump it
-    # alongside Cargo.toml. The mvmctl and SDK cdylib nix packages read their
-    # version from Cargo.toml and need no edit.
-    sed -i.bak -E "s/(overlayVersion[[:space:]]*=[[:space:]]*\")[^\"]*(\")/\1$V\2/" nix/images/runtime-overlay/flake.nix
-    rm nix/images/runtime-overlay/flake.nix.bak
-    git add nix/images/runtime-overlay/flake.nix
+    # The runtime overlay, SDK sidecar and initramfs take their VERSION from
+    # one pin (check-runtime-overlay-version fails closed on a mismatch), so
+    # bump it alongside Cargo.toml. The mvmctl and SDK cdylib nix packages
+    # read their version from Cargo.toml and need no edit.
+    sed -i.bak -E "s/^\"[^\"]*\"$/\"$V\"/" nix/images/version.nix
+    rm nix/images/version.nix.bak
+    grep -qxF "\"$V\"" nix/images/version.nix
+    git add nix/images/version.nix
     # The cargo-fuzz crates are separate workspaces with their own lockfiles,
     # each pinning the internal `mvm-*` crates by version. A bump leaves every
     # one of them naming the old version, and ci.yml's "cargo-fuzz crates still
