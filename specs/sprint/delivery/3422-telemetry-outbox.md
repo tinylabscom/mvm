@@ -35,7 +35,7 @@ Transport failure counts describe failed attempts, not proof of non-receipt.
 Automatic delta summaries and reserved summary bandwidth are not implemented by
 this component and remain part of the supervised worker integration.
 
-## Local component validation complete; delivery pending
+## Local component validation complete; delivery queued
 
 PR #3464 carries this handoff, rebased onto the merged transport foundation
 after #3449 landed. Final PR and merge-group checks remain required.
@@ -72,7 +72,10 @@ the entire core library passed
 also passed. Final workspace all-target clippy, BDD-feature all-target clippy,
 fmt, the Linux all-target cross-check, all 69 repository gates and the separate
 declared-backing gate pass. Cross-compilation is not execution of Linux-specific
-tests. PR checks and merge-queue delivery remain pending for this change.
+tests. PR #3464's required checks passed and actual merge-queue entry was
+observed on 2026-09-19 UTC (position 5, `AWAITING_CHECKS`). The merge itself
+and merge-group validation remain pending; auto-merge alone was not counted
+as queue entry.
 
 Host validation uses isolated MVM_HOME/CARGO_HOME/CARGO_TARGET_DIR and Rust
 1.97.1. The full workspace run excludes `run_build_surfaces_environment_gaps`

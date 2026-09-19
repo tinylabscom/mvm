@@ -10,6 +10,7 @@ Feature: HVF save/restore for checkpoint and fork
     Given a captured HVF launch config carrying an egress relay, a broker and a console socket
     When the captured config is rewritten for a restored child
     Then the restored config carries no egress relay, broker or console socket
+    And the restored config carries only a child-local telemetry listener
     And the restored config carries no live-handoff control socket
     And the restored config loads the saved machine state instead of booting a kernel
 

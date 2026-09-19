@@ -55,7 +55,7 @@ pub struct VsockHostBindings {
     pub network_endpoint: Option<PathBuf>,
     /// Host broker endpoint path.
     pub broker_endpoint: Option<PathBuf>,
-    /// Dev-only console listeners keyed by guest port.
+    /// Additional host-dial listeners (telemetry and admitted console ports).
     pub console_sockets: Vec<(u32, PathBuf)>,
 }
 
@@ -108,7 +108,7 @@ fn canonical_child_bindings(
     let broker_path =
         mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::BROKER_PORT);
     let broker_endpoint = (mask & HANDOFF_BROKER != 0).then_some(broker_path);
-    let console_sockets = if mask & HANDOFF_CONSOLE != 0 {
+    let mut console_sockets = if mask & HANDOFF_CONSOLE != 0 {
         mvm_agentd::vsock::dev_console_data_ports()
             .map(|port| {
                 (
@@ -120,6 +120,13 @@ fn canonical_child_bindings(
     } else {
         Vec::new()
     };
+    if mask & crate::hvf_handoff::HANDOFF_TELEMETRY != 0 {
+        let port = mvm_core::protocol::telemetry::TELEMETRY_PORT;
+        console_sockets.push((
+            port,
+            mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, port),
+        ));
+    }
     Ok(VsockHostBindings {
         agent_socket,
         network_endpoint,
@@ -2354,6 +2361,46 @@ mod tests {
             }
         }
         assert_eq!(&buf[..n], b"# ");
+    }
+
+    #[test]
+    fn telemetry_handoff_is_independent_and_rebinds_the_child_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let bindings = canonical_child_bindings(
+            "telemetry-child",
+            dir.path(),
+            crate::hvf_handoff::HANDOFF_TELEMETRY,
+        )
+        .unwrap();
+        assert!(bindings.agent_socket.is_none());
+        assert!(bindings.network_endpoint.is_none());
+        assert!(bindings.broker_endpoint.is_none());
+        let port = mvm_core::protocol::telemetry::TELEMETRY_PORT;
+        let socket = mvm_core::config::vm_hvf_vsock_port_socket_at(dir.path(), port);
+        assert_eq!(bindings.console_sockets, vec![(port, socket.clone())]);
+        assert!(
+            canonical_child_bindings("telemetry-child", dir.path(), 0)
+                .unwrap()
+                .console_sockets
+                .is_empty()
+        );
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let mut device = virtio_dev();
+        device
+            .rebind_host_channels(&bindings, Arc::new(TestIrqLine))
+            .unwrap();
+        assert!(socket.exists());
+        let _client = UnixStream::connect(&socket).unwrap();
+        device.shutdown();
+        assert!(device.io.is_none());
+        assert_ne!(
+            HvfHandoffRequest::signing_message(42, "telemetry-child", 0),
+            HvfHandoffRequest::signing_message(
+                42,
+                "telemetry-child",
+                crate::hvf_handoff::HANDOFF_TELEMETRY
+            ),
+        );
     }
 
     #[test]

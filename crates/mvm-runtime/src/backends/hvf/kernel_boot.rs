@@ -361,9 +361,8 @@ pub struct HostChannels {
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
     pub broker_socket: Option<PathBuf>,
-    /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
-    /// data port the interactive PTY may reach. Populated only for a `dev_console`
-    /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
+    /// Additional host-dial listeners, including telemetry and admitted console
+    /// data channels. Telemetry is present independently of console grants.
     pub console_data_sockets: Vec<(u32, PathBuf)>,
     /// Builder-tier control listeners: job dispatch and the resident daemon's
     /// typed channel, for a persistent builder VM. Empty for every workload.
@@ -880,8 +879,7 @@ struct RunInputs {
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
-    /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
-    /// data port). Empty for a sealed prod config — nothing bound (claim 15).
+    /// Additional host-dial listeners, including telemetry and console channels.
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
@@ -1772,16 +1770,10 @@ unsafe fn run(
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
             }
-            // Dev-only interactive console (`machine run -it`): bind one host
-            // listener per guest console data port so the console driver can reach
-            // the agent-allocated PTY channel. The list is populated only for a
-            // `dev_console` machine; a sealed prod config carries none, so nothing
-            // is bound (claim 15). Shares the heartbeat counter so an open console
-            // stream keeps the loop waking an idle guest.
-            // Builder control ports ride the same bridge, and a persistent
-            // builder has no console, so bind whichever list is populated.
-            // They cannot both be: one is dev-console policy, the other
-            // builder-tier policy.
+            // Bind the explicitly supplied telemetry, console and builder
+            // listeners through the shared host-dial bridge. Telemetry does not
+            // enable a console or grant network access. The activity counter
+            // keeps the guest responsive while a host stream is active.
             let host_dial_sockets: Vec<(u32, PathBuf)> = console_data_sockets
                 .iter()
                 .chain(builder_control_sockets.iter())

@@ -229,17 +229,7 @@ impl SignerHelper {
             return Err("signer helper has no host signing key path".into());
         };
         let keystore = Keystore::load_from_file(path).map_err(|e| e.to_string())?;
-        let request_id = req.request_id().to_string();
-        let bytes_to_sign: &[u8] = match req {
-            SignRequest::SignPlan { bytes, .. } => bytes,
-        };
-        let result = keystore.sign(bytes_to_sign);
-        Ok(SignResponse::Ok {
-            request_id,
-            sig_alg: result.sig_alg,
-            signature: result.signature,
-            signer_pubkey: result.pub_key_bytes,
-        })
+        Ok(crate::host_signer::server::dispatch_local(req, &keystore))
     }
 }
 

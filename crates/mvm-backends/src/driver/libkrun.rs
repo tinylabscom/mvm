@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
@@ -597,12 +597,12 @@ impl RunningVm for LibkrunRunningVm {
         // libkrun's per-port UDS convention: `<state_dir>/vsock-<port>.sock`
         // (flat), resolved through the single source of truth shared with the
         // host-side resolver — NOT HVF's nested `vsock/` convention. Restricted
-        // to the agent port and the dev-only console data ports (claim 15: a
+        // to telemetry, the agent port and dev-only console data ports (claim 15: a
         // sealed prod boot registers no console listeners).
-        if guest_port != GUEST_AGENT_PORT && !dev_console_data_ports().any(|p| p == guest_port) {
+        if !super::host_dialable_port(guest_port) {
             bail!(
                 "libkrun driver vsock_connect supports only the agent port \
-                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                 ({GUEST_AGENT_PORT}), telemetry and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
@@ -959,6 +959,7 @@ mod tests {
             KernelImage::Path("/img/Image".into()),
             vec![
                 host_dials(GuestService::MachineControl, "/run/agent.sock"),
+                host_dials(GuestService::Telemetry, "/run/telemetry.sock"),
                 guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
                 guest_dials(GuestService::WorkloadExit, "/run/exit.sock"),
                 guest_dials(GuestService::Broker, "/run/broker.sock"),
@@ -974,6 +975,16 @@ mod tests {
         let cfg = relay(&spec);
         // HostDials → the host dials the guest's listeners (add_vsock_port).
         assert!(cfg.krun.vsock_ports.contains(&GUEST_AGENT_PORT));
+        assert!(
+            cfg.krun
+                .vsock_ports
+                .contains(&GuestService::Telemetry.port())
+        );
+        assert!(
+            !cfg.krun
+                .host_listen_ports
+                .contains(&GuestService::Telemetry.port())
+        );
         assert!(cfg.krun.vsock_ports.contains(&(CONSOLE_PORT_BASE + 1)));
         // GuestDials → the host binds the listener the guest dials.
         assert!(cfg.krun.host_listen_ports.contains(&EGRESS_PORT));
@@ -1053,42 +1064,43 @@ mod tests {
     }
 
     #[test]
-    fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
+    fn vsock_connect_reaches_agent_and_telemetry_sockets_and_rejects_other_ports() {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
-        // The libkrun flat convention: <state_dir>/vsock-<port>.sock.
-        let sock = vm_vsock_port_socket_at(dir.path(), GUEST_AGENT_PORT);
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
-        let server = std::thread::spawn(move || {
-            if let Ok((mut c, _)) = listener.accept() {
-                let mut b = [0u8; 1];
-                if c.read_exact(&mut b).is_ok() {
-                    let _ = c.write_all(&b);
+        for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
+            let dir = tempfile::tempdir().unwrap();
+            // The libkrun flat convention: <state_dir>/vsock-<port>.sock.
+            let sock = vm_vsock_port_socket_at(dir.path(), port);
+            let Some(listener) = bind_unix_listener(&sock) else {
+                return;
+            };
+            let server = std::thread::spawn(move || {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut b = [0u8; 1];
+                    if c.read_exact(&mut b).is_ok() {
+                        let _ = c.write_all(&b);
+                    }
                 }
-            }
-        });
+            });
 
-        let vm = LibkrunRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join("libkrun.pid"),
-        };
+            let vm = LibkrunRunningVm {
+                id: VmId("agent-vm".into()),
+                state_dir: dir.path().to_path_buf(),
+                pid_file: dir.path().join("libkrun.pid"),
+            };
 
-        // The agent port connects + round-trips through the socket.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
+            let mut s = vm.vsock_connect(port).unwrap();
+            s.write_all(b"x").unwrap();
+            let mut got = [0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"x");
+            server.join().unwrap();
 
-        // A port outside the agent + console data range is not host-dialable.
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
-        assert!(vm.vsock_connect(9999).is_err());
+            // A port outside the agent + console data range is not host-dialable.
+            assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+            assert!(vm.vsock_connect(9999).is_err());
+        }
     }
 
     #[test]

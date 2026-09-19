@@ -167,6 +167,20 @@ struct WarmClaimSpawner {
 }
 
 impl NetworkEndpointSpawner for WarmClaimSpawner {
+    fn prepare_identity(
+        &self,
+        req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> anyhow::Result<Option<std::path::PathBuf>> {
+        Ok(matches!(
+            req.identity,
+            mvm_runtime::workload_runner::FlowMuxIdentitySource::Mint
+        )
+        .then(|| {
+            req.state_dir
+                .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+        }))
+    }
+
     fn spawn(
         &self,
         req: &NetworkEndpointSpawnRequest<'_>,

@@ -20,13 +20,28 @@ Last updated: 2026-09-18
       `a126a8299679b3c0a0b1022dc3bedca1504ce14f`.
       `specs/sprint/delivery/3421-telemetry-transport.md` records the scope.
       No runtime listener, source capture or VM-generation binding is enabled.
+      W2b backend channel and identity wiring passes 1,857 affected-crate tests (six ignored),
+      workspace clippy and Linux all-target cross-check. Both restore BDD scenarios
+      pass (ten steps, no skips). The final Linux rerun passes; full-suite validation
+      remains open. Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
+      Wiring includes HVF cold boot, live handoff and child-local saved restore. Guest listener activation,
+      authoritative generation registration and real-VM witnesses remain open.
+      No-egress identity provisioning is implemented locally without granting
+      network access or loading the host private key. Identity/refusal and disk-isolation
+      regressions pass; full workspace validation remains in progress.
+      Standby capture also provisions its own identity. Identity-stage policy
+      gates (69), declared backing, BDD and Linux cross-check pass; full workspace validation is open.
       W3b prepared-record handoff passes nine new component tests, including a
       stalled encrypted writer, atomic close and retrievable loss evidence.
       Two allocation regressions pass natively and under Miri, including cold
       admission after setup initializes the native mutex.
       Workspace/core tests, clippy, Linux cross-check and repository gates pass;
-      delivery and runtime integration remain open. Scope:
+      PR #3464 entered the merge queue. Merge and runtime integration remain open. Scope:
       `specs/sprint/delivery/3422-telemetry-outbox.md`.
+      W4 receive-only authentication now integrates with the resident signer via
+      a typed, domain-restricted operation and deadline-bounded async client.
+      Seven integration tests, workspace clippy and Linux all-target cross-check
+      pass. VM-lifetime collection and generation registration remain unimplemented.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.

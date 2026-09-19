@@ -218,6 +218,24 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
   - [ ] W2b — Provision backend endpoints and bind each connection's expected
         guest key to authoritative VM/boot/generation registration. Prove actual
         service routing and restore isolation before enabling collection.
+        Local integration now adds the standing host-dial channel, backend
+        connection routing, HVF supervisor binding, signed live-handoff bit and
+        fresh child-local saved-restore endpoint. Affected-crate tests pass
+        (1,857 passed, six ignored), as does workspace clippy. Linux all-target
+        cross-compilation passes after the final fixture changes;
+        full-suite validation remains in progress. Both restore BDD scenarios
+        pass (ten steps, no skips), including the child-local telemetry path;
+        no guest listener, generation registration or real-VM
+        tracing witness is claimed by these channel changes.
+        See [integration evidence](../sprint/delivery/3423-telemetry-runtime-integration.md).
+        Identity-only provisioning is now implemented locally for deny-all,
+        secret-free boots: mint from the host's public anchor without an egress
+        process, and preserve the restored guest's registered key on warm claim.
+        Its positive/refusal and disk-isolation regressions pass in the affected
+        suites above; full workspace validation remains in progress.
+        Standby capture now provisions its own identity too. The identity-stage
+        policy pass clears all 69 repository gates and declared backing;
+        full workspace tests remain open.
 - [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export
@@ -242,7 +260,8 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         Two additional allocation regressions pass natively and under Miri,
         including cold admission and fresh producer threads.
         Host workspace/core tests, clippy, Linux cross-check and all 69 repository
-        gates pass; delivery remains pending. Record preparation still allocates outside
+        gates pass. PR #3464 passed its PR checks and entered the merge queue;
+        merge-group checks and merge remain pending. Record preparation still allocates outside
         admission. Source callbacks, event-driven worker ownership and automatic
         wire loss summaries remain required; this is not complete guest capture.
         See [validation record](../sprint/delivery/3422-telemetry-outbox.md).
@@ -250,6 +269,17 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
       prove a stopped peer/full queue does not stall workload or pipe draining.
 
 ### W4 — Host collector owned for the VM lifetime
+
+Receive-only authentication is being integrated on `codex/telemetry-collector`.
+The local receiver now supports an external signer, retains no host signing key,
+pins the registered guest before requesting a signature, and verifies the signer
+result before confirming the handshake. A typed, domain-restricted resident-signer
+operation and deadline-bounded async client now pass seven integration tests,
+including encrypted record reception through the real signer socket, cancellation
+with socket closure, and rejection of other service domains with valid guest proofs.
+Workspace clippy and Linux all-target cross-compilation pass. This is not yet a
+running VM-lifetime collector; generation registration and runtime ownership remain
+open. Existing `SignPlan` is not reused for telemetry signing.
 
 - [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.

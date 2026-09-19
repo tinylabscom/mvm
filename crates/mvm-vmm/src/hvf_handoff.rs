@@ -22,6 +22,9 @@ pub const HVF_HANDOFF_PROTOCOL_DOMAIN: &[u8] = b"mvm-hvf-live-handoff-v1";
 /// The parent's reply to a handoff that took: exactly this line.
 pub const HANDOFF_ACCEPTED: &[u8] = b"OK\n";
 
+/// Dedicated telemetry authorization bit in a signed handoff channel mask.
+pub const HANDOFF_TELEMETRY: u8 = 1 << 4;
+
 /// Longest reply line either side of the handoff socket will handle, newline
 /// included. The parent writes within it and the host reads no further, so an
 /// unterminated reply cannot hold a claim open.
