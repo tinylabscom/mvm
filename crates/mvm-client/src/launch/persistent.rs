@@ -168,7 +168,11 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
     crate::register_machine(&crate::MachineRegistration::minimal(vm_name, network_name));
 }
 
-pub fn start_persistent_oci_machine(params: PersistentImageStartParams<'_>) -> Result<()> {
+/// Admit and start a persistent machine. Returns the admitted plan the
+/// machine booted under.
+pub fn start_persistent_oci_machine(
+    params: PersistentImageStartParams<'_>,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     let PersistentImageStartParams {
         name,
         image_label,
@@ -326,7 +330,7 @@ pub fn start_persistent_oci_machine(params: PersistentImageStartParams<'_>) -> R
     emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
-    Ok(())
+    Ok(admission.admitted)
 }
 
 #[cfg(test)]
