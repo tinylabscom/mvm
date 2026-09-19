@@ -200,6 +200,8 @@ struct OpenInput {
     /// cause it — and a *repeat* of this number, which is a retry rather than
     /// a reorder, is answered without queueing the bytes again.
     delivered_seq: Option<u64>,
+    max_bytes: Option<u64>,
+    accepted_bytes: u64,
 }
 
 /// Where a host-admitted input frame lands. Reached by name rather than by
@@ -214,9 +216,20 @@ impl InputDesk {
     /// reaped by the time a new one spawns, and a stale sink kept around would
     /// answer frames for a workload that no longer exists.
     pub fn open(stdin: ChildStdin) {
+        Self::open_with_limit(stdin, None);
+    }
+
+    /// Accept streamed input with a cumulative byte ceiling for this call.
+    pub fn open_bounded(stdin: ChildStdin, max_bytes: u64) {
+        Self::open_with_limit(stdin, Some(max_bytes));
+    }
+
+    fn open_with_limit(stdin: ChildStdin, max_bytes: Option<u64>) {
         *desk() = Some(OpenInput {
             sink: InputSink::new(stdin),
             delivered_seq: None,
+            max_bytes,
+            accepted_bytes: 0,
         });
     }
 
@@ -261,10 +274,21 @@ impl InputDesk {
                 );
             }
         }
+        let frame_bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
+        if open
+            .max_bytes
+            .is_some_and(|max| open.accepted_bytes.saturating_add(frame_bytes) > max)
+        {
+            return refused(
+                StreamInputRefusal::CapExceeded,
+                "streamed input exceeds the opened call's byte grant".to_string(),
+            );
+        }
         let seq = frame.seq;
         match open.sink.write_frame(frame) {
             Ok(()) => {
                 open.delivered_seq = Some(seq);
+                open.accepted_bytes = open.accepted_bytes.saturating_add(frame_bytes);
                 StreamInputResult::Accepted {
                     queued_bytes: open.sink.queued_bytes() as u64,
                 }
@@ -302,6 +326,17 @@ impl InputDesk {
         let mut open = slot
             .take()
             .expect("the desk observed under this same lock is still there");
+        let trailing_bytes = u64::try_from(close.trailing.len()).unwrap_or(u64::MAX);
+        if open
+            .max_bytes
+            .is_some_and(|max| open.accepted_bytes.saturating_add(trailing_bytes) > max)
+        {
+            open.sink.close();
+            return refused(
+                StreamInputRefusal::CapExceeded,
+                "streamed input tail exceeds the opened call's byte grant".to_string(),
+            );
+        }
         let tail = open.sink.deliver_tail(&close.trailing);
         // The fd closes either way: the stream is over, and a workload left
         // waiting on a stdin that never EOFs would hang until its deadline.
@@ -513,6 +548,12 @@ mod tests {
         child
     }
 
+    fn bounded_desk_over_cat(max_bytes: u64) -> std::process::Child {
+        let mut child = spawn("/bin/cat", &[]);
+        InputDesk::open_bounded(child.stdin.take().expect("piped stdin"), max_bytes);
+        child
+    }
+
     fn queued(result: &StreamInputResult) -> u64 {
         match result {
             StreamInputResult::Accepted { queued_bytes } => *queued_bytes,
@@ -548,6 +589,23 @@ mod tests {
 
         let out = child.wait_with_output().expect("cat exits after EOF");
         assert_eq!(out.stdout, b"AKIAIOSFODNN7EXAMPLE");
+    }
+
+    #[test]
+    fn bounded_desk_refuses_input_past_the_call_grant() {
+        let _guard = desk_test();
+        let child = bounded_desk_over_cat(5);
+
+        let _ = queued(&InputDesk::write_frame(frame(0, b"hello")));
+        let refused = InputDesk::write_frame(frame(1, b"!"));
+        assert_eq!(refusal_kind(&refused), StreamInputRefusal::CapExceeded);
+        InputDesk::close(CloseInput {
+            after_seq: Some(0),
+            trailing: Vec::new(),
+        });
+
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(out.stdout, b"hello");
     }
 
     #[test]

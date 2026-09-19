@@ -61,6 +61,19 @@ stream_input?: boolean
 timeout_secs: number
 }
 } | {
+DriveOpen: {
+cwd: string
+/**
+ * Host-synthesized egress and secret-placeholder environment. This is not an arbitrary caller surface: the host drive API builds it through the same synthesis seam used by `RunEntrypoint`.
+ */
+env?: [string, string][]
+program_id: string
+}
+} | {
+DriveFile: {
+operation: DriveFileOperation
+}
+} | {
 RunExtension: {
 dispatch: ExtensionDispatch
 }
@@ -292,7 +305,38 @@ export type VolumeConfigKind = ("virtio_fs" | "block")
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
+/**
+ * Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.
+ */
+export type DriveFileOperation = ({
+Read: {
+follow_symlinks?: boolean
+length: number
+offset?: (number | null)
+path: string
+}
+} | {
+Write: {
+content: number[]
+create_parents?: boolean
+follow_symlinks?: boolean
+mode: number
+offset?: (number | null)
+path: string
+truncate?: boolean
+}
+} | {
+List: {
+follow_symlinks?: boolean
+path: string
+}
+} | {
+Stat: {
+follow_symlinks?: boolean
+path: string
+}
+})
 /**
  * A `sha256:<64 hex>` digest.
  * 
@@ -387,6 +431,12 @@ primed: boolean
 }
 } | {
 EntrypointEvent: EntrypointEvent
+} | {
+DriveEvent: EntrypointEvent
+} | {
+DriveRefused: {
+reason: DriveRefusal
+}
 } | "ExtensionCancellationAck" | {
 ExecEvent: ExecEvent
 } | {
@@ -521,6 +571,10 @@ message: string
  * The variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.
  */
 export type RunEntrypointError = ("PayloadCap" | "Timeout" | "Canceled" | "Busy" | "WrapperCrashed" | "NotReady" | "EntrypointInvalid" | "SessionKilled" | "InternalError")
+/**
+ * Stable reason a drive request was refused. No request content or secret material is carried back or written to the host audit chain.
+ */
+export type DriveRefusal = ("not_granted" | "program_mismatch" | "outside_workspace_roots" | "input_limit_exceeded" | "output_limit_exceeded")
 /**
  * One event in the response stream of a DevOnly `Exec` call. The agent emits a sequence of these for a single `Exec` request, terminated by `Exit`. The host reads frames in a loop until terminal.
  */
@@ -708,7 +762,7 @@ message: string
 /**
  * Why the agent would not deliver an input frame.
  */
-export type StreamInputRefusal = ("no_workload" | "out_of_order" | "queue_full" | "workload_gone")
+export type StreamInputRefusal = ("no_workload" | "out_of_order" | "queue_full" | "cap_exceeded" | "workload_gone")
 
 /**
  * Schema root: both wire directions under one document so the shared `$defs` (`FsResult`, `ProcResult`, `EntrypointEvent`, …) are emitted once and the generated clients reference a single definition set.
@@ -887,6 +941,10 @@ pubkey_hex: string
  * Host-signer-signed, session- and time-bound capability granting a workload a subset of agent control verbs. Signed by the admission authority, verified by the guest — deliberately a different key from the per-session frame-signing key.
  */
 export interface VerbGrant {
+/**
+ * Drive authority copied from the admitted signed plan. It rides inside this host-signed envelope so the guest can enforce the same roots, program identity, byte bounds, and lifetime without trusting request fields.
+ */
+drive?: (DriveGrant | null)
 not_after: string
 plan_nonce: Nonce
 session_id: string
@@ -895,6 +953,19 @@ session_id: string
  */
 sig: string
 verbs: VerbId[]
+}
+/**
+ * The bounded authority to drive one plan-selected program and its workspace.
+ */
+export interface DriveGrant {
+max_bytes_in: number
+max_bytes_out: number
+program_id: string
+/**
+ * Lifetime of one opened drive session, in seconds.
+ */
+ttl: number
+workspace_roots: string[]
 }
 /**
  * User volume to mount after rootfs activation.

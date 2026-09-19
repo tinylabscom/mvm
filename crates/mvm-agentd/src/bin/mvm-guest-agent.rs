@@ -55,9 +55,9 @@ use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
     AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane,
-    TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_verb_grant, is_verb_trust_baseline,
-    launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
-    load_verb_trust_policy, trust_decision, workload_privilege_refusal,
+    TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_drive_grant, enforce_verb_grant,
+    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
+    load_pinned_verb_grant, load_verb_trust_policy, trust_decision, workload_privilege_refusal,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -116,12 +116,13 @@ use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
     handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
-    handle_entrypoint_status, handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move,
-    handle_fs_read, handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
-    handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
-    handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
-    handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
-    handle_resource_usage, handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
+    handle_drive_file, handle_drive_open, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
+    handle_fs_mkdir, handle_fs_move, handle_fs_read, handle_fs_remove, handle_fs_stat,
+    handle_fs_write, handle_integration_status, handle_mount_volume, handle_ping,
+    handle_post_restore, handle_primed_status, handle_probe_status, handle_proc_kill,
+    handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
+    handle_proc_wait, handle_readiness_status, handle_resource_usage,
+    handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
     handle_start_unix_socket_forward, handle_stream_input, handle_unmount_volume,
     handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
@@ -299,6 +300,10 @@ fn handle_client(
         send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }
+    if let Some(resp) = enforce_drive_grant(&req, verb_grant.as_ref()) {
+        send_authenticated_response(&mut file, &mut session, &resp);
+        return;
+    }
 
     // No workload code runs as root. The privilege drop during activation is
     // the mechanism; this is the backstop that makes a boot path which never
@@ -417,6 +422,21 @@ fn handle_client(
                 env,
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
+
+            GuestRequest::DriveOpen {
+                program_id: _,
+                cwd,
+                env,
+            } => handle_drive_open(
+                &mut ctx,
+                &cwd,
+                env,
+                verb_grant.as_ref().and_then(|grant| grant.drive.as_ref()),
+            ),
+            GuestRequest::DriveFile { operation } => handle_drive_file(
+                &operation,
+                verb_grant.as_ref().and_then(|grant| grant.drive.as_ref()),
+            ),
 
             GuestRequest::RunExtension { dispatch } => handle_run_extension(ctx.file, dispatch),
             GuestRequest::CancelExtension { cancellation } => handle_cancel_extension(cancellation),

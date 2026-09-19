@@ -2207,6 +2207,7 @@ mod tests {
                 plan_nonce: nonce,
                 not_after,
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -3132,6 +3133,7 @@ mod tests {
                 plan_nonce: nonce,
                 not_after,
                 verbs: vec![mvm_core::plan::VerbId::new(&"a".repeat(4000)).unwrap()],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -3771,9 +3773,11 @@ mod tests {
         fn issue(&self, config: &VmStartConfig) -> Result<Option<VerbGrantEnvelope>> {
             let plan_json = config.plan_json.as_deref().context("child plan missing")?;
             let plan = mvm_core::plan::plan_from_admitted_json(plan_json)?;
-            let Some(verbs) = plan.agent_verbs else {
+            let verbs = plan.agent_verbs.unwrap_or_default();
+            let drive = plan.grants.and_then(|grants| grants.drive);
+            if verbs.is_empty() && drive.is_none() {
                 return Ok(None);
-            };
+            }
             *self.seen_child.lock().unwrap() = Some(config.name.clone());
             Ok(Some(VerbGrantEnvelope {
                 pubkey_hex: "ab".repeat(32),
@@ -3785,6 +3789,7 @@ mod tests {
                     plan_nonce: plan.nonce,
                     not_after: plan.valid_until,
                     verbs,
+                    drive,
                     sig: vec![3u8; 64],
                 },
             }))

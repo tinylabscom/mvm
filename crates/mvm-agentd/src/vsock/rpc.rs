@@ -34,6 +34,13 @@ pub enum RpcError {
         /// `kind_name()` (kebab-case) of the rejected request.
         verb: String,
     },
+    /// The request was a drive operation but the signed drive authority did
+    /// not cover it.
+    #[error("drive request refused: {reason:?}")]
+    DriveRefused {
+        /// Stable refusal reason; never carries request content.
+        reason: DriveRefusal,
+    },
     /// The agent refused to spawn workload code because it is still uid 0.
     /// Indicates a boot path that never reached the privilege drop, not a
     /// policy decision about this particular caller.
@@ -345,6 +352,111 @@ pub struct RunEntrypointCall {
     /// Keep the workload's stdin open for `StreamInput` frames. Only a plan
     /// carrying the input grant gets this; see `mvm_hostd::stream::InputGate`.
     pub stream_input: bool,
+}
+
+/// Host-selected inputs for opening the program fixed by a [`DriveGrant`].
+///
+/// There is deliberately no program field: the signed grant is the only
+/// source of that identity, so a caller cannot turn this into argv selection.
+#[derive(Debug, Clone, Default)]
+pub struct DriveOpenCall {
+    /// Working directory, restricted to a granted workspace root before any
+    /// request is written and checked again after canonicalization in-guest.
+    pub cwd: String,
+    /// Environment synthesized by the host's workload-egress seam.
+    pub env: Vec<(String, String)>,
+}
+
+/// Open the plan-selected drive program and consume its bounded event stream.
+///
+/// The host performs the first workspace check here. The guest repeats it
+/// against the independently pinned grant and canonical path before spawning.
+pub fn send_drive_open<F>(
+    stream: &mut UnixStream,
+    grant: &mvm_contract::grants::DriveGrant,
+    call: DriveOpenCall,
+    mut on_event: F,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+{
+    ensure_drive_path(grant, &call.cwd)?;
+    require_capabilities(stream, &[GuestCapability::Drive])?;
+    let request = GuestRequest::DriveOpen {
+        program_id: grant.program_id.clone(),
+        cwd: call.cwd,
+        env: call.env,
+    };
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &request)?;
+    loop {
+        match check_response(&request, session.read(stream)?)? {
+            GuestResponse::DriveEvent(event) if event.is_terminal() => return Ok(event),
+            GuestResponse::DriveEvent(event) => on_event(&event),
+            GuestResponse::DriveRefused { reason } => {
+                return Err(RpcError::DriveRefused { reason }.into());
+            }
+            other => {
+                return Err(RpcError::OffContract {
+                    verb: request.verb().name(),
+                    got: other.variant(),
+                    expected: request.response_contract().responses,
+                }
+                .into());
+            }
+        }
+    }
+}
+
+/// Execute one grant-bounded drive filesystem operation.
+pub fn send_drive_file(
+    stream: &mut UnixStream,
+    grant: &mvm_contract::grants::DriveGrant,
+    operation: DriveFileOperation,
+) -> Result<FsResult> {
+    ensure_drive_path(grant, operation.path())?;
+    if operation.input_len() > grant.max_bytes_in.get() {
+        return Err(RpcError::DriveRefused {
+            reason: DriveRefusal::InputLimitExceeded,
+        }
+        .into());
+    }
+    if operation.requested_output_len() > grant.max_bytes_out.get() {
+        return Err(RpcError::DriveRefused {
+            reason: DriveRefusal::OutputLimitExceeded,
+        }
+        .into());
+    }
+    require_capabilities(stream, &[GuestCapability::Drive])?;
+    let request = GuestRequest::DriveFile { operation };
+    match call_unary(stream, &request)? {
+        GuestResponse::FsResult(result) => Ok(result),
+        GuestResponse::DriveRefused { reason } => Err(RpcError::DriveRefused { reason }.into()),
+        other => Err(RpcError::OffContract {
+            verb: request.verb().name(),
+            got: other.variant(),
+            expected: request.response_contract().responses,
+        }
+        .into()),
+    }
+}
+
+fn ensure_drive_path(grant: &mvm_contract::grants::DriveGrant, path: &str) -> Result<(), RpcError> {
+    let inside = mvm_contract::grants::WorkspaceRoot::parse(path)
+        .ok()
+        .is_some_and(|path| {
+            grant
+                .workspace_roots
+                .iter()
+                .any(|root| path.is_within(root))
+        });
+    if inside {
+        Ok(())
+    } else {
+        Err(RpcError::DriveRefused {
+            reason: DriveRefusal::OutsideWorkspaceRoots,
+        })
+    }
 }
 
 /// Deliver one gate-admitted input frame to the workload's stdin.
@@ -771,6 +883,31 @@ mod tests {
     }
     use super::*;
     use rand::Rng;
+
+    fn drive_grant() -> mvm_contract::grants::DriveGrant {
+        use mvm_contract::grants::{DriveGrant, DriveProgramId, WorkspaceRoot};
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        DriveGrant::builder()
+            .workspace_root(WorkspaceRoot::parse("/workspace").unwrap())
+            .program_id(DriveProgramId::parse("agent").unwrap())
+            .max_bytes_in(NonZeroU64::new(16).unwrap())
+            .max_bytes_out(NonZeroU64::new(32).unwrap())
+            .ttl(NonZeroU32::new(30).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn drive_rpc_refuses_outside_path_before_transport() {
+        let error = ensure_drive_path(&drive_grant(), "/workspace-escape/file").unwrap_err();
+        assert!(matches!(
+            error,
+            RpcError::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots
+            }
+        ));
+    }
 
     /// A plain call: no streamed input, so the guest closes stdin as soon as
     /// the payload is written.

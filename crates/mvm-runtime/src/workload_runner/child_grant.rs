@@ -20,13 +20,19 @@ pub trait ChildGrantIssuer: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChildGrantError {
-    #[error("the admitted plan requests agent verbs but no child grant issuer is configured")]
+    #[error(
+        "the admitted plan requests agent verbs or drive authority but no child grant issuer is configured"
+    )]
     IssuerRequired,
     #[error("child grant issuer failed: {0}")]
     Issue(#[source] anyhow::Error),
-    #[error("the admitted plan requests agent verbs but the issuer returned no grant")]
+    #[error(
+        "the admitted plan requests agent verbs or drive authority but the issuer returned no grant"
+    )]
     GrantRequired,
-    #[error("the admitted plan requests no agent verbs but the issuer returned a grant")]
+    #[error(
+        "the admitted plan requests no agent verbs or drive authority but the issuer returned a grant"
+    )]
     UnexpectedGrant,
     #[error("child grant session id does not match the final child identity")]
     SessionMismatch,
@@ -38,6 +44,8 @@ pub(crate) enum ChildGrantError {
     ExpiryMismatch,
     #[error("child grant verbs do not match the admitted plan")]
     VerbsMismatch,
+    #[error("child drive grant does not match the admitted plan")]
+    DriveMismatch,
     #[error("fresh child grant unexpectedly carries predecessor lineage")]
     UnexpectedPredecessor,
     #[error("child grant public key is not a 32-byte lowercase hex key")]
@@ -53,8 +61,13 @@ pub(crate) fn issue_child_grant(
     config: &VmStartConfig,
     issuer: Option<&dyn ChildGrantIssuer>,
 ) -> std::result::Result<Option<VerbGrantEnvelope>, ChildGrantError> {
+    let expected_drive = plan
+        .grants
+        .as_ref()
+        .and_then(|grants| grants.drive.as_ref());
+    let grant_required = plan.agent_verbs.is_some() || expected_drive.is_some();
     let Some(issuer) = issuer else {
-        return if plan.agent_verbs.is_some() {
+        return if grant_required {
             Err(ChildGrantError::IssuerRequired)
         } else {
             Ok(None)
@@ -62,13 +75,13 @@ pub(crate) fn issue_child_grant(
     };
     let issued = issuer.issue(config).map_err(ChildGrantError::Issue)?;
 
-    let Some(expected_verbs) = plan.agent_verbs.as_ref() else {
+    if !grant_required {
         return if issued.is_some() {
             Err(ChildGrantError::UnexpectedGrant)
         } else {
             Ok(None)
         };
-    };
+    }
     let envelope = issued.ok_or(ChildGrantError::GrantRequired)?;
 
     if envelope.grant.session_id != config.name {
@@ -83,8 +96,11 @@ pub(crate) fn issue_child_grant(
     if envelope.grant.not_after != plan.valid_until {
         return Err(ChildGrantError::ExpiryMismatch);
     }
-    if &envelope.grant.verbs != expected_verbs {
+    if envelope.grant.verbs.as_slice() != plan.agent_verbs.as_deref().unwrap_or_default() {
         return Err(ChildGrantError::VerbsMismatch);
+    }
+    if envelope.grant.drive.as_ref() != expected_drive {
+        return Err(ChildGrantError::DriveMismatch);
     }
     if envelope.predecessor_session_id.is_some() || envelope.predecessor_plan_nonce_hex.is_some() {
         return Err(ChildGrantError::UnexpectedPredecessor);
@@ -155,6 +171,7 @@ mod tests {
                 plan_nonce: plan.nonce.clone(),
                 not_after: plan.valid_until,
                 verbs: plan.agent_verbs.clone().unwrap(),
+                drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
                 sig: vec![3u8; 64],
             },
         }

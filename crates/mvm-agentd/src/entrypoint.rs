@@ -896,7 +896,10 @@ pub fn execute_streaming(
             // The host intends to keep writing, so the fd survives this scope
             // and the EOF is the host's to send. `Pump::run` finds no stdin
             // left on the `Child` and has nothing to close.
-            crate::stream_input::InputDesk::open(pipe);
+            crate::stream_input::InputDesk::open_bounded(
+                pipe,
+                u64::try_from(caps.stdin_max).unwrap_or(u64::MAX),
+            );
         }
         // Otherwise dropping `pipe` closes stdin; without that the wrapper may
         // block forever on read.

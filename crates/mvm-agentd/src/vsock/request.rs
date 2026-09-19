@@ -117,6 +117,23 @@ pub enum GuestRequest {
         #[serde(default)]
         stream_input: bool,
     },
+    /// Start the one plan-selected program under its drive grant. The host
+    /// echoes the opaque program identity from the admitted plan; the guest
+    /// compares it with the independently verified pinned grant before it
+    /// resolves the boot-validated executable.
+    DriveOpen {
+        program_id: mvm_contract::grants::DriveProgramId,
+        cwd: String,
+        /// Host-synthesized egress and secret-placeholder environment. This is
+        /// not an arbitrary caller surface: the host drive API builds it through
+        /// the same synthesis seam used by `RunEntrypoint`.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
+    /// Perform one bounded filesystem operation inside the drive grant's
+    /// workspace roots. The existing filesystem RPC handlers execute the
+    /// operation after the drive-specific host and guest checks pass.
+    DriveFile { operation: DriveFileOperation },
     /// Run one exact optional extension admitted and mounted at activation.
     /// The request carries identities and bounded stdin only; the executable,
     /// mount, environment, and resource ceilings are fixed by admission.
@@ -504,6 +521,8 @@ impl GuestRequest {
             Self::Exec { .. } => "exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::DriveOpen { .. } => "drive-open",
+            Self::DriveFile { .. } => "drive-file",
             Self::RunExtension { .. } => "run-extension",
             Self::CancelExtension { .. } => "cancel-extension",
             Self::RunDetached { .. } => "run-detached",
@@ -534,6 +553,74 @@ impl GuestRequest {
             Self::RunCode { .. } => "run-code",
             Self::StreamInput(_) => "stream-input",
             Self::CloseStreamInput(_) => "close-stream-input",
+        }
+    }
+}
+
+/// Filesystem operations exposed by the grant-gated production drive surface.
+/// Deliberately excludes mkdir, remove, and move: the issue's authority is the
+/// smallest useful read/write/list/stat set, while the wider `Fs*` family
+/// remains DevOnly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DriveFileOperation {
+    Read {
+        path: String,
+        offset: Option<u64>,
+        length: u64,
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+    Write {
+        path: String,
+        content: Vec<u8>,
+        mode: u32,
+        #[serde(default)]
+        create_parents: bool,
+        #[serde(default)]
+        follow_symlinks: bool,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default = "default_true")]
+        truncate: bool,
+    },
+    List {
+        path: String,
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+    Stat {
+        path: String,
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+}
+
+impl DriveFileOperation {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Read { path, .. }
+            | Self::Write { path, .. }
+            | Self::List { path, .. }
+            | Self::Stat { path, .. } => path,
+        }
+    }
+
+    #[must_use]
+    pub fn input_len(&self) -> u64 {
+        match self {
+            Self::Write { content, .. } => u64::try_from(content.len()).unwrap_or(u64::MAX),
+            Self::Read { .. } | Self::List { .. } | Self::Stat { .. } => 0,
+        }
+    }
+
+    #[must_use]
+    pub fn requested_output_len(&self) -> u64 {
+        match self {
+            Self::Read { length, .. } => *length,
+            Self::Write { .. } | Self::List { .. } | Self::Stat { .. } => 0,
         }
     }
 }
@@ -583,6 +670,22 @@ mod tests {
                 command: "uname -a".to_string(),
                 stdin: Some("hello".to_string()),
                 timeout_secs: Some(10),
+            },
+            GuestRequest::DriveOpen {
+                program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
+                cwd: "/workspace".to_string(),
+                env: vec![(
+                    "HTTPS_PROXY".to_string(),
+                    "socks5://127.0.0.1:15001".to_string(),
+                )],
+            },
+            GuestRequest::DriveFile {
+                operation: DriveFileOperation::Read {
+                    path: "/workspace/input.txt".to_string(),
+                    offset: None,
+                    length: 64,
+                    follow_symlinks: true,
+                },
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],

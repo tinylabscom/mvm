@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, EntrypointCall, ProcessResourceLimits};
+use mvm_agentd::entrypoint::{CallCaps, CancellationToken, EntrypointCall, ProcessResourceLimits};
 use mvm_agentd::entrypoint_stream::stream_call;
 use mvm_agentd::stream_input::InputDesk;
 use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
-    ComponentState, EntrypointEvent, ExtensionCancellation, ExtensionDispatch, FsChange,
-    FsChangeKind, GuestResponse, RunEntrypointError,
+    ComponentState, DriveFileOperation, DriveRefusal, EntrypointEvent, ExtensionCancellation,
+    ExtensionDispatch, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
@@ -99,6 +99,10 @@ impl Drop for CallTmpdir {
 /// Wrap an `EntrypointEvent` in a `GuestResponse` for vsock framing.
 fn evt(e: EntrypointEvent) -> GuestResponse {
     GuestResponse::EntrypointEvent(e)
+}
+
+fn drive_evt(e: EntrypointEvent) -> GuestResponse {
+    GuestResponse::DriveEvent(e)
 }
 
 fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
@@ -756,6 +760,132 @@ pub(crate) fn handle_run_entrypoint_request(
     } else {
         handle_run_entrypoint(ctx.file, stdin, timeout_secs, env, stream_input)
     }
+}
+
+/// Start the boot-validated entrypoint under the pinned drive authority. The
+/// program identity has already been compared by the dispatcher gate; this
+/// handler independently canonicalizes the working directory against the
+/// granted roots before spawning and derives every cap from the grant.
+pub(crate) fn handle_drive_open(
+    ctx: &mut HandlerCtx,
+    cwd: &str,
+    env: Vec<(String, String)>,
+    grant: Option<&mvm_contract::grants::DriveGrant>,
+) -> GuestResponse {
+    let Some(grant) = grant else {
+        return GuestResponse::DriveRefused {
+            reason: DriveRefusal::NotGranted,
+        };
+    };
+    if matches!(
+        ctx.boot_state.snapshot().entrypoint,
+        ComponentState::Starting
+    ) {
+        return drive_evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::NotReady,
+            message: "entrypoint validation in progress; poll ReadinessStatus and retry".into(),
+        });
+    }
+    let policy = mvm_core::crypto::policy::PathPolicy::default().with_allow_roots(
+        grant
+            .workspace_roots
+            .iter()
+            .map(mvm_contract::grants::WorkspaceRoot::as_str),
+    );
+    let canonical = match policy.validate(
+        &mvm_core::crypto::policy::OsCanonicalizer,
+        cwd,
+        mvm_core::crypto::policy::PathOp::Read,
+    ) {
+        Ok(path) => path,
+        Err(_) => {
+            return GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots,
+            };
+        }
+    };
+    let _guard = match RUN_ENTRYPOINT_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Busy,
+                message: "another driven program is in flight".into(),
+            });
+        }
+    };
+    let entrypoint = match VALIDATED_ENTRYPOINT.get() {
+        Some(Ok(entrypoint)) => entrypoint,
+        Some(Err(message)) => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: message.clone(),
+            });
+        }
+        None => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: "entrypoint validation never ran".into(),
+            });
+        }
+    };
+    let mut caps = CallCaps::v1();
+    caps.stdin_max = usize::try_from(grant.max_bytes_in.get()).unwrap_or(usize::MAX);
+    let output_max = usize::try_from(grant.max_bytes_out.get()).unwrap_or(usize::MAX);
+    caps.stdout_max = output_max;
+    caps.stderr_max = output_max;
+    let cancellation = CancellationToken::default();
+    let call = EntrypointCall {
+        entrypoint,
+        cwd: canonical.as_path(),
+        stdin: &[],
+        timeout: Duration::from_secs(u64::from(grant.ttl.get())),
+        caps,
+        resource_limits: None,
+        cancellation: Some(cancellation.clone()),
+        env,
+        stream_input: true,
+    };
+    let mut output_bytes = 0u64;
+    let mut output_exceeded = false;
+    let terminal = stream_call(call, &mut |event| {
+        let chunk_len = match &event {
+            EntrypointEvent::Stdout { chunk } | EntrypointEvent::Stderr { chunk } => {
+                u64::try_from(chunk.len()).unwrap_or(u64::MAX)
+            }
+            EntrypointEvent::Control { .. }
+            | EntrypointEvent::Exit { .. }
+            | EntrypointEvent::Error { .. } => 0,
+        };
+        output_bytes = output_bytes.saturating_add(chunk_len);
+        if output_bytes > grant.max_bytes_out.get() {
+            output_exceeded = true;
+            cancellation.request();
+            return;
+        }
+        write_response(&mut *ctx.file, &drive_evt(event));
+    });
+    if output_exceeded {
+        drive_evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::PayloadCap,
+            message: "drive output exceeded max_bytes_out".into(),
+        })
+    } else {
+        drive_evt(terminal)
+    }
+}
+
+pub(crate) fn handle_drive_file(
+    operation: &DriveFileOperation,
+    grant: Option<&mvm_contract::grants::DriveGrant>,
+) -> GuestResponse {
+    let Some(grant) = grant else {
+        return GuestResponse::DriveRefused {
+            reason: DriveRefusal::NotGranted,
+        };
+    };
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_drive_with_defaults(
+        operation, grant,
+    ))
 }
 
 /// Deliver one host-admitted input frame to the running workload's stdin.

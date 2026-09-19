@@ -474,6 +474,7 @@ mod tests {
             plan_nonce: Nonce::from_bytes([56u8; 16]),
             not_after: chrono::Utc::now() + chrono::Duration::minutes(10),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            drive: None,
             sig: vec![],
         };
         g.sig = signer.sign(&g.signing_bytes()).to_bytes().to_vec();
@@ -649,6 +650,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after: chrono::Utc::now() + chrono::Duration::minutes(10),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            drive: None,
             sig: vec![],
         };
         g.sig = signer.sign(&g.signing_bytes()).to_bytes().to_vec();

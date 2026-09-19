@@ -2964,6 +2964,7 @@ mod tests {
                     secs: std::num::NonZeroU32::new(600).unwrap(),
                 }),
                 egress: destinations(&[("api.example.com", 443), ("pypi.org", 443)]),
+                drive: None,
             }),
             Some(mvm_contract::grants::Grants {
                 cpu: share(1000),
@@ -2971,6 +2972,7 @@ mod tests {
                     secs: std::num::NonZeroU32::new(60).unwrap(),
                 }),
                 egress: destinations(&[("api.example.com", 443)]),
+                drive: None,
             }),
         )
         .expect("a narrowing child is admitted");

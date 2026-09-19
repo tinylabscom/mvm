@@ -841,6 +841,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after: now + Duration::minutes(5),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            drive: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
@@ -871,6 +872,7 @@ mod tests {
                 VerbId::new("run-entrypoint").unwrap(),
                 VerbId::new("ping").unwrap(),
             ],
+            drive: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
