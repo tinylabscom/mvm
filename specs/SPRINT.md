@@ -190,6 +190,18 @@
       exported from `nix/flake.nix` and the in-tree image flakes build through
       them, so the interface `mvm-images` will pin is already the one in use;
       no image or check derivation changed.
+      W5 (#3364) slice W5a: `MVM_IMAGES_DIR` names a local `mvm-images`
+      checkout explicitly (canonical root, commit and dirty fingerprint
+      recorded, re-verified before use); `local-dev` and `verified-release` are
+      distinct tiers; a release build and a sealed-production admission refuse
+      the variable; `mvmctl doctor` reports the source, both repositories'
+      identities and the tier. No image consumer reads it yet — W5b–W5m in the
+      plan move them one by one.
+      W5 (#3364) slices W5b + W5c: `mvm-images` builds against a local `mvm`
+      through `--override-input` and emits a manifest whose producer is only
+      `local_checkouts`; `mvm` reads it with the release parser as `local-dev`
+      and refuses a release claim, a stale checkout, the wrong architecture, a
+      missing role and a symlinked artifact. Still no consumer reads it.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

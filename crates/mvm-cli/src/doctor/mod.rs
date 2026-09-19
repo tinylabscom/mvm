@@ -10,6 +10,7 @@ use mvm_core::platform;
 
 mod builder;
 mod daemons;
+mod image_source;
 mod nix_checks;
 mod platform_checks;
 mod registry;
@@ -188,6 +189,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(builder::builder_backend_check(plat));
     checks.push(builder::builder_capabilities_check());
     checks.push(builder::boot_image_acquisition_check());
+    checks.push(image_source::image_source_check());
     checks.push(runtime::runtime_backend_check(plat));
     checks.push(platform_checks::residency_check());
     checks.push(builder::builder_residency_check());

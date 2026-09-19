@@ -21,23 +21,31 @@ use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 
+mod checkout;
 mod error;
 mod identity;
+mod local;
 mod lock;
 mod train_lock;
+mod trust_tier;
 mod validate;
 mod verify;
 
+pub use checkout::{LocalCheckouts, RepoIdentity, WorktreeState};
 pub use error::{ImageSetError, ImageSetStage};
 pub use identity::{
     ArtifactName, GitCommit, ImageSetIdentityError, ImageSetVersion, ProtocolRange, ReleaseTag,
     RepositorySlug, RevocationChannel, TagRef, WorkflowPath,
+};
+pub use local::{
+    LOCAL_SET_MANIFEST_NAME, LocalImageSet, LocalImageSetVerification, verify_local_image_set,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
     PinnedArtifact, Stage0KernelPin, image_train_lock,
 };
+pub use trust_tier::ImageTrustTier;
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
     check_against_lock, check_protocol_compatibility, require_complete, select_member,
@@ -47,7 +55,10 @@ pub use verify::{ImageSetVerification, VerifiedArtifact, VerifiedImageSet, verif
 
 pub const IMAGE_SET_SCHEMA_VERSION: u32 = 1;
 
-/// The root object of one published image set.
+/// The root object of one image set: a published release, or a set built
+/// locally from two checkouts. Both are read by the same parser and checked by
+/// the same structural rules; [`ImageSetProducer`] is what tells them apart,
+/// and the fields only a release can carry are absent from a local set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageSetManifest {
@@ -61,22 +72,155 @@ pub struct ImageSetManifest {
     pub mvm_source_commit: GitCommit,
     pub compatibility: ImageSetCompatibility,
     pub nix_inputs: NixInputs,
-    pub revocation_channel: RevocationChannel,
+    /// Where revocations of a released set are published. Required of a
+    /// release and refused on a local set, which no one publishes or revokes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_channel: Option<RevocationChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<Supersedes>,
     pub members: Vec<ImageSetMember>,
 }
 
-/// Who built the set, and from what. The repository, workflow and tag are also
-/// what a lock pins, so a set cannot claim one producer and be locked as
-/// another.
+/// Who built the set, and from what.
+///
+/// A release names the repository, workflow and tag it was published from —
+/// which are also what a lock pins, so a set cannot claim one producer and be
+/// locked as another. A local set names only the two checkouts it was built
+/// from. The two shapes share no field, so a manifest is exactly one of them:
+/// one naming both, or neither, does not parse.
+///
+/// On the wire a release producer is the flat object it has always been, and a
+/// local one is `{"local_checkouts": {...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawProducer", into = "RawProducer")]
+pub enum ImageSetProducer {
+    Release(ReleaseProducer),
+    LocalCheckouts(LocalCheckouts),
+}
+
+impl ImageSetProducer {
+    /// The release this set claims to be, if it claims one.
+    #[must_use]
+    pub fn release(&self) -> Option<&ReleaseProducer> {
+        match self {
+            Self::Release(release) => Some(release),
+            Self::LocalCheckouts(_) => None,
+        }
+    }
+
+    /// The checkouts this set was built from, if it was built locally.
+    #[must_use]
+    pub fn local_checkouts(&self) -> Option<&LocalCheckouts> {
+        match self {
+            Self::Release(_) => None,
+            Self::LocalCheckouts(local) => Some(local),
+        }
+    }
+}
+
+/// The release workflow run that published a set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageSetProducer {
+pub struct ReleaseProducer {
     pub repository: RepositorySlug,
     pub workflow: WorkflowPath,
     pub release_tag: ReleaseTag,
     pub source_commit: GitCommit,
+}
+
+/// The wire form of [`ImageSetProducer`]: every field either shape can carry,
+/// so an object mixing the two is caught by name rather than parsed as
+/// whichever shape it happens to satisfy.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProducer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository: Option<RepositorySlug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<WorkflowPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_tag: Option<ReleaseTag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_commit: Option<GitCommit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_checkouts: Option<LocalCheckouts>,
+}
+
+impl TryFrom<RawProducer> for ImageSetProducer {
+    type Error = String;
+
+    fn try_from(raw: RawProducer) -> Result<Self, Self::Error> {
+        let RawProducer {
+            repository,
+            workflow,
+            release_tag,
+            source_commit,
+            local_checkouts,
+        } = raw;
+        let release_fields = [
+            ("repository", repository.is_some()),
+            ("workflow", workflow.is_some()),
+            ("release_tag", release_tag.is_some()),
+            ("source_commit", source_commit.is_some()),
+        ];
+        if let Some(local) = local_checkouts {
+            let named: Vec<&str> = release_fields
+                .iter()
+                .filter(|(_, present)| *present)
+                .map(|(name, _)| *name)
+                .collect();
+            if !named.is_empty() {
+                return Err(format!(
+                    "a producer naming local_checkouts cannot also name a release ({})",
+                    named.join(", ")
+                ));
+            }
+            return Ok(Self::LocalCheckouts(local));
+        }
+        match (repository, workflow, release_tag, source_commit) {
+            (Some(repository), Some(workflow), Some(release_tag), Some(source_commit)) => {
+                Ok(Self::Release(ReleaseProducer {
+                    repository,
+                    workflow,
+                    release_tag,
+                    source_commit,
+                }))
+            }
+            _ => {
+                let missing: Vec<&str> = release_fields
+                    .iter()
+                    .filter(|(_, present)| !*present)
+                    .map(|(name, _)| *name)
+                    .collect();
+                Err(format!(
+                    "producer names neither local_checkouts nor a complete release \
+                     (missing {})",
+                    missing.join(", ")
+                ))
+            }
+        }
+    }
+}
+
+impl From<ImageSetProducer> for RawProducer {
+    fn from(producer: ImageSetProducer) -> Self {
+        match producer {
+            ImageSetProducer::Release(release) => Self {
+                repository: Some(release.repository),
+                workflow: Some(release.workflow),
+                release_tag: Some(release.release_tag),
+                source_commit: Some(release.source_commit),
+                local_checkouts: None,
+            },
+            ImageSetProducer::LocalCheckouts(local) => Self {
+                repository: None,
+                workflow: None,
+                release_tag: None,
+                source_commit: None,
+                local_checkouts: Some(local),
+            },
+        }
+    }
 }
 
 /// What a host must support to use the set, declared so an incompatible set is
@@ -119,9 +263,15 @@ pub struct ImageSetMember {
     pub boot_protocol: Option<BootProtocol>,
     pub artifacts: Vec<MemberArtifact>,
     pub required_capabilities: Vec<GuestDeviceRequirement>,
-    /// Content hash of the member's `PackManifest`.
-    pub pack_hash: Sha256Hex,
-    pub sbom: SbomReference,
+    /// Content hash of the member's signed `PackManifest`. Required of a
+    /// release; a local build has no signed pack, and a local set carrying one
+    /// is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_hash: Option<Sha256Hex>,
+    /// The member's published SBOM. Required of a release and refused on a
+    /// local set, for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbom: Option<SbomReference>,
 }
 
 /// The part a member plays in the set.

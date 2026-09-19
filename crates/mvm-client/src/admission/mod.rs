@@ -300,6 +300,17 @@ impl std::fmt::Debug for AdmissionContext {
 /// the rest of the supervisor surface uses). Once `mvm-hostd` lifts
 /// the supervisor in-process, the proper `mvm_core::crypto::image_verify`
 /// signed-manifest path can replace this.
+/// The policy variant an admission runs under. `restrict_agent_verbs` is this
+/// codebase's sealed-production signal: a non-interactive, non-ad-hoc,
+/// non-dev boot of a sealed image.
+fn admission_variant(restrict_agent_verbs: bool) -> Variant {
+    if restrict_agent_verbs {
+        Variant::Prod
+    } else {
+        Variant::Dev
+    }
+}
+
 pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionContext> {
     admit_plan_for_boot_with_ingress(p, Vec::new())
 }
@@ -308,6 +319,13 @@ pub fn admit_plan_for_boot_with_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
+    // A production boot runs only verified released images. The refusal keys
+    // on the variable being present rather than on whether it names a usable
+    // checkout, so a sealed run cannot be steered by a local path at all.
+    mvm_build::image_source::refuse_in_production(
+        admission_variant(p.restrict_agent_verbs),
+        mvm_build::image_source::configured_images_dir().as_deref(),
+    )?;
     // Refuse before any hashing, bundle reads, or signing: a rejection here
     // must not have already spent the boot work it exists to avoid. Gated on
     // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
@@ -543,11 +561,7 @@ pub fn admit_plan_for_boot_with_ingress(
     // codebase's sealed-production signal — the same one the input-grant
     // refusal above is scoped to — so a sealed boot refuses a grant nothing
     // can enforce, and a dev boot is told about it and proceeds.
-    let variant = if p.restrict_agent_verbs {
-        Variant::Prod
-    } else {
-        Variant::Dev
-    };
+    let variant = admission_variant(p.restrict_agent_verbs);
     let t_pre_sign = std::time::Instant::now();
     tracing::debug!(
         ms = (t_pre_sign - t_sha).as_secs_f64() * 1000.0,
@@ -2456,6 +2470,65 @@ mod admit_plan_tests {
         .expect("dev-tier runs are out of the shell-entrypoint refusal's scope");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    /// A sealed boot refuses while a local image checkout is configured, and
+    /// refuses before it signs anything: the path is never examined, so a
+    /// production run cannot be steered by one whether or not it is usable.
+    #[test]
+    fn a_production_admission_refuses_a_configured_local_image_checkout() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            "/nonexistent/mvm-images",
+        );
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"local-image-source-prod");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            restrict_agent_verbs: true,
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect_err("a sealed boot must refuse a local image source");
+
+        assert!(
+            err.to_string().contains("production admission"),
+            "unexpected refusal: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(keys_dir.path()).unwrap().count(),
+            0,
+            "the refusal must precede signing"
+        );
+    }
+
+    /// The same configuration leaves a development boot alone: the refusal is
+    /// scoped to the production tier, not to the variable.
+    #[test]
+    fn a_development_admission_is_not_refused_for_a_configured_local_image_checkout() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            "/nonexistent/mvm-images",
+        );
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"local-image-source-dev");
+        let ledger = InMemoryNonceLedger::new();
+
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            restrict_agent_verbs: false,
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("a development boot is not refused for a configured checkout");
     }
 }
 

@@ -122,11 +122,11 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
         boot_protocol,
         artifacts,
         required_capabilities,
-        pack_hash: sha(&format!("pack:{role}:{target}")),
-        sbom: crate::packs::SbomReference {
+        pack_hash: Some(sha(&format!("pack:{role}:{target}"))),
+        sbom: Some(crate::packs::SbomReference {
             uri: format!("https://example.test/sbom/{role}/{target}.cdx.json"),
             sha256: sha(&format!("sbom:{role}:{target}")),
-        },
+        }),
     }
 }
 
@@ -135,12 +135,12 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
         schema_version: IMAGE_SET_SCHEMA_VERSION,
         set_version: version(set_version),
         issued_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
-        producer: ImageSetProducer {
+        producer: ImageSetProducer::Release(ReleaseProducer {
             repository: RepositorySlug::new("tinylabscom/mvm-images").unwrap(),
             workflow: WorkflowPath::new(".github/workflows/release.yml").unwrap(),
             release_tag: ReleaseTag::new(format!("v{set_version}")).unwrap(),
             source_commit: commit('a'),
-        },
+        }),
         mvm_source_commit: commit('b'),
         compatibility: ImageSetCompatibility {
             guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
@@ -157,10 +157,12 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
                 tree_hash: sha("nixpkgs"),
             }],
         },
-        revocation_channel: RevocationChannel::new(
-            "https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json",
-        )
-        .unwrap(),
+        revocation_channel: Some(
+            RevocationChannel::new(
+                "https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json",
+            )
+            .unwrap(),
+        ),
         supersedes: None,
         members: ImageSetRequirement::current_train()
             .members()
@@ -172,6 +174,17 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
 
 fn manifest() -> ImageSetManifest {
     manifest_at("1.0.0")
+}
+
+fn release(manifest: &ImageSetManifest) -> &ReleaseProducer {
+    manifest.producer.release().unwrap()
+}
+
+fn release_mut(manifest: &mut ImageSetManifest) -> &mut ReleaseProducer {
+    match &mut manifest.producer {
+        ImageSetProducer::Release(release) => release,
+        ImageSetProducer::LocalCheckouts(_) => panic!("fixture is a release"),
+    }
 }
 
 fn member_mut(
@@ -218,14 +231,14 @@ fn digest(manifest: &ImageSetManifest) -> Sha256Hex {
 }
 
 fn lock_for(manifest: &ImageSetManifest) -> ImageLock {
-    let release_tag = manifest.producer.release_tag.clone();
+    let release_tag = release(manifest).release_tag.clone();
     ImageLock {
         schema_version: IMAGE_LOCK_SCHEMA_VERSION,
-        repository: manifest.producer.repository.clone(),
+        repository: release(manifest).repository.clone(),
         manifest_asset: ArtifactName::new("image-set.json").unwrap(),
         manifest_sha256: digest(manifest),
         signing_identity: SigningIdentity {
-            workflow: manifest.producer.workflow.clone(),
+            workflow: release(manifest).workflow.clone(),
             tag_ref: TagRef::for_tag(&release_tag),
         },
         release_tag,
@@ -855,7 +868,7 @@ mod structure {
     #[test]
     fn refuses_a_release_tag_naming_another_version() {
         let mut manifest = manifest();
-        manifest.producer.release_tag = ReleaseTag::new("v1.0.1").unwrap();
+        release_mut(&mut manifest).release_tag = ReleaseTag::new("v1.0.1").unwrap();
         assert!(matches!(
             refused(&manifest),
             ImageSetError::ReleaseTagVersionMismatch { set_version, release_tag }
@@ -1605,7 +1618,7 @@ mod verification {
     fn a_revoked_member_pack_hash_is_refused() {
         let set = staged();
         let manifest: ImageSetManifest = serde_json::from_slice(&set.manifest_bytes).unwrap();
-        let revoked = manifest.members[2].pack_hash.clone();
+        let revoked = manifest.members[2].pack_hash.clone().unwrap();
         let revocations = revoking(&set.lock, &revoked);
 
         let err = verify_checked(
@@ -1661,7 +1674,7 @@ mod verification {
                 key_id: key_id_from_identity(
                     "https://github.com/elsewhere/.github/workflows/x.yml@refs/tags/v1.0.0",
                 ),
-                pack_hash: Some(manifest.members[0].pack_hash.clone()),
+                pack_hash: manifest.members[0].pack_hash.clone(),
                 reason: "another signer's problem".to_string(),
             }],
             ..PackTrustConfig::default()
@@ -1866,3 +1879,5 @@ mod verification {
         );
     }
 }
+
+mod local;
