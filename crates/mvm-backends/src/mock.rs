@@ -106,6 +106,9 @@ pub struct MockDriver {
     /// Whether claims should use the resident-handoff path instead of the
     /// saved-state materialization path.
     resident_handoff: bool,
+    /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
+    /// as a real driver does for a snapshot another VMM version wrote.
+    unrestorable_fork: Option<String>,
 }
 
 impl Default for MockDriver {
@@ -131,7 +134,16 @@ impl MockDriver {
             dying_console_output: Vec::new(),
             refuse_attach: false,
             resident_handoff: false,
+            unrestorable_fork: None,
         }
+    }
+
+    /// Make `fork_standby_child` refuse as a real driver does when the parent's
+    /// snapshot was written by a VMM this host cannot load.
+    #[must_use]
+    pub fn refusing_fork_as_unrestorable(mut self, reason: impl Into<String>) -> Self {
+        self.unrestorable_fork = Some(reason.into());
+        self
     }
 
     /// Make `attach` refuse, as it does for a VM that is no longer there.
@@ -321,6 +333,9 @@ impl VmmDriver for MockDriver {
                 req.child_vm_name,
                 req.child_dir.display()
             )));
+        }
+        if let Some(reason) = &self.unrestorable_fork {
+            return Err(StandbyError::Unrestorable(reason.clone()));
         }
         self.forked.lock().unwrap().push(MockChildFork {
             child_vm_name: req.child_vm_name.to_string(),

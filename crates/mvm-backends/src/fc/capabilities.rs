@@ -39,12 +39,17 @@ impl FcCapabilities {
     /// Ask the Firecracker serving `socket` which version it is. A failed or
     /// malformed answer is reported, not guessed at.
     pub fn probe(socket: &Path) -> Result<Self> {
-        let body = crate::fc::call(socket, "GET", "/version", None)
-            .context("GET /version from Firecracker")?;
-        let reported: VersionResponse =
-            serde_json::from_str(&body).context("parsing Firecracker's /version response")?;
-        Ok(Self::for_version(&reported.firecracker_version))
+        Ok(Self::for_version(&running_version(socket)?))
     }
+}
+
+/// The version the Firecracker serving `socket` reports, e.g. `1.17.0`.
+pub fn running_version(socket: &Path) -> Result<String> {
+    let body = crate::fc::call(socket, "GET", "/version", None)
+        .context("GET /version from Firecracker")?;
+    let reported: VersionResponse =
+        serde_json::from_str(&body).context("parsing Firecracker's /version response")?;
+    Ok(reported.firecracker_version)
 }
 
 /// `GET /version`'s body.

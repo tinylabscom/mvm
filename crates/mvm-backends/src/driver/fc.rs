@@ -319,6 +319,16 @@ fn running_fc_capabilities(socket: &str) -> FcCapabilities {
     }
 }
 
+/// Classify a failed fork restore. A snapshot this Firecracker cannot decode is
+/// permanent for this parent, and saying so lets the pool drop it; anything
+/// else is an ordinary failed claim.
+fn fork_restore_error(e: anyhow::Error) -> StandbyError {
+    match e.downcast_ref::<crate::fc::UndecodableSnapshot>() {
+        Some(undecodable) => StandbyError::Unrestorable(undecodable.to_string()),
+        None => StandbyError::ClaimFailed(format!("restore forked child: {e}")),
+    }
+}
+
 /// The host UDS Firecracker connects *out* to when the guest dials
 /// `CID_HOST:<port>`: the sibling `<runtime_dir>/v.sock_<port>` of the vsock mux
 /// socket. The host must own a listener there before the guest dials.
@@ -907,7 +917,7 @@ impl VmmDriver for FcDriver {
         // path off the box that bypasses vsock.
         crate::fc::FcForkRestorer
             .restore_fork(req.child_vm_name, req.child_dir, req.cpu_grant)
-            .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
+            .map_err(fork_restore_error)?;
         Ok(())
     }
 
@@ -2300,6 +2310,36 @@ mod tests {
     /// The runner materializes the CoW clone before forking. An absent dir means
     /// the clone never landed, so restoring would load something other than the
     /// verified parent's content — refuse instead.
+    #[test]
+    fn a_snapshot_this_firecracker_cannot_decode_makes_the_parent_unrestorable() {
+        // Wrapped the way the restore path wraps it: the load's own context,
+        // then the guarded-load helper's, then the fork restorer's.
+        let undecodable = crate::fc::UndecodableSnapshot {
+            state_file: "/vms/child/vmstate.bin".into(),
+            firecracker: Some("1.17.0".into()),
+        };
+        let error = anyhow!("PUT /snapshot/load failed: HTTP 400")
+            .context(undecodable)
+            .context("load_snapshot_for_fork_paused(/vms/child)")
+            .context("FC warm-restore for forked child 'child' failed");
+
+        match fork_restore_error(error) {
+            StandbyError::Unrestorable(reason) => {
+                assert!(reason.contains("cannot decode"), "{reason}")
+            }
+            other => panic!("expected Unrestorable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_other_failed_fork_is_an_ordinary_failed_claim() {
+        let error = anyhow!("PUT /snapshot/load failed: HTTP 400").context("restore");
+        assert!(matches!(
+            fork_restore_error(error),
+            StandbyError::ClaimFailed(_)
+        ));
+    }
+
     #[test]
     fn fork_standby_child_refuses_an_unmaterialized_child_dir() {
         let tmp = tempfile::tempdir().unwrap();
