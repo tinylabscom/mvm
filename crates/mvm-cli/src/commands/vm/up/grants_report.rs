@@ -16,7 +16,7 @@
 use mvm_contract::grants::Grants;
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 
-use super::admission::AdmissionContext;
+use mvm_client::admission::AdmissionContext;
 
 /// Read back what bounded `vm_name`, persist it where `machine inspect` can
 /// find it, put it on the chain-signed log, and tell the operator when a bound

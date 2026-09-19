@@ -1044,7 +1044,7 @@ pub fn validate_audit_policy_stream_destinations(
 /// preserve the wrapped inspector's `name()` so audit binding stays
 /// intact.
 ///
-/// Public so the resolver in `mvm-cli::policy_resolver`
+/// Public so the resolver in `mvm-client`'s `admission::policy_resolver`
 /// can build the same canonical chain when it turns a parsed bundle
 /// into a `ResolvedSlots`. Keeping the order in one place avoids
 /// chain-shape drift between the in-process supervisor path and

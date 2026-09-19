@@ -571,6 +571,7 @@ jobs:
           - mvm-backends
           - mvm-build
           - mvm-cli
+          - mvm-client
           - mvm-core
           # Six, and the number is measured rather than chosen.
           #

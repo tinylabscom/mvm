@@ -23,7 +23,7 @@ use std::path::Path;
 
 /// What the host believes a workload's PID 1 will exec.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands::vm) enum ResolvedEntrypoint {
+pub enum ResolvedEntrypoint {
     /// The build path recorded what this image runs.
     Known {
         /// The argv PID 1 execs.
@@ -66,7 +66,7 @@ impl ResolvedEntrypoint {
     ///
     /// Distinct from a failed resolution only in the words; both are "the host
     /// cannot say", and both refuse a workload input grant.
-    pub(in crate::commands::vm) fn unresolved(because: impl Into<String>) -> Self {
+    pub fn unresolved(because: impl Into<String>) -> Self {
         Self::Unresolved {
             because: because.into(),
         }
@@ -79,7 +79,7 @@ impl ResolvedEntrypoint {
 /// build path writes next to the blob, and the one
 /// [`image_is_sealed`](super::agent_verbs::image_is_sealed) already reads to
 /// decide the posture this resolution feeds.
-pub(in crate::commands::vm) fn resolve_for_rootfs(rootfs_path: &Path) -> ResolvedEntrypoint {
+pub fn resolve_for_rootfs(rootfs_path: &Path) -> ResolvedEntrypoint {
     let Some(dir) = rootfs_path.parent() else {
         return ResolvedEntrypoint::unresolved(format!(
             "the rootfs path {} has no directory to read a sidecar from",

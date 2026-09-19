@@ -2,6 +2,7 @@
 //! keypair, plan persistence, and the checkpoint bind helpers. Library API so
 //! both the CLI and fleet consumers emit identical chain entries.
 
+pub mod active_signer;
 pub mod assurance;
 pub mod bind;
 /// Whether a run's `plan.admitted` entry is a control or a note — the one

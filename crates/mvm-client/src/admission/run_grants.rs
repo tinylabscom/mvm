@@ -22,7 +22,7 @@ use mvm_core::user_config::MvmConfig;
 /// should fall back to. Grouped rather than passed positionally because they
 /// are one decision's inputs and threading six arguments through the CLI would
 /// invite a caller to swap two of them.
-pub(in crate::commands) struct GrantInputs<'a> {
+pub struct GrantInputs<'a> {
     /// `--cpu-limit`: the share of host CPU time, in millicores. Distinct from
     /// `--cpus`, which is the vCPU count the guest sees.
     pub cpu_limit_millicores: Option<u32>,
@@ -54,7 +54,7 @@ pub(in crate::commands) struct GrantInputs<'a> {
 /// One invocation's resolved permission set and the egress policy that follows
 /// from it.
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::commands) struct RunGrants {
+pub struct RunGrants {
     /// What the signed plan carries. `None` when no surface authored anything.
     pub plan_grants: Option<Grants>,
     /// What the egress gate enforces for this run.
@@ -67,7 +67,7 @@ pub(in crate::commands) struct RunGrants {
 ///
 /// Precedence is per dimension: a `--cpu-limit` on the command line does not
 /// discard an egress allow-list the manifest declared.
-pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
+pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
     let cli = cli_layer(&inputs)?;
     let file = match inputs.grants_file {
         Some(path) => load_grants_file(path)?,
@@ -103,7 +103,7 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
         inputs
             .peer
             .iter()
-            .map(|raw| super::parse_peer_binding(raw))
+            .map(|raw| super::run_network::parse_peer_binding(raw))
             .collect::<Result<Vec<_>>>()?,
     );
     Ok(RunGrants {
@@ -152,7 +152,7 @@ fn refuse_over_ceiling(
 /// derivation of egress policy from a grant. With no egress grant the legacy
 /// `--net` / `--allow-host` resolution stands, which is deny-all unless the
 /// caller asked for something.
-pub(in crate::commands) fn enforced_network_policy(
+pub fn enforced_network_policy(
     egress: Option<&EgressGrant>,
     net: bool,
     network_preset: Option<NetworkPreset>,
@@ -165,7 +165,7 @@ pub(in crate::commands) fn enforced_network_policy(
                 ..Default::default()
             }),
         ),
-        None => super::resolve_run_network_policy_with_preset_and_peers(
+        None => super::run_network::resolve_run_network_policy_with_preset_and_peers(
             net,
             network_preset,
             allow_host,
@@ -202,7 +202,7 @@ fn cli_layer(inputs: &GrantInputs<'_>) -> Result<Grants> {
         // Reuse the one `--allow-host` parser so the granted allow-list and the
         // legacy policy path agree on what `HOST` without a port means, and on
         // which ports are refused outright.
-        let policy = super::resolve_run_network_policy(false, inputs.allow_host)?;
+        let policy = super::run_network::resolve_run_network_policy(false, inputs.allow_host)?;
         Some(EgressGrant {
             allow: policy.resolve_rules().unwrap_or_default(),
         })

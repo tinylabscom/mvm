@@ -1,7 +1,12 @@
-//! Signed `ExecutionPlan` admission for `mvmctl up` — synthesize, sign,
-//! verify, and audit-emit the plan right before a backend `start()`, plus
-//! the guest boot-config attachments (host-signer pubkey, security policy)
-//! that ride along with an admitted plan.
+//! Signed `ExecutionPlan` admission for a boot — synthesize, sign, verify,
+//! and audit-emit the plan right before a backend `start()`, plus the guest
+//! boot-config attachments (host-signer pubkey, security policy) that ride
+//! along with an admitted plan.
+//!
+//! Every boot path admits through here: the CLI's transient runs, entrypoints,
+//! sessions, checkpoint forks and persistent starts, and the host library the
+//! SDKs load. It lives in the client rather than the CLI so that one request is
+//! admitted under one plan whoever makes it.
 
 use anyhow::{Context, Result, bail};
 
@@ -14,25 +19,45 @@ use mvm_hostd::plan_admission::{
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
-use crate::commands::vm::audit_chain::AuditEmitter;
-use crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint;
-use crate::commands::vm::host_signer::{PUBLIC_FILENAME, load_or_init_at};
-use crate::commands::vm::policy_resolver::{
+use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
+use crate::admission::policy_resolver::{
     LOCAL_DEFAULT, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
 };
+use mvm_hostd::audit::emitter::AuditEmitter;
+use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
 
-use super::audit::{
+use self::audit::{
     build_default_audit_emitter, build_policy_audit_emitter, emit_policy_audit_invalid,
     emit_policy_resolve_failure, emit_policy_resolved,
 };
-use super::policy::{
+use self::policy::{
     InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
 };
 
-pub(in crate::commands::vm) const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+pub mod agent_verbs;
+mod audit;
+pub mod entrypoint_resolve;
+pub mod policy;
+pub mod policy_resolver;
+pub mod run_grants;
+pub mod run_network;
 
-pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
+/// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
+/// directory tree the run binds by content identity without attaching it
+/// to the guest (unlike a `--mount`, nothing is materialized or shared —
+/// the asset's canonical hash is recorded in the signed plan and the
+/// chain-signed audit log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetSpec {
+    pub kind: mvm_contract::plan::AssetKind,
+    /// Host file or directory to hash. Must exist at admission time.
+    pub host_path: String,
+}
+
+pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+
+pub struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
     pub vm_name: &'a str,
     pub backend_name: &'a str,
@@ -108,7 +133,7 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// `asset_identities` (with the environment, bundle, deps volume,
     /// digested shares, and the resolved network policy). Empty for runs
     /// that declare no assets.
-    pub assets: Vec<crate::commands::shared::AssetSpec>,
+    pub assets: Vec<AssetSpec>,
     /// Output grants recorded in the signed plan: which guest directories the
     /// workload may hand back, where they land on the host, and the bounds the
     /// collection enforces. Each must be backed by a writable disk in `shares`.
@@ -209,10 +234,7 @@ fn argv_is_shell(argv: &[String]) -> bool {
 /// `exec`s a shell, or an interpreter invoked under an unusual name defeats
 /// it. What still holds is the signed grant itself: input only reaches a
 /// program the admitted plan chose, never one input bytes select.
-pub(in crate::commands::vm) fn entrypoint_is_shell_shaped(
-    argv: &[String],
-    shebang: Option<&[u8]>,
-) -> bool {
+pub fn entrypoint_is_shell_shaped(argv: &[String], shebang: Option<&[u8]>) -> bool {
     argv_is_shell(argv)
         || argv.iter().skip(1).any(|arg| arg == "-c")
         || shebang
@@ -229,13 +251,13 @@ pub(in crate::commands::vm) fn entrypoint_is_shell_shaped(
 /// xtask `check-no-display-on-secret-types` lint would catch a
 /// derived `Debug` that forwarded; the manual impl prints only the
 /// plan_id + signer_id and elides the emitter's signing material.
-pub(in crate::commands::vm) struct AdmissionContext {
-    pub(in crate::commands::vm) admitted: AdmittedPlan,
-    pub(in crate::commands::vm) emitter: AuditEmitter,
+pub struct AdmissionContext {
+    pub admitted: AdmittedPlan,
+    pub emitter: AuditEmitter,
     /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
     /// per-tenant L4 egress against; `None` for a local-default plan.
-    pub(in crate::commands::vm) policy_bundle: Option<PolicyBundle>,
-    pub(in crate::commands::vm) host_signer_public_path: std::path::PathBuf,
+    pub policy_bundle: Option<PolicyBundle>,
+    pub host_signer_public_path: std::path::PathBuf,
 }
 
 // allow(secret-debug): hand-written Debug elides the AuditEmitter's
@@ -278,13 +300,11 @@ impl std::fmt::Debug for AdmissionContext {
 /// the rest of the supervisor surface uses). Once `mvm-hostd` lifts
 /// the supervisor in-process, the proper `mvm_core::crypto::image_verify`
 /// signed-manifest path can replace this.
-pub(in crate::commands::vm) fn admit_plan_for_boot(
-    p: AdmitPlanForBootParams<'_>,
-) -> Result<AdmissionContext> {
+pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionContext> {
     admit_plan_for_boot_with_ingress(p, Vec::new())
 }
 
-pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
+pub fn admit_plan_for_boot_with_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
@@ -492,11 +512,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment: p.caller_commitment.clone(),
         audit_labels: Default::default(),
-        agent_verbs: crate::commands::vm::agent_verbs::parse_agent_verb_override(
+        agent_verbs: crate::admission::agent_verbs::parse_agent_verb_override(
             &p.agent_verb_override,
         )?
         .or_else(|| {
-            crate::commands::vm::agent_verbs::default_agent_verbs(
+            crate::admission::agent_verbs::default_agent_verbs(
                 p.restrict_agent_verbs,
                 !p.shares.is_empty(),
                 mvm_contract::stream::input::grants_input_for(&p.services),
@@ -575,7 +595,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
     // mvmctl up degrades gracefully (logs a warning, continues).
     let signer = match p.keys_dir {
         Some(dir) => load_or_init_at(dir),
-        None => crate::commands::vm::host_signer::load_or_init(),
+        None => mvm_hostd::audit::host_keypair::load_or_init(),
     }
     .context("loading host signer for audit emitter")?;
     let t_signer = std::time::Instant::now();
@@ -796,11 +816,8 @@ fn resolve_image_sha256(
     }
 }
 
-pub(in crate::commands::vm) fn guest_profile_for_boot(
-    is_dev_mode: bool,
-    rootfs_path: &std::path::Path,
-) -> AgentProfile {
-    if is_dev_mode || !crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path) {
+pub fn guest_profile_for_boot(is_dev_mode: bool, rootfs_path: &std::path::Path) -> AgentProfile {
+    if is_dev_mode || !crate::admission::agent_verbs::image_is_sealed(rootfs_path) {
         AgentProfile::Dev
     } else {
         AgentProfile::SealedProd
@@ -818,7 +835,7 @@ fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
     }
 }
 
-pub(super) fn attach_guest_security_policy_config(
+pub fn attach_guest_security_policy_config(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     profile: AgentProfile,
 ) -> Result<()> {
@@ -837,7 +854,7 @@ pub(super) fn attach_guest_security_policy_config(
     Ok(())
 }
 
-pub(in crate::commands::vm) fn attach_guest_boot_config_for_plan(
+pub fn attach_guest_boot_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     plan: &mvm_core::plan::ExecutionPlan,
     host_signer_public_path: &std::path::Path,
@@ -847,7 +864,7 @@ pub(in crate::commands::vm) fn attach_guest_boot_config_for_plan(
     attach_guest_security_policy_config(start_config, profile)
 }
 
-pub(super) fn attach_guest_boot_config(
+pub fn attach_guest_boot_config(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     admission: &AdmissionContext,
     profile: AgentProfile,
@@ -860,7 +877,7 @@ pub(super) fn attach_guest_boot_config(
     )
 }
 
-pub(super) fn attach_host_signer_pubkey_config_for_plan(
+pub fn attach_host_signer_pubkey_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     plan: &mvm_core::plan::ExecutionPlan,
     host_signer_public_path: &std::path::Path,
@@ -902,9 +919,9 @@ pub(super) fn attach_host_signer_pubkey_config_for_plan(
 }
 
 #[derive(Debug)]
-pub(super) struct PolicyAdmissionResolution {
-    pub(super) slots_mode: &'static str,
-    pub(super) audit: Option<mvm_core::policy::AuditPolicy>,
+pub struct PolicyAdmissionResolution {
+    pub slots_mode: &'static str,
+    pub audit: Option<mvm_core::policy::AuditPolicy>,
 }
 
 /// Run the policy resolver against the admitted plan and return the
@@ -914,7 +931,7 @@ pub(super) struct PolicyAdmissionResolution {
 /// callers pass `None` and the resolver resolves it from `$HOME`.
 /// Tests inject a tempdir to stage / omit bundles deterministically.
 ///
-pub(super) fn resolve_policy_for_admission(
+pub fn resolve_policy_for_admission(
     plan: &mvm_core::plan::ExecutionPlan,
     policy_dir: Option<&std::path::Path>,
 ) -> Result<PolicyAdmissionResolution> {
@@ -957,16 +974,12 @@ pub(super) fn resolve_policy_for_admission(
 /// Plan persistence failure is non-fatal — the launch already
 /// succeeded; the cost is that lifecycle audit will be unbound on
 /// this VM until the next launch.
-pub(in crate::commands::vm) fn emit_launched(
-    ctx: &AdmissionContext,
-    backend: &str,
-    persist_plan: bool,
-) {
+pub fn emit_launched(ctx: &AdmissionContext, backend: &str, persist_plan: bool) {
     if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
     if persist_plan
-        && let Err(e) = crate::commands::vm::plan_persist::write_plan(
+        && let Err(e) = mvm_hostd::audit::plan_persist::write_plan(
             &ctx.admitted.plan().workload.0,
             ctx.admitted.plan(),
         )
@@ -996,7 +1009,7 @@ fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::Roo
 /// be attached isn't named in the verified `ExecutionPlan.shares`, so no
 /// host-fs grant reaches a guest unless the signed plan admitted it
 /// (claim 1 / claim 8).
-pub(super) fn enforce_shares(
+pub fn enforce_shares(
     ctx: &AdmissionContext,
     volumes: &[mvm_core::vm_backend::VmVolume],
 ) -> Result<()> {
@@ -1012,10 +1025,7 @@ pub(super) fn enforce_shares(
 /// than going through `start_admitted`, so every gate that path runs has to be
 /// run here too or it does not run at all. The admitted-environment gate was
 /// the one nobody called.
-pub(super) fn enforce_kernel(
-    ctx: &AdmissionContext,
-    kernel_path: Option<&std::path::Path>,
-) -> Result<()> {
+pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Path>) -> Result<()> {
     mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
         .context("admission kernel check")
 }
@@ -1031,7 +1041,7 @@ pub(super) fn enforce_kernel(
 ///
 /// Both transient paths close the same way, so they share this rather than each
 /// carrying its own copy of the two branches.
-pub(in crate::commands::vm) fn record_transient_outcome<T>(
+pub fn record_transient_outcome<T>(
     admitted: Option<&AdmissionContext>,
     backend: &str,
     strategy: mvm_build::run_image::RootStrategy,
@@ -1050,11 +1060,7 @@ pub(in crate::commands::vm) fn record_transient_outcome<T>(
 /// Emit `plan.failed` against the supplied admission context. `class` is a short grep-friendly tag
 /// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
 /// rendered error chain.
-pub(in crate::commands::vm) fn emit_failed(
-    ctx: &AdmissionContext,
-    class: &str,
-    err: &anyhow::Error,
-) {
+pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
     let msg = format!("{err:#}");
     if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
@@ -1593,7 +1599,7 @@ mod admit_plan_tests {
                 agent_verb_override: vec![],
                 restrict_agent_verbs: false,
                 services: Vec::new(),
-                entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                     "test",
                 ),
             })
@@ -1994,7 +2000,7 @@ mod admit_plan_tests {
 
     #[test]
     fn up_populates_agent_verbs_default_and_override() {
-        use crate::commands::vm::agent_verbs::{default_agent_verbs, parse_agent_verb_override};
+        use crate::admission::agent_verbs::{default_agent_verbs, parse_agent_verb_override};
         // Default path: sealed-prod, no shares → run-entrypoint present, mount-volume absent.
         let d = parse_agent_verb_override(&[])
             .unwrap()
@@ -2554,7 +2560,7 @@ mod entrypoint_shape_tests {
 #[cfg(test)]
 mod grant_surface_tests {
     use super::*;
-    use crate::commands::shared::{GrantInputs, resolve_run_grants};
+    use crate::admission::run_grants::{GrantInputs, resolve_run_grants};
     use mvm_contract::grants::CpuGrant;
     use mvm_core::network_policy::HostPort;
     use mvm_core::user_config::MvmConfig;

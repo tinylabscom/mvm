@@ -752,7 +752,7 @@ pub(in crate::commands) fn run_secure_with_source(
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every
             // attachment has something to be checked against (claim 1).
-            shares: super::up::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
+            shares: mvm_client::admission::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),

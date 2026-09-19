@@ -8,22 +8,14 @@ use clap::Args as ClapArgs;
 
 use super::shared::{clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec};
 
-mod admission;
-mod audit;
 mod grants_report;
 mod kernel;
 // `pub(crate)` so the crate-root boot-policy facade can re-export the
 // effective-initrd decision; nothing else in the module is `pub`.
 pub(crate) mod oci_persist;
-// `pub(crate)` so the transient and session boot paths can name
-// `policy::admitted_shares_for_boot` directly. Deliberately not re-exported
-// from here: a `use` line counts as a caller to `check-dormant-controls`, so
-// re-exporting would let the real call site be deleted with the gate still
-// green.
-pub(crate) mod policy;
 mod runtime_source;
 
-pub(super) use admission::{
+pub(super) use mvm_client::admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
     attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
     record_transient_outcome,
@@ -32,7 +24,7 @@ pub(super) use admission::{
 // security-policy config-drive file name) — cfg-gated so a non-test build
 // doesn't carry an unused re-export.
 #[cfg(test)]
-pub(super) use admission::SECURITY_POLICY_FILENAME;
+pub(super) use mvm_client::admission::SECURITY_POLICY_FILENAME;
 
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;

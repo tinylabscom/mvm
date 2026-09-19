@@ -17,14 +17,14 @@ use crate::commands::vm::shared::VmStartParams;
 
 use crate::commands::vm::readiness::record_vm_readiness;
 
-use super::admission::{
-    AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
-    emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
-};
-use super::policy::shares_from_volume_cfg;
 use super::runtime_source::{
     attach_runtime_overlay_if_cached, attach_universal_initramfs_if_cached,
     emit_runtime_source_status,
+};
+use mvm_client::admission::policy::shares_from_volume_cfg;
+use mvm_client::admission::{
+    AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
+    emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
 };
 
 fn preopen_console_for_profile(profile: &str) -> bool {
