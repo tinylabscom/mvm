@@ -112,6 +112,13 @@
       }
     },
     {
+      "path": "crates/mvm-cli/src/update.rs",
+      "package": "mvm-cli",
+      "claims": [
+        20
+      ]
+    },
+    {
       "path": "crates/mvm-client/src/admission/mod.rs",
       "package": "mvm-client",
       "claims": [

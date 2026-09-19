@@ -388,7 +388,7 @@ id = "MVM-SEC-20"
 level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "supply_chain"
-statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid"
+statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, and self-update paths refuse an artifact whose required signature is missing or invalid"
 # `release.yml` signs archives and manifests keyless through GitHub OIDC and
 # publishes bundles carrying the Fulcio certificate and Rekor inclusion proof.
 # Raw kernels, root filesystems, and metadata are covered by those signed
@@ -400,20 +400,16 @@ statement = "Every published release artifact is authenticated under the release
 # manifest before parsing it, with the hash-skip hatch explicitly not waiving
 # the signature.
 #
-# The limit, which the statement carries deliberately: the two enforcement paths
-# do not share a posture. `verify_signature` on the self-update path returns Ok
-# with a warning when cosign is absent, so there the signature is best-effort and
-# the SHA-256 pin is what still holds. A claim that said "every path refuses"
-# would be false.
+# The self-update path used to be the exception: `verify_signature` shelled out
+# to cosign and returned Ok with a warning when it was absent. It now calls the
+# same in-process verifier with the CLI release train, so all three consuming
+# paths refuse. `install.sh`, which runs before any mvmctl exists, is outside
+# the claim and still best-effort.
 #
-# `a_malformed_bundle_is_refused` is deliberately NOT listed. It exists, it is a
-# good test, and it passes — but it is `#[cfg(feature = "manifest-verify")]`, and
-# every use of that feature in CI is `cargo run --example`, never `cargo test
-# --features`. No lane executes it. `check-claim-catalog` resolves `fn:` needles
-# by text search and cannot see a cfg gate, so listing it would buy a witness
-# that is green because nothing runs it — the same shape as the retired
-# `mvm.secret_env` witness on claim 13. Wire the feature into a test lane and it
-# becomes citable.
+# The `manifest-verify`-gated tests on these paths now run in the `Lint feature
+# coverage` job of ci.yml. `a_real_release_bundle_verifies_under_its_tag` is one
+# of them, and is citable because of that step: `check-claim-catalog` resolves
+# `fn:` needles by text search and cannot see a cfg gate.
 #
 # `ci:release-provenance` anchors the step that attests the binary tarballs with
 # `actions/attest-build-provenance`. It witnesses authenticity because the
@@ -429,4 +425,6 @@ witnesses = [
     "fn:a_missing_bundle_refuses_and_names_the_asset",
     "fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing",
     "fn:skip_hash_verify_does_not_waive_the_manifest_signature",
+    "fn:an_archive_without_a_bundle_is_refused",
+    "fn:a_real_release_bundle_verifies_under_its_tag",
 ]

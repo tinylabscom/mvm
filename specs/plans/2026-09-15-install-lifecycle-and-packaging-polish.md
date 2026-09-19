@@ -106,17 +106,21 @@ Issue: [#3271](https://github.com/tinylabscom/mvm/issues/3271).
 
 Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
 
-- [ ] Verify the Sigstore bundle in-process in Rust for `mvmctl update`
+- [x] Verify the Sigstore bundle in-process in Rust for `mvmctl update`
       (`crates/mvm-cli/src/update.rs`), so the self-update path stops being
-      best-effort.
+      best-effort. It calls `mvm_build::release_signature` with the CLI release
+      train and refuses a missing or invalid bundle.
 - [ ] Have `install.sh` prefer `mvmctl verify-release` once a binary exists on
-      disk, falling back to `cosign` and then to the current warning.
-- [ ] Delete the "Claim 20 limits" carve-out from
-      `specs/adrs/001-microvm-security-posture.md` once the third path refuses
-      an unsigned artifact like the other two.
-- [ ] Weigh the closure cost first: a bundle verifier is a real dependency, and
-      the limit-dependencies rule applies. If the cost is unacceptable, record
-      that decision in the ADR instead of leaving the limits note unexplained.
+      disk, falling back to `cosign` and then to the current warning. There is
+      no `verify-release` verb yet; it is the next step.
+- [x] Rewrite the "Claim 20 limits" note in
+      `specs/adrs/001-microvm-security-posture.md` now that the third path
+      refuses: the claim names all three paths, and the note keeps the two
+      things still outside it (a build without `manifest-verify`, and
+      `install.sh`).
+- [x] Weigh the closure cost first. There was none to weigh: the verifier
+      already ships in every release build for the fetch path and the runtime
+      overlay, so the self-update path adds no dependency.
 
 ## WS6 — Compat CI
 
