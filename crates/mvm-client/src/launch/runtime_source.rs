@@ -11,19 +11,19 @@
 
 use anyhow::{Context, Result};
 
-pub(crate) use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
+pub use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 
-use crate::commands::runtime_overlay::{
+use crate::launch::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
     runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
 };
-use crate::ui;
+use mvm_runtime::ui;
 
 /// Report where this launch's guest binaries come from.
 ///
 /// There is one answer now — the runtime overlay — so this reports whether the
 /// overlay was actually attached rather than which of several postures applied.
-pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
+pub fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
     let attached = start_config.runtime_overlay_path.is_some();
     tracing::info!(overlay_attached = attached, "resolved guest runtime source");
     ui::info(if attached {
@@ -55,7 +55,7 @@ fn apply_runtime_overlay_artifact(
 /// resolve is a pure cache read — no build, no download, no `nix` — so this
 /// is safe on every host.
 #[tracing::instrument(skip_all, fields(hypervisor, arch = ?arch))]
-pub(crate) fn attach_runtime_overlay(
+pub fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
@@ -82,14 +82,14 @@ pub(crate) fn attach_runtime_overlay(
 /// Ordinary starts always re-resolve the overlay for the current host build.
 /// Callers that need same-version continuity across lifecycle state must use
 /// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
-pub(crate) fn attach_runtime_overlay_if_cached(
+pub fn attach_runtime_overlay_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
     attach_runtime_overlay_if_cached_version(start_config, hypervisor, None)
 }
 
-pub(crate) fn attach_runtime_overlay_if_cached_version(
+pub fn attach_runtime_overlay_if_cached_version(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
     expected_version: Option<&str>,
@@ -276,7 +276,7 @@ fn evict_stale_universal_initramfs(
 /// source-fingerprint eviction as the attach path first, so a stale artifact
 /// never counts as available.
 #[cfg(test)]
-pub(crate) fn universal_initramfs_available() -> bool {
+pub fn universal_initramfs_available() -> bool {
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
@@ -314,7 +314,7 @@ const KERNEL_BOOTING_HYPERVISORS: [&str; 5] =
     ["firecracker", "hvf", "qemu", "libkrun", "apple-container"];
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn attach_universal_initramfs_if_cached(
+pub fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
@@ -359,7 +359,7 @@ fn attach_universal_initramfs_with_resolver(
     match resolve(&env, &cache_root, version, arch) {
         Ok(artifact) => {
             if let Some(workspace_root) =
-                crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+                crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
                 && let Ok(fingerprint) =
                     mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
                         &workspace_root,
@@ -431,7 +431,7 @@ fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
 /// 3. Still missing: consult the *same* build-vs-download decision the overlay
 ///    makes on this host, so a contributor whose overlay is source-built never
 ///    silently downloads a sidecar.
-pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
+pub fn resolve_sdk_sidecar_attachment_for_host(
     services: &[mvm_contract::protocol::broker::ServiceId],
     libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<Option<SdkSidecarAttachment>> {
@@ -504,7 +504,7 @@ fn warn_if_sidecar_predates_the_working_tree(
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let Some(workspace_root) =
-        crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+        crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
     else {
         return;
     };
@@ -737,7 +737,7 @@ mod sdk_sidecar_host_resolution_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",
         );
         assert!(
@@ -811,7 +811,7 @@ mod sdk_sidecar_host_resolution_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
         );
         env.set(
@@ -857,7 +857,7 @@ mod sdk_sidecar_host_resolution_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
@@ -889,7 +889,7 @@ mod sdk_sidecar_host_resolution_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
@@ -921,7 +921,7 @@ mod sdk_sidecar_host_resolution_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
@@ -939,7 +939,7 @@ mod sdk_sidecar_host_resolution_tests {
 #[cfg(test)]
 mod runtime_overlay_attach_tests {
     use super::*;
-    use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
+    use crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
@@ -1002,7 +1002,7 @@ mod runtime_overlay_attach_tests {
         )
         .unwrap();
         if let Some(workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+            crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
         {
             let fingerprint =
                 mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(

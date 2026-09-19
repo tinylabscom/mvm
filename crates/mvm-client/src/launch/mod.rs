@@ -8,7 +8,12 @@
 //! boot) and typed secret references are validated fail-closed and recorded
 //! as metadata-only sidecars before any boot.
 
+pub mod grants_report;
+pub mod persistent;
 mod request;
+pub mod runtime_overlay;
+pub mod runtime_source;
+pub mod start_params;
 #[cfg(test)]
 mod tests;
 

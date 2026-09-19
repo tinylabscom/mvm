@@ -24,7 +24,7 @@ why = "The input plane's default-deny check. Losing its caller reopens claim 17'
 
 [[control]]
 symbol = "report_enforced_grants"
-file = "crates/mvm-cli/src/commands/vm/up/grants_report.rs"
+file = "crates/mvm-client/src/launch/grants_report.rs"
 dormant = false
 why = """
 Records what actually bounded a boot: the read-back tier, the \

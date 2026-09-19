@@ -3061,6 +3061,7 @@ dependencies = [
  "mvm-hostd",
  "mvm-runtime",
  "mvm-sdk",
+ "mvm-vmm",
  "rand 0.10.2",
  "secrecy",
  "serde",

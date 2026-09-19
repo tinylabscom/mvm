@@ -484,7 +484,7 @@ pub(in crate::commands) fn release_volume_leases_for_vm(vm_name: &str) -> Result
 /// The resolved, leased volume set handed to admission and the backend.
 /// Commit only after the backend start succeeds — dropping uncommitted rolls
 /// the leases back so a failed launch leaks nothing.
-pub(super) type PreparedLaunchVolumes = mvm_client::volume::LaunchPreparation;
+pub(in crate::commands) type PreparedLaunchVolumes = mvm_client::volume::LaunchPreparation;
 
 /// Merge persisted local registrations into the volume list used to construct
 /// both signed admission grants and the backend launch configuration.
@@ -500,7 +500,7 @@ pub(crate) fn list_registered_attachments(
     service().list_attachments(vm_name)
 }
 
-pub(super) fn merge_registered_volumes_for_launch(
+pub(in crate::commands) fn merge_registered_volumes_for_launch(
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
 ) -> Result<PreparedLaunchVolumes> {

@@ -10,7 +10,6 @@ mod format;
 mod hints;
 mod parse;
 mod resolve;
-mod start;
 mod state;
 mod vcpu_default;
 mod vsock;
@@ -31,14 +30,13 @@ pub(crate) use parse::materialize_disk_volume;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_asset_spec,
-    parse_port_spec, parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
+    parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(super) use resolve::{
     ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
     resolve_manifest_arg,
 };
-pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

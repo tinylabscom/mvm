@@ -29,7 +29,6 @@ mod plugin;
 /// crate-root `exec` runner can reach the glue.
 pub(crate) mod pool;
 mod qemu_bridge;
-mod runtime_overlay;
 mod seccomp_audit;
 pub(crate) mod shared;
 mod storage;

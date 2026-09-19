@@ -71,7 +71,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
-    crate::commands::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
+    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
     resolve_or_pull_run_image_with(
         cache_root,
         reference,
@@ -250,7 +250,7 @@ pub(super) fn pull_image_with_trust(
         cache_root,
         reference,
         prod,
-        crate::commands::runtime_overlay::prepare_oci_guest_runtime,
+        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime,
     )
 }
 

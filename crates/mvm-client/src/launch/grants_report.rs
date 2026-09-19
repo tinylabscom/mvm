@@ -16,7 +16,7 @@
 use mvm_contract::grants::Grants;
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 
-use mvm_client::admission::AdmissionContext;
+use crate::admission::AdmissionContext;
 
 /// Read back what bounded `vm_name`, persist it where `machine inspect` can
 /// find it, put it on the chain-signed log, and tell the operator when a bound
@@ -26,7 +26,7 @@ use mvm_client::admission::AdmissionContext;
 /// never from the caller's arguments: what a run was authorized to consume is
 /// settled at admission, and re-deriving it here would let the report describe
 /// a different request than the one that was signed.
-pub(super) fn report_enforced_grants(
+pub fn report_enforced_grants(
     ctx: &AdmissionContext,
     backend_name: &str,
     vm_name: &str,
@@ -36,7 +36,7 @@ pub(super) fn report_enforced_grants(
 
     let enforced = read_back_tier(backend_name, vm_name, requested);
 
-    mvm_client::record_enforced_grants(vm_name, &enforced);
+    crate::record_enforced_grants(vm_name, &enforced);
 
     if let Err(e) = ctx
         .emitter
@@ -46,7 +46,7 @@ pub(super) fn report_enforced_grants(
     }
 
     if let Some(reason) = degradation_warning(requested, &enforced) {
-        crate::ui::warn(&reason);
+        mvm_runtime::ui::warn(&reason);
     }
 
     enforced
@@ -59,7 +59,7 @@ pub(super) fn report_enforced_grants(
 /// dimension is the only answer that can never be wrong in the dangerous
 /// direction.
 fn read_back_tier(backend_name: &str, vm_name: &str, requested: &Grants) -> EnforcedGrants {
-    match mvm_client::enforced_grants_after_start(backend_name, vm_name, requested) {
+    match crate::enforced_grants_after_start(backend_name, vm_name, requested) {
         Ok(enforced) => enforced,
         Err(e) => {
             tracing::warn!(
@@ -93,8 +93,8 @@ mod tests {
     use mvm_contract::protocol::resource_controls::EnforcedTier;
     use mvm_hostd::plan_admission::InMemoryNonceLedger;
 
-    use crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint;
-    use crate::commands::vm::up::{AdmitPlanForBootParams, admit_plan_for_boot};
+    use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
+    use crate::admission::{AdmitPlanForBootParams, admit_plan_for_boot};
 
     /// Admit a real plan carrying `grants` and return its context plus the
     /// audit dir the chain was written to. The signer, chain and plan are the
@@ -187,7 +187,7 @@ mod tests {
         // The same tier must survive to `machine inspect`, which reads it from
         // the per-VM record rather than from this process.
         assert_eq!(
-            mvm_client::enforced_grants_of("vm-grants-enforced"),
+            crate::enforced_grants_of("vm-grants-enforced"),
             Some(enforced),
             "the recorded tier is what inspect will show"
         );

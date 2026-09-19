@@ -151,8 +151,8 @@ use config::ConfigAction;
 use image::ImageAction;
 
 use super::shared::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_port_spec,
-    parse_volume_spec, resolve_flake_ref,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_volume_spec,
+    resolve_flake_ref,
 };
 
 #[test]
@@ -1898,28 +1898,6 @@ fn test_forward_no_ports_parses() {
         }
         _ => panic!("Expected Forward command"),
     }
-}
-
-#[test]
-fn test_parse_port_spec_single() {
-    let (local, guest) = parse_port_spec("3000").unwrap();
-    assert_eq!(local, 3000);
-    assert_eq!(guest, 3000);
-}
-
-#[test]
-fn test_parse_port_spec_mapping() {
-    let (local, guest) = parse_port_spec("8080:3000").unwrap();
-    assert_eq!(local, 8080);
-    assert_eq!(guest, 3000);
-}
-
-#[test]
-fn test_parse_port_spec_invalid() {
-    assert!(parse_port_spec("abc").is_err());
-    assert!(parse_port_spec("abc:3000").is_err());
-    assert!(parse_port_spec("3000:abc").is_err());
-    assert!(parse_port_spec("99999").is_err());
 }
 
 // -------------------------------------------------------------------------
