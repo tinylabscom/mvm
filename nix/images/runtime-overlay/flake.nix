@@ -122,15 +122,11 @@
         mvm-workspace = workspace;
       };
 
-      # mvmctl semver pinned to match
-      # `[workspace.package].version` in the root Cargo.toml. The
-      # `RuntimeOverlayResolver` rejects an overlay whose VERSION
-      # file disagrees with the running mvmctl. Bumping the
-      # workspace version requires bumping this string too — keep
-      # the two in lock-step or `mvmctl up` admission fails.
-      # `xtask check-runtime-overlay-version` (a CI gate)
-      # asserts this match so the pin can't silently go stale.
-      overlayVersion = "0.18.0-rc.2";
+      # mvmctl semver, shared with the universal initramfs. The
+      # `RuntimeOverlayResolver` rejects an overlay whose VERSION file
+      # disagrees with the running mvmctl; `../version.nix` says how the
+      # pin is kept equal to the workspace version.
+      overlayVersion = import ../version.nix;
 
       # mvm-agentd binaries — agent + seccomp shim + netinit + OCI entrypoint.
       # The universal initramfs agent is PID 1 and lives in the initramfs, not

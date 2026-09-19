@@ -560,7 +560,7 @@ fn main() -> Result<()> {
                 "  check-guest-binary-lists                assert the four OCI guest-binary name lists agree and name real [[bin]]s"
             );
             eprintln!(
-                "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"
+                "  check-runtime-overlay-version           assert the overlay, SDK sidecar and initramfs VERSION pin matches the workspace version"
             );
             eprintln!(
                 "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from claim frontmatter embedded in specs/adrs/ outside exempt paths"

@@ -56,10 +56,11 @@
         })
         { inherit workspaceRoot; };
 
-      # mvmctl semver pinned to match `[workspace.package].version` in
-      # the root Cargo.toml.  Kept in lock-step with the runtime overlay
-      # VERSION pin.
-      initramfsVersion = "0.18.0";
+      # mvmctl semver, the same pin the runtime overlay carries.
+      # `InitramfsResolver` refuses an initramfs whose VERSION differs from
+      # the running mvmctl's; `../version.nix` says how the pin is kept
+      # equal to the workspace version.
+      initramfsVersion = import ../version.nix;
 
       # The `mvm` flake, evaluated against this flake's pinned nixpkgs and the
       # filtered workspace. The recipes never touch microvm.nix, which this
