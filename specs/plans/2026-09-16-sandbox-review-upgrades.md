@@ -165,10 +165,15 @@ data directory ships owned by its own account boots with root-owned files.
   - [x] a deferred layer node at an injected path is refused rather than laid
         over the runtime's file;
   - [x] concurrent runs of one image no longer inject into its shared unpacked
-        tree at once (a sealed image could be walked mid-way through a dev
-        run's injection): every writer and copier of a tree takes its per-tree
-        lock, the output is locked across materialization, and the
-        overlay-lean staging tree is private per run;
+        tree at once: every writer and copier of a tree takes its per-tree
+        lock, materialization holds the tree and output locks until the seal,
+        the overlay-lean staging tree is private per run, and the prepared
+        rootfs-only tree is renamed into place only when complete;
+  - [x] a `--prod` run is always sealed: the rootfs path carries its variant,
+        a cached image is reused only when its sidecar's `sealed` matches the
+        run, a fresh `--prod` pull is sealed, an unsealed image is refused to
+        a `--prod` resolve, and the trust check runs before anything is
+        materialized or signed;
   - [x] the builder-VM writer sets the claimed paths back to root after its
         copy;
   - [x] a builder-VM refusal names the route that reached it;

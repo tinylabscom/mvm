@@ -175,10 +175,13 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
         })?;
     }
 
-    let rootfs_rel = format!(
-        "rootfs/{manifest_hex}-{}/rootfs.ext4",
-        oci_runtime_tag(cache_root)
-    );
+    // A local archive is dev-only (`--prod` is refused above), so this is the
+    // dev variant's path.
+    let rootfs_rel = super::materialize::oci_rootfs_rel(
+        &metadata.manifest_digest,
+        &oci_runtime_tag(cache_root),
+        false,
+    )?;
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &metadata.manifest_digest)?;
@@ -264,10 +267,13 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
     }
     drop(tree_lock);
 
-    let rootfs_rel = format!(
-        "rootfs/{manifest_hex}-{}/rootfs.ext4",
-        oci_runtime_tag(cache_root)
-    );
+    // A local archive is dev-only (`--prod` is refused above), so this is the
+    // dev variant's path.
+    let rootfs_rel = super::materialize::oci_rootfs_rel(
+        &image.manifest_digest,
+        &oci_runtime_tag(cache_root),
+        false,
+    )?;
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;

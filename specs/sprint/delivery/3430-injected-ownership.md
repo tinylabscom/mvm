@@ -61,17 +61,40 @@ being root-owned.
     links met while recursing. An intermediate component could still resolve
     through a link; that is safe only because the host refused any tree with
     a link on the way to a claimed path.
-  - Its refusal no longer counts non-root owners on paths mvm claims.
+  - Its refusal no longer counts non-root owners on paths mvm claims. It now
+    also refuses a tree carrying a guest-semantic extended attribute (a file
+    capability, an ACL, a `user.`/`trusted.` attribute). The archive carries
+    none, and the builder's busybox `tar` could not restore them.
+  - Files are streamed into the archive, never read into memory whole.
+- A `--prod` run is always sealed. Before this change the cached rootfs path
+  did not record the variant, so a dev image and a sealed image of one image
+  shared a file, and the first one written was kept. A `--prod` pull on a cold
+  cache also materialized the dev variant, and the boot then quietly picked
+  the dev agent profile. Now:
+  - The rootfs path carries its variant (`…-sealed/` or `…-dev/`), so the
+    two variants never share a file, a sidecar or an output lock.
+  - A cached image is reused only at this variant's path, and only when its
+    sidecar records `sealed` exactly when the run is `--prod`. Anything else
+    is rebuilt.
+  - A fresh `--prod` pull is sealed and carries its provenance mark.
+  - A `--prod` resolve refuses an image whose sidecar is not sealed, rather
+    than hand it to a boot that would choose the dev profile.
+  - The cosign trust check runs before anything is materialized or signed
+    for a cached image, so a refused image leaves no sealed, signed rootfs
+    behind.
 - Concurrency. Two runs of one image share its unpacked tree, which is
-  injected in place. A dev run could clear `/etc/mvm` and rewrite `variant`
-  and `/etc/passwd` between a prod run's post-injection check and its image
-  walk, sealing a dev-variant image. Now:
+  injected in place. Without a lock, one run could clear `/etc/mvm` and
+  rewrite `variant` and `/etc/passwd` between another run's post-injection
+  check and its image walk. Now:
   - Every path that removes, unpacks, injects into or copies from a tree
     holds its per-tree lock (`mvm_build::run_image::lock_unpacked_tree`).
-    Injection keeps the lock through the seal, and the rootfs output is
-    locked as well.
+  - Materialization runs under a `HeldTreeLocks` proof covering the tree and
+    the rootfs output, passed by reference to the work, so both locks are
+    held until the seal and sidecar are written.
   - The overlay-lean staging tree is private to each run.
-  - The prepared rootfs-only tree is built under its own lock.
+  - The prepared rootfs-only tree is built in a scratch directory and renamed
+    into place under its own lock, so a failure never leaves a partial tree.
+  - `copy_tree` skips devices, FIFOs and sockets instead of reading them.
 - A deferred-node sidecar that exists but cannot be read is an error. Only
   an absent one means nothing was deferred.
 - The alias defence is layered. Clearing the mvm-only trees and writing
@@ -101,7 +124,3 @@ the read-only workload root.
 
 Still open (plan W3.8): on macOS the unpacker's hard-link fallback removes
 the link *source* when an earlier layer wrote it.
-
-Not addressed: a prod and a dev run of one image still write the same cached
-rootfs path. The lock serializes them, but the later one's image is the one
-the cache keeps.

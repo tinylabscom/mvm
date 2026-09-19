@@ -625,11 +625,18 @@ fn reseat_file(path: &Path, mode: u32) -> Result<(), io::Error> {
     write_file(path, &contents, mode)
 }
 
+/// Remove the non-directory at `path`, if there is one. A directory is named
+/// as such: `unlink` on one fails with a bare `EPERM` on macOS, which reads as
+/// a permissions problem.
 fn remove_if_present(path: &Path) -> Result<(), io::Error> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
+    match std::fs::symlink_metadata(path) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
+        Ok(meta) if meta.is_dir() => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is a directory where mvm writes a file", path.display()),
+        )),
+        Ok(_) => std::fs::remove_file(path),
     }
 }
 
@@ -1012,6 +1019,21 @@ mod tests {
             first_shaped_component(&shaped.root, Path::new("usr/lib")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn remove_if_present_removes_a_file_skips_absence_and_names_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        remove_if_present(&file).unwrap();
+        assert!(!file.exists());
+        remove_if_present(&file).expect("absence is not an error");
+        let sub = dir.path().join("d");
+        std::fs::create_dir(&sub).unwrap();
+        let err = remove_if_present(&sub).expect_err("a directory is not removed");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("is a directory"), "{err}");
     }
 
     /// A guest binary the image shipped is stripped; one that cannot be

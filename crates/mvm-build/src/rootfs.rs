@@ -403,7 +403,16 @@ pub enum RootfsError {
     )]
     LayerOwnershipUnsupported { count: usize, route: BuilderVmRoute },
 
-    #[cfg(any(test, feature = "builder-vm"))]
+    #[error(
+        "the builder-VM materializer cannot carry the extended attribute {name} on {} \
+         (file capabilities and ACLs are lost in its copy); {}", path.display(), route.remedy()
+    )]
+    XattrUnsupported {
+        path: PathBuf,
+        name: String,
+        route: BuilderVmRoute,
+    },
+
     #[error("archiving {path} for the builder VM: {source}")]
     ArchiveTree {
         path: PathBuf,
@@ -461,8 +470,10 @@ impl RootfsError {
     }
 
     /// Whether the run path should retry this pure-path failure via the builder
-    /// VM (which has no such limits and whose `cp -a` preserves xattrs). A
-    /// malformed tree or I/O error is genuine and surfaces unchanged.
+    /// VM, which has no size limits. It carries no extended attributes, so a
+    /// tree whose attributes overflowed the in-process writer is refused there
+    /// in turn, naming this failure. A malformed tree or I/O error is genuine
+    /// and surfaces unchanged.
     pub fn pure_should_fall_back(&self) -> bool {
         self.is_pure_capacity_limit()
     }
@@ -584,6 +595,22 @@ fn refuse_tree_only_materialization_loss(
             route: route.clone(),
         });
     }
+    // The archive this writer hands the builder carries no extended
+    // attributes, and the builder's `tar` could not restore them if it did.
+    let xattr =
+        mvm_fs::rootfs::first_guest_semantic_xattr(&input.unpacked_root).map_err(|source| {
+            RootfsError::ArchiveTree {
+                path: input.unpacked_root.clone(),
+                source,
+            }
+        })?;
+    if let Some((path, name)) = xattr {
+        return Err(RootfsError::XattrUnsupported {
+            path,
+            name,
+            route: route.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -607,24 +634,50 @@ fn allocate_sparse_image(path: &Path, size_bytes: u64) -> Result<(), RootfsError
     Ok(())
 }
 
+/// The builder job that turns the tree into an image: the tree archived into
+/// `work`, which becomes the job's `/work`, and a script that extracts that
+/// archive onto the output disk. The tree itself is never the job's input —
+/// the generic staging a work directory passes through drops names and reads
+/// special files.
+#[cfg(feature = "builder-vm")]
+fn builder_rootfs_job(
+    input: &MaterializeExt4Input,
+    options: &MaterializeExt4Options,
+    device_size_bytes: u64,
+    work: &Path,
+) -> Result<crate::builder_vm::BuilderShellJob, RootfsError> {
+    write_rootfs_archive(&input.unpacked_root, &work.join(ROOTFS_ARCHIVE_NAME))?;
+    Ok(crate::builder_vm::BuilderShellJob {
+        work_dir: work.to_path_buf(),
+        artifact_out: input
+            .output
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        script: ext4_materialization_script(
+            &options.guest_output_device,
+            device_size_bytes,
+            &crate::oci_runtime_inject::injected_root_owned_paths(),
+        ),
+        extra_disks: vec![crate::builder_vm::BuilderExtraDisk {
+            id: "oci-rootfs".to_string(),
+            path: input.output.clone(),
+            read_only: false,
+        }],
+    })
+}
+
 #[cfg(feature = "builder-vm")]
 fn materialize_ext4_in_builder_vm(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
     device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
-    use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob};
-
     let artifact_out = input
         .output
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let script = ext4_materialization_script(
-        &options.guest_output_device,
-        device_size_bytes,
-        &crate::oci_runtime_inject::injected_root_owned_paths(),
-    );
     // Beside the output rather than in the system temp dir: this path runs for
     // the images too large for the in-process writer, and the archive is the
     // size of the tree.
@@ -635,17 +688,7 @@ fn materialize_ext4_in_builder_vm(
             path: artifact_out.clone(),
             source,
         })?;
-    write_rootfs_archive(&input.unpacked_root, &work.path().join(ROOTFS_ARCHIVE_NAME))?;
-    let shell_job = BuilderShellJob {
-        work_dir: work.path().to_path_buf(),
-        artifact_out,
-        script,
-        extra_disks: vec![BuilderExtraDisk {
-            id: "oci-rootfs".to_string(),
-            path: input.output.clone(),
-            read_only: false,
-        }],
-    };
+    let shell_job = builder_rootfs_job(input, options, device_size_bytes, work.path())?;
 
     // Keep the materializer on the same builder-backend policy as the rest of
     // the builder surface. In particular, do not silently retry on qemu here:
@@ -859,12 +902,37 @@ fn append_archive_entry<W: std::io::Write>(
             .map_err(err)?;
         Ok(true)
     } else {
-        let data = mvm_fs::rootfs::read_file_for_guest_image(&path).map_err(err)?;
-        header.set_size(data.len() as u64);
-        builder
-            .append_data(&mut header, rel, data.as_slice())
-            .map_err(err)?;
+        // Streamed: this writer exists for the trees too large for the
+        // in-process one, so a file is never held in memory whole. The size in
+        // the header is the one `set_metadata_in_mode` read with the mode.
+        let file = open_for_archive(&path).map_err(err)?;
+        builder.append_data(&mut header, rel, file).map_err(err)?;
         Ok(false)
+    }
+}
+
+/// Open a regular file of the tree for reading, widening an owner-unreadable
+/// mode (a 0000 `/etc/shadow`) for the open alone. The mode is restored as
+/// soon as the file is open — the descriptor stays readable — so the host
+/// tree is left as it was however the archive then fails.
+#[cfg(any(test, feature = "builder-vm"))]
+fn open_for_archive(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(file),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            let original = std::fs::symlink_metadata(path)?.permissions().mode();
+            let widened = original | 0o400;
+            if widened == original {
+                return Err(err);
+            }
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(widened))?;
+            let opened = std::fs::File::open(path);
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(original))?;
+            opened
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -1526,6 +1594,46 @@ mod tests {
         assert_eq!(paths, ["regular"]);
     }
 
+    /// The job the builder runs gets the archive as its whole `/work`, never
+    /// the tree, and its script extracts exactly that archive.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn the_builder_job_is_handed_the_archive_not_the_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tree.path().join("usr/local/lib/node_modules")).unwrap();
+        std::fs::write(tree.path().join("usr/local/lib/node_modules/x.js"), b"js").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let input =
+            MaterializeExt4Input::new(tree.path().to_path_buf(), out.path().join("rootfs.ext4"), 1);
+
+        let job = builder_rootfs_job(
+            &input,
+            &MaterializeExt4Options::default(),
+            64 * 1024 * 1024,
+            work.path(),
+        )
+        .unwrap();
+
+        assert_eq!(job.work_dir, work.path());
+        assert_ne!(job.work_dir, input.unpacked_root);
+        let listed: Vec<_> = std::fs::read_dir(&job.work_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(listed, [ROOTFS_ARCHIVE_NAME]);
+        assert!(
+            job.script
+                .contains(&format!("tar -xf /work/{ROOTFS_ARCHIVE_NAME}"))
+        );
+        let paths: Vec<String> = archive_entries(&job.work_dir.join(ROOTFS_ARCHIVE_NAME))
+            .into_iter()
+            .map(|e| e.0)
+            .collect();
+        assert!(paths.iter().any(|p| p == "usr/local/lib/node_modules/x.js"));
+        assert_eq!(job.extra_disks[0].path, input.output);
+    }
+
     #[test]
     fn ext4_block_count_leaves_a_one_mib_margin() {
         // 64 MiB device → format (64 MiB - 1 MiB) / 4096 = 16128 blocks.
@@ -1790,6 +1898,32 @@ mod tree_only_materialization_loss_tests {
             refuse_tree_only_materialization_loss(&input, &BuilderVmRoute::Selected),
             Err(RootfsError::DeferredNodesUnsupported { count: 1, .. })
         ));
+    }
+
+    /// The builder's archive carries no extended attributes and its `tar`
+    /// could not restore them, so a tree that has any is refused rather than
+    /// emitted without them.
+    #[test]
+    fn a_guest_semantic_xattr_refuses_the_tree_copy_materializer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("ping");
+        std::fs::write(&bin, b"elf").unwrap();
+        if xattr::set(&bin, "user.mvm.cap", b"c").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        let err = refuse_tree_only_materialization_loss(
+            &input_in(&dir),
+            &BuilderVmRoute::PureFallback {
+                because: "xattr too large".to_string(),
+            },
+        )
+        .expect_err("an attribute the writer cannot carry must refuse");
+        assert!(
+            matches!(&err, RootfsError::XattrUnsupported { name, .. } if name == "user.mvm.cap"),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("xattr too large"), "{err}");
     }
 
     fn refusal_message(route: &BuilderVmRoute) -> String {

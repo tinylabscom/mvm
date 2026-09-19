@@ -114,19 +114,6 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
     }
 }
 
-/// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
-/// `rootfs.ext4` path), and write the overlay-aware guest sidecar beside it.
-/// `cache_root` holds the guest-agent binary cache; `label` names the image in
-/// the sidecar.
-///
-/// When `sealed` is set (the `--prod` OCI run), the materialized rootfs is
-/// dm-verity-sealed (see [`seal_rootfs_for_run`]) and the sidecar is written
-/// `sealed`, so the runtime routes the block+ext4 verity boot and refuses
-/// interactive access.
-///
-/// Guest binaries resolve from the invoking source checkout's content-keyed
-/// cache or an existing compatibility cache. The host executable does not carry
-/// workload binaries.
 /// Hold `root`'s tree exclusively against every other writer and reader that
 /// takes this lock, across processes.
 ///
@@ -150,9 +137,23 @@ fn lock_output(output: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
     lock_beside(output, "output")
 }
 
+/// Take the lock for `path` in `role`, saying so when another holder makes
+/// this wait: a run that stops while another materializes the same image
+/// would otherwise look hung.
 fn lock_beside(path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
-    mvm_core::util::atomic_io::FileLock::acquire(&lock_key(path, role)?)
-        .with_context(|| format!("lock {} ({role})", path.display()))
+    let key = lock_key(path, role)?;
+    let context = || format!("lock {} ({role})", path.display());
+    if let Some(held) =
+        mvm_core::util::atomic_io::FileLock::try_acquire(&key).with_context(context)?
+    {
+        return Ok(held);
+    }
+    tracing::info!(
+        path = %path.display(),
+        role,
+        "another run is materializing this image; waiting for it"
+    );
+    mvm_core::util::atomic_io::FileLock::acquire(&key).with_context(context)
 }
 
 /// The path [`mvm_core::util::atomic_io::FileLock`] turns into the lock file
@@ -169,7 +170,54 @@ fn lock_key(path: &Path, role: &str) -> Result<std::path::PathBuf> {
     Ok(path.with_file_name(key))
 }
 
+/// Proof that this process holds an unpacked tree's lock and the lock on the
+/// image being built from it.
+///
+/// The work that reads or writes either takes `&HeldTreeLocks`, so the borrow
+/// checker keeps both held for as long as that work runs: they cannot be
+/// dropped early without the call that needs them failing to compile.
+pub struct HeldTreeLocks {
+    _tree: mvm_core::util::atomic_io::FileLock,
+    _output: mvm_core::util::atomic_io::FileLock,
+}
+
+impl HeldTreeLocks {
+    /// Take the tree's lock, then the output's. Every holder of both takes
+    /// them in this order.
+    pub fn acquire(tree: &Path, output: &Path) -> Result<Self> {
+        Ok(Self {
+            _tree: lock_unpacked_tree(tree)?,
+            _output: lock_output(output)?,
+        })
+    }
+}
+
+/// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
+/// `rootfs.ext4` path), and write the overlay-aware guest sidecar beside it.
+/// `cache_root` holds the guest-agent binary cache; `label` names the image in
+/// the sidecar.
+///
+/// When `sealed` is set (the `--prod` OCI run), the materialized rootfs is
+/// dm-verity-sealed (see [`seal_rootfs_for_run`]) and the sidecar is written
+/// `sealed`, so the runtime routes the block+ext4 verity boot and refuses
+/// interactive access.
+///
+/// Guest binaries resolve from the invoking source checkout's content-keyed
+/// cache or an existing compatibility cache. The host executable does not carry
+/// workload binaries.
+///
+/// The tree and the output are locked for the whole call ([`HeldTreeLocks`]):
+/// the injection, the post-injection check, the walk, the seal and the sidecar
+/// all read or write one or the other.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
+    let held = HeldTreeLocks::acquire(request.unpacked_root, request.output)?;
+    inject_and_materialize_holding(request, &held)
+}
+
+fn inject_and_materialize_holding(
+    request: InjectAndMaterializeRequest<'_>,
+    _held: &HeldTreeLocks,
+) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
         unpacked_root,
@@ -181,10 +229,6 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         owners,
         evidence,
     } = request;
-    // Held to the end: injection, the post-injection check, the walk, the seal
-    // and the sidecar all read or write the shared tree or the shared output.
-    let _tree = lock_unpacked_tree(unpacked_root)?;
-    let _output = lock_output(output)?;
     crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
         .context("admit the image's deferred layer nodes")?;
     let bins = resolve_guest_binaries(cache_root)?;
@@ -522,10 +566,11 @@ fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcess
     match crate::rootfs::materialize_ext4_pure(input) {
         Ok(_) => Ok(InProcessOutcome::Materialized),
         // The in-process writer structurally can't emit a faithful image —
-        // too large / too fragmented / a directory over one block, or the tree
-        // carries an xattr the writer can't represent — so retry via the
-        // builder VM, which has no such limits and whose `cp -a` preserves
-        // xattrs. Logged, never silent.
+        // too large / too fragmented / a directory over one block, or an
+        // xattr too big for it — so retry via the builder VM, which has no
+        // size limits. That writer carries no extended attributes, so a tree
+        // that has any is refused there, naming this failure. Logged, never
+        // silent.
         Err(e) if e.pure_should_fall_back() => {
             tracing::warn!(
                 error = %e,
@@ -673,9 +718,6 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
-    /// The production entry point refuses a deferred layer node at an
-    /// injected path before it touches the tree or resolves a single guest
-    /// binary, so the refusal is not something a later step can undo.
     /// Seed `cache_root` with stand-in guest binaries, so a test that reaches
     /// binary resolution by mistake fails in milliseconds instead of
     /// cross-compiling the guest runtime.
@@ -762,6 +804,33 @@ mod tests {
             .expect("the run proceeds once the lock is released");
         assert!(err.contains("/etc/passwd"), "{err}");
         worker.join().unwrap();
+    }
+
+    /// The locks the whole materialization runs under are held for exactly as
+    /// long as their proof lives: a second holder of either waits, and both
+    /// are free again once it is gone.
+    #[test]
+    fn held_tree_locks_exclude_other_holders_until_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("rootfs");
+        let output = tmp.path().join("rootfs.ext4");
+        let try_both = || {
+            let tree_free =
+                mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&tree, "tree").unwrap())
+                    .unwrap()
+                    .is_some();
+            let output_free = mvm_core::util::atomic_io::FileLock::try_acquire(
+                &lock_key(&output, "output").unwrap(),
+            )
+            .unwrap()
+            .is_some();
+            (tree_free, output_free)
+        };
+
+        let held = HeldTreeLocks::acquire(&tree, &output).unwrap();
+        assert_eq!(try_both(), (false, false), "both are held");
+        drop(held);
+        assert_eq!(try_both(), (true, true), "both are released");
     }
 
     #[test]

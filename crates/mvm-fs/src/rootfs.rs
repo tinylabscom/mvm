@@ -998,7 +998,7 @@ fn stream_ext4_to_file(
 /// widening an owner-unreadable mode (e.g. a 0000 `/etc/shadow`) and restoring
 /// it afterwards. The captured guest mode is unaffected — the walk reads modes
 /// via metadata, not via this read.
-pub fn read_file_for_guest_image(path: &Path) -> std::io::Result<Vec<u8>> {
+fn read_file_for_guest_image(path: &Path) -> std::io::Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1065,6 +1065,32 @@ fn collect_guest_xattrs(path: &Path) -> Vec<Xattr> {
     // Deterministic order (the writer also sorts, but keep the node stable).
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The first node under `root` carrying an extended attribute the guest needs
+/// (a file capability, a POSIX ACL, a `user.`/`trusted.` attribute), with the
+/// attribute's name. Links are not followed.
+///
+/// For a writer that cannot carry these attributes: it refuses a tree this
+/// finds anything in, rather than emit an image in which `ping` has lost its
+/// capability or a directory its ACL.
+pub fn first_guest_semantic_xattr(root: &Path) -> std::io::Result<Option<(PathBuf, String)>> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = std::fs::read_dir(&dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        for path in entries {
+            if let Some(xattr) = collect_guest_xattrs(&path).into_iter().next() {
+                return Ok(Some((path, xattr.name)));
+            }
+            if std::fs::symlink_metadata(&path)?.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Whether an xattr name carries guest-relevant image semantics the pure
@@ -1343,6 +1369,25 @@ mod tests {
     const SUPERBLOCK: usize = 1024;
     const S_UUID: usize = SUPERBLOCK + 0x68;
     const S_VOLUME_NAME: usize = SUPERBLOCK + 0x78;
+
+    #[test]
+    fn a_guest_semantic_xattr_anywhere_in_the_tree_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+        let bin = root.path().join("usr/bin/ping");
+        std::fs::write(&bin, b"elf").unwrap();
+        std::fs::write(root.path().join("plain"), b"x").unwrap();
+        assert_eq!(first_guest_semantic_xattr(root.path()).unwrap(), None);
+        // Skip where the host filesystem can't hold a user attribute.
+        if xattr::set(&bin, "user.mvm.cap", b"c").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        assert_eq!(
+            first_guest_semantic_xattr(root.path()).unwrap(),
+            Some((bin, "user.mvm.cap".to_string()))
+        );
+    }
 
     #[test]
     fn only_image_semantic_xattrs_are_captured() {
