@@ -63,6 +63,159 @@ fn encrypted_roundtrip_sends_without_any_application_ack() {
 }
 
 #[test]
+fn stalled_encrypted_worker_does_not_stall_offers_and_losses_remain_retrievable() {
+    use super::outbox::{Offer, Outbox, PreparedRecord};
+    use crate::protocol::telemetry::{GuestLossStage, LossReason, TailState};
+    use std::sync::{Arc, mpsc};
+
+    struct StalledWriter {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        first: bool,
+        bytes: Vec<u8>,
+    }
+    impl Write for StalledWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.first {
+                self.first = false;
+                self.entered.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (mut receiver, mut sender) = pair();
+    let queue = Arc::new(Outbox::new(2, 2 * MAX_RECORD_BYTES).unwrap());
+    let initial = PreparedRecord::new(&record()).unwrap();
+    assert_eq!(queue.offer(&initial), Offer::Queued);
+    let records: Vec<_> = (2..=1001)
+        .map(|sequence| {
+            PreparedRecord::new(
+                &TelemetryRecord::builder()
+                    .epoch(record().epoch())
+                    .producer(1)
+                    .sequence(sequence)
+                    .source(SourceKind::GuestAgent)
+                    .body(record().body().clone())
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let (entered, blocked) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let worker_queue = Arc::clone(&queue);
+    let worker = thread::spawn(move || {
+        let mut output = StalledWriter {
+            entered,
+            release: resume,
+            first: true,
+            bytes: Vec::new(),
+        };
+        assert!(sender.send_next(&mut output, &worker_queue).unwrap());
+        while sender.send_next(&mut output, &worker_queue).unwrap() {}
+        (sender, output.bytes)
+    });
+    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The worker is now inside Write, not merely scheduled for later. Nothing
+    // can release it until after all producer offers and loss reads complete.
+    let producer_queue = Arc::clone(&queue);
+    let (completed, completion) = mpsc::channel();
+    let producer = thread::spawn(move || {
+        let mut admitted = 0;
+        let mut lost_bytes = 0;
+        for record in records {
+            match producer_queue.offer(&record) {
+                Offer::Queued => admitted += 1,
+                Offer::Full => lost_bytes += record.len() as u64,
+                result => panic!("unexpected offer {result:?}"),
+            }
+        }
+        completed.send((admitted, lost_bytes)).unwrap();
+    });
+    let (admitted, lost_bytes) = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+    producer.join().unwrap();
+    assert_eq!(admitted, 2);
+    let losses = queue.losses();
+    assert_eq!(losses.capacity.records, 998);
+    assert_eq!(losses.capacity.bytes, lost_bytes);
+    assert_eq!(losses.contention.records, 0);
+    release.send(()).unwrap();
+    let (mut sender, mut bytes) = worker.join().unwrap();
+
+    // Serialize the independently retained evidence through the real encrypted
+    // record contract. This is a component witness, not runtime supervision.
+    let summary = TelemetryRecord::builder()
+        .epoch(record().epoch())
+        .producer(1)
+        .sequence(1002)
+        .source(SourceKind::GuestAgent)
+        .body(RecordBody::Loss {
+            stage: GuestLossStage::Capture,
+            reason: LossReason::Capacity,
+            records: losses.capacity.records,
+            bytes: losses.capacity.bytes,
+            tail: TailState::Known,
+        })
+        .build()
+        .unwrap();
+    sender.send(&mut bytes, &summary).unwrap();
+    let mut input = Cursor::new(bytes);
+    for sequence in [1, 2, 3] {
+        assert_eq!(receiver.receive(&mut input).unwrap().sequence(), sequence);
+    }
+    assert_eq!(receiver.receive(&mut input).unwrap(), summary);
+    assert_eq!(input.position(), input.get_ref().len() as u64);
+    assert_eq!(
+        queue.losses(),
+        losses,
+        "reading/sending evidence must not erase it"
+    );
+}
+
+#[test]
+fn failed_worker_write_accounts_unknown_tail_and_does_not_drain_on_closed_session() {
+    use super::outbox::{Offer, Outbox, PreparedRecord};
+
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (_, mut sender) = pair();
+    let queue = Outbox::new(2, 2 * MAX_RECORD_BYTES).unwrap();
+    let prepared = PreparedRecord::new(&record()).unwrap();
+    assert!(!sender.send_next(&mut Vec::new(), &queue).unwrap());
+    assert_eq!(queue.offer(&prepared), Offer::Queued);
+    assert_eq!(queue.offer(&prepared), Offer::Queued);
+    assert_eq!(
+        sender.send_next(&mut Broken, &queue),
+        Err(TelemetryError::Transport)
+    );
+    assert_eq!(queue.losses().transport.records, 1);
+    assert_eq!(queue.losses().transport.bytes, prepared.len() as u64);
+    assert!(queue.losses().transport_tail_unknown);
+    assert_eq!(
+        sender.send_next(&mut Broken, &queue),
+        Err(TelemetryError::Closed)
+    );
+    assert_eq!(queue.losses().transport.records, 1);
+    let (_, mut replacement) = pair();
+    assert!(replacement.send_next(&mut Vec::new(), &queue).unwrap());
+    assert!(!replacement.send_next(&mut Vec::new(), &queue).unwrap());
+}
+
+#[test]
 fn replay_tampering_wrong_session_and_plaintext_fail_closed() {
     let (mut receiver, mut sender) = pair();
     let frame = encoded(&mut sender);

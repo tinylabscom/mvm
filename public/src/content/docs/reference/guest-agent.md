@@ -67,7 +67,12 @@ public key; guest-authored VM/tenant/boot identity fields are rejected.
 
 The worker protocol has no per-record ACK. Socket I/O still belongs on a
 dedicated worker, never a tracing callback. The current library is an
-allocation-conscious wire boundary, not the nonblocking producer queue.
+allocation-conscious wire boundary. A prepared-record outbox now provides fixed
+storage with count/byte limits and single-attempt admission; it never waits for
+a contended queue lock. Preparation still allocates outside that admission path.
+Independent cumulative counters retain capacity, contention and unavailable
+losses, and failed writes mark transport delivery uncertain. The outbox is not
+yet connected to runtime source adapters or an event-driven worker supervisor.
 Records are capped at 32 KiB encoded, with eight JSON nesting levels, 16
 primitive attributes, eight span links, 128-byte labels, 2 KiB text fields,
 and 4 KiB stdio chunks. Malformed input terminates the connection without

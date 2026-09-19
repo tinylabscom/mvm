@@ -25,9 +25,17 @@
       W2a transport foundation is tested: bounded typed records,
       encrypted worker sessions with peer pinning and a dedicated semantic port.
       Twenty-one focused tests, host workspace tests, clippy, Linux cross-check,
-      seeded fuzz smoke and all 69 repository gates pass; queued delivery is pending.
+      seeded fuzz smoke and all 69 repository gates pass. PR #3449 landed through
+      the merge queue as `a126a8299679b3c0a0b1022dc3bedca1504ce14f`.
       Evidence: `specs/sprint/delivery/3421-telemetry-transport.md`.
       Runtime endpoint provisioning and the VM-lifetime collector remain open.
+      W3b prepared-record handoff is tested: fixed queue storage, non-waiting
+      admission/close and independent loss evidence pass nine new component tests.
+      Two allocation regressions also pass natively and under Miri; native mutex
+      initialization happens during setup, before cold admission.
+      Workspace/core tests, clippy, Linux cross-check and repository gates pass.
+      Delivery and runtime adapter/worker integration remain open;
+      `specs/sprint/delivery/3422-telemetry-outbox.md` records the exact boundary.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 

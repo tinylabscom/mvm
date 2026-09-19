@@ -29,7 +29,13 @@ oversized record spends no transport sequence number. Sending reads no ACK.
 `GuestService::Telemetry` reserves port 5254 independently of other fixed service
 ports. No backend endpoint, listener or guest source is activated by this change.
 
-## Local validation complete; queued delivery pending
+## Foundation merged; runtime acceptance remains open
+
+PR #3449 merged through the merge queue at 2026-09-19T00:59:24Z as
+`a126a8299679b3c0a0b1022dc3bedca1504ce14f`. Its merge-group CI run
+35408437682 passed, including Linux/ARM workspace tests, conformance, Nix
+evaluation and the tree-built guest boot. That boot is not a telemetry runtime
+witness: this foundation does not activate a collector or a guest producer.
 
 Test-first contract tests failed to compile before the new module existed.
 All eight final contract tests, nine encrypted-stream tests and four service
@@ -45,7 +51,8 @@ committed golden record fixtures. CI's fuzz job copies those same fixtures to a
 temporary corpus. The short smoke test is not exhaustive malformed-input or
 runtime security certification. Final workspace all-target clippy and
 BDD-feature all-target clippy passed with warnings denied; all 69 repository
-gates passed. Required PR checks and actual merge-queue delivery remain pending.
+gates passed. Required PR and merge-group checks subsequently passed and the
+foundation landed; the runtime acceptance items below remain open.
 
 The first PR invariant run passed those 69 gates, then the separate
 `check-declared-backing` gate rejected a negated phrase in the preview plan.

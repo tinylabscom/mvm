@@ -13,6 +13,8 @@ use crate::protocol::telemetry::{MAX_RECORD_BYTES, RecordError, TelemetryRecord}
 
 use super::session::{Session, SessionError, read_sealed_frame, write_sealed_frame};
 
+pub mod outbox;
+
 const SESSION_PREFIX: &str = "mvm.telemetry.v1.";
 // Binary metadata is length-bounded (three u8 strings, u16 signature), with a
 // fixed Ed25519 signature and GCM tag. This leaves room for the legal envelope.
@@ -72,14 +74,44 @@ impl TelemetrySender {
         if self.session.is_none() {
             return Err(TelemetryError::Closed);
         }
-        let plaintext = record.encode()?;
+        let prepared = outbox::PreparedRecord::new(record)?;
+        self.send_prepared(stream, &prepared)
+    }
+
+    /// Worker-only send of a validated, prepared record; no decode/re-encode.
+    pub fn send_prepared(
+        &mut self,
+        stream: &mut impl Write,
+        record: &outbox::PreparedRecord,
+    ) -> Result<(), TelemetryError> {
         let mut session = self.session.take().ok_or(TelemetryError::Closed)?;
         let frame = session
-            .seal(&plaintext)
+            .seal(record.bytes())
             .map_err(|_| TelemetryError::Rejected)?;
         write_sealed_frame(stream, &frame).map_err(|_| TelemetryError::Transport)?;
         self.session = Some(session);
         Ok(())
+    }
+
+    /// Worker-only: send at most one queued record. A stalled write owns no queue
+    /// lock, and loss counters survive a failed write. The runtime owns readiness,
+    /// I/O deadlines and cancellation; emitting threads never call this method.
+    pub fn send_next(
+        &mut self,
+        stream: &mut impl Write,
+        queue: &outbox::Outbox,
+    ) -> Result<bool, TelemetryError> {
+        if self.session.is_none() {
+            return Err(TelemetryError::Closed);
+        }
+        let Some(record) = queue.take()? else {
+            return Ok(false);
+        };
+        if let Err(error) = self.send_prepared(stream, &record) {
+            queue.failed_transport(&record);
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 
