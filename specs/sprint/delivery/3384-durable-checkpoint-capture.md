@@ -66,3 +66,9 @@ and retiring the whole-blob layout. Workstreams C1–C8 of the plan track them,
 with #3384's four acceptance criteria mapped to C2.3, C3.1, C3.3 and C2.4.
 Abandoned staging is swept only by the next capture; `cache prune` sweeping it
 is C5.1.
+
+A recapture that crashes between moving the old checkpoint aside and renaming
+the new one in leaves neither under the id. The old one sits in staging as
+`<name>.replaced`, and the next capture's sweep deletes it once the owning
+process is dead. The checkpoint is lost, never left half-written. Restoring it
+from the aside copy instead would close that window, and nothing does yet.
