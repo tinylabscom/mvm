@@ -14,6 +14,7 @@
     {
       "base_python": "Exception",
       "base_typescript": "Error",
+      "code": null,
       "doc": "Base of every typed host-services failure.",
       "fields": [],
       "message_format": null,
@@ -28,6 +29,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The host rejected the record shape or size (audit cap).",
       "fields": [],
       "message_format": null,
@@ -42,6 +44,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The per-workload audit emit rate limit is exhausted.",
       "fields": [],
       "message_format": null,
@@ -56,6 +59,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The host could not answer (handler down, broker not ready).",
       "fields": [],
       "message_format": null,
@@ -70,6 +74,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The workload's `ExecutionPlan.services` did not bind the service.",
       "fields": [],
       "message_format": null,
@@ -84,6 +89,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The verb is not implemented in this build.",
       "fields": [],
       "message_format": null,
@@ -98,6 +104,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "Any other typed broker error code.",
       "fields": [],
       "message_format": null,
@@ -112,6 +119,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "Connect, framing, or (de)serialization failure on the vsock path.",
       "fields": [],
       "message_format": null,
@@ -126,6 +134,7 @@
     {
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
+      "code": null,
       "doc": "The request was malformed: unknown method or a body the verb rejects.",
       "fields": [],
       "message_format": null,
@@ -140,6 +149,7 @@
     {
       "base_python": "Exception",
       "base_typescript": "Error",
+      "code": null,
       "doc": "User code inside the VM raised; a structured envelope was parsed.",
       "fields": [
         {
@@ -167,6 +177,7 @@
     {
       "base_python": "RuntimeError",
       "base_typescript": "Error",
+      "code": null,
       "doc": "Could not reach the substrate, or got an unparseable response.",
       "fields": [],
       "message_format": null,
@@ -181,6 +192,7 @@
     {
       "base_python": "RuntimeError",
       "base_typescript": "Error",
+      "code": null,
       "doc": "The workload declared msgpack but the SDK has no msgpack support.",
       "fields": [],
       "message_format": null,
@@ -195,6 +207,7 @@
     {
       "base_python": "MvmTransportError",
       "base_typescript": "MvmTransportError",
+      "code": null,
       "doc": "The encoded request exceeded the payload cap, refused before any               subprocess spawned.",
       "fields": [],
       "message_format": null,
@@ -209,6 +222,7 @@
     {
       "base_python": "MvmTransportError",
       "base_typescript": "MvmTransportError",
+      "code": null,
       "doc": "No-VM dispatch was requested without a local function to               introspect. Python-only in practice: the mode itself has no               TypeScript form.",
       "fields": [],
       "message_format": null,
@@ -223,6 +237,7 @@
     {
       "base_python": "RuntimeError",
       "base_typescript": "Error",
+      "code": null,
       "doc": "A secret-shaped value was passed as a call argument under strict               mode.",
       "fields": [],
       "message_format": null,
@@ -237,6 +252,7 @@
     {
       "base_python": "UserWarning",
       "base_typescript": "Error",
+      "code": null,
       "doc": "Heuristic flagged a secret-shaped value passed as a call               argument.",
       "fields": [],
       "message_format": null,
@@ -250,6 +266,7 @@
     {
       "base_python": "RuntimeError",
       "base_typescript": "Error",
+      "code": null,
       "doc": "A transport call fired inside an emit subprocess, where no live               microVM exists.",
       "fields": [],
       "message_format": null,
@@ -259,6 +276,174 @@
         "rust",
         "python",
         "typescript"
+      ]
+    },
+    {
+      "base_python": "Exception",
+      "base_typescript": "Error",
+      "code": null,
+      "doc": "Base of every error the host library reports.",
+      "fields": [],
+      "message_format": null,
+      "name": "HostLibraryError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "NOT_FOUND",
+      "doc": "The machine named does not exist.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineNotFoundError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "INVALID_SPEC",
+      "doc": "The request described a machine that cannot be built.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineSpecError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "BACKEND_ERROR",
+      "doc": "The backend failed while carrying the request out.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineBackendError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "UNAUTHORIZED",
+      "doc": "The caller is not allowed to do this.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineUnauthorizedError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "CONFLICT",
+      "doc": "The request conflicts with the machine's current state.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineConflictError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "REJECTED",
+      "doc": "A policy refused the request.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineRejectedError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "UNAVAILABLE",
+      "doc": "The backend cannot answer right now; the request may be retried.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineUnavailableError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "INVALID_INPUT",
+      "doc": "The method is unknown or its request did not parse.",
+      "fields": [],
+      "message_format": null,
+      "name": "HostLibraryInputError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "ABI_NOT_NEGOTIATED",
+      "doc": "The library and this binding disagree about the ABI version.",
+      "fields": [],
+      "message_format": null,
+      "name": "HostLibraryAbiError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "EMBEDDER",
+      "doc": "The library could not set itself up in this process.",
+      "fields": [],
+      "message_format": null,
+      "name": "HostLibraryEmbedderError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "INTERNAL",
+      "doc": "A fault inside the host library itself.",
+      "fields": [],
+      "message_format": null,
+      "name": "HostLibraryInternalError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
       ]
     }
   ],

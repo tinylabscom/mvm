@@ -31,13 +31,13 @@ impl MvmError {
     /// mapping has exactly one source of truth instead of drifting copies.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::NotFound { .. } => "NOT_FOUND",
-            Self::InvalidSpec { .. } => "INVALID_SPEC",
-            Self::Backend { .. } => "BACKEND_ERROR",
-            Self::Unauthorized { .. } => "UNAUTHORIZED",
-            Self::Conflict { .. } => "CONFLICT",
-            Self::Rejected { .. } => "REJECTED",
-            Self::Unavailable { .. } => "UNAVAILABLE",
+            Self::NotFound { .. } => crate::error_codes::NOT_FOUND,
+            Self::InvalidSpec { .. } => crate::error_codes::INVALID_SPEC,
+            Self::Backend { .. } => crate::error_codes::BACKEND_ERROR,
+            Self::Unauthorized { .. } => crate::error_codes::UNAUTHORIZED,
+            Self::Conflict { .. } => crate::error_codes::CONFLICT,
+            Self::Rejected { .. } => crate::error_codes::REJECTED,
+            Self::Unavailable { .. } => crate::error_codes::UNAVAILABLE,
         }
     }
 

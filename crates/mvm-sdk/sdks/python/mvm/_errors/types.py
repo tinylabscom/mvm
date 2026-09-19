@@ -98,6 +98,54 @@ class EmittingContextError(RuntimeError):
     """
 
 
+class HostLibraryError(Exception):
+    """Base of every error the host library reports."""
+
+
+class MachineNotFoundError(HostLibraryError):
+    """The machine named does not exist."""
+
+
+class MachineSpecError(HostLibraryError):
+    """The request described a machine that cannot be built."""
+
+
+class MachineBackendError(HostLibraryError):
+    """The backend failed while carrying the request out."""
+
+
+class MachineUnauthorizedError(HostLibraryError):
+    """The caller is not allowed to do this."""
+
+
+class MachineConflictError(HostLibraryError):
+    """The request conflicts with the machine's current state."""
+
+
+class MachineRejectedError(HostLibraryError):
+    """A policy refused the request."""
+
+
+class MachineUnavailableError(HostLibraryError):
+    """The backend cannot answer right now; the request may be retried."""
+
+
+class HostLibraryInputError(HostLibraryError):
+    """The method is unknown or its request did not parse."""
+
+
+class HostLibraryAbiError(HostLibraryError):
+    """The library and this binding disagree about the ABI version."""
+
+
+class HostLibraryEmbedderError(HostLibraryError):
+    """The library could not set itself up in this process."""
+
+
+class HostLibraryInternalError(HostLibraryError):
+    """A fault inside the host library itself."""
+
+
 #: The success status; any other value is a failure.
 STATUS_OK = 0
 
@@ -112,6 +160,22 @@ STATUS_ERRORS = {
     6: ServiceError,
     7: TransportError,
     8: InvalidInputError,
+}
+
+#: Host-library error code -> error type. Keyed by the `code` an
+#: error body carries, from `mvm_core::error_codes`.
+CODE_ERRORS = {
+    "NOT_FOUND": MachineNotFoundError,
+    "INVALID_SPEC": MachineSpecError,
+    "BACKEND_ERROR": MachineBackendError,
+    "UNAUTHORIZED": MachineUnauthorizedError,
+    "CONFLICT": MachineConflictError,
+    "REJECTED": MachineRejectedError,
+    "UNAVAILABLE": MachineUnavailableError,
+    "INVALID_INPUT": HostLibraryInputError,
+    "ABI_NOT_NEGOTIATED": HostLibraryAbiError,
+    "EMBEDDER": HostLibraryEmbedderError,
+    "INTERNAL": HostLibraryInternalError,
 }
 
 __all__ = [
@@ -132,6 +196,19 @@ __all__ = [
     "SecretInArgError",
     "SecretInArgWarning",
     "EmittingContextError",
+    "HostLibraryError",
+    "MachineNotFoundError",
+    "MachineSpecError",
+    "MachineBackendError",
+    "MachineUnauthorizedError",
+    "MachineConflictError",
+    "MachineRejectedError",
+    "MachineUnavailableError",
+    "HostLibraryInputError",
+    "HostLibraryAbiError",
+    "HostLibraryEmbedderError",
+    "HostLibraryInternalError",
     "STATUS_OK",
     "STATUS_ERRORS",
+    "CODE_ERRORS",
 ]
