@@ -220,10 +220,10 @@ Last updated: 2026-09-19
       audited when it is handed to the forward leg, with the outcome recorded
       separately (T9, #3286). A placeholder outside a header is refused and
       recorded rather than forwarded (T17, #3297). WS1's drive plane (#3260)
-      is complete locally:
+      is complete in PR #3505:
       the signed grant, dual host/guest workspace checks, bounded stream reuse,
       substituted workload environment and chain-signed refusal witnesses all
-      pass; queued PR delivery remains open. Open: the
+      pass; PR #3505 carries the implementation through queued delivery. Open: the
       example (#3258), the SDK's argv
       transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
       with its versioned ABI and read-only machine methods; the bindings that
