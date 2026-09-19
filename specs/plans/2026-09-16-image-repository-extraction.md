@@ -623,6 +623,18 @@ Design, taken 2026-09-19 against `main` at `fd555b5ef9`.
   lock-pinned manifest, and `local-dev`, for anything built locally in either
   checkout. A configured selector that cannot be used is an error; it never
   falls back to the in-tree flakes or to the released set.
+- **Local manifest.** A locally built set is described by the release
+  schema and read by the release parser. Only the producer differs: a release
+  names repository, workflow, tag and source commit; a local set names
+  `local_checkouts` (the image and mvm checkouts' commit and working-tree
+  state) and nothing else, and the two shapes share no field. The fields only a
+  release can carry — revocation channel, lineage, per-member pack hash and
+  SBOM — are required of a release and refused on a local set.
+  `verify_image_set` refuses a local producer at a `provenance` stage;
+  `verify_local_image_set` refuses a release producer there, a set whose
+  identities differ from the re-read checkouts at a `freshness` stage, a
+  member for another architecture, a missing role, and any artifact that is
+  not a regular file inside the set's directory. It always yields `local-dev`.
 - **Release binaries and production.** A binary built with the
   `release-channel` feature (`artifact_acquisition::compiled_channel()`, the
   existing contributor-versus-release switch) refuses `MVM_IMAGES_DIR` before
@@ -665,17 +677,23 @@ Delivery slices, one PR each:
       retargeted selection symlink, a non-directory, a non-checkout, a
       subdirectory of a checkout, a copy with no repository, and the release
       refusal. No consumer reads the selection yet.
-- [ ] W5b (`mvm-images`) — accept a local `mvm` through `--override-input`,
+- [x] W5b (`mvm-images`) — accept a local `mvm` through `--override-input`,
       build the host binaries from a given mvm checkout, and emit a local
       image-set manifest recording both identities.
-- [ ] W5c (`mvm`) — the local manifest in the released schema and parser, with
+      Delivered by tinylabscom/mvm-images#6: the override, `--mvm-checkout`,
+      and `emit-local-manifest.py`, whose producer is `local_checkouts` only.
+- [x] W5c (`mvm`) — the local manifest in the released schema and parser, with
       a provenance that is either a release producer or the two checkout
       identities; classification refuses a local manifest that claims a
       release producer, a manifest whose identities disagree with a
       re-verified checkout (stale), a missing role, and the wrong
       architecture.
-- [ ] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
+      Landed as `verify_local_image_set`, always `local-dev`; it also refuses
+      symlinked artifacts and any release-only field on a local set.
+- [x] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
       local outputs.
+      Landed as `LocalImageCache`: verified, then published by one `rename`;
+      re-verified on every read, evicted on failure, only ever `local-dev`.
 - [ ] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
       selected checkout inside the builder VM, plus the `bin/dev` wrapper that
       sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.

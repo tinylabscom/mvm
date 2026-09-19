@@ -12,18 +12,24 @@ use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
     IMAGE_SET_SCHEMA_VERSION, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
-    ImageSetRole, MemberTarget,
+    ImageSetProducer, ImageSetRole, LocalCheckouts, MemberTarget, ReleaseProducer,
 };
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
 
 /// Check the manifest is internally consistent: supported schema, members that
-/// are unique and well-formed, a tag that names the set version, lineage that
-/// points backwards, and pinned Nix inputs.
+/// are unique and well-formed, the fields its producer calls for and no
+/// others, lineage that points backwards, and pinned Nix inputs.
+///
+/// The same rules hold for a released and a locally built set; only the
+/// producer-specific fields differ. A release must carry a tag naming the set
+/// version, a revocation channel, and a signed pack and SBOM per member. A
+/// local set must carry none of those, and must name as its mvm source the
+/// mvm checkout it records.
 pub fn validate_structure(manifest: &ImageSetManifest) -> Result<(), ImageSetError> {
     check_schema_version(manifest)?;
     check_members(&manifest.members)?;
-    check_release_tag_version(manifest)?;
+    check_producer_fields(manifest)?;
     check_supersedes(manifest)?;
     check_nix_inputs(manifest)
 }
@@ -133,8 +139,80 @@ fn check_boot_protocol_presence(member: &ImageSetMember) -> Result<(), ImageSetE
     }
 }
 
-fn check_release_tag_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError> {
-    let release_tag = &manifest.producer.release_tag;
+fn check_producer_fields(manifest: &ImageSetManifest) -> Result<(), ImageSetError> {
+    match &manifest.producer {
+        ImageSetProducer::Release(release) => check_release_fields(manifest, release),
+        ImageSetProducer::LocalCheckouts(local) => check_local_fields(manifest, local),
+    }
+}
+
+fn check_release_fields(
+    manifest: &ImageSetManifest,
+    release: &ReleaseProducer,
+) -> Result<(), ImageSetError> {
+    check_release_tag_version(manifest, release)?;
+    if manifest.revocation_channel.is_none() {
+        return Err(ImageSetError::ReleaseFieldMissing {
+            field: "revocation_channel",
+        });
+    }
+    for member in &manifest.members {
+        let missing = [
+            ("pack_hash", member.pack_hash.is_none()),
+            ("sbom", member.sbom.is_none()),
+        ];
+        if let Some((field, _)) = missing.into_iter().find(|(_, absent)| *absent) {
+            return Err(ImageSetError::ReleaseMemberFieldMissing {
+                role: member.role,
+                target: member.target,
+                field,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Nothing a release is verified by may appear on a local set: carrying a
+/// revocation channel, a lineage, a pack hash or an SBOM would be a claim about
+/// publication that no one made.
+fn check_local_fields(
+    manifest: &ImageSetManifest,
+    local: &LocalCheckouts,
+) -> Result<(), ImageSetError> {
+    let present = [
+        ("revocation_channel", manifest.revocation_channel.is_some()),
+        ("supersedes", manifest.supersedes.is_some()),
+    ];
+    if let Some((field, _)) = present.into_iter().find(|(_, here)| *here) {
+        return Err(ImageSetError::LocalFieldPresent { field });
+    }
+    for member in &manifest.members {
+        let present = [
+            ("pack_hash", member.pack_hash.is_some()),
+            ("sbom", member.sbom.is_some()),
+        ];
+        if let Some((field, _)) = present.into_iter().find(|(_, here)| *here) {
+            return Err(ImageSetError::LocalMemberFieldPresent {
+                role: member.role,
+                target: member.target,
+                field,
+            });
+        }
+    }
+    if manifest.mvm_source_commit != local.mvm.commit {
+        return Err(ImageSetError::LocalMvmCommitMismatch {
+            declared: manifest.mvm_source_commit.clone(),
+            recorded: local.mvm.commit.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn check_release_tag_version(
+    manifest: &ImageSetManifest,
+    release: &ReleaseProducer,
+) -> Result<(), ImageSetError> {
+    let release_tag = &release.release_tag;
     if release_tag.version() == &manifest.set_version {
         Ok(())
     } else {
@@ -433,7 +511,7 @@ fn check_producer_matches_lock(
     manifest: &ImageSetManifest,
     lock: &ImageLock,
 ) -> Result<(), ImageSetError> {
-    let producer = &manifest.producer;
+    let producer = require_release(manifest)?;
     if producer.repository != lock.repository {
         return Err(ImageSetError::RepositoryMismatch {
             pinned: lock.repository.clone(),
@@ -453,6 +531,18 @@ fn check_producer_matches_lock(
         });
     }
     Ok(())
+}
+
+/// The release a manifest claims to be. A locally built set is refused here,
+/// whatever else about it matches: a lock pins releases, and nothing a local
+/// set carries can stand in for one.
+pub(super) fn require_release(
+    manifest: &ImageSetManifest,
+) -> Result<&ReleaseProducer, ImageSetError> {
+    manifest
+        .producer
+        .release()
+        .ok_or(ImageSetError::NotARelease)
 }
 
 fn check_signing_ref(lock: &ImageLock) -> Result<(), ImageSetError> {

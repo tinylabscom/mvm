@@ -196,8 +196,17 @@ Last updated: 2026-09-19
       - [x] W5a #3364: explicit `MVM_IMAGES_DIR` selector, `local-dev` /
             `verified-release` tiers, release-build and production refusals,
             `doctor` image-source line; W5b–W5m sliced in the plan.
-      - [ ] W5b–W5m #3364: local manifest, cache identity, wrapper, and each
-            in-tree image consumer moved onto the selector.
+      - [x] W5b #3364 (tinylabscom/mvm-images#6): `--override-input mvm
+            path:<checkout>`, `build-host-binaries.sh --mvm-checkout`, and a
+            local-manifest emitter whose producer is `local_checkouts` only.
+      - [x] W5c #3364: local manifest read by the release parser and
+            classified `local-dev`; refuses release claims, stale identities,
+            wrong arch, missing roles, symlinked artifacts.
+      - [x] W5d #3364: local image cache keyed on both checkouts, target,
+            arch, toolchain pins and flake locks; staged, verified, published
+            by one `rename`; re-verified on read and evicted on failure.
+      - [ ] W5e–W5m #3364: build verb, wrapper, and each in-tree image
+            consumer moved onto the selector.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

@@ -9,7 +9,7 @@
 use mvm_build::artifact_acquisition::{DistributionChannel, compiled_channel};
 use mvm_build::image_source::{
     ImageSource, ImageSourceError, MVM_IMAGES_DIR_ENV, RepoIdentity, configured_images_dir,
-    mvm_source_checkout, resolve_image_source,
+    mvm_source_checkout, probe_identity, resolve_image_source,
 };
 
 use super::Check;
@@ -26,7 +26,7 @@ impl MvmOrigin {
     fn detect(channel: DistributionChannel) -> Self {
         match mvm_source_checkout(channel) {
             None => Self::ReleaseBuild,
-            Some(root) => match RepoIdentity::probe(&root) {
+            Some(root) => match probe_identity(&root) {
                 Ok(identity) => Self::Checkout(identity),
                 Err(detail) => Self::Unreadable(detail),
             },
