@@ -624,15 +624,25 @@ mod tests {
 
     /// Records the request the forward leg was handed, so a test can prove the
     /// destination received the real credential without a network call.
+    ///
+    /// With `fail_after_send` set it records the request and then fails, which
+    /// is an upstream that took the credential and never answered.
     struct RecordingForwarder {
         seen: Mutex<Option<PreparedRequest>>,
         body: Vec<u8>,
+        fail_after_send: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
     impl Forwarder for RecordingForwarder {
         async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
             *self.seen.lock().expect("forwarder record lock") = Some(req);
+            if self
+                .fail_after_send
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ForwardError::Failed("upstream reset".into()));
+            }
             Ok(ForwardResponse {
                 status: 200,
                 headers: vec![
@@ -709,6 +719,7 @@ mod tests {
         let forwarder = Arc::new(RecordingForwarder {
             seen: Mutex::new(None),
             body: response_body.to_vec(),
+            fail_after_send: std::sync::atomic::AtomicBool::new(false),
         });
 
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -1323,6 +1334,92 @@ mod tests {
             !String::from_utf8_lossy(&response).contains(REAL_SECRET),
             "a refusal carries no credential"
         );
+    }
+
+    /// The credential that went out is on the chain even when no response
+    /// came back.
+    ///
+    /// `secret.substituted` used to be written only once the upstream response
+    /// had finished, so a forward that failed after sending (a reset, a
+    /// timeout, an oversized response) left the destination holding the real
+    /// key and the chain saying nothing. It is now written when the request is
+    /// handed to the forward leg, and how the forward ended is a separate entry
+    /// after it.
+    #[test]
+    fn substitution_is_audited_when_upstream_fails_after_send() {
+        let harness = harness(BOUND_HOST, b"never sent");
+        harness
+            .forwarder
+            .fail_after_send
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 502"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+
+        let seen = harness
+            .forwarder
+            .seen
+            .lock()
+            .expect("forwarder record lock")
+            .clone()
+            .expect("the forward leg ran");
+        assert!(
+            seen.headers
+                .iter()
+                .any(|(_, value)| value.contains(REAL_SECRET)),
+            "the forward leg was handed the real credential"
+        );
+
+        let chain = harness.audit_chain();
+        let substituted = chain
+            .find("secret.substituted")
+            .unwrap_or_else(|| panic!("the send must be on the chain: {chain}"));
+        let outcome = chain
+            .find("secret.forward_outcome")
+            .unwrap_or_else(|| panic!("the failure must be on the chain: {chain}"));
+        assert!(
+            substituted < outcome,
+            "the hand-off is recorded before the outcome: {chain}"
+        );
+        assert!(chain.contains("upstream_failed"), "{chain}");
+        assert!(chain.contains("model-api"), "{chain}");
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
+        assert!(
+            !chain.contains("upstream reset"),
+            "error text is not recorded: {chain}"
+        );
+    }
+
+    /// A forward that completes records its substitution once, and then that
+    /// it completed.
+    #[test]
+    fn a_completed_forward_records_the_substitution_once_then_completed() {
+        let harness = harness(BOUND_HOST, b"{\"ok\":true}");
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(status_line(&response).starts_with("HTTP/1.1 200"));
+
+        let chain = harness.audit_chain();
+        assert_eq!(
+            chain.matches("secret.substituted").count(),
+            1,
+            "one substitution, one entry: {chain}"
+        );
+        let substituted = chain.find("secret.substituted").expect("substituted");
+        let outcome = chain
+            .find("secret.forward_outcome")
+            .unwrap_or_else(|| panic!("no outcome entry: {chain}"));
+        assert!(substituted < outcome, "{chain}");
+        assert!(chain[outcome..].contains("completed"), "{chain}");
+        assert!(!chain.contains("upstream_failed"), "{chain}");
     }
 
     /// The 502 a policy refusal produces on a terminated flow is recorded in

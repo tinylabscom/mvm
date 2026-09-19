@@ -189,8 +189,10 @@ retires the second guest proxy (#3288).
       and repoint the CA-detection path that keys off a file nothing writes.
 - [ ] T7. Point the proxy environment at the one surviving guest proxy.
 - [ ] T8. Delete the absolute-form forward proxy and its guest binary (#3288).
-- [ ] T9. Audit the substitution when the credential is written, with the
-      outcome recorded separately (#3286).
+- [x] T9. Audit the substitution when the credential is written, with the
+      outcome recorded separately (#3286). "Written" is the hand-off to the
+      forward leg, which over-reports a connect failure and never
+      under-reports a send.
 - [ ] T10. One secret-resolution step shared by every admission path (#3284),
       and decide PID 1: wire the boot-time token or delete its guest parser.
 - [x] T11. Honor `--name` on the kept-alive entrypoint path (#3285).

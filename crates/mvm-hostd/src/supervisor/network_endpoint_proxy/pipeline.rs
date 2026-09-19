@@ -19,6 +19,7 @@ use crate::keyholder::{NetworkEndpoint, find_placeholder};
 use crate::supervisor::ai_meter;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
 use crate::supervisor::reversible_replacement::StreamingReinjector;
+use crate::supervisor::secret_audit::ForwardOutcome;
 
 /// Typed FlowMux request ceiling, independent of transport frame size.
 const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -55,10 +56,13 @@ impl SubstitutionService {
             method: request.method.clone(),
             url: request.url.clone(),
         });
+        self.audit_handoff(&flow).await;
         match self.forwarder.forward(request).await {
             Ok(mut response) => {
                 let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
                 self.audit_completed_flow(&flow, &reinject_proofs).await;
+                self.audit_forward_outcome(&flow, ForwardOutcome::Completed)
+                    .await;
                 if let Some(meta) = ai_meta {
                     self.record_ai_usage(&meta, response.status, &response.body)
                         .await;
@@ -69,9 +73,13 @@ impl SubstitutionService {
                     body_b64: B64.encode(response.body),
                 }
             }
-            Err(error) => WireResponse::Refused {
-                message: error.to_string(),
-            },
+            Err(error) => {
+                self.audit_forward_outcome(&flow, ForwardOutcome::UpstreamFailed)
+                    .await;
+                WireResponse::Refused {
+                    message: error.to_string(),
+                }
+            }
         }
     }
 
@@ -96,13 +104,17 @@ impl SubstitutionService {
             method: request.method.clone(),
             url: request.url.clone(),
         });
-        let upstream = self
-            .forwarder
-            .forward_stream(request)
-            .await
-            .map_err(|error| WireResponse::Refused {
-                message: error.to_string(),
-            })?;
+        self.audit_handoff(&flow).await;
+        let upstream = match self.forwarder.forward_stream(request).await {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                self.audit_forward_outcome(&flow, ForwardOutcome::UpstreamFailed)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: error.to_string(),
+                });
+            }
+        };
 
         self.transform_response_stream(flow, upstream, ai_meta)
             .await
@@ -305,21 +317,34 @@ impl SubstitutionService {
             }
             Ok(hits)
         });
-        let upstream = self
-            .forwarder
-            .forward_body_stream(request, receiver)
-            .await
-            .map_err(|error| WireResponse::Refused {
-                message: error.to_string(),
-            })?;
-        let request_hits = producer
-            .await
-            .map_err(|_| WireResponse::Refused {
-                message: "request transform task failed closed".into(),
-            })?
-            .map_err(|_| WireResponse::Refused {
-                message: "request transform failed closed".into(),
-            })?;
+        self.audit_handoff(&flow).await;
+        let upstream = match self.forwarder.forward_body_stream(request, receiver).await {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                self.audit_forward_outcome(&flow, ForwardOutcome::UpstreamFailed)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: error.to_string(),
+                });
+            }
+        };
+        let request_hits = match producer.await {
+            Ok(Ok(hits)) => hits,
+            Ok(Err(_)) => {
+                self.audit_forward_outcome(&flow, ForwardOutcome::RequestFailed)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: "request transform failed closed".into(),
+                });
+            }
+            Err(_) => {
+                self.audit_forward_outcome(&flow, ForwardOutcome::RequestFailed)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: "request transform task failed closed".into(),
+                });
+            }
+        };
         flow.redaction_hits.merge(request_hits);
         self.transform_response_stream(flow, upstream, ai_meta)
             .await
@@ -355,6 +380,8 @@ impl SubstitutionService {
                         "response_header_detector_failed",
                     )
                     .await;
+                    self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                        .await;
                     return Err(WireResponse::Refused {
                         message: "sensitive-data detector failed closed; refusing response".into(),
                     });
@@ -371,30 +398,37 @@ impl SubstitutionService {
         let response_destination = flow.destination.clone();
         let meter_streaming = ai_meta.is_some();
         tokio::spawn(async move {
-            let mut redactor = StreamingRedactor::new();
-            let mut ai_body_buffer = if meter_streaming {
-                Some(Vec::with_capacity(0))
-            } else {
-                None
-            };
-            let mut reinjector = StreamingReinjector::new();
-            while let Some(next) = upstream.body.recv().await {
-                let chunk = match next {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
+            // Every exit below yields how the forward ended, and the outcome is
+            // recorded once, after the block, whichever exit was taken.
+            let outcome = async {
+                let mut redactor = StreamingRedactor::new();
+                let mut ai_body_buffer = if meter_streaming {
+                    Some(Vec::with_capacity(0))
+                } else {
+                    None
                 };
-                if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
-                    buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
-                }) {
-                    buf.extend_from_slice(&chunk);
-                }
-                let (reintroduced, proofs) = reinjector.push(&mut flow.replacement_flow, &chunk);
-                reinject_proofs.extend(proofs);
-                let (ready, hits) =
-                    match redactor.push(&service.redactor, &flow.redaction_action, &reintroduced) {
+                let mut reinjector = StreamingReinjector::new();
+                while let Some(next) = upstream.body.recv().await {
+                    let chunk = match next {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            let _ = sender.send(Err(error)).await;
+                            return ForwardOutcome::ResponseFailed;
+                        }
+                    };
+                    if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
+                        buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
+                    }) {
+                        buf.extend_from_slice(&chunk);
+                    }
+                    let (reintroduced, proofs) =
+                        reinjector.push(&mut flow.replacement_flow, &chunk);
+                    reinject_proofs.extend(proofs);
+                    let (ready, hits) = match redactor.push(
+                        &service.redactor,
+                        &flow.redaction_action,
+                        &reintroduced,
+                    ) {
                         Ok(result) => result,
                         Err(_) => {
                             service
@@ -408,9 +442,43 @@ impl SubstitutionService {
                                     "sensitive-data detector failed closed".into(),
                                 )))
                                 .await;
-                            return;
+                            return ForwardOutcome::ResponseRefused;
                         }
                     };
+                    flow.redaction_hits.merge(hits);
+                    if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                        service
+                            .audit_fail_closed(
+                                response_destination.as_deref(),
+                                "response_body_stream_canceled",
+                            )
+                            .await;
+                        return ForwardOutcome::Canceled;
+                    }
+                }
+                let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+                reinject_proofs.extend(proofs);
+                let (ready, hits) = match redactor.push(
+                    &service.redactor,
+                    &flow.redaction_action,
+                    &reintroduced_tail,
+                ) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        service
+                            .audit_fail_closed(
+                                response_destination.as_deref(),
+                                "response_body_detector_failed",
+                            )
+                            .await;
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(
+                                "sensitive-data detector failed closed".into(),
+                            )))
+                            .await;
+                        return ForwardOutcome::ResponseRefused;
+                    }
+                };
                 flow.redaction_hits.merge(hits);
                 if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
                     service
@@ -419,75 +487,46 @@ impl SubstitutionService {
                             "response_body_stream_canceled",
                         )
                         .await;
-                    return;
+                    return ForwardOutcome::Canceled;
                 }
-            }
-            let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
-            reinject_proofs.extend(proofs);
-            let (ready, hits) = match redactor.push(
-                &service.redactor,
-                &flow.redaction_action,
-                &reintroduced_tail,
-            ) {
-                Ok(result) => result,
-                Err(_) => {
+                let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action)
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        service
+                            .audit_fail_closed(
+                                response_destination.as_deref(),
+                                "response_body_detector_failed",
+                            )
+                            .await;
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(
+                                "sensitive-data detector failed closed".into(),
+                            )))
+                            .await;
+                        return ForwardOutcome::ResponseRefused;
+                    }
+                };
+                flow.redaction_hits.merge(hits);
+                if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
                     service
                         .audit_fail_closed(
                             response_destination.as_deref(),
-                            "response_body_detector_failed",
+                            "response_body_stream_canceled",
                         )
                         .await;
-                    let _ = sender
-                        .send(Err(ForwardError::Failed(
-                            "sensitive-data detector failed closed".into(),
-                        )))
-                        .await;
-                    return;
+                    return ForwardOutcome::Canceled;
                 }
-            };
-            flow.redaction_hits.merge(hits);
-            if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
-                service
-                    .audit_fail_closed(
-                        response_destination.as_deref(),
-                        "response_body_stream_canceled",
-                    )
-                    .await;
-                return;
-            }
-            let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
-                Ok(result) => result,
-                Err(_) => {
+                service.audit_completed_flow(&flow, &reinject_proofs).await;
+                if let (Some(meta), Some(body)) = (ai_meta, ai_body_buffer) {
                     service
-                        .audit_fail_closed(
-                            response_destination.as_deref(),
-                            "response_body_detector_failed",
-                        )
+                        .record_streaming_ai_usage(&meta, response_status, &body)
                         .await;
-                    let _ = sender
-                        .send(Err(ForwardError::Failed(
-                            "sensitive-data detector failed closed".into(),
-                        )))
-                        .await;
-                    return;
                 }
-            };
-            flow.redaction_hits.merge(hits);
-            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
-                service
-                    .audit_fail_closed(
-                        response_destination.as_deref(),
-                        "response_body_stream_canceled",
-                    )
-                    .await;
-                return;
+                ForwardOutcome::Completed
             }
-            service.audit_completed_flow(&flow, &reinject_proofs).await;
-            if let (Some(meta), Some(body)) = (ai_meta, ai_body_buffer) {
-                service
-                    .record_streaming_ai_usage(&meta, response_status, &body)
-                    .await;
-            }
+            .await;
+            service.audit_forward_outcome(&flow, outcome).await;
         });
 
         Ok(ForwardStreamResponse {

@@ -110,8 +110,11 @@ process ever sees.
   security is the destination-binding and host-side-only injection, not the
   token's opacity.
 - Every substitution emits a `secret.substituted` audit entry (name,
-  destination, auth-type — never the value); every dropped leak emits a
-  drop entry. The chain-signed audit verifier covers both; `mvmctl trust
+  destination, auth-type — never the value) when the request is handed to the
+  forward leg, before any response, so a forward that fails after sending
+  still records that the credential went out. A separate
+  `secret.forward_outcome` entry records how the forward ended. Every dropped
+  leak emits a drop entry. The chain-signed audit verifier covers both; `mvmctl trust
   audit verify` surfaces drift.
 
 ## Consequences
