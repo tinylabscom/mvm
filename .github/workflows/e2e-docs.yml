@@ -72,7 +72,7 @@ jobs:
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API
       # socket, which otherwise surfaces as an unhelpful socket timeout.
-      FC_VERSION: v1.14.1
+      FC_VERSION: v1.17.0
       # The published builder/default-image paths fail closed unless the
       # source-built binary can verify their signed checksum manifests.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap

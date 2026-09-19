@@ -1009,7 +1009,14 @@ mod tests {
         crate::microvm::api_put_socket(
             &sock,
             "/drives/rootfs",
-            &crate::microvm::drive_body("rootfs", &rootfs_copy.to_string_lossy(), true, false),
+            &crate::microvm::FcDrive {
+                drive_id: "rootfs",
+                path_on_host: &rootfs_copy.to_string_lossy(),
+                is_root_device: true,
+                is_read_only: false,
+                discard: false,
+            }
+            .body(),
         )?;
         if let Some(tap) = tap {
             crate::microvm::api_put_socket(
@@ -1177,7 +1184,14 @@ mod tests {
         crate::microvm::api_put_socket(
             &sock,
             "/drives/rootfs",
-            &crate::microvm::drive_body("rootfs", &images.rootfs.to_string_lossy(), true, false),
+            &crate::microvm::FcDrive {
+                drive_id: "rootfs",
+                path_on_host: &images.rootfs.to_string_lossy(),
+                is_root_device: true,
+                is_read_only: false,
+                discard: false,
+            }
+            .body(),
         )
         .expect("configure rootfs drive");
         crate::microvm::api_put_socket(&sock, "/actions", r#"{"action_type":"InstanceStart"}"#)

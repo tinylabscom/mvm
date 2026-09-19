@@ -178,7 +178,7 @@ runcmd:
   # `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. If you bump
   # that constant, bump FC_VERSION here.
   - |
-    FC_VERSION="v1.14.1"
+    FC_VERSION="v1.17.0"
     ARCH=$(uname -m)   # x86_64 or aarch64
     if ! command -v firecracker >/dev/null \
        || ! firecracker --version 2>&1 | grep -q "$FC_VERSION"; then

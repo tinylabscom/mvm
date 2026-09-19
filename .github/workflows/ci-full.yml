@@ -105,7 +105,7 @@ jobs:
     timeout-minutes: 45
     env:
       # Must track `FC_VERSION_DEFAULT` in mvm-core, as the merge-queue lane does.
-      FC_VERSION: v1.14.1
+      FC_VERSION: v1.17.0
       # Hosted runners protect their distro kernel under /boot.
       MVM_KERNEL_SOURCE: download
     steps:
@@ -203,7 +203,7 @@ jobs:
     timeout-minutes: 240
     env:
       # Must track `FC_VERSION_DEFAULT` in mvm-core.
-      FC_VERSION: v1.14.1
+      FC_VERSION: v1.17.0
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
       # Hosted runners protect their distro kernel under /boot; the workload
       # kernel is not what this lane proves.
