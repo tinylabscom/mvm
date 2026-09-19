@@ -540,9 +540,9 @@ pub fn inject_mvm_runtime(
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
     let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
-    let _ = std::fs::remove_file(&agent_dest);
-    let _ = std::fs::remove_file(&netinit_dest);
-    let _ = std::fs::remove_file(&egress_client_dest);
+    remove_if_present(&agent_dest)?;
+    remove_if_present(&netinit_dest)?;
+    remove_if_present(&egress_client_dest)?;
 
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
@@ -643,7 +643,7 @@ fn copy_file_with_mode(src: &Path, dst: &Path, mode: u32) -> Result<(), io::Erro
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::remove_file(dst);
+    remove_if_present(dst)?;
     std::fs::copy(src, dst)?;
     set_mode(dst, mode)
 }
@@ -906,6 +906,15 @@ mod tests {
         folded
     }
 
+    /// The names `dir` lists, read directly rather than through the check
+    /// under test.
+    fn listing(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
     /// Plant `planted_rel`, whose component `alias` inside `parent_rel` is
     /// another spelling of mvm's `mvm_name`, and inject. On a host that folds
     /// the two names the injection must refuse, naming the fold; on one that
@@ -921,7 +930,7 @@ mod tests {
         let parent = shaped.root.join(parent_rel);
         std::fs::create_dir_all(&parent).unwrap();
         // The image ships only its own spelling.
-        if directory_lists_exactly(&parent, mvm_name.as_ref()).unwrap() {
+        if listing(&parent).iter().any(|name| name == mvm_name) {
             std::fs::remove_dir_all(parent.join(mvm_name)).unwrap();
         }
         let aliases = folds(&parent, alias, mvm_name);
@@ -941,7 +950,7 @@ mod tests {
                  proven by lists_exactly_is_byte_equality instead"
             );
             result.expect("distinct names on a non-folding filesystem");
-            assert!(directory_lists_exactly(&parent, mvm_name.as_ref()).unwrap());
+            assert!(listing(&parent).iter().any(|name| name == mvm_name));
         }
     }
 
@@ -1003,6 +1012,30 @@ mod tests {
             first_shaped_component(&shaped.root, Path::new("usr/lib")).unwrap(),
             None
         );
+    }
+
+    /// A guest binary the image shipped is stripped; one that cannot be
+    /// removed is an error, not a silent skip that leaves the image's copy
+    /// shadowing the runtime overlay.
+    #[test]
+    fn a_guest_binary_the_injection_cannot_strip_is_an_error() {
+        let shaped = shaped_root();
+        let bin_dir = shaped.root.join("usr/local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(shaped.root.join(AGENT_DEST), b"image's own agent").unwrap();
+        std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let removable = std::fs::write(bin_dir.join("probe"), b"").is_ok();
+
+        let result = inject_mvm_runtime(&shaped.root, &shaped.bins, None, false);
+
+        std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if removable {
+            eprintln!("SKIPPED: this user can write a 0555 directory, so removal cannot fail");
+            return;
+        }
+        let err = result.expect_err("an unremovable image binary must fail the injection");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(shaped.root.join(AGENT_DEST).exists());
     }
 
     /// A directory where the account database goes cannot be adopted; a FIFO

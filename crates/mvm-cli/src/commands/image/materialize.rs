@@ -293,19 +293,26 @@ pub(super) fn prepare_rootfs_only_tree(
     identity: &str,
 ) -> Result<PathBuf> {
     let prepared_root = prepared_virtiofs_root(cache_root, identity, &oci_runtime_tag(cache_root));
+    // Shared by every run of this image: without the lock a second run sees a
+    // half-copied tree exist and boots it. Taken before the raw tree's lock,
+    // and no path takes them the other way round.
+    let _prepared = mvm_build::run_image::lock_unpacked_tree(&prepared_root)?;
     if prepared_root.exists() {
         return Ok(prepared_root);
     }
     if let Some(parent) = prepared_root.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    copy_tree(raw_unpacked_root, &prepared_root).with_context(|| {
-        format!(
-            "copy raw OCI tree {} -> {}",
-            raw_unpacked_root.display(),
-            prepared_root.display()
-        )
-    })?;
+    {
+        let _raw = mvm_build::run_image::lock_unpacked_tree(raw_unpacked_root)?;
+        copy_tree(raw_unpacked_root, &prepared_root).with_context(|| {
+            format!(
+                "copy raw OCI tree {} -> {}",
+                raw_unpacked_root.display(),
+                prepared_root.display()
+            )
+        })?;
+    }
     let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
         .context("resolve guest binaries for rootfs-only OCI tree")?;
     mvm_build::oci_runtime_inject::inject_mvm_runtime(&prepared_root, &bins, None, false)
@@ -326,18 +333,29 @@ pub(super) fn materialize_overlay_lean_rootfs(
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
 ) -> Result<()> {
-    let staging_root = rootfs_abs.with_extension("staging");
-    if staging_root.exists() {
-        fs::remove_dir_all(&staging_root)
-            .with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
+    // A staging tree of this run's own: a fixed name was shared by every
+    // concurrent run of the image, each removing and refilling it under the
+    // others.
+    let staging_parent = rootfs_abs
+        .parent()
+        .with_context(|| format!("rootfs path has no parent dir: {}", rootfs_abs.display()))?;
+    fs::create_dir_all(staging_parent)
+        .with_context(|| format!("create {}", staging_parent.display()))?;
+    let staging_dir = tempfile::Builder::new()
+        .prefix("staging-")
+        .tempdir_in(staging_parent)
+        .with_context(|| format!("create a staging dir in {}", staging_parent.display()))?;
+    let staging_root = staging_dir.path().join("rootfs");
+    {
+        let _raw = mvm_build::run_image::lock_unpacked_tree(raw_unpacked_root)?;
+        copy_tree(raw_unpacked_root, &staging_root).with_context(|| {
+            format!(
+                "copy raw OCI tree {} -> {}",
+                raw_unpacked_root.display(),
+                staging_root.display()
+            )
+        })?;
     }
-    copy_tree(raw_unpacked_root, &staging_root).with_context(|| {
-        format!(
-            "copy raw OCI tree {} -> {}",
-            raw_unpacked_root.display(),
-            staging_root.display()
-        )
-    })?;
     let result = inject_runtime_and_materialize(MaterializeCall {
         cache_root,
         unpacked_root: &staging_root,
@@ -349,13 +367,11 @@ pub(super) fn materialize_overlay_lean_rootfs(
         owners,
         evidence: None,
     });
-    let cleanup = fs::remove_dir_all(&staging_root);
-    if let Err(err) = cleanup
-        && staging_root.exists()
-    {
+    let staging_path = staging_dir.path().to_path_buf();
+    if let Err(err) = staging_dir.close() {
         tracing::warn!(
             error = %err,
-            staging = %staging_root.display(),
+            staging = %staging_path.display(),
             "failed to remove OCI runtime-lean staging tree"
         );
     }

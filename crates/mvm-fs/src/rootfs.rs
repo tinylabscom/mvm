@@ -998,7 +998,7 @@ fn stream_ext4_to_file(
 /// widening an owner-unreadable mode (e.g. a 0000 `/etc/shadow`) and restoring
 /// it afterwards. The captured guest mode is unaffected — the walk reads modes
 /// via metadata, not via this read.
-fn read_file_for_guest_image(path: &Path) -> std::io::Result<Vec<u8>> {
+pub fn read_file_for_guest_image(path: &Path) -> std::io::Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {

@@ -164,6 +164,11 @@ data directory ships owned by its own account boots with root-owned files.
         as fresh inodes, and checks the result by listing each directory;
   - [x] a deferred layer node at an injected path is refused rather than laid
         over the runtime's file;
+  - [x] concurrent runs of one image no longer inject into its shared unpacked
+        tree at once (a sealed image could be walked mid-way through a dev
+        run's injection): every writer and copier of a tree takes its per-tree
+        lock, the output is locked across materialization, and the
+        overlay-lean staging tree is private per run;
   - [x] the builder-VM writer sets the claimed paths back to root after its
         copy;
   - [x] a builder-VM refusal names the route that reached it;
@@ -176,11 +181,15 @@ data directory ships owned by its own account boots with root-owned files.
         instead of the link, so an absolute link in an image read a host file
         into the rootfs; staging and the input archive now carry links as
         links (#3430);
-  - [ ] the input tar records the host account's uid and gid for every file,
-        and the guest extracts and copies them, so every path mvm does not
-        claim is owned by the host account rather than root. The image root
-        and every claimed path are set back to root (#3430); the rest is
-        open;
+  - [x] the input tar recorded the host account's uid and gid for every file,
+        and the guest extracted and copied them, so every path mvm does not
+        claim was owned by the host account; the rootfs now reaches the builder
+        as one archive the host writes with every entry owned 0:0 (#3430);
+  - [x] the generic work-input staging dropped `node_modules`, `target`,
+        `dist`, `.git` and `result*` at any depth (a node image lost
+        `/usr/local/lib/node_modules`) and read special files (a FIFO hung
+        the copy); the one-file archive passes through staging untouched and
+        omits special files the way the in-process writer does (#3430);
   - [ ] on macOS the unpacker's hard-link fallback removes the link source,
         not the destination, when an earlier layer wrote it, and then refuses
         the link.

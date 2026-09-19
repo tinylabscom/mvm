@@ -13,7 +13,7 @@
 //!   ext4 creation inside the Linux builder boundary for trees the
 //!   pure writer structurally can't represent.
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any(test, feature = "builder-vm"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -403,6 +403,14 @@ pub enum RootfsError {
     )]
     LayerOwnershipUnsupported { count: usize, route: BuilderVmRoute },
 
+    #[cfg(any(test, feature = "builder-vm"))]
+    #[error("archiving {path} for the builder VM: {source}")]
+    ArchiveTree {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
@@ -617,8 +625,19 @@ fn materialize_ext4_in_builder_vm(
         device_size_bytes,
         &crate::oci_runtime_inject::injected_root_owned_paths(),
     );
+    // Beside the output rather than in the system temp dir: this path runs for
+    // the images too large for the in-process writer, and the archive is the
+    // size of the tree.
+    let work = tempfile::Builder::new()
+        .prefix("mvm-rootfs-archive-")
+        .tempdir_in(&artifact_out)
+        .map_err(|source| RootfsError::ArchiveTree {
+            path: artifact_out.clone(),
+            source,
+        })?;
+    write_rootfs_archive(&input.unpacked_root, &work.path().join(ROOTFS_ARCHIVE_NAME))?;
     let shell_job = BuilderShellJob {
-        work_dir: input.unpacked_root.clone(),
+        work_dir: work.path().to_path_buf(),
         artifact_out,
         script,
         extra_disks: vec![BuilderExtraDisk {
@@ -688,10 +707,18 @@ fn ext4_block_count(device_size_bytes: u64) -> u64 {
 /// mounts on a workload backend whose virtio-blk device reports slightly
 /// fewer blocks than the builder VM saw (see [`EXT4_DEVICE_MARGIN_BYTES`]).
 ///
-/// `root_owned` names the paths the image builder owns. The copy keeps
-/// whatever ids the transport carried in — the host account's, not root's —
-/// so the script sets each of those paths back to root after it, the same
-/// guarantee the in-process writer gives through the owner table.
+/// The tree arrives as [`ROOTFS_ARCHIVE_NAME`], written by
+/// [`write_rootfs_archive`] with every entry owned 0:0. `root_owned` names the
+/// paths the image builder owns; the script sets each back to root after the
+/// extraction anyway, the same guarantee the in-process writer gives through
+/// the owner table, so it does not rest on the archive alone.
+///
+/// What `-h` does and does not promise: `chown -h` does not follow the final
+/// component, and `chown -Rh` does not follow links it meets while recursing.
+/// Neither stops the kernel resolving a symbolic link in an *intermediate*
+/// component of the path it is given. That is safe here only because the host
+/// refused, before injection, any tree in which a component leading to a
+/// claimed path is a link.
 #[cfg(any(test, feature = "builder-vm"))]
 pub(crate) fn ext4_materialization_script(
     guest_output_device: &str,
@@ -716,7 +743,7 @@ mkdir -p "$MOUNTPOINT"
 /sbin/mkfs.ext4 -F -b {block_size} "$ROOTFS_DEV" {block_count}
 mount -t ext4 "$ROOTFS_DEV" "$MOUNTPOINT"
 trap 'umount "$MOUNTPOINT" 2>/dev/null || true' EXIT
-cp -aR /work/. "$MOUNTPOINT"/
+tar -xf /work/{archive} -C "$MOUNTPOINT"
 chown -h 0:0 "$MOUNTPOINT"
 {chown_root_owned}sync
 umount "$MOUNTPOINT"
@@ -726,7 +753,119 @@ trap - EXIT
         block_size = EXT4_BLOCK_SIZE_BYTES,
         block_count = ext4_block_count(device_size_bytes),
         chown_root_owned = chown_root_owned_lines(root_owned),
+        archive = ROOTFS_ARCHIVE_NAME,
     )
+}
+
+/// The one file the builder VM's `/work` holds for a rootfs job: the tree as a
+/// tar the host wrote itself.
+#[cfg(any(test, feature = "builder-vm"))]
+const ROOTFS_ARCHIVE_NAME: &str = "mvm-rootfs.tar";
+
+/// Archive the tree at `root` into `out` for the builder VM to extract.
+///
+/// The builder's generic work-input staging is built for source checkouts: it
+/// drops `node_modules`, `target`, `dist`, `.git` and the rest at any depth,
+/// and copies a special file by reading it. Applied to an image that deleted a
+/// node image's `/usr/local/lib/node_modules`, and would hang on a FIFO. One
+/// archive file passes through that staging untouched, so the tree the image
+/// writer sees is the tree the host holds.
+///
+/// Each entry is written the way the image should hold it, not the way the
+/// host does:
+/// - owned 0:0, which is every owner this writer is allowed to emit (a
+///   non-root layer owner outside the claimed paths is refused before this
+///   runs), so the guest's `tar` does not restore the host account's ids;
+/// - a symbolic link as a link, never its host target;
+/// - an owner-unreadable file read the way the in-process writer reads one;
+/// - a device, FIFO or socket omitted, as the in-process writer omits it:
+///   `devtmpfs` supplies `/dev` at boot.
+///
+/// Entries are sorted, so the archive is a function of the tree.
+#[cfg(any(test, feature = "builder-vm"))]
+pub(crate) fn write_rootfs_archive(root: &Path, out: &Path) -> Result<(), RootfsError> {
+    let archive_err = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| RootfsError::ArchiveTree { path, source }
+    };
+    let file = std::fs::File::create(out).map_err(archive_err(out))?;
+    let mut builder = tar::Builder::new(std::io::BufWriter::new(file));
+    builder.follow_symlinks(false);
+    let mut stack = vec![PathBuf::new()];
+    while let Some(dir_rel) = stack.pop() {
+        let dir = root.join(&dir_rel);
+        let mut names = std::fs::read_dir(&dir)
+            .map_err(archive_err(&dir))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(archive_err(&dir))?;
+        names.sort();
+        let mut subdirs = Vec::new();
+        for name in names {
+            let rel = dir_rel.join(&name);
+            if append_archive_entry(&mut builder, root, &rel)? {
+                subdirs.push(rel);
+            }
+        }
+        // Reversed, so popping visits subdirectories in sorted order.
+        stack.extend(subdirs.into_iter().rev());
+    }
+    builder
+        .into_inner()
+        .and_then(|writer| {
+            writer
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)
+        })
+        .and_then(|file| file.sync_all())
+        .map_err(archive_err(out))
+}
+
+/// Append the node at `root/rel` to `builder`. Returns whether it is a
+/// directory the walk should descend into.
+#[cfg(any(test, feature = "builder-vm"))]
+fn append_archive_entry<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    root: &Path,
+    rel: &Path,
+) -> Result<bool, RootfsError> {
+    let path = root.join(rel);
+    let err = |source| RootfsError::ArchiveTree {
+        path: path.clone(),
+        source,
+    };
+    let meta = std::fs::symlink_metadata(&path).map_err(err)?;
+    let file_type = meta.file_type();
+    if !(file_type.is_dir() || file_type.is_file() || file_type.is_symlink()) {
+        return Ok(false);
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata_in_mode(&meta, tar::HeaderMode::Complete);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_username("root").map_err(err)?;
+    header.set_groupname("root").map_err(err)?;
+    if file_type.is_symlink() {
+        header.set_size(0);
+        let target = std::fs::read_link(&path).map_err(err)?;
+        builder
+            .append_link(&mut header, rel, &target)
+            .map_err(err)?;
+        Ok(false)
+    } else if file_type.is_dir() {
+        header.set_size(0);
+        builder
+            .append_data(&mut header, rel, std::io::empty())
+            .map_err(err)?;
+        Ok(true)
+    } else {
+        let data = mvm_fs::rootfs::read_file_for_guest_image(&path).map_err(err)?;
+        header.set_size(data.len() as u64);
+        builder
+            .append_data(&mut header, rel, data.as_slice())
+            .map_err(err)?;
+        Ok(false)
+    }
 }
 
 /// One `chown_root` line per claimed path and one `chown_root_tree` line per
@@ -1193,7 +1332,8 @@ mod tests {
         // so the image mounts on a backend reporting fewer blocks.
         assert!(script.contains("/sbin/mkfs.ext4 -F -b 4096 \"$ROOTFS_DEV\""));
         assert!(script.contains("mount -t ext4 \"$ROOTFS_DEV\" \"$MOUNTPOINT\""));
-        assert!(script.contains("cp -aR /work/. \"$MOUNTPOINT\"/"));
+        assert!(script.contains("tar -xf /work/mvm-rootfs.tar -C \"$MOUNTPOINT\""));
+        assert!(!script.contains("cp -aR"));
         assert!(script.contains("umount \"$MOUNTPOINT\""));
         assert!(!script.contains("mke2fs -d"));
     }
@@ -1206,7 +1346,9 @@ mod tests {
     fn script_sets_every_injected_path_back_to_root_after_the_copy() {
         let claimed = crate::oci_runtime_inject::injected_root_owned_paths();
         let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024, &claimed);
-        let copy = script.find("cp -aR /work/.").expect("copies the tree");
+        let copy = script
+            .find("tar -xf /work/mvm-rootfs.tar")
+            .expect("extracts the tree");
         let image_root = script
             .find("\nchown -h 0:0 \"$MOUNTPOINT\"\n")
             .expect("the image root is set back to root, without following a link");
@@ -1247,6 +1389,141 @@ mod tests {
         );
         assert!(script.contains(r#"if [ -e "$1" ] || [ -L "$1" ]; then chown -h 0:0 "$1"; fi"#));
         assert!(script.contains("chown_root \"$MOUNTPOINT\"'/etc/absent'"));
+    }
+
+    fn archive_entries(archive: &Path) -> Vec<(String, tar::Header, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut reader = tar::Archive::new(std::fs::File::open(archive).unwrap());
+        for entry in reader.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let header = entry.header().clone();
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut body).unwrap();
+            out.push((path.trim_end_matches('/').to_string(), header, body));
+        }
+        out
+    }
+
+    /// The builder VM receives the tree the host holds. The generic
+    /// work-input staging drops `node_modules`, `target`, `dist`, `.git` at
+    /// any depth; the archive is one file, so a node image keeps
+    /// `/usr/local/lib/node_modules`.
+    #[test]
+    fn the_rootfs_archive_keeps_names_the_workspace_staging_drops() {
+        let tree = tempfile::tempdir().unwrap();
+        for dir in [
+            "usr/local/lib/node_modules/npm",
+            "srv/target",
+            "srv/dist",
+            "srv/.git",
+            "srv/result",
+        ] {
+            std::fs::create_dir_all(tree.path().join(dir)).unwrap();
+        }
+        std::fs::write(
+            tree.path().join("usr/local/lib/node_modules/npm/index.js"),
+            b"js",
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(tree.path(), &archive).unwrap();
+
+        let paths: Vec<String> = archive_entries(&archive).into_iter().map(|e| e.0).collect();
+        for kept in [
+            "usr/local/lib/node_modules/npm/index.js",
+            "srv/target",
+            "srv/dist",
+            "srv/.git",
+            "srv/result",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == kept),
+                "{kept} missing from {paths:?}"
+            );
+        }
+        let again = out.path().join("again.tar");
+        write_rootfs_archive(tree.path(), &again).unwrap();
+        assert_eq!(
+            std::fs::read(&archive).unwrap(),
+            std::fs::read(&again).unwrap(),
+            "the archive is a function of the tree"
+        );
+    }
+
+    /// Every entry is root's whatever the host account is, keeps its mode
+    /// (setuid included), and a link is stored as a link to the target it
+    /// names, never the target's bytes.
+    #[test]
+    fn the_rootfs_archive_is_root_owned_mode_faithful_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let host = tempfile::tempdir().unwrap();
+        let secret = host.path().join("id_ed25519");
+        std::fs::write(&secret, b"host private key").unwrap();
+        let tree = host.path().join("tree");
+        std::fs::create_dir_all(tree.join("usr/bin")).unwrap();
+        let su = tree.join("usr/bin/su");
+        std::fs::write(&su, b"elf").unwrap();
+        std::fs::set_permissions(&su, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let shadow = tree.join("shadow");
+        std::fs::write(&shadow, b"root:*:").unwrap();
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(&secret, tree.join("k")).unwrap();
+        let archive = host.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(&tree, &archive).unwrap();
+
+        let entries = archive_entries(&archive);
+        for (path, header, body) in &entries {
+            assert_eq!(header.uid().unwrap(), 0, "{path}");
+            assert_eq!(header.gid().unwrap(), 0, "{path}");
+            assert!(
+                !body.windows(16).any(|w| w == b"host private key"),
+                "{path} carries the host file a link names"
+            );
+        }
+        let find = |name: &str| entries.iter().find(|e| e.0 == name).unwrap();
+        assert_eq!(find("usr/bin/su").1.mode().unwrap() & 0o7777, 0o4755);
+        let (_, shadow_header, shadow_body) = find("shadow");
+        assert_eq!(shadow_header.mode().unwrap() & 0o7777, 0o000);
+        assert_eq!(
+            shadow_body, b"root:*:",
+            "an owner-unreadable file is still read"
+        );
+        let (_, link, _) = find("k");
+        assert_eq!(link.entry_type(), tar::EntryType::Symlink);
+        assert_eq!(link.link_name().unwrap().unwrap(), secret);
+        assert_eq!(
+            std::fs::metadata(&shadow).unwrap().permissions().mode() & 0o7777,
+            0o000,
+            "the host file's mode is restored"
+        );
+    }
+
+    /// A FIFO is omitted, as the in-process writer omits it, rather than read
+    /// (which blocks forever) or failing the archive.
+    #[test]
+    fn the_rootfs_archive_omits_a_fifo_instead_of_reading_it() {
+        let tree = tempfile::tempdir().unwrap();
+        let fifo = tree.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(tree.path().join("regular"), b"x").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join(ROOTFS_ARCHIVE_NAME);
+
+        write_rootfs_archive(tree.path(), &archive).unwrap();
+
+        let paths: Vec<String> = archive_entries(&archive).into_iter().map(|e| e.0).collect();
+        assert_eq!(paths, ["regular"]);
     }
 
     #[test]

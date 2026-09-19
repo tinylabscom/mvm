@@ -43,14 +43,41 @@ being root-owned.
   The image writer lays deferred nodes over the walked tree, so a deferred
   symlink at `/etc/passwd` would have replaced the runtime's file.
 - Builder-VM writer:
-  - Its input staging and input archive carry symbolic links as links. They
-    used to follow them, so an image link such as
+  - The tree now reaches the builder as one archive the host writes itself
+    (`mvm-rootfs.tar`) and the guest extracts into the new filesystem. The
+    generic work-input staging, built for source checkouts, dropped
+    `node_modules`, `target`, `dist`, `.git` and `result*` at any depth, so a
+    node image lost `/usr/local/lib/node_modules`. It also copied symbolic
+    links by reading their host targets (an image link such as
     `srv/k -> ../../../.ssh/id_ed25519` copied a host file into the guest
-    image.
-  - The copy keeps the ids the transport carried, which are the host
-    account's. The script now sets the image root and every claimed path
-    back to 0:0.
+    image), and read special files, so a FIFO hung the copy. The archive
+    stores links as links and every entry owned 0:0. It keeps modes,
+    including setuid. Devices, FIFOs and sockets are omitted, as the
+    in-process writer omits them.
+  - The staging and the input archive also carry links as links for every
+    other builder job.
+  - After extraction, the script sets the image root and every claimed path
+    to 0:0. `chown -h` and `chown -Rh` do not follow the final component or
+    links met while recursing. An intermediate component could still resolve
+    through a link; that is safe only because the host refused any tree with
+    a link on the way to a claimed path.
   - Its refusal no longer counts non-root owners on paths mvm claims.
+- Concurrency. Two runs of one image share its unpacked tree, which is
+  injected in place. A dev run could clear `/etc/mvm` and rewrite `variant`
+  and `/etc/passwd` between a prod run's post-injection check and its image
+  walk, sealing a dev-variant image. Now:
+  - Every path that removes, unpacks, injects into or copies from a tree
+    holds its per-tree lock (`mvm_build::run_image::lock_unpacked_tree`).
+    Injection keeps the lock through the seal, and the rootfs output is
+    locked as well.
+  - The overlay-lean staging tree is private to each run.
+  - The prepared rootfs-only tree is built under its own lock.
+- A deferred-node sidecar that exists but cannot be read is an error. Only
+  an absent one means nothing was deferred.
+- The alias defence is layered. Clearing the mvm-only trees and writing
+  fresh inodes re-spell mvm's names even without the pre-check. The
+  post-injection check catches an alias of a parent directory, which those
+  two cannot.
 - `INJECT_SEMANTICS_VERSION` is bumped, and the injection layout digest now
   covers the mvm-only trees. A rootfs cached before this change is rebuilt
   rather than reused.
@@ -72,8 +99,9 @@ the tree bind-mounts it, or `/etc/passwd` and `/etc/group`, read-only; the
 `fs_rpc` module doc says it does. What protects all three in the guest is
 the read-only workload root.
 
-Still open (plan W3.8):
-- On the builder-VM path, paths mvm does not claim are owned by the host
-  account's uid.
-- On macOS, the unpacker's hard-link fallback removes the link *source* when
-  an earlier layer wrote it.
+Still open (plan W3.8): on macOS the unpacker's hard-link fallback removes
+the link *source* when an earlier layer wrote it.
+
+Not addressed: a prod and a dev run of one image still write the same cached
+rootfs path. The lock serializes them, but the later one's image is the one
+the cache keeps.

@@ -157,17 +157,23 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
 
     let manifest_hex = sha256_hex(&metadata.manifest_digest)?;
     let unpacked_root = unpacked_parent.join(&manifest_hex);
-    if unpacked_root.exists() {
-        fs::remove_dir_all(&unpacked_root)
-            .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
+    {
+        // Another run of this image may be injecting into or copying from the
+        // tree being replaced.
+        let _tree = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
+        if unpacked_root.exists() {
+            fs::remove_dir_all(&unpacked_root).with_context(|| {
+                format!("remove stale unpacked root {}", unpacked_root.display())
+            })?;
+        }
+        fs::rename(&tmp_path, &unpacked_root).with_context(|| {
+            format!(
+                "rename unpack directory {} to {}",
+                tmp_path.display(),
+                unpacked_root.display()
+            )
+        })?;
     }
-    fs::rename(&tmp_path, &unpacked_root).with_context(|| {
-        format!(
-            "rename unpack directory {} to {}",
-            tmp_path.display(),
-            unpacked_root.display()
-        )
-    })?;
 
     let rootfs_rel = format!(
         "rootfs/{manifest_hex}-{}/rootfs.ext4",
@@ -232,6 +238,9 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
 
     let manifest_hex = sha256_hex(&image.manifest_digest)?;
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
+    // Another run of this image may be injecting into or copying from the
+    // tree this is about to remove and refill.
+    let tree_lock = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
     if unpacked_root.exists() {
         fs::remove_dir_all(&unpacked_root)
             .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
@@ -253,6 +262,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
     }
+    drop(tree_lock);
 
     let rootfs_rel = format!(
         "rootfs/{manifest_hex}-{}/rootfs.ext4",

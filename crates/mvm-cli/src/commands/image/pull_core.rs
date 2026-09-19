@@ -361,6 +361,10 @@ fn pull_image_ref(
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
+    // Another run of this image may be injecting into or copying from the
+    // tree this is about to remove. Released before materializing, which
+    // takes it again itself.
+    let tree_lock = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
     if unpacked_root.exists() {
         fs::remove_dir_all(&unpacked_root)
             .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
@@ -404,6 +408,7 @@ fn pull_image_ref(
     // an image's own tools are off `PATH` even though the binaries are in the
     // rootfs. The cache-hit path beside this one has always passed it; this
     // one computed `config_path` forty lines earlier and dropped it.
+    drop(tree_lock);
     let entrypoint = oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?;
     inject_runtime_and_materialize(super::materialize::MaterializeCall {
         cache_root,

@@ -208,8 +208,14 @@ pub(super) fn read_deferred_nodes(
     resolved_digest: &str,
 ) -> Result<Option<Vec<mvm_fs::ext4::Node>>> {
     let path = deferred_nodes_sidecar(cache_root, resolved_digest)?;
-    let Ok(body) = fs::read(&path) else {
-        return Ok(Some(Vec::new()));
+    // Only an absent sidecar means "nothing deferred". One that is there and
+    // cannot be read — permissions, a directory in its place, an I/O error —
+    // says nothing about what was deferred, and reading it as empty would
+    // build an image quietly missing paths.
+    let body = match fs::read(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
     Ok(parse_sidecar(&path, &body))
 }
@@ -962,6 +968,25 @@ mod tests {
         assert_eq!(
             read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("not an error"),
             None
+        );
+    }
+
+    /// A sidecar that exists and cannot be read is an error, never "nothing
+    /// deferred": here a directory stands where the file should be.
+    #[test]
+    fn an_unreadable_deferred_sidecar_is_an_error_not_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let path = tmp
+            .path()
+            .join("unpacked")
+            .join(format!("{hex}.deferred-nodes.json"));
+        std::fs::create_dir_all(&path).unwrap();
+        let err = read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
+            .expect_err("an unreadable sidecar must not read as empty");
+        assert!(
+            format!("{err:#}").contains("deferred-nodes.json"),
+            "{err:#}"
         );
     }
 

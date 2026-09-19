@@ -127,6 +127,48 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// Guest binaries resolve from the invoking source checkout's content-keyed
 /// cache or an existing compatibility cache. The host executable does not carry
 /// workload binaries.
+/// Hold `root`'s tree exclusively against every other writer and reader that
+/// takes this lock, across processes.
+///
+/// An image's unpacked tree lives once in the cache and is injected in place,
+/// so two runs of one image share it. Without the lock a dev run's clearing of
+/// `/etc/mvm` and rewriting of `variant` and `/etc/passwd` can land between a
+/// prod run's post-injection check and its image walk, and the sealed image
+/// then carries `variant=dev` and no trust policy. Everything that removes,
+/// unpacks, injects into or copies from a tree takes this lock first; nothing
+/// holds it while taking another tree's lock in the other order.
+///
+/// The lock file sits beside the tree as `<name>.tree.lock`, so it survives
+/// the tree being removed and re-unpacked under it.
+pub fn lock_unpacked_tree(root: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_beside(root, "tree")
+}
+
+/// Hold the materialized image at `output` exclusively, as
+/// `<name>.output.lock` beside it.
+fn lock_output(output: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_beside(output, "output")
+}
+
+fn lock_beside(path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
+    mvm_core::util::atomic_io::FileLock::acquire(&lock_key(path, role)?)
+        .with_context(|| format!("lock {} ({role})", path.display()))
+}
+
+/// The path [`mvm_core::util::atomic_io::FileLock`] turns into the lock file
+/// for `path` in `role`. It replaces the last extension with `lock`, so the
+/// key carries a throwaway one: `rootfs` locks as `rootfs.tree.lock` and
+/// `rootfs.ext4` as `rootfs.ext4.output.lock`, and no two roles or names can
+/// land on one file — which in one process would deadlock.
+fn lock_key(path: &Path, role: &str) -> Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no name to lock", path.display()))?;
+    let mut key = name.to_os_string();
+    key.push(format!(".{role}.key"));
+    Ok(path.with_file_name(key))
+}
+
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
@@ -139,6 +181,10 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         owners,
         evidence,
     } = request;
+    // Held to the end: injection, the post-injection check, the walk, the seal
+    // and the sidecar all read or write the shared tree or the shared output.
+    let _tree = lock_unpacked_tree(unpacked_root)?;
+    let _output = lock_output(output)?;
     crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
         .context("admit the image's deferred layer nodes")?;
     let bins = resolve_guest_binaries(cache_root)?;
@@ -630,25 +676,125 @@ mod tests {
     /// The production entry point refuses a deferred layer node at an
     /// injected path before it touches the tree or resolves a single guest
     /// binary, so the refusal is not something a later step can undo.
+    /// Seed `cache_root` with stand-in guest binaries, so a test that reaches
+    /// binary resolution by mistake fails in milliseconds instead of
+    /// cross-compiling the guest runtime.
+    fn seed_stub_guest_binaries(cache_root: &Path) {
+        let source = crate::guest_agent_build::guest_binary_source().unwrap();
+        let layout = crate::guest_agent_build::GuestAgentLayout::under(
+            cache_root,
+            source.cache_key(),
+            mvm_core::arch::GuestArch::host(),
+        );
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        for bin in [
+            &layout.agent,
+            &layout.netinit,
+            &layout.egress_client,
+            &layout.entrypoint_runner,
+        ] {
+            std::fs::write(bin, b"\x7fELF-stub").unwrap();
+        }
+    }
+
+    fn hostile_request<'a>(
+        cache_root: &'a Path,
+        root: &'a Path,
+        output: &'a Path,
+    ) -> InjectAndMaterializeRequest<'a> {
+        InjectAndMaterializeRequest::builder(cache_root, root, output, "hostile")
+            .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
+                path: "/etc/passwd".to_string(),
+                target: "/srv/accounts".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            }])
+            .build()
+    }
+
+    /// The production entry point refuses a deferred layer node at an
+    /// injected path before it touches the tree or resolves a single guest
+    /// binary, so the refusal is not something a later step can undo.
     #[test]
     fn a_deferred_node_at_an_injected_path_stops_the_run_before_injection() {
         let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
         let root = tmp.path().join("rootfs");
         std::fs::create_dir_all(&root).unwrap();
         let output = tmp.path().join("rootfs.ext4");
-        let err = inject_and_materialize(
-            InjectAndMaterializeRequest::builder(tmp.path(), &root, &output, "hostile")
-                .deferred_nodes(vec![mvm_fs::ext4::Node::Symlink {
-                    path: "/etc/passwd".to_string(),
-                    target: "/srv/accounts".to_string(),
-                    owner: mvm_fs::ext4::Owner::ROOT,
-                }])
-                .build(),
-        )
-        .expect_err("a layer must not replace the account database");
+        let err = inject_and_materialize(hostile_request(tmp.path(), &root, &output))
+            .expect_err("a layer must not replace the account database");
         assert!(format!("{err:#}").contains("/etc/passwd"), "{err:#}");
         assert!(!root.join("etc").exists(), "nothing was injected");
         assert!(!output.exists());
+    }
+
+    /// Two runs of one image share its unpacked tree. A run waits for the
+    /// tree's lock before doing anything at all, so another run holding it —
+    /// mid-injection, mid-walk — cannot have the tree changed under it.
+    #[test]
+    fn a_run_waits_for_the_tree_lock_before_touching_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_stub_guest_binaries(tmp.path());
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = tmp.path().join("rootfs.ext4");
+
+        let held = lock_unpacked_tree(&root).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let (cache, root, output) = (tmp.path().to_path_buf(), root.clone(), output.clone());
+            std::thread::spawn(move || {
+                let result = inject_and_materialize(hostile_request(&cache, &root, &output));
+                done_tx.send(format!("{:#}", result.unwrap_err())).unwrap();
+            })
+        };
+
+        assert!(
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the run proceeded while another held the tree"
+        );
+        drop(held);
+        let err = done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the run proceeds once the lock is released");
+        assert!(err.contains("/etc/passwd"), "{err}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn the_tree_lock_is_exclusive_and_named_for_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        let held = lock_unpacked_tree(&root).unwrap();
+        assert!(tmp.path().join("rootfs.tree.lock").is_file());
+        assert!(
+            mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&root, "tree").unwrap())
+                .unwrap()
+                .is_none(),
+            "a second holder must wait"
+        );
+        drop(held);
+        assert!(
+            mvm_core::util::atomic_io::FileLock::try_acquire(&lock_key(&root, "tree").unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A tree and the image beside it that share a stem must not share a lock
+    /// file: one run holds both, and flock on a second descriptor of the same
+    /// file would wait on itself.
+    #[test]
+    fn a_tree_and_its_output_never_share_a_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = lock_unpacked_tree(&tmp.path().join("rootfs")).unwrap();
+        let output = lock_output(&tmp.path().join("rootfs.ext4")).unwrap();
+        assert!(tmp.path().join("rootfs.tree.lock").is_file());
+        assert!(tmp.path().join("rootfs.ext4.output.lock").is_file());
+        drop((tree, output));
     }
 
     /// Build an unpacked-rootfs tree whose `lib/` carries `loader`.
