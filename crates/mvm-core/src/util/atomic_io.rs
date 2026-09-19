@@ -59,6 +59,47 @@ pub fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
     atomic_write(path, content.as_bytes())
 }
 
+/// Flush an existing file's data and metadata to stable storage.
+///
+/// For a file written by some other party — a hypervisor saving guest memory,
+/// a copy-on-write clone — whose bytes must be durable before a record naming
+/// them is published. On macOS this is `F_FULLFSYNC`, a full device flush.
+pub fn sync_file(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening {} to sync it", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))
+}
+
+/// Flush a directory's entries to stable storage, so a file created in it or
+/// renamed into or out of it survives a crash.
+///
+/// Syncing a file makes its bytes durable but not its name; only syncing the
+/// directory that holds the name does that.
+pub fn sync_dir(path: &Path) -> Result<()> {
+    let dir =
+        fs::File::open(path).with_context(|| format!("opening directory {}", path.display()))?;
+    anyhow::ensure!(
+        dir.metadata()
+            .with_context(|| format!("reading {}", path.display()))?
+            .is_dir(),
+        "{} is not a directory",
+        path.display()
+    );
+    dir.sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+/// [`atomic_write`], then sync the parent directory so the rename itself
+/// survives a crash — the step [`atomic_write`] deliberately leaves out.
+pub fn atomic_write_durable(path: &Path, data: &[u8]) -> Result<()> {
+    atomic_write(path, data)?;
+    let parent = path
+        .parent()
+        .with_context(|| format!("path has no parent: {}", path.display()))?;
+    sync_dir(parent)
+}
+
 /// The one failure [`atomic_write_new`] means a caller to read as "another
 /// writer already claimed this exact path" — the no-clobber persist step
 /// itself lost the race. Nothing else `atomic_write_new` does, including the
@@ -252,6 +293,35 @@ mod tests {
         let path = dir.path().join("test.txt");
         atomic_write_str(&path, "hello").expect("write");
         assert_eq!(fs::read_to_string(&path).expect("read"), "hello");
+    }
+
+    #[test]
+    fn atomic_write_durable_replaces_content_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meta.json");
+        fs::write(&path, b"old").expect("seed");
+        atomic_write_durable(&path, b"new").expect("write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("meta.json")]);
+    }
+
+    #[test]
+    fn sync_file_and_sync_dir_accept_what_exists_and_refuse_what_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("blob");
+        fs::write(&file, b"bytes").expect("seed");
+        sync_file(&file).expect("sync file");
+        sync_dir(dir.path()).expect("sync dir");
+
+        assert!(sync_file(&dir.path().join("absent")).is_err());
+        assert!(sync_dir(&dir.path().join("absent")).is_err());
+        // A file is not a directory: syncing it as one would silently skip
+        // the directory entry the caller meant to make durable.
+        assert!(sync_dir(&file).is_err());
     }
 
     #[test]
