@@ -433,14 +433,16 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    shot — strictly more than the per-crate `src/` hash this replaced
 ///    (which also broke when the two former top-level `crates/<name>/`
 ///    crates were folded into `crates/mvm-build/src/bin/`).
-/// 3. The shared Nix library (`nix/lib`) the flake imports.
+/// 3. Every Nix source outside the flake's directory that it imports
+///    ([`BUILDER_FLAKE_NIX_INPUTS`]): the shared library, the guest recipes,
+///    the kernel configs, and the runtime-overlay flake.
 ///
-/// The workspace `Cargo.lock` is deliberately not hashed. The builder-VM
-/// flake forbids `rustPlatform.buildRustPackage`, so the only Rust binaries
-/// baked into the image are the embedded host binaries, whose byte hashes are
-/// already folded into layer 2. `build.rs` watches `Cargo.lock` and
-/// `crates/mvm-build/src` so dependency or library changes that affect those
-/// binaries rebuild the bytes before this fingerprint is computed.
+/// The workspace `Cargo.lock` is deliberately not hashed, so an unrelated
+/// dependency bump does not rebuild the builder. The embedded host binaries'
+/// byte hashes are folded into layer 2, and `build.rs` watches `Cargo.lock` and
+/// `crates/mvm-build/src` so changes that affect them rebuild the bytes before
+/// this fingerprint is computed. `mvm-setpriv` is the exception: the flake
+/// compiles it from `mvm-agentd` source, which none of these layers hashes yet.
 ///
 /// Pre-2026-05 this function only hashed (1), so contributor edits to
 /// the in-VM binaries silently reused the cached `rootfs.ext4`,
@@ -497,18 +499,37 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
         fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
     }
 
-    // Layer 3: the shared Nix library the flake imports. The builder-vm
-    // flake pulls in `nix/lib` (mkGuest, the workspace filter, the
-    // host-binaries manifest), so a change there — e.g. a new rootfs
-    // mount-point dir — changes the built image. Hashing only the flake
-    // dir misses it, which silently reuses a stale image.
-    let nix_lib = workspace_root.join("nix").join("lib");
-    if nix_lib.is_dir() {
-        hash_dir_recursive(&mut hasher, "nix/lib", &nix_lib)?;
+    // Layer 3: every Nix source outside its own directory that the flake
+    // reaches. A change to any of them changes the built image, and a
+    // fingerprint that skips one silently reuses a stale image.
+    for input in BUILDER_FLAKE_NIX_INPUTS {
+        let path = workspace_root.join(input);
+        if path.is_dir() {
+            hash_dir_recursive(&mut hasher, input, &path)?;
+        } else if path.is_file() {
+            hash_named_file(&mut hasher, input, &path)?;
+        }
     }
 
     Ok(hex::encode(hasher.finalize()))
 }
+
+/// The Nix sources, relative to the workspace root, that the builder-vm flake
+/// imports from outside its own directory: the shared library (mkGuest, the
+/// workspace filter, the host-binaries manifest), the guest package recipes,
+/// the kernel configs, and the runtime-overlay flake. The top-level `nix`
+/// flake is listed because a build reaches the recipes through it.
+///
+/// A test holds this list to the flakes' actual import sites, so adding an
+/// import without listing it fails rather than going stale.
+pub(super) const BUILDER_FLAKE_NIX_INPUTS: &[&str] = &[
+    "nix/flake.nix",
+    "nix/flake.lock",
+    "nix/lib",
+    "nix/packages",
+    "nix/images/kernel",
+    "nix/images/runtime-overlay",
+];
 
 /// Fold one embedded host-binary's identity into the fingerprint.
 /// Keyed on `(name, sha256_hex)` so a rebuilt binary's byte change —
