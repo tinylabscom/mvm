@@ -28,9 +28,17 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    built for. Until that returns 1, every call is refused with
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
-2. It calls a dotted method (`machine.list`, `machine.inspect`,
-   `machine.logs`, `backend.capabilities`) with a JSON request. Request types
-   refuse unknown fields.
+2. It calls a dotted method with a JSON request. Request types refuse unknown
+   fields.
+   - `machine.list`, `machine.inspect`, `machine.logs`,
+     `backend.capabilities` go to the `MvmClient`.
+   - `guest.proc.{start,list,signal,kill,stdin,wait}` and
+     `guest.fs.{read,write,list,stat,mkdir,remove,rename}` go to
+     `mvm_client::guest`, the same implementation `mvmctl machine proc`/`fs`
+     use, with the same audit entries. They are DevOnly agent verbs, refused
+     on a sealed image. Byte payloads cross as base64, and
+     `guest.proc.wait` buffers each output stream up to 8 MiB and reports
+     `truncated` past that.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
