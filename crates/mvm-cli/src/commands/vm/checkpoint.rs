@@ -2205,6 +2205,7 @@ mod tests {
             plan_nonce: mvm_core::plan::Nonce::from_bytes([1u8; 16]),
             not_after: chrono::Utc::now() + chrono::Duration::hours(1),
             verbs: vec![],
+            drive: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -2247,6 +2248,7 @@ mod tests {
                 plan_nonce: nonce.clone(),
                 not_after: chrono::Utc::now() + chrono::Duration::hours(1),
                 verbs: vec![],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };

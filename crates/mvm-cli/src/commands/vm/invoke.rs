@@ -1292,48 +1292,15 @@ fn show(chunk: mvm_hostd::stream::ShownChunk, out: &mut CallOutput<'_>) {
 /// use the guest-local SOCKS5 client when the VM booted with vsock egress
 /// enabled. Empty when the VM has neither.
 fn workload_egress_env(vm_name: &str) -> Vec<(String, String)> {
-    let subst = substitution_env(vm_name);
-    if !subst.is_empty() {
-        return subst;
-    }
-    vsock_egress_env(vm_name)
+    mvm_hostd::workload_env::workload_egress_env(vm_name)
 }
 
-/// The workload launch env that routes secret-bearing egress
-/// through the substitution endpoint. Reads the `(guest var, placeholder)`
-/// pairs the endpoint minted at boot (`vm_substitution_env_path`); when
-/// present, prepends the standard proxy environment pointing at the guest's
-/// loopback egress proxy so outbound requests carrying a placeholder reach the
-/// host, which terminates the ones bound to a credentialed destination and
-/// substitutes. Empty (no proxy, no vars) when the VM has no secrets — so a
-/// plain workload is unaffected.
-fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
-    let path = mvm_core::config::vm_substitution_env_path(vm_name);
-    let placeholders: Vec<(String, String)> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    with_egress_ca_env(
-        build_substitution_env(placeholders),
-        egress_ca_present(vm_name),
-    )
-}
-
+#[cfg(test)]
 fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
         return Vec::new();
     }
     mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
-}
-
-/// Whether this VM booted with a per-VM egress CA — i.e. the endpoint spawner
-/// minted one for the plan's bound destinations, persisted it here, and put its
-/// certificate on the identity drive the guest assembled
-/// `/run/mvm/ca-bundle.crt` from.
-fn egress_ca_present(vm_name: &str) -> bool {
-    mvm_core::config::vm_state_dir(vm_name)
-        .join(mvm_vmm::host::network_endpoint_spawn::EGRESS_CA_STATE_FILE)
-        .exists()
 }
 
 /// Point the workload's TLS stack at the guest-side egress CA bundle when one
@@ -1343,6 +1310,7 @@ fn egress_ca_present(vm_name: &str) -> bool {
 /// exports (`SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` →
 /// combined bundle, `NODE_EXTRA_CA_CERTS` → the egress cert alone). No CA
 /// provisioned ⇒ env unchanged.
+#[cfg(test)]
 fn with_egress_ca_env(
     env: Vec<(String, String)>,
     egress_ca_present: bool,
@@ -1383,6 +1351,7 @@ fn with_egress_ca_env(
 /// dial. A `CONNECT` (or SOCKS) tunnel to a bound destination is terminated on
 /// the host and the credential goes in there; an unbound destination is
 /// spliced untouched.
+#[cfg(test)]
 fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, String)> {
     if placeholders.is_empty() {
         return Vec::new();

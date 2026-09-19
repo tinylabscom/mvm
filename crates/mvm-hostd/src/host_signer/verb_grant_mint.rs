@@ -10,12 +10,14 @@ pub fn mint_verb_grant(
     plan_nonce: &Nonce,
     not_after: DateTime<Utc>,
     verbs: Vec<VerbId>,
+    drive: Option<mvm_contract::grants::DriveGrant>,
 ) -> Result<VerbGrant> {
     let mut grant = VerbGrant {
         session_id: session_id.to_string(),
         plan_nonce: plan_nonce.clone(),
         not_after,
         verbs,
+        drive,
         sig: vec![],
     };
     let result = signer.sign(&grant.signing_bytes());
@@ -45,6 +47,7 @@ mod tests {
             &nonce,
             now + Duration::minutes(5),
             vec![VerbId::new("run-entrypoint").unwrap()],
+            None,
         )
         .unwrap();
 

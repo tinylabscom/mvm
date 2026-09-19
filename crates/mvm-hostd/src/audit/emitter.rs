@@ -130,6 +130,13 @@ pub mod stream_audit {
     pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
 }
 
+/// Wire-stable names for refusal decisions on the grant-gated drive plane.
+pub mod drive_audit {
+    pub const REFUSED_EVENT: &str = "drive.refused";
+    pub const LABEL_VM_NAME: &str = "vm_name";
+    pub const LABEL_REASON: &str = "drive_refusal_reason";
+}
+
 /// The label set for one input refusal: the binding, the reason word, and
 /// whatever that reason needs to be actionable.
 ///
@@ -882,6 +889,26 @@ impl AuditEmitter {
             plan,
             stream_audit::INPUT_REFUSED_EVENT,
             input_refused_labels(vm_name, refusal),
+        )
+    }
+
+    /// Emit a payload-free, chain-signed drive refusal.
+    pub fn emit_drive_refused(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        refusal: mvm_agentd::vsock::DriveRefusal,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            drive_audit::REFUSED_EVENT,
+            [
+                (drive_audit::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (
+                    drive_audit::LABEL_REASON.to_string(),
+                    refusal.reason().to_string(),
+                ),
+            ],
         )
     }
 
@@ -1823,6 +1850,33 @@ mod tests {
             "authorizer must be the host signer: {principal}"
         );
         verify_audit_chain(&dir.path().join("local.jsonl"), &vk).expect("refusal entry verifies");
+    }
+
+    #[test]
+    fn drive_refusals_are_chain_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let verifying_key = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-drive-refused");
+
+        emitter
+            .emit_drive_refused(
+                &plan,
+                "drive-vm",
+                mvm_agentd::vsock::DriveRefusal::OutsideWorkspaceRoots,
+            )
+            .unwrap();
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], drive_audit::REFUSED_EVENT);
+        assert_eq!(entry["labels"]["vm_name"], "drive-vm");
+        assert_eq!(
+            entry["labels"]["drive_refusal_reason"],
+            "outside-workspace-roots"
+        );
+        verify_audit_chain(&dir.path().join("local.jsonl"), &verifying_key)
+            .expect("drive refusal entry verifies");
     }
 
     /// Control-key use is recorded with the key id and role as the

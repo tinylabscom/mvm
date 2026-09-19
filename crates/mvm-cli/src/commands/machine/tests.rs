@@ -3408,6 +3408,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
                     mvm_core::network_policy::HostPort::new("db.internal", 5432),
                 ],
             }),
+            drive: None,
         })
     );
 }

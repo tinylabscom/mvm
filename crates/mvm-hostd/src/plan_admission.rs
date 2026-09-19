@@ -1237,10 +1237,12 @@ fn mint_verb_grant_sidecar(
         return Ok(None);
     };
 
-    let Some(verbs) = plan.agent_verbs else {
-        // No verb grant requested — grant-less boot, sidecar already removed.
+    let verbs = plan.agent_verbs.unwrap_or_default();
+    let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
+    if verbs.is_empty() && drive.is_none() {
+        // No verb or drive grant requested — grant-less boot, sidecar already removed.
         return Ok(None);
-    };
+    }
 
     let keys_dir = mvm_core::config::mvm_keys_dir();
     let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
@@ -1254,6 +1256,7 @@ fn mint_verb_grant_sidecar(
         &plan.nonce,
         plan.valid_until,
         verbs,
+        drive,
     )
     .context("mint verb grant")?;
 

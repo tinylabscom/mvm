@@ -29,6 +29,12 @@ pub struct VerbGrant {
     pub plan_nonce: Nonce,
     pub not_after: DateTime<Utc>,
     pub verbs: Vec<VerbId>,
+    /// Drive authority copied from the admitted signed plan. It rides inside
+    /// this host-signed envelope so the guest can enforce the same roots,
+    /// program identity, byte bounds, and lifetime without trusting request
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<crate::grants::DriveGrant>,
     /// Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as
     /// base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal
     /// numbers — roughly 230 characters against base64's 88 — and this grant
@@ -80,6 +86,8 @@ struct VerbGrantSigned<'a> {
     plan_nonce: &'a str,
     not_after: String,
     verbs: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drive: Option<&'a crate::grants::DriveGrant>,
 }
 
 impl VerbGrant {
@@ -89,6 +97,7 @@ impl VerbGrant {
             plan_nonce: self.plan_nonce.as_hex(),
             not_after: self.not_after.to_rfc3339(),
             verbs: self.verbs.iter().map(VerbId::as_str).collect(),
+            drive: self.drive.as_ref(),
         };
         serde_json::to_vec(&body).expect("VerbGrantSigned serializes")
     }
@@ -118,7 +127,9 @@ impl VerbGrant {
     /// of the grant set. `protocol-hello` is the handshake itself and is pinned
     /// before any grant exists.
     pub fn permits(&self, verb: &str) -> bool {
-        VERB_GRANT_BASELINE.contains(&verb) || self.verbs.iter().any(|v| v.as_str() == verb)
+        VERB_GRANT_BASELINE.contains(&verb)
+            || (self.drive.is_some() && matches!(verb, "drive-open" | "drive-file"))
+            || self.verbs.iter().any(|v| v.as_str() == verb)
     }
 }
 
@@ -147,6 +158,7 @@ mod tests {
             plan_nonce: nonce(),
             not_after: now + Duration::minutes(10),
             verbs: verbs.into_iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            drive: None,
             sig: vec![],
         };
         g.sig = k.sign(&g.signing_bytes()).to_bytes().to_vec();
