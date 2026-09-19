@@ -27,6 +27,10 @@ use crate::world::CliWorld;
 struct FixedAnchor(Option<CheckpointDigest>);
 
 impl CheckpointChainAnchor for FixedAnchor {
+    fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> anyhow::Result<Option<String>> {
+        Ok(self.0.as_ref().map(|_| "local".to_string()))
+    }
+
     fn recorded_creation_digest(
         &self,
         _meta: &CheckpointMeta,
@@ -47,6 +51,7 @@ impl mvm_runtime::checkpoint::VmFullRestore for NeverReachedRestore {
         _memory: &std::path::Path,
         _machine_id: &std::path::Path,
         _config_src: Option<&std::path::Path>,
+        _content: &[mvm_core::checkpoint::ContentBlob],
     ) -> anyhow::Result<()> {
         panic!("the VMM must not be started for a checkpoint that failed its gate");
     }
@@ -80,6 +85,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         snapshot_frame: Some(PathBuf::from("/parent/state/snapshot.frame")),
         restore_ram: None,
         restore_frame: None,
+        restore_fds: None,
         timeout_secs: 0,
         plan: None,
         audit_dir: None,
@@ -155,6 +161,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
             vm_name: "restored-child",
             state_dir: &dir,
             cpu_grant: None,
+            content: &[],
         },
     )
     .expect("rewrite the captured config for a restored child");
@@ -349,6 +356,7 @@ fn restore_is_refused(world: &mut CliWorld) {
                 RestoreParams {
                     checkpoint: meta.id.clone(),
                     target_vm: meta.vm_name.clone(),
+                    tenant: "local".into(),
                 },
                 &NeverReachedRestore,
                 &anchor,

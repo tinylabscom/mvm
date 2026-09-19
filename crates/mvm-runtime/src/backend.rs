@@ -1907,6 +1907,10 @@ mod tests {
         /// lineage check, so it only has to satisfy the context type.
         struct NoAnchor;
         impl CheckpointChainAnchor for NoAnchor {
+            fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+                Ok(None)
+            }
+
             fn recorded_creation_digest(
                 &self,
                 _meta: &CheckpointMeta,

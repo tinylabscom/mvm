@@ -143,6 +143,12 @@
       helper and makes a resume whose guest does not confirm a reseed a
       refusal rather than a warning; its live Firecracker refusal witness and
       a chain-signed refusal entry are open.
+  - [ ] W5 — issue #3382: copy-on-write HVF restore from a verified,
+        unlinked private clone (W5.1–W5.6); no page sharing between restored
+        guests; a cross-tenant restore or fork is refused as a policy guard.
+        W5.7, sandboxing supervisors so the verification also holds against
+        same-user processes, is open. Measurements are in the PR and in
+        `specs/sprint/delivery/3382-hvf-cow-restore.md`.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed

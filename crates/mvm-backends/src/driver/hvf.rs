@@ -245,6 +245,7 @@ fn relay_supervisor_config_with_handoff(
         snapshot_frame: Some(paths.state_dir.join("snapshot.frame")),
         restore_ram: None,
         restore_frame: None,
+        restore_fds: None,
         timeout_secs: paths.timeout_secs,
         // The plan's wall-clock bound and the paths its kill is audited under.
         // The supervisor owns the guest for its whole life, so it holds the

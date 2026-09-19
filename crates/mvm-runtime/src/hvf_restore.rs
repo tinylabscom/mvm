@@ -12,7 +12,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mvm_backends::driver::hvf_restore::restore_hvf_vm;
+use mvm_backends::driver::hvf_restore::{VERIFIED_ON_LOAD, restore_hvf_vm};
+use mvm_core::checkpoint::ContentBlob;
 
 pub use mvm_backends::driver::hvf_restore::{
     HvfRestoreRequest, RestoredHvfVm, hvf_child_restore_config,
@@ -20,17 +21,21 @@ pub use mvm_backends::driver::hvf_restore::{
 
 /// Boots a forked child from an HVF checkpoint cloned into its state dir.
 ///
-/// An inherent method rather than a trait impl, matching `FcForkRestorer`: the
-/// fork walk takes a [`crate::checkpoint::ForkRestore`] callback, so the two
-/// VMMs need no shared trait and neither has to be named where the other is.
+/// Verifies the saved RAM and frame itself, on the private copies it maps, so
+/// the fork walk leaves those two blobs to it.
 pub struct HvfForkRestorer;
 
-impl HvfForkRestorer {
-    pub fn restore_fork(&self, child: &crate::checkpoint::RestoredChild<'_>) -> Result<()> {
+impl crate::checkpoint::ForkRestorer for HvfForkRestorer {
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        VERIFIED_ON_LOAD
+    }
+
+    fn restore(&self, child: &crate::checkpoint::RestoredChild<'_>) -> Result<()> {
         restore_hvf_vm(&HvfRestoreRequest {
             vm_name: child.vm_name,
             state_dir: child.state_dir,
             cpu_grant: child.cpu_grant,
+            content: child.content,
         })
         .with_context(|| format!("HVF warm-restore for forked child '{}'", child.vm_name))?;
         Ok(())
@@ -54,6 +59,7 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
         _memory: &Path,
         _machine_id: &Path,
         _config_src: Option<&Path>,
+        content: &[ContentBlob],
     ) -> Result<()> {
         let content_dir = rootfs_src
             .parent()
@@ -70,9 +76,14 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
             // to bind. Inventing one from the checkpoint record would be a bound
             // nobody signed for this run.
             cpu_grant: None,
+            content,
         })
         .with_context(|| format!("HVF restore of '{target_vm}'"))?;
         Ok(())
+    }
+
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        VERIFIED_ON_LOAD
     }
 }
 
@@ -136,6 +147,7 @@ mod tests {
                 &content.join("memory.bin"),
                 &content.join("machine-id"),
                 None,
+                &[],
             )
             .unwrap_err();
         let rendered = format!("{error:#}");
