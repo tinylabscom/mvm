@@ -773,6 +773,69 @@ fn minimal_profile_exists_and_has_required_settings() {
 /// `services`) plus the explicit `dev` overrides, and asserts the
 /// `passthru.mvm.{accessible, sealed, entrypointKind}` metadata is
 /// inferred correctly.
+/// A workspace root reached through a symlink must be refused by name, not
+/// filtered to an empty tree: Nix hands the filter symlink-resolved paths, and
+/// the filter strips the root as text. On macOS every path under `/tmp` is such
+/// a root.
+#[test]
+fn workspace_filter_refuses_a_symlinked_root_when_nix_available() {
+    use std::process::Command;
+
+    if Command::new("nix").arg("--version").output().is_err() {
+        eprintln!("[nix_flake_structure::workspace_filter_eval] skipped — `nix` not on PATH");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("ws");
+    fs::create_dir_all(canonical.join("docs")).expect("mkdir workspace");
+    fs::write(canonical.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+    fs::write(canonical.join("Cargo.lock"), "version = 4\n").expect("write lockfile");
+    fs::write(canonical.join("docs/a.md"), "not admitted\n").expect("write doc");
+    let linked = tmp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("link");
+    std::os::unix::fs::symlink(&canonical, &linked).expect("symlink the workspace");
+
+    let eval_file = repo_dir().join("nix/tests/workspace-filter-eval.nix");
+    let expr = format!(
+        "import {} {{ canonical = \"{}\"; linked = \"{}\"; }}",
+        eval_file.display(),
+        canonical.display(),
+        linked.display()
+    );
+    let out = Command::new("nix")
+        .args(["--extra-experimental-features", "nix-command flakes"])
+        .args(["eval", "--impure", "--json", "--expr", &expr])
+        .output()
+        .expect("nix eval invocation");
+    assert!(
+        out.status.success(),
+        "nix eval failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("workspace-filter-eval.nix returns JSON");
+    for check in [
+        "canonicalKeepsTheLockfile",
+        "canonicalDropsUnlistedEntries",
+        "linkedRootIsRefused",
+    ] {
+        assert_eq!(
+            json[check],
+            serde_json::Value::Bool(true),
+            "{check}: {json}"
+        );
+    }
+}
+
 #[test]
 fn mk_guest_eval_assertions_all_pass_when_nix_available() {
     use std::process::Command;
