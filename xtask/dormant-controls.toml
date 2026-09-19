@@ -115,3 +115,22 @@ call would leave the sector arithmetic unchecked against the image's own \
 capacity, and the workload tier shares this device model with the builder. Its \
 unit tests pass whether or not the device calls it, which is what this file \
 exists to catch."""
+
+[[control]]
+symbol = "refuse_in_production"
+file = "crates/mvm-build/src/image_source.rs"
+dormant = false
+why = """
+Refuses a sealed-production admission while `MVM_IMAGES_DIR` names a local \
+image checkout. Losing its caller in `admit_plan_for_boot` would let a \
+production boot be steered at unsigned local images by an environment \
+variable."""
+
+[[control]]
+symbol = "refuse_in_release_build"
+file = "crates/mvm-build/src/image_source.rs"
+dormant = false
+why = """
+Refuses `MVM_IMAGES_DIR` in a release-channel binary before any verb runs. \
+Losing its caller in the CLI entry point would make which images a release \
+binary boots depend on the shell it was started from."""
