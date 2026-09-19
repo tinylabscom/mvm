@@ -260,8 +260,9 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         Two additional allocation regressions pass natively and under Miri,
         including cold admission and fresh producer threads.
         Host workspace/core tests, clippy, Linux cross-check and all 69 repository
-        gates pass. PR #3464 passed its PR checks and entered the merge queue;
-        merge-group checks and merge remain pending. Record preparation still allocates outside
+        gates pass. PR #3464 merged through the queue as
+        `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9` after successful merge-group
+        validation. Record preparation still allocates outside
         admission. Source callbacks, event-driven worker ownership and automatic
         wire loss summaries remain required; this is not complete guest capture.
         See [validation record](../sprint/delivery/3422-telemetry-outbox.md).

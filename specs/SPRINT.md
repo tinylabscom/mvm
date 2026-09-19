@@ -45,8 +45,8 @@
       Two allocation regressions also pass natively and under Miri; native mutex
       initialization happens during setup, before cold admission.
       Workspace/core tests, clippy, Linux cross-check and repository gates pass.
-      PR #3464 entered the merge queue after passing its PR checks; merge and
-      runtime adapter/worker integration remain open;
+      PR #3464 merged through the queue as `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9`
+      after successful merge-group checks. Runtime adapter/worker integration remains open;
       `specs/sprint/delivery/3422-telemetry-outbox.md` records the exact boundary.
       W4 receive-only authentication now integrates with the resident signer via
       a typed, domain-restricted operation and deadline-bounded async client.

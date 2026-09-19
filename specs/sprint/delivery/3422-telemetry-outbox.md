@@ -73,9 +73,12 @@ also passed. Final workspace all-target clippy, BDD-feature all-target clippy,
 fmt, the Linux all-target cross-check, all 69 repository gates and the separate
 declared-backing gate pass. Cross-compilation is not execution of Linux-specific
 tests. PR #3464's required checks passed and actual merge-queue entry was
-observed on 2026-09-19 UTC (position 5, `AWAITING_CHECKS`). The merge itself
-and merge-group validation remain pending; auto-merge alone was not counted
-as queue entry.
+observed on 2026-09-19 UTC (position 5, `AWAITING_CHECKS`). It merged at
+2026-09-19T02:31:31Z as `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9` after
+[merge-group run 35414129921](https://github.com/tinylabscom/mvm/actions/runs/35414129921)
+completed successfully. The main checkout was immediately synchronized, and
+the merge evidence was recorded on issue #3422. Runtime capture acceptance
+remains open; this component merge does not close W3 or epic #3419.
 
 Host validation uses isolated MVM_HOME/CARGO_HOME/CARGO_TARGET_DIR and Rust
 1.97.1. The full workspace run excludes `run_build_surfaces_environment_gaps`
