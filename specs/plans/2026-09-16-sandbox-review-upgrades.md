@@ -169,11 +169,17 @@ data directory ships owned by its own account boots with root-owned files.
         lock, materialization holds the tree and output locks until the seal,
         the overlay-lean staging tree is private per run, and the prepared
         rootfs-only tree is renamed into place only when complete;
-  - [x] a `--prod` run is always sealed: the rootfs path carries its variant,
-        a cached image is reused only when its sidecar's `sealed` matches the
+  - [x] `run --prod --image` and foreground `machine run --prod --image`
+        always boot a sealed image: the rootfs path carries its variant, a
+        cached image is reused only when its sidecar's `sealed` matches the
         run, a fresh `--prod` pull is sealed, an unsealed image is refused to
-        a `--prod` resolve, and the trust check runs before anything is
-        materialized or signed;
+        a `--prod` resolve, the trust check runs before anything is
+        materialized or signed, and `--prod` refuses `--profile dev`, an
+        ad-hoc command and a launch document. Persistent (`-d`) and
+        non-image `--prod` runs are issue #3480;
+  - [x] a rebuilt rootfs is published whole (sidecar last) and reused only
+        when complete, checked under the output lock; `image rm` removes both
+        variants with their sidecars;
   - [x] the builder-VM writer sets the claimed paths back to root after its
         copy;
   - [x] a builder-VM refusal names the route that reached it;

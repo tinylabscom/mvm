@@ -77,7 +77,19 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
     validate_image_paths(cache_root, &image)?;
 
     for path in metadata_paths(&image) {
+        if image.rootfs_path.as_deref() == Some(path.as_str()) {
+            continue;
+        }
         remove_cache_file(cache_root, &path, &mut removed_files, &mut freed_bytes)?;
+    }
+    if !index
+        .images
+        .iter()
+        .any(|other| other.resolved_digest == image.resolved_digest)
+    {
+        for dir in rootfs_dirs_of(cache_root, &image)? {
+            remove_rootfs_dir(cache_root, &dir, &mut removed_files, &mut freed_bytes)?;
+        }
     }
 
     for layer in &image.layers {
@@ -428,6 +440,76 @@ pub(super) fn read_json_optional(cache_root: &Path, relative: &str) -> Result<Op
     serde_json::from_slice(&bytes)
         .map(Some)
         .with_context(|| format!("parse {}", path.display()))
+}
+
+/// Every materialized rootfs directory of `image`: the one its index entry
+/// names, and each directory derived from its digest — both variants, sealed
+/// and dev, under any runtime tag. Each holds one image and its sidecars.
+fn rootfs_dirs_of(cache_root: &Path, image: &CachedOciImage) -> Result<BTreeSet<PathBuf>> {
+    let mut dirs = BTreeSet::new();
+    if let Some(rel) = image.rootfs_path.as_deref() {
+        let path = safe_cache_path(cache_root, rel)?;
+        if let Some(dir) = path.parent()
+            && dir.starts_with(cache_root.join("rootfs"))
+            && dir != cache_root.join("rootfs")
+        {
+            dirs.insert(dir.to_path_buf());
+        }
+    }
+    // A digest this cache cannot key has no derived directories to find.
+    let Ok(hex) = sha256_hex(&image.resolved_digest) else {
+        return Ok(dirs);
+    };
+    let prefix = format!("{hex}-");
+    let rootfs_root = cache_root.join("rootfs");
+    let entries = match fs::read_dir(&rootfs_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(dirs),
+        Err(err) => return Err(err).with_context(|| format!("list {}", rootfs_root.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) && entry.file_type()?.is_dir() {
+            dirs.insert(entry.path());
+        }
+    }
+    Ok(dirs)
+}
+
+/// Remove a rootfs directory whole — image, verity tree, root hash, guest and
+/// provenance sidecars, locks — counting what it frees. Removing only
+/// `rootfs.ext4` left the sidecars to describe an image that was gone.
+fn remove_rootfs_dir(
+    cache_root: &Path,
+    dir: &Path,
+    removed_files: &mut usize,
+    freed_bytes: &mut u64,
+) -> Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let entries = match fs::read_dir(&at) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("list {}", at.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let meta = fs::symlink_metadata(entry.path())
+                .with_context(|| format!("stat {}", entry.path().display()))?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                *removed_files += 1;
+                *freed_bytes = freed_bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("remove {}", dir.display())),
+    }
+    prune_empty_parents(cache_root, dir.parent())
 }
 
 pub(super) fn remove_cache_file(
@@ -787,6 +869,98 @@ mod tests {
 
     const SAMPLE_DIGEST: &str =
         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// `image rm` removes both variants of the image's rootfs, each with its
+    /// sidecars, and nothing belonging to another digest.
+    #[test]
+    fn removing_an_image_removes_both_rootfs_variants_and_their_sidecars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let other_hex =
+            sha256_hex("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+                .unwrap();
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some(format!("rootfs/{hex}-tag-sealed/rootfs.ext4"));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "manifests/alpine.json", b"{}");
+        for variant in ["sealed", "dev"] {
+            for file in [
+                "rootfs.ext4",
+                "rootfs.verity",
+                "rootfs.roothash",
+                "mvm-meta.json",
+            ] {
+                write_file(
+                    tmp.path(),
+                    &format!("rootfs/{hex}-tag-{variant}/{file}"),
+                    b"x",
+                );
+            }
+        }
+        write_file(
+            tmp.path(),
+            &format!("rootfs/{other_hex}-tag-dev/rootfs.ext4"),
+            b"x",
+        );
+
+        let outcome = remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(!tmp.path().join(format!("rootfs/{hex}-tag-sealed")).exists());
+        assert!(!tmp.path().join(format!("rootfs/{hex}-tag-dev")).exists());
+        assert!(
+            tmp.path()
+                .join(format!("rootfs/{other_hex}-tag-dev/rootfs.ext4"))
+                .exists(),
+            "another digest's rootfs is untouched"
+        );
+        assert_eq!(
+            outcome.removed_files,
+            1 + 8,
+            "the manifest and both variants' files"
+        );
+    }
+
+    /// Two references to one digest share its rootfs; removing one keeps it.
+    #[test]
+    fn removing_one_reference_keeps_a_rootfs_another_reference_shares() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let mut by_tag = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        by_tag.config_path = None;
+        by_tag.claims_path = None;
+        by_tag.rootfs_path = Some(format!("rootfs/{hex}-tag-dev/rootfs.ext4"));
+        let mut by_other = by_tag.clone();
+        by_other.reference = "docker.io/library/alpine:latest".to_string();
+        by_other.manifest_path = "manifests/latest.json".to_string();
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![by_tag, by_other],
+            },
+        );
+        write_file(
+            tmp.path(),
+            &format!("rootfs/{hex}-tag-dev/rootfs.ext4"),
+            b"x",
+        );
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(
+            tmp.path()
+                .join(format!("rootfs/{hex}-tag-dev/rootfs.ext4"))
+                .exists()
+        );
+    }
 
     #[test]
     fn deferred_nodes_roundtrip_through_the_sidecar() {

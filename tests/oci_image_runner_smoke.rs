@@ -343,7 +343,7 @@ fn run_image_boots_and_round_trips_the_agent() {
 
 #[test]
 #[cfg(target_os = "macos")]
-fn run_image_prod_boots_with_cached_verity_sidecars() {
+fn image_pull_prod_builds_a_sealed_rootfs_with_verity_sidecars() {
     if std::env::var(PROD_ENABLE_VAR).as_deref() != Ok("1") {
         eprintln!(
             "[oci_image_runner_prod_smoke] skipped - set {PROD_ENABLE_VAR}=1 on macOS with \
@@ -372,34 +372,20 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
     let pinned_digest = digest_from_reference(&image_ref)
         .expect("prod OCI smoke requires a digest-pinned reference")
         .to_string();
-    let marker = format!("oci-prod-smoke-marker-{}", std::process::id());
-
+    // A sealed production image serves no ad-hoc command, so the live check
+    // is the production pull: verify, then build the sealed rootfs.
     let output = mvmctl_with_target_path()
         .env("MVM_OCI_POLICY", &policy_path)
-        .args([
-            "--kernel-source",
-            "compile",
-            "run",
-            "--image",
-            &image_ref,
-            "--prod",
-            "--",
-            "/bin/echo",
-            &marker,
-        ])
+        .args(["image", "pull", "--prod", &image_ref])
         .output()
-        .expect("spawn mvmctl run --image --prod");
+        .expect("spawn mvmctl image pull --prod");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "mvmctl run --image --prod exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "mvmctl image pull --prod exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
-    );
-    assert!(
-        stdout.contains(&marker) || stderr.contains(&marker),
-        "guest did not echo the prod marker {marker:?}.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
     let resolved_digest = resolved_digest_from_run_output(&stdout)
@@ -423,6 +409,15 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
         roothash_path.is_file(),
         "prod OCI roothash missing at {}",
         roothash_path.display()
+    );
+
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(rootfs_path.with_file_name("mvm-meta.json")).expect("read prod sidecar"),
+    )
+    .expect("parse prod sidecar");
+    assert_eq!(
+        sidecar["sealed"], true,
+        "a --prod pull must build a sealed image"
     );
 
     let roothash = std::fs::read_to_string(&roothash_path).expect("read prod roothash");

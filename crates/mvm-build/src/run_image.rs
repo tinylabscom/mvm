@@ -170,12 +170,13 @@ fn lock_key(path: &Path, role: &str) -> Result<std::path::PathBuf> {
     Ok(path.with_file_name(key))
 }
 
-/// Proof that this process holds an unpacked tree's lock and the lock on the
-/// image being built from it.
+/// An unpacked tree's lock and the lock on the image being built from it,
+/// taken together in one order.
 ///
-/// The work that reads or writes either takes `&HeldTreeLocks`, so the borrow
-/// checker keeps both held for as long as that work runs: they cannot be
-/// dropped early without the call that needs them failing to compile.
+/// `inject_and_materialize_holding` takes `&HeldTreeLocks`, so the borrow
+/// keeps both locks alive until that call returns. That is all the type
+/// guarantees: it does not make the code inside the call use them, and a
+/// caller holding the value may keep it longer than the call.
 pub struct HeldTreeLocks {
     _tree: mvm_core::util::atomic_io::FileLock,
     _output: mvm_core::util::atomic_io::FileLock,
@@ -206,9 +207,10 @@ impl HeldTreeLocks {
 /// cache or an existing compatibility cache. The host executable does not carry
 /// workload binaries.
 ///
-/// The tree and the output are locked for the whole call ([`HeldTreeLocks`]):
-/// the injection, the post-injection check, the walk, the seal and the sidecar
-/// all read or write one or the other.
+/// The tree and the output are locked before any work starts and stay locked
+/// until it returns ([`HeldTreeLocks`]): the injection, the post-injection
+/// check, the walk, the seal and the publish all read or write one or the
+/// other.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let held = HeldTreeLocks::acquire(request.unpacked_root, request.output)?;
     inject_and_materialize_holding(request, &held)
@@ -243,25 +245,49 @@ fn inject_and_materialize_holding(
     let seal_started = chrono::Utc::now().to_rfc3339();
     maybe_write_provenance_mark(unpacked_root, sealed, evidence.as_ref())?;
 
+    // The whole artifact set — image, verity tree, root hash, provenance, and
+    // last the guest sidecar — is built in a scratch directory beside the
+    // output and published into place only once it is complete. Built in place,
+    // a run that died part-way left a partial image next to the previous
+    // build's sidecars, and every later run reused it and failed at dm-verity.
+    let rootfs_dir = output
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
+    std::fs::create_dir_all(rootfs_dir)
+        .with_context(|| format!("create {}", rootfs_dir.display()))?;
+    remove_stale_builds(rootfs_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(ROOTFS_BUILD_PREFIX)
+        .tempdir_in(rootfs_dir)
+        .with_context(|| format!("create a build dir in {}", rootfs_dir.display()))?;
+    let staged_output =
+        staging.path().join(output.file_name().ok_or_else(|| {
+            anyhow::anyhow!("rootfs path has no file name: {}", output.display())
+        })?);
+
     // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     materialize_run_rootfs(
-        &MaterializeExt4Input::new(unpacked_root.to_path_buf(), output.to_path_buf(), tree_size)
-            .with_deferred_nodes(deferred_nodes)
-            .with_owners(owners),
+        &MaterializeExt4Input::new(
+            unpacked_root.to_path_buf(),
+            staged_output.clone(),
+            tree_size,
+        )
+        .with_deferred_nodes(deferred_nodes)
+        .with_owners(owners),
     )?;
 
     // `--prod`: seal the rootfs before the sidecar is written. If this fails we
     // surface it and never write a `sealed` sidecar over a rootfs that can't
     // verity-boot.
     if sealed {
-        seal_rootfs_for_run(output)?;
+        seal_rootfs_for_run(&staged_output)?;
         if let Some(evidence) = &evidence {
-            let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(output)
+            let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(&staged_output)
                 .context("hash sealed rootfs for provenance sidecar")?;
             crate::intoto::write_sidecar(
-                output,
+                &staged_output,
                 &subject_sha256,
                 evidence,
                 &seal_started,
@@ -273,13 +299,84 @@ fn inject_and_materialize_holding(
 
     // The sidecar lives next to rootfs.ext4 so the backend's admit_runtime_overlay_contract
     // gate reads it at start.
-    let rootfs_dir = output
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
     oci_run_sidecar(unpacked_root, label, sealed, entrypoint)
-        .write_to_dir(rootfs_dir)
-        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+        .write_to_dir(staging.path())
+        .with_context(|| format!("write OCI sidecar in {}", staging.path().display()))?;
+    publish_rootfs_build(staging.path(), rootfs_dir)?;
     Ok(())
+}
+
+/// Prefix of the scratch directory an image is built in beside its output.
+const ROOTFS_BUILD_PREFIX: &str = ".rootfs-build-";
+
+/// Remove scratch build directories a run that died left in `rootfs_dir`.
+/// Called under the output lock, so none of them belongs to a live build.
+fn remove_stale_builds(rootfs_dir: &Path) -> Result<()> {
+    for entry in
+        std::fs::read_dir(rootfs_dir).with_context(|| format!("list {}", rootfs_dir.display()))?
+    {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(ROOTFS_BUILD_PREFIX)
+            && entry.file_type()?.is_dir()
+        {
+            std::fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove stale build {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Move a complete artifact set from `staging` into `rootfs_dir`.
+///
+/// The guest sidecar is what marks a set complete: a reuse check requires it
+/// (see [`rootfs_build_is_complete`]). So the published sidecar is removed
+/// before anything else is replaced, every other file is renamed into place,
+/// and the new sidecar is renamed in last. A run that dies at any point leaves
+/// either the old set whole or a set with no sidecar, which is rebuilt.
+fn publish_rootfs_build(staging: &Path, rootfs_dir: &Path) -> Result<()> {
+    let sidecar = crate::builder_vm::SIDECAR_FILENAME;
+    match std::fs::remove_file(rootfs_dir.join(sidecar)) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("retire the sidecar in {}", rootfs_dir.display()));
+        }
+    }
+    for entry in
+        std::fs::read_dir(staging).with_context(|| format!("list {}", staging.display()))?
+    {
+        let entry = entry?;
+        if entry.file_name() == sidecar || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let target = rootfs_dir.join(entry.file_name());
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("publish {}", target.display()))?;
+    }
+    std::fs::rename(staging.join(sidecar), rootfs_dir.join(sidecar))
+        .with_context(|| format!("publish the sidecar in {}", rootfs_dir.display()))
+}
+
+/// Whether the artifact set beside `rootfs` finished publishing: its guest
+/// sidecar, renamed in last by [`publish_rootfs_build`], is there and reads.
+pub fn rootfs_build_is_complete(rootfs: &Path) -> bool {
+    rootfs.is_file()
+        && rootfs.parent().is_some_and(|dir| {
+            matches!(
+                crate::builder_vm::GuestSidecar::read_from_dir(dir),
+                Ok(Some(_))
+            )
+        })
+}
+
+/// Hold the output lock of the image at `rootfs`, for a caller that decides
+/// whether to reuse it: no build can be publishing while the lock is held.
+pub fn lock_rootfs_output(rootfs: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_output(rootfs)
 }
 
 /// Write the signed provenance mark into the tree being sealed, when the
@@ -804,6 +901,70 @@ mod tests {
             .expect("the run proceeds once the lock is released");
         assert!(err.contains("/etc/passwd"), "{err}");
         worker.join().unwrap();
+    }
+
+    fn write_set(dir: &Path, tag: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in ["rootfs.ext4", "rootfs.verity", "rootfs.roothash"] {
+            std::fs::write(dir.join(file), tag).unwrap();
+        }
+        crate::builder_vm::GuestSidecar::for_oci_run(tag, false, true)
+            .write_to_dir(dir)
+            .unwrap();
+    }
+
+    /// A finished build replaces the old set whole, sidecar last.
+    #[test]
+    fn a_published_build_replaces_the_previous_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("rootfs");
+        write_set(&live, "old");
+        let staging = tmp.path().join("rootfs/.rootfs-build-x");
+        write_set(&staging, "new");
+
+        publish_rootfs_build(&staging, &live).unwrap();
+
+        assert_eq!(std::fs::read(live.join("rootfs.ext4")).unwrap(), b"new");
+        assert_eq!(std::fs::read(live.join("rootfs.verity")).unwrap(), b"new");
+        assert!(rootfs_build_is_complete(&live.join("rootfs.ext4")));
+    }
+
+    /// A publish that fails part-way — here one file cannot be renamed over a
+    /// directory — leaves no sidecar, so the half-replaced set is never reused
+    /// and the next run builds it again.
+    #[test]
+    fn a_publish_that_dies_part_way_leaves_a_set_that_is_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("rootfs");
+        write_set(&live, "old");
+        assert!(rootfs_build_is_complete(&live.join("rootfs.ext4")));
+        let staging = tmp.path().join("staging");
+        write_set(&staging, "new");
+        std::fs::write(staging.join("blocker"), b"x").unwrap();
+        std::fs::create_dir_all(live.join("blocker/occupied")).unwrap();
+
+        publish_rootfs_build(&staging, &live).expect_err("the rename over a directory fails");
+
+        assert!(
+            !rootfs_build_is_complete(&live.join("rootfs.ext4")),
+            "a half-published set must not read as complete"
+        );
+    }
+
+    /// A build killed before it published leaves only its scratch directory,
+    /// which the next build removes.
+    #[test]
+    fn a_stale_build_directory_is_removed_by_the_next_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("rootfs");
+        std::fs::create_dir_all(dir.join(".rootfs-build-dead/sub")).unwrap();
+        std::fs::write(dir.join(".rootfs-build-dead/rootfs.ext4"), b"partial").unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"live").unwrap();
+
+        remove_stale_builds(&dir).unwrap();
+
+        assert!(!dir.join(".rootfs-build-dead").exists());
+        assert_eq!(std::fs::read(dir.join("rootfs.ext4")).unwrap(), b"live");
     }
 
     /// The locks the whole materialization runs under are held for exactly as

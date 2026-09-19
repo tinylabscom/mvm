@@ -64,36 +64,62 @@ being root-owned.
   - Its refusal no longer counts non-root owners on paths mvm claims. It now
     also refuses a tree carrying a guest-semantic extended attribute (a file
     capability, an ACL, a `user.`/`trusted.` attribute). The archive carries
-    none, and the builder's busybox `tar` could not restore them.
+    none, and the builder's busybox `tar` could not restore them. The root
+    directory itself is checked as well. The refusal names the file and the
+    attribute, and says the image must drop it or fit the in-process writer's
+    limits.
+  - Files are opened for the archive without following links, and an
+    unreadable one is widened only after `lstat` shows it is a regular file.
   - Files are streamed into the archive, never read into memory whole.
-- A `--prod` run is always sealed. Before this change the cached rootfs path
-  did not record the variant, so a dev image and a sealed image of one image
-  shared a file, and the first one written was kept. A `--prod` pull on a cold
-  cache also materialized the dev variant, and the boot then quietly picked
-  the dev agent profile. Now:
+- `mvmctl run --prod --image` and a foreground `mvmctl machine run --prod
+  --image` now always boot a sealed image. Before this change the cached
+  rootfs path did not record the variant, so an image's dev build and its
+  sealed build shared a file, and the first one written was kept. A `--prod`
+  pull on a cold cache also materialized the dev variant, and the boot then
+  quietly picked the dev agent profile. Now:
   - The rootfs path carries its variant (`…-sealed/` or `…-dev/`), so the
-    two variants never share a file, a sidecar or an output lock.
+    two builds never share a file, a sidecar or an output lock.
   - A cached image is reused only at this variant's path, and only when its
     sidecar records `sealed` exactly when the run is `--prod`. Anything else
     is rebuilt.
   - A fresh `--prod` pull is sealed and carries its provenance mark.
-  - A `--prod` resolve refuses an image whose sidecar is not sealed, rather
-    than hand it to a boot that would choose the dev profile.
+  - A `--prod` resolve refuses an image whose sidecar is not sealed.
   - The cosign trust check runs before anything is materialized or signed
     for a cached image, so a refused image leaves no sealed, signed rootfs
     behind.
+  - `--prod` refuses `--profile dev`, which would boot the sealed image with
+    the dev agent profile. It also refuses an ad-hoc command after `--` or a
+    `--launch-plan`, which a sealed image refuses anyway. All three refusals
+    happen before anything is pulled.
+  - Not covered yet: a persistent `mvmctl machine run --prod -d` and `--prod`
+    with `--runtime-pack`, `--deployment`, `--flake` or `--manifest` still do
+    not honour `--prod` (issue #3480).
+- A rebuilt rootfs is published, not written in place. The image, its
+  verity files, its provenance and, last, its guest sidecar are built in a
+  scratch directory beside the output. They are then renamed into place with
+  the old sidecar retired first. A reuse check requires that sidecar and
+  runs under the output lock. Before this, a crashed rebuild left a partial
+  `rootfs.ext4` beside the previous build's sidecars, and every later run
+  reused it and failed at dm-verity.
+- `mvmctl image rm` removes every rootfs directory of the image, both
+  variants with all their sidecars, unless another cached reference
+  resolves to the same digest. Before, it removed only the last-written
+  variant's `rootfs.ext4`.
 - Concurrency. Two runs of one image share its unpacked tree, which is
   injected in place. Without a lock, one run could clear `/etc/mvm` and
   rewrite `variant` and `/etc/passwd` between another run's post-injection
   check and its image walk. Now:
   - Every path that removes, unpacks, injects into or copies from a tree
     holds its per-tree lock (`mvm_build::run_image::lock_unpacked_tree`).
-  - Materialization runs under a `HeldTreeLocks` proof covering the tree and
-    the rootfs output, passed by reference to the work, so both locks are
-    held until the seal and sidecar are written.
+  - Materialization takes the tree lock and the rootfs output lock together
+    (`HeldTreeLocks`) and passes them by reference to the function that does
+    the work. The borrow guarantees only that the locks outlive that
+    function's call.
   - The overlay-lean staging tree is private to each run.
   - The prepared rootfs-only tree is built in a scratch directory and renamed
     into place under its own lock, so a failure never leaves a partial tree.
+    A scratch directory a killed run left behind is removed by the next
+    prepare.
   - `copy_tree` skips devices, FIFOs and sockets instead of reading them.
 - A deferred-node sidecar that exists but cannot be read is an error. Only
   an absent one means nothing was deferred.
@@ -113,8 +139,23 @@ being root-owned.
   unpacked again. A corrupt deferred-node sidecar is treated as unknown, not
   as an empty list.
 
-Compatibility: images that ship `/data`, `/work`, `/mnt`, `/home`, `/tmp` or
-`/dev/shm` (or any other injected path) as a symbolic link are now refused.
+Compatibility:
+- Images that ship `/data`, `/work`, `/mnt`, `/home`, `/tmp` or `/dev/shm`
+  (or any other injected path) as a symbolic link are now refused.
+- `mvmctl run --image <ref> --prod -- <cmd>` is refused before any pull, and
+  so is `--prod` with `--launch-plan`. Each is dispatched to the guest as
+  `Exec`, a DevOnly verb, and a sealed production image serves none. This
+  used to "work" only because the bug above booted `--prod` images unsealed,
+  with the dev profile. No `run`/`machine run --image` path yet dispatches an
+  OCI image's own entrypoint under `--prod`, so a sealed OCI image can be
+  pulled and verified (`mvmctl image pull --prod`) but has no command path
+  (issue #3481).
+- `--prod` with `--profile dev` is refused.
+- An image that falls back to the builder VM and carries a file capability,
+  an ACL or another guest-semantic extended attribute is refused rather than
+  built without it.
+- Cached rootfs paths change, so existing cached rootfs images are rebuilt
+  once.
 
 `/etc/nsswitch.conf` is named in claim 2 but is neither injected nor
 claimed. The image's own file keeps the owner its layer declared. No code in

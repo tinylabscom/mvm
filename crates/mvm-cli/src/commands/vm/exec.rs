@@ -5,6 +5,7 @@
 //! `run --profile dev -- <argv>` covers its interactive case. The `Args`
 //! struct + internal request machinery stay — `run_secure` reuses them.
 
+use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -931,59 +932,6 @@ fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
             "MVM_SDK_MODE={other:?} is not recognized; expected one of: live, plan, record"
         ),
     }
-}
-
-fn validate_run_profile(args: &RunArgs) -> Result<()> {
-    let grants = args.profile.grants();
-    let name = args.profile.as_str();
-
-    if grants.needs_acknowledgement && std::env::var_os("MVM_ACK_PERMISSIVE_RUN").is_none() {
-        anyhow::bail!(
-            "--profile permissive requires MVM_ACK_PERMISSIVE_RUN=1 so broad local execution is explicit"
-        );
-    }
-
-    if !grants.env && !args.env.is_empty() {
-        anyhow::bail!("--profile {name} does not allow --env");
-    }
-    if !grants.host_shares && !(args.mounts.is_empty() && args.outputs.is_empty()) {
-        anyhow::bail!("--profile {name} does not allow --mount or --output");
-    }
-
-    for spec in &args.mounts {
-        // Only the *directory* shape is refused `rw`, and only because a
-        // granted directory is materialized into a throwaway image at boot: a
-        // write would land in that image, be discarded with the VM, and never
-        // reach the directory the user named. Refusing is the honest answer.
-        //
-        // A sized disk is the opposite. Its host path is what the caller
-        // named, `materialize_disk_volume` creates it there if absent, and it
-        // outlives the VM — so a write is exactly as durable as the caller
-        // asked for.
-        //
-        // These were refused together by accident, not by design. The check
-        // was introduced parsing `parse_dir_share_spec` and could only ever
-        // see directories; widening the loop to `parse_volume_spec` extended a
-        // directory-specific rule to disks without revisiting it, and the
-        // message it carried ("transient live shares are read-only") described
-        // only the case it was written for.
-        let parsed = super::shared::parse_volume_spec(spec)?;
-        if matches!(
-            parsed,
-            super::shared::VolumeSpec::DirShare {
-                read_only: false,
-                ..
-            }
-        ) {
-            anyhow::bail!(
-                "--mount '{spec}' requests rw, but a transient directory snapshot is read-only. \
-                 Writes to the snapshot would not reach the host directory. Use a sized disk \
-                 (`HOST:/GUEST:SIZE:rw`) or register a persistent machine volume."
-            );
-        }
-    }
-
-    Ok(())
 }
 
 struct TransientMounts {

@@ -147,6 +147,20 @@ pub(super) fn rootfs_matches_variant(rootfs_path: &Path, prod: bool) -> bool {
     crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path) == prod
 }
 
+/// Whether the rootfs at `rootfs_abs` can be reused by this run as it is: a
+/// finished build (its guest sidecar, published last, is present), with its
+/// verity sidecars, of this run's variant.
+///
+/// Checked under the image's output lock, so a rebuild that is publishing is
+/// never read half-way. The lock is released on return; a caller that goes on
+/// to rebuild takes it again through the materializer.
+pub(super) fn reusable_rootfs(rootfs_abs: &Path, prod: bool) -> Result<bool> {
+    let _output = mvm_build::run_image::lock_rootfs_output(rootfs_abs)?;
+    Ok(mvm_build::run_image::rootfs_build_is_complete(rootfs_abs)
+        && rootfs_verity_sidecars_present(rootfs_abs)
+        && rootfs_matches_variant(rootfs_abs, prod))
+}
+
 /// Refuse to hand a `--prod` run an image that is not sealed. The boot path
 /// picks the guest profile from the image's sidecar, and an unsealed one
 /// would quietly boot the dev agent profile for a production run.
@@ -241,10 +255,7 @@ pub(super) fn rematerialize_cached_image(
     // Reused only when it is this variant's image, complete. A file left by an
     // interrupted run, or one whose sidecar disagrees with the path it sits
     // at, is built again rather than trusted.
-    if !rootfs_abs.is_file()
-        || !rootfs_verity_sidecars_present(&rootfs_abs)
-        || !rootfs_matches_variant(&rootfs_abs, prod)
-    {
+    if !reusable_rootfs(&rootfs_abs, prod)? {
         let signer;
         let evidence = if prod {
             signer = crate::commands::vm::host_signer::load_or_init()
@@ -351,11 +362,12 @@ pub(super) fn prepare_rootfs_only_tree(
         .parent()
         .with_context(|| format!("{} has no parent", prepared_root.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    remove_stale_prepare_staging(parent)?;
     // Built beside its final name and renamed into place once complete, so a
     // run that dies part-way leaves a scratch directory, never a partial tree
     // that `exists()` would serve to every later run.
     let staging = tempfile::Builder::new()
-        .prefix(".rootfs-only-")
+        .prefix(PREPARE_STAGING_PREFIX)
         .tempdir_in(parent)
         .with_context(|| format!("create a staging dir in {}", parent.display()))?;
     let staged_root = staging.path().join("rootfs-only");
@@ -381,6 +393,27 @@ pub(super) fn prepare_rootfs_only_tree(
         )
     })?;
     Ok(prepared_root)
+}
+
+/// Prefix of the scratch directory a prepared tree is built in.
+const PREPARE_STAGING_PREFIX: &str = ".rootfs-only-";
+
+/// Remove scratch directories a prepare that died left beside the prepared
+/// tree. Called under the prepared tree's lock, so none belongs to a live run.
+fn remove_stale_prepare_staging(parent: &Path) -> Result<()> {
+    for entry in fs::read_dir(parent).with_context(|| format!("list {}", parent.display()))? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PREPARE_STAGING_PREFIX)
+            && entry.file_type()?.is_dir()
+        {
+            fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove stale staging {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn materialize_overlay_lean_rootfs(
@@ -654,11 +687,25 @@ mod tests {
         let prepared = prepared_virtiofs_root(tmp.path(), identity, &oci_runtime_tag(tmp.path()));
         assert!(!prepared.exists(), "no partial prepared tree");
 
+        // What a run killed mid-copy leaves: its scratch directory, which a
+        // dropped guard never got to remove.
+        let crashed = prepared
+            .parent()
+            .unwrap()
+            .join(format!("{PREPARE_STAGING_PREFIX}crashed/rootfs-only"));
+        fs::create_dir_all(&crashed).unwrap();
+        fs::write(crashed.join("half-copied"), b"x").unwrap();
         fs::remove_file(raw.join("etc")).unwrap();
         fs::create_dir_all(raw.join("etc")).unwrap();
         let built = prepare_rootfs_only_tree(tmp.path(), &raw, identity).expect("prepares");
         assert_eq!(built, prepared);
         assert!(built.join("etc/mvm/variant").is_file());
+        let leftovers = fs::read_dir(built.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(PREPARE_STAGING_PREFIX))
+            .count();
+        assert_eq!(leftovers, 0, "the crashed run's scratch directory is gone");
     }
 
     #[test]
@@ -866,6 +913,32 @@ mod tests {
             Path::new(&sealed).parent(),
             Path::new(&dev).parent(),
             "their sidecars and locks sit in different directories too"
+        );
+    }
+
+    /// A crashed rebuild leaves the image and its verity files without the
+    /// guest sidecar that is published last. That set is not reused, whatever
+    /// else is there.
+    #[test]
+    fn a_rootfs_without_its_published_sidecar_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        for (file, body) in [
+            ("rootfs.ext4", "partial"),
+            ("rootfs.verity", "v"),
+            ("rootfs.roothash", "h\n"),
+        ] {
+            fs::write(dir.path().join(file), body).unwrap();
+        }
+        assert!(!reusable_rootfs(&rootfs, false).unwrap());
+
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("t", false, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(reusable_rootfs(&rootfs, false).unwrap());
+        assert!(
+            !reusable_rootfs(&rootfs, true).unwrap(),
+            "a dev set is not a sealed one"
         );
     }
 

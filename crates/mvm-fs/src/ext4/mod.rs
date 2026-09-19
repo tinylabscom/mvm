@@ -100,8 +100,9 @@ pub enum Ext4Error {
     /// root `/`), which would emit duplicate directory entries.
     DuplicatePath(String),
     /// An inode's extended attributes don't fit the in-inode xattr area (an
-    /// external xattr block is not implemented). Treated as a capacity limit so
-    /// the run path falls back to the builder VM, which preserves them.
+    /// external xattr block is not implemented). Treated as a capacity limit, so
+    /// the run path tries the builder VM; that writer carries no extended
+    /// attributes and refuses such a tree, naming this failure.
     XattrTooLarge { ino: u32 },
     /// A deferred host file no longer matches the content digest captured
     /// during the verified walk, so publishing the image under that identity

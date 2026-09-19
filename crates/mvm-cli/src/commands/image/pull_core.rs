@@ -22,7 +22,7 @@ use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present, upsert_
 use super::materialize::{
     RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
     inject_runtime_and_materialize, oci_entrypoint_from_cache_path, oci_runtime_tag,
-    prepare_rootfs_only_tree, rematerialize_cached_image, rootfs_verity_sidecars_present,
+    prepare_rootfs_only_tree, rematerialize_cached_image,
 };
 use super::oci_types::{CachedOciImage, CachedOciLayer, OciTrustDecision, ResolvedOciRunImage};
 use super::source;
@@ -161,10 +161,7 @@ pub(super) fn resolve_or_pull_run_image_with(
     };
     let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
     let mut rematerialized_from = None;
-    if !rootfs_path.is_file()
-        || !rootfs_verity_sidecars_present(&rootfs_path)
-        || !super::materialize::rootfs_matches_variant(&rootfs_path, prod)
-    {
+    if !super::materialize::reusable_rootfs(&rootfs_path, prod)? {
         // Self-heal a cache whose index still records a materialized rootfs but
         // whose sealed block-root artifacts have since drifted. That covers a
         // vanished `rootfs.ext4` (interrupted prune / manual delete) and older
@@ -1197,6 +1194,9 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             &dir.join("rootfs.roothash").to_string_lossy(),
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
         );
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("alpine", false, true)
+            .write_to_dir(&tmp.path().join(dir))
+            .expect("publish the sidecar that marks the set complete");
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)

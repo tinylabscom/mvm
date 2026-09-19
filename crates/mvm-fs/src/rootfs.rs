@@ -1075,6 +1075,11 @@ fn collect_guest_xattrs(path: &Path) -> Vec<Xattr> {
 /// finds anything in, rather than emit an image in which `ping` has lost its
 /// capability or a directory its ACL.
 pub fn first_guest_semantic_xattr(root: &Path) -> std::io::Result<Option<(PathBuf, String)>> {
+    // The root directory is an inode of the image too: a default ACL on `/`
+    // is exactly as lost as one on any directory beneath it.
+    if let Some(xattr) = collect_guest_xattrs(root).into_iter().next() {
+        return Ok(Some((root.to_path_buf(), xattr.name)));
+    }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let mut entries = std::fs::read_dir(&dir)?
@@ -1386,6 +1391,20 @@ mod tests {
         assert_eq!(
             first_guest_semantic_xattr(root.path()).unwrap(),
             Some((bin, "user.mvm.cap".to_string()))
+        );
+    }
+
+    /// The root directory itself is checked, not only what is beneath it.
+    #[test]
+    fn a_guest_semantic_xattr_on_the_root_itself_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        if xattr::set(root.path(), "user.mvm.acl", b"a").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        assert_eq!(
+            first_guest_semantic_xattr(root.path()).unwrap(),
+            Some((root.path().to_path_buf(), "user.mvm.acl".to_string()))
         );
     }
 

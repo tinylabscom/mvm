@@ -363,8 +363,10 @@ impl BuilderVmRoute {
                     .to_string()
             }
             Self::PureFallback { because } => format!(
-                "the in-process materializer, which can, was tried first and could not emit this \
-                 image ({because}), so no materializer can build it faithfully"
+                "the in-process materializer was tried first and could not emit this image \
+                 ({because}). To build it, bring the image within that writer's limits — fewer \
+                 or smaller files, or smaller extended attributes, as the failure names — or \
+                 remove from the image what this materializer cannot carry"
             ),
         }
     }
@@ -405,7 +407,8 @@ pub enum RootfsError {
 
     #[error(
         "the builder-VM materializer cannot carry the extended attribute {name} on {} \
-         (file capabilities and ACLs are lost in its copy); {}", path.display(), route.remedy()
+         (file capabilities and ACLs are lost in its copy); the image must not set it on that \
+         file for this materializer. {}", path.display(), route.remedy()
     )]
     XattrUnsupported {
         path: PathBuf,
@@ -516,10 +519,10 @@ pub fn estimate_ext4_size(
 /// Materialize `input.unpacked_root` into `input.output`.
 ///
 /// The host allocates the sparse file, but never formats it. When
-/// compiled with the `builder-vm` feature, the existing libkrun
-/// builder VM receives the unpacked tree over virtio-fs and the
-/// sparse output image as a writable virtio-blk device, then runs
-/// `mkfs.ext4` inside the guest. Default builds return
+/// compiled with the `builder-vm` feature, the host archives the tree
+/// ([`write_rootfs_archive`]) and hands the builder VM that archive as its
+/// `/work` input and the sparse output image as a writable disk; the guest runs
+/// `mkfs.ext4` and extracts the archive onto it. Default builds return
 /// [`RootfsError::BuilderVmFeatureDisabled`] because they do not link
 /// the libkrun builder launcher.
 ///
@@ -915,20 +918,35 @@ fn append_archive_entry<W: std::io::Write>(
 /// mode (a 0000 `/etc/shadow`) for the open alone. The mode is restored as
 /// soon as the file is open — the descriptor stays readable — so the host
 /// tree is left as it was however the archive then fails.
+///
+/// Never through a link: every open refuses one (`O_NOFOLLOW`), and the mode
+/// is widened only on a path that `lstat` has just shown to be a regular
+/// file, so a `chmod` — which does follow links — cannot reach a file outside
+/// the tree.
 #[cfg(any(test, feature = "builder-vm"))]
 fn open_for_archive(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    match std::fs::File::open(path) {
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    match open() {
         Ok(file) => Ok(file),
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            let original = std::fs::symlink_metadata(path)?.permissions().mode();
+            let meta = std::fs::symlink_metadata(path)?;
+            if !meta.file_type().is_file() {
+                return Err(err);
+            }
+            let original = meta.permissions().mode();
             let widened = original | 0o400;
             if widened == original {
                 return Err(err);
             }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(widened))?;
-            let opened = std::fs::File::open(path);
+            let opened = open();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(original))?;
             opened
         }
@@ -1571,6 +1589,27 @@ mod tests {
         );
     }
 
+    /// A link is never opened or widened through: its target outside the tree
+    /// keeps its mode and is not read.
+    #[test]
+    fn open_for_archive_refuses_a_link_and_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("outside");
+        std::fs::write(&target, b"host").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(open_for_archive(&link).is_err());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o000
+        );
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     /// A FIFO is omitted, as the in-process writer omits it, rather than read
     /// (which blocks forever) or failing the archive.
     #[test]
@@ -1958,5 +1997,9 @@ mod tree_only_materialization_loss_tests {
             "the fallback path set nothing to unset; got {message}"
         );
         assert!(message.contains("file too fragmented"), "got {message}");
+        assert!(
+            message.contains("bring the image within"),
+            "the refusal says what can be done; got {message}"
+        );
     }
 }
