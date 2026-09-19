@@ -192,6 +192,17 @@
       exported from `nix/flake.nix` and the in-tree image flakes build through
       them, so the interface `mvm-images` will pin is already the one in use;
       no image or check derivation changed.
+      W4 (#3362) slice W4b: `tinylabscom/mvm-images` builds every image from
+      `mvm` pinned at `6717e2451e`, on both architectures, without publishing.
+      W4 (#3362) slice W4c, in progress: every byte difference between that
+      build and `boot-image/v0.1.5` traces to a named `mvm` commit or to the
+      `generatorRev` rewrite. The in-tree and `mvm-images` builds have the same
+      derivations. Independent builds differ only in filesystem and verity
+      metadata (#3499). The images boot on x86_64 Firecracker and on HVF from an
+      isolated `MVM_HOME`, at the development tier, and the `mvm-images`
+      builder built and booted a workload on Firecracker. Outstanding: aarch64
+      Firecracker, and a build through the builder on HVF, which did not finish
+      on the loaded host.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

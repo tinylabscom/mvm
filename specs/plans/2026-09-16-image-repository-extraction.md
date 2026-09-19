@@ -549,12 +549,30 @@ Delivery slices, one PR each:
       runner, egress client, addon DNS, exit report, SDK cdylib glibc/musl) and
       `lib.<system>.hostBinaries`. For the same source, all 52 image and check
       `drvPath`s are identical on both systems under the old and new wiring.
-- [ ] W4b (`mvm-images`) — the image flakes, kernel, initramfs and QEMU-wasm
+- [x] W4b (`mvm-images`) — the image flakes, kernel, initramfs and QEMU-wasm
       pack, with every `mvm` import rewritten onto an `mvm` input pinned to an
       exact commit, plus a no-publish build workflow for both architectures.
+      Landed as tinylabscom/mvm-images#4, pinned to `6717e2451e`.
 - [ ] W4c (`mvm-images`) — compare the outputs against the published
       `boot-image/v0.1.5` set: file set, digests, closures, and boot on
       Firecracker (x86_64 and aarch64) and HVF, with every difference explained.
+      Comparison done; aarch64 Firecracker boot outstanding
+      (`specs/sprint/delivery/3362-w4c-image-comparison.md`). Every byte
+      difference from `v0.1.5` traces to a named `mvm` commit or to the
+      `generatorRev` rewrite. None is unexplained, and none comes from the build
+      environment. Built from mvm's in-tree flakes at the pinned commit, the
+      builder and default images have the same `drvPath`s as `mvm-images`
+      (tinylabscom/mvm-images#5). Two builds of one derivation still differ in
+      ext4 hash seeds, verity UUIDs and cpio inode numbers, with identical file
+      trees (#3499). Until that is fixed, equivalence is checked file by file.
+      Development-tier boots from an isolated `MVM_HOME`: x86_64 Firecracker ran
+      the dev and prod default images, and built and booted a sealed workload
+      through the `mvm-images` builder. On HVF the dev and prod default images
+      ran, and the `mvm-images` builder booted, but its build did not finish
+      within 90 minutes on the loaded host. The aarch64 Firecracker host was
+      unreachable. Also found: #3500 (the Nix initramfs
+      says `VERSION` `0.18.0`, which an rc CLI refuses) and #3502 (a Firecracker
+      run rewrites the cached dev rootfs).
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 
