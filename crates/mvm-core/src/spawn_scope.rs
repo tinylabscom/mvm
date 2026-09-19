@@ -1922,7 +1922,6 @@ mod tests {
         )
         .expect("fake launcher");
         let launcher = scratch.path().join("bin").join(SYSTEMD_RUN);
-        std::fs::copy("/usr/bin/yes", &launcher).expect("install executable fake launcher");
         assert!(
             launcher.is_file(),
             "fake launcher must exist before binding"

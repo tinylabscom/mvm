@@ -4202,9 +4202,10 @@ writes the plan:
 
 - [x] Resolve the probed `systemd-run` executable to an absolute path before
       constructing either spawn shape.
-- [x] Replace the unresponsive-manager test's racy shell-script launcher with
-      a real executable named `systemd-run`, and verify the exact launcher path
-      before spawning.
+- [x] Keep the unresponsive-manager test's executable blocking script named
+      `systemd-run`, resolve it to an absolute path, and verify that exact
+      launcher before spawning. Do not replace it with a program whose process
+      name makes the observer report a false successful exec.
 - [x] Pass all 47 focused `spawn_scope` host tests, formatting, and all-target
       `mvm-core` Clippy with warnings denied.
 - [ ] Pass the Linux process-table witness in CI, merge through the queue, and
