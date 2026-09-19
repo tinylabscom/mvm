@@ -324,6 +324,12 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
         `mvm_hostd::run::admit_and_boot_local` as a second path for them.
   - [ ] Witness: one request yields the same signed plan whether it enters
         through `mvmctl machine run` or through `mvm_client::launch`.
+- [x] Error codes have one definition (`mvm_core::error_codes`), and the SDK
+      error taxonomy generates the host library's error classes from them,
+      keyed by code (`CODE_ERRORS`).
+- [x] The Python loader (`mvm/_hostlib.py`): `MVM_HOSTLIB_PATH`, then beside
+      `mvmctl` on `PATH`, then a typed error; ABI negotiated once; no process
+      API in the module.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.

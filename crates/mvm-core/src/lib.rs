@@ -5,9 +5,6 @@
 // `deny` (not `forbid`) so `util::test_env` can carry the one narrow
 // unsafe carve-out for process-wide env mutation in tests.
 
-/// Content-addressed build-action cache records: a typed identity for one
-/// cached action's output artifacts, and a verify-on-read helper that
-/// recomputes each artifact's digest before a cache entry is trusted.
 pub mod action;
 /// SCITT-compatible action state capsules with hash chaining and evidence binding.
 pub mod action_state;
@@ -16,6 +13,10 @@ pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;
+/// Content-addressed build-action cache records: a typed identity for one
+/// cached action's output artifacts, and a verify-on-read helper that
+/// recomputes each artifact's digest before a cache entry is trusted.
+pub mod error_codes;
 pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled

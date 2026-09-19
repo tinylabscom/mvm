@@ -79,6 +79,11 @@ pub struct SdkErrorType {
     pub doc: &'static str,
     /// The `MVM_HSVC_*` status this type is raised for, if any.
     pub status: Option<i32>,
+    /// The error code (`mvm_core::error_codes`) a host-library error body
+    /// carries when this type is raised, if any. Keyed by code rather than
+    /// status because the host-library statuses reuse the host-services
+    /// numbers.
+    pub code: Option<&'static str>,
     /// Surfaces that carry this type.
     pub surfaces: &'static [Surface],
     /// Structured fields the type carries. Empty for a plain subclass.
@@ -122,6 +127,7 @@ macro_rules! sdk_errors {
                     base: $base,
                     doc: concat!($($doc),+),
                     status: sdk_errors!(@status $($status)?),
+                    code: None,
                     surfaces: &[$(Surface::$surface),+],
                     fields: &[],
                     message_format: None,
@@ -183,6 +189,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Root,
         doc: "User code inside the VM raised; a structured envelope was parsed.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[
             ErrorField {
@@ -205,6 +212,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Runtime,
         doc: "Could not reach the substrate, or got an unparseable response.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
@@ -214,6 +222,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Runtime,
         doc: "The workload declared msgpack but the SDK has no msgpack support.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
@@ -223,6 +232,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Named("MvmTransportError"),
         doc: "The encoded request exceeded the payload cap, refused before any               subprocess spawned.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
@@ -232,6 +242,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Named("MvmTransportError"),
         doc: "No-VM dispatch was requested without a local function to               introspect. Python-only in practice: the mode itself has no               TypeScript form.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
@@ -241,6 +252,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Runtime,
         doc: "A secret-shaped value was passed as a call argument under strict               mode.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
@@ -250,6 +262,7 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Warning,
         doc: "Heuristic flagged a secret-shaped value passed as a call               argument.",
         status: None,
+        code: None,
         // Python-only, permanently: JavaScript has no warning type, and
         // `exports_to` refuses to emit a `Warning` into TypeScript.
         surfaces: &[Surface::Rust, Surface::Python],
@@ -261,11 +274,104 @@ const TIER_C: &[SdkErrorType] = &[
         base: ErrorBase::Runtime,
         doc: "A transport call fired inside an emit subprocess, where no live               microVM exists.",
         status: None,
+        code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
     },
 ];
+
+/// The errors the host library reports, keyed by the code its error body
+/// carries. Python only for now: the Python binding is the surface that
+/// raises them.
+const HOST_LIBRARY: &[SdkErrorType] = &[
+    host_library_base(),
+    host_library_error(
+        "MachineNotFoundError",
+        "The machine named does not exist.",
+        mvm_core::error_codes::NOT_FOUND,
+    ),
+    host_library_error(
+        "MachineSpecError",
+        "The request described a machine that cannot be built.",
+        mvm_core::error_codes::INVALID_SPEC,
+    ),
+    host_library_error(
+        "MachineBackendError",
+        "The backend failed while carrying the request out.",
+        mvm_core::error_codes::BACKEND_ERROR,
+    ),
+    host_library_error(
+        "MachineUnauthorizedError",
+        "The caller is not allowed to do this.",
+        mvm_core::error_codes::UNAUTHORIZED,
+    ),
+    host_library_error(
+        "MachineConflictError",
+        "The request conflicts with the machine's current state.",
+        mvm_core::error_codes::CONFLICT,
+    ),
+    host_library_error(
+        "MachineRejectedError",
+        "A policy refused the request.",
+        mvm_core::error_codes::REJECTED,
+    ),
+    host_library_error(
+        "MachineUnavailableError",
+        "The backend cannot answer right now; the request may be retried.",
+        mvm_core::error_codes::UNAVAILABLE,
+    ),
+    host_library_error(
+        "HostLibraryInputError",
+        "The method is unknown or its request did not parse.",
+        mvm_core::error_codes::INVALID_INPUT,
+    ),
+    host_library_error(
+        "HostLibraryAbiError",
+        "The library and this binding disagree about the ABI version.",
+        mvm_core::error_codes::ABI_NOT_NEGOTIATED,
+    ),
+    host_library_error(
+        "HostLibraryEmbedderError",
+        "The library could not set itself up in this process.",
+        mvm_core::error_codes::EMBEDDER,
+    ),
+    host_library_error(
+        "HostLibraryInternalError",
+        "A fault inside the host library itself.",
+        mvm_core::error_codes::INTERNAL,
+    ),
+];
+
+const fn host_library_base() -> SdkErrorType {
+    SdkErrorType {
+        name: "HostLibraryError",
+        base: ErrorBase::Root,
+        doc: "Base of every error the host library reports.",
+        status: None,
+        code: None,
+        surfaces: &[Surface::Rust, Surface::Python],
+        fields: &[],
+        message_format: None,
+    }
+}
+
+const fn host_library_error(
+    name: &'static str,
+    doc: &'static str,
+    code: &'static str,
+) -> SdkErrorType {
+    SdkErrorType {
+        name,
+        base: ErrorBase::Named("HostLibraryError"),
+        doc,
+        status: None,
+        code: Some(code),
+        surfaces: &[Surface::Rust, Surface::Python],
+        fields: &[],
+        message_format: None,
+    }
+}
 
 /// The success status. Not an error, so it has no registry row — but it
 /// belongs to the same `MVM_HSVC_*` family the SDKs mirrored by hand, and
@@ -281,9 +387,18 @@ pub fn status_mapping() -> impl Iterator<Item = (i32, &'static str)> {
         .filter_map(|e| e.status.map(|status| (status, e.name)))
 }
 
-/// Every error type: the host-services family followed by Tier C's.
+/// The code → error-type mapping, in registry order.
+pub fn code_mapping() -> impl Iterator<Item = (&'static str, &'static str)> {
+    all().filter_map(|e| e.code.map(|code| (code, e.name)))
+}
+
+/// Every error type: the host-services family, Tier C's, then the host
+/// library's.
 pub fn all() -> impl Iterator<Item = &'static SdkErrorType> {
-    REGISTRY.iter().chain(TIER_C.iter())
+    REGISTRY
+        .iter()
+        .chain(TIER_C.iter())
+        .chain(HOST_LIBRARY.iter())
 }
 
 /// The rows `surface` carries, in declaration order.
@@ -309,6 +424,45 @@ mod tests {
         // failure would surface as an untyped fallback.
         let expected: BTreeSet<i32> = (1..=8).collect();
         assert_eq!(seen, expected, "status coverage gap");
+    }
+
+    /// Every code a host-library error body can carry has exactly one type,
+    /// so no failure the library reports surfaces as an untyped fallback.
+    #[test]
+    fn every_host_library_code_maps_to_exactly_one_type() {
+        use mvm_core::error_codes as c;
+        let codes: Vec<&str> = code_mapping().map(|(code, _)| code).collect();
+        let unique: BTreeSet<&str> = codes.iter().copied().collect();
+        assert_eq!(codes.len(), unique.len(), "a code is mapped twice");
+        let expected: BTreeSet<&str> = [
+            c::NOT_FOUND,
+            c::INVALID_SPEC,
+            c::BACKEND_ERROR,
+            c::UNAUTHORIZED,
+            c::CONFLICT,
+            c::REJECTED,
+            c::UNAVAILABLE,
+            c::INVALID_INPUT,
+            c::ABI_NOT_NEGOTIATED,
+            c::EMBEDDER,
+            c::INTERNAL,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(unique, expected);
+    }
+
+    /// A type is keyed by a status or by a code, never both: the two maps
+    /// answer different transports.
+    #[test]
+    fn no_type_carries_both_a_status_and_a_code() {
+        for e in all() {
+            assert!(
+                e.status.is_none() || e.code.is_none(),
+                "{} has both a status and a code",
+                e.name
+            );
+        }
     }
 
     #[test]

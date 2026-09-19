@@ -164,7 +164,7 @@ pub unsafe extern "C" fn mvm_hostlib_call(
     .unwrap_or_else(|_| {
         Outcome::failure(
             MVM_HOSTLIB_INTERNAL,
-            "INTERNAL",
+            mvm_core::error_codes::INTERNAL,
             "the library panicked",
             false,
         )
@@ -194,8 +194,14 @@ pub unsafe extern "C" fn mvm_hostlib_free(buf: MvmHostlibBuf) {
 /// The client every production call is answered by: the local backend, in a
 /// process that has been told it is a library embedder.
 fn local_client() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
-    embedder::ensure_declared()
-        .map_err(|e| Outcome::failure(MVM_HOSTLIB_EMBEDDER, "EMBEDDER", &e.to_string(), false))?;
+    embedder::ensure_declared().map_err(|e| {
+        Outcome::failure(
+            MVM_HOSTLIB_EMBEDDER,
+            mvm_core::error_codes::EMBEDDER,
+            &e.to_string(),
+            false,
+        )
+    })?;
     Ok(Box::new(mvm_client::LocalBackend::new()))
 }
 
@@ -211,7 +217,7 @@ fn handle(
     if !negotiated {
         return Outcome::failure(
             MVM_HOSTLIB_ABI_NOT_NEGOTIATED,
-            "ABI_NOT_NEGOTIATED",
+            mvm_core::error_codes::ABI_NOT_NEGOTIATED,
             "call mvm_hostlib_abi_is_compatible with the binding's ABI version first",
             false,
         );
@@ -234,7 +240,7 @@ fn handle(
         Err(e) => {
             return Outcome::failure(
                 MVM_HOSTLIB_INTERNAL,
-                "INTERNAL",
+                mvm_core::error_codes::INTERNAL,
                 &format!("the runtime would not start: {e}"),
                 false,
             );
@@ -336,7 +342,7 @@ mod tests {
         let outcome = handle(true, b"machine.list", b"", || {
             Err(Outcome::failure(
                 MVM_HOSTLIB_EMBEDDER,
-                "EMBEDDER",
+                mvm_core::error_codes::EMBEDDER,
                 "no",
                 false,
             ))
