@@ -9,12 +9,11 @@
 //! (which may differ from what the host sees, e.g. on virtio-fs
 //! shares).
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::{Read, Write};
 
-use mvm_agentd::vsock::{FsResult, GuestRequest};
-use mvm_core::naming::validate_vm_name;
+use mvm_client::guest;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -162,35 +161,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Send an FS RPC to `name`'s guest agent over the backend-aware transport.
-/// `vsock_transport::for_vm` picks the right socket per VMM —
-/// Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU expose
-/// — so `mvmctl fs`/`cp` work regardless of which backend launched the VM.
-/// The `--hypervisor mock` fast path (a mock agent at the VM dir's
-/// `runtime/v.sock`) stays ahead of the probe since `for_vm` is unaware of
-/// the in-memory mock backend. Gated behind `test-support` along with the
-/// mock backend itself — a production build never has a mock VM dir to
-/// find, so it goes straight to the real probe.
-pub(in crate::commands) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
-    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    #[cfg(feature = "test-support")]
-    {
-        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-        if mock_dir.join("runtime").join("v.sock").exists() {
-            return mvm_agentd::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
-        }
-    }
-    let mut stream =
-        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    mvm_agentd::vsock::send_fs_request_on(&mut stream, req)
-}
-
-fn unwrap_fs(result: FsResult) -> Result<FsResult> {
-    if let FsResult::Error { kind, message } = &result {
-        bail!("Guest FS error ({:?}): {}", kind, message);
-    }
-    Ok(result)
-}
+pub(in crate::commands) use mvm_client::guest::fs_request;
 
 fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
     let content = read_guest_chunks(name, path, offset, length)?;
@@ -214,10 +185,17 @@ fn cmd_write(
             buf
         }
     };
-    let bytes_written =
-        write_guest_chunks(name, path, &bytes, mode, create_parents, follow_symlinks)?;
+    let bytes_written = guest::write_file(
+        name,
+        path,
+        &bytes,
+        guest::WriteOptions {
+            mode,
+            create_parents,
+            follow_symlinks,
+        },
+    )?;
     eprintln!("wrote {} bytes", bytes_written);
-    mvm_core::audit_emit!(VmFsMutate, vm: name, "op=write path={path} bytes={bytes_written}");
     Ok(())
 }
 
@@ -227,7 +205,7 @@ pub(in crate::commands) fn read_guest_chunks(
     start_offset: u64,
     length: u64,
 ) -> Result<Vec<u8>> {
-    read_guest_chunks_with_symlink_policy(name, path, start_offset, length, true)
+    guest::read_file_chunks(name, path, start_offset, length, true)
 }
 
 pub(in crate::commands) fn read_guest_chunks_with_symlink_policy(
@@ -237,47 +215,7 @@ pub(in crate::commands) fn read_guest_chunks_with_symlink_policy(
     length: u64,
     follow_symlinks: bool,
 ) -> Result<Vec<u8>> {
-    let chunk_cap =
-        u64::try_from(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE).expect("wire chunk size fits u64");
-    let capacity = usize::try_from(length).unwrap_or(usize::MAX);
-    let mut content = Vec::with_capacity(capacity.min(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE));
-    let mut offset = start_offset;
-    let mut remaining = length;
-    while remaining > 0 {
-        let requested = remaining.min(chunk_cap);
-        let req = fs_read_request(path, offset, requested, follow_symlinks);
-        super::shared::emit_vsock_rpc_audit(name, &req);
-        match unwrap_fs(fs_request(name, req)?)? {
-            FsResult::Read {
-                content: chunk,
-                total_size,
-            } => {
-                let chunk_len = u64::try_from(chunk.len()).expect("chunk length fits u64");
-                if chunk_len > requested {
-                    bail!("Guest read returned a chunk larger than requested");
-                }
-                content.extend_from_slice(&chunk);
-                offset = offset
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| anyhow::anyhow!("Guest read offset overflow"))?;
-                remaining -= chunk_len;
-                if chunk_len < requested || offset >= total_size {
-                    break;
-                }
-            }
-            other => bail!("Unexpected FsResult variant for Read: {other:?}"),
-        }
-    }
-    Ok(content)
-}
-
-fn fs_read_request(path: &str, offset: u64, length: u64, follow_symlinks: bool) -> GuestRequest {
-    GuestRequest::FsRead {
-        path: path.to_string(),
-        offset: Some(offset),
-        length,
-        follow_symlinks,
-    }
+    guest::read_file_chunks(name, path, start_offset, length, follow_symlinks)
 }
 
 pub(super) fn write_guest_chunks(
@@ -288,177 +226,75 @@ pub(super) fn write_guest_chunks(
     create_parents: bool,
     follow_symlinks: bool,
 ) -> Result<u64> {
-    let mut offset = 0_u64;
-    for (index, chunk) in content
-        .chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE)
-        .chain(content.is_empty().then_some(content))
-        .enumerate()
-    {
-        let req = GuestRequest::FsWrite {
-            path: path.to_string(),
-            content: chunk.to_vec(),
+    guest::write_file_chunks(
+        name,
+        path,
+        content,
+        guest::WriteOptions {
             mode,
-            create_parents: create_parents && index == 0,
+            create_parents,
             follow_symlinks,
-            offset: Some(offset),
-            truncate: index == 0,
-        };
-        super::shared::emit_vsock_rpc_audit(name, &req);
-        match unwrap_fs(fs_request(name, req)?)? {
-            FsResult::Write { bytes_written } => {
-                let expected = u64::try_from(chunk.len()).expect("chunk length fits u64");
-                if bytes_written != expected {
-                    bail!("Guest wrote {bytes_written} bytes, expected {expected}");
-                }
-                offset = offset
-                    .checked_add(bytes_written)
-                    .ok_or_else(|| anyhow::anyhow!("Guest write offset overflow"))?;
-            }
-            other => bail!("Unexpected FsResult variant for Write: {other:?}"),
-        }
-    }
-    Ok(offset)
+        },
+    )
 }
 
 fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
-    let req = GuestRequest::FsList {
-        path: path.to_string(),
-        follow_symlinks: true,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::List { entries, truncated } => {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
-                if truncated {
-                    eprintln!("(listing truncated; raise --max-list-entries on the agent)");
-                }
-                return Ok(());
-            }
-            if entries.is_empty() {
-                println!("(empty)");
-            }
-            for e in &entries {
-                let kind = match e.kind {
-                    mvm_agentd::vsock::FsEntryKind::File => "f",
-                    mvm_agentd::vsock::FsEntryKind::Dir => "d",
-                    mvm_agentd::vsock::FsEntryKind::Symlink => "l",
-                    mvm_agentd::vsock::FsEntryKind::Other => "?",
-                };
-                if e.size > 0 {
-                    println!("  {} {} ({})", kind, e.name, human_bytes(e.size));
-                } else {
-                    println!("  {} {}", kind, e.name);
-                }
-            }
-            if truncated {
-                eprintln!("(listing truncated; agent capped entries — raise its max_list_entries)");
-            }
-            Ok(())
+    let guest::Listing { entries, truncated } = guest::list_dir(name, path)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        if truncated {
+            eprintln!("(listing truncated; raise --max-list-entries on the agent)");
         }
-        other => bail!("Unexpected FsResult variant for List: {:?}", other),
+        return Ok(());
     }
+    if entries.is_empty() {
+        println!("(empty)");
+    }
+    for e in &entries {
+        let kind = match e.kind {
+            mvm_agentd::vsock::FsEntryKind::File => "f",
+            mvm_agentd::vsock::FsEntryKind::Dir => "d",
+            mvm_agentd::vsock::FsEntryKind::Symlink => "l",
+            mvm_agentd::vsock::FsEntryKind::Other => "?",
+        };
+        if e.size > 0 {
+            println!("  {} {} ({})", kind, e.name, human_bytes(e.size));
+        } else {
+            println!("  {} {}", kind, e.name);
+        }
+    }
+    if truncated {
+        eprintln!("(listing truncated; agent capped entries — raise its max_list_entries)");
+    }
+    Ok(())
 }
 
 fn cmd_stat(name: &str, path: &str, follow_symlinks: bool, json: bool) -> Result<()> {
-    let req = GuestRequest::FsStat {
-        path: path.to_string(),
-        follow_symlinks,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Stat(s) => {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&s)?);
-            } else {
-                println!("path:  {}", s.canonical_path);
-                println!("kind:  {:?}", s.kind);
-                println!("size:  {} ({})", s.size, human_bytes(s.size));
-                println!("mode:  {:o}", s.mode);
-                if let Some(t) = s.mtime {
-                    println!("mtime: {}", t);
-                }
-            }
-            Ok(())
+    let s = guest::stat(name, path, follow_symlinks)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+    } else {
+        println!("path:  {}", s.canonical_path);
+        println!("kind:  {:?}", s.kind);
+        println!("size:  {} ({})", s.size, human_bytes(s.size));
+        println!("mode:  {:o}", s.mode);
+        if let Some(t) = s.mtime {
+            println!("mtime: {}", t);
         }
-        other => bail!("Unexpected FsResult variant for Stat: {:?}", other),
     }
+    Ok(())
 }
 
 fn cmd_mkdir(name: &str, path: &str, mode: u32, parents: bool) -> Result<()> {
-    let req = GuestRequest::FsMkdir {
-        path: path.to_string(),
-        mode,
-        parents,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Mkdir => {
-            mvm_core::audit_emit!(VmFsMutate, vm: name, "op=mkdir path={path} mode={mode:o} parents={parents}");
-            Ok(())
-        }
-        other => bail!("Unexpected FsResult variant for Mkdir: {:?}", other),
-    }
+    guest::make_dir(name, path, mode, parents)
 }
 
 fn cmd_rm(name: &str, path: &str, recursive: bool) -> Result<()> {
-    let req = GuestRequest::FsRemove {
-        path: path.to_string(),
-        recursive,
-        follow_symlinks: false,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Remove { entries_removed } => {
-            eprintln!("removed {} entries", entries_removed);
-            mvm_core::audit_emit!(VmFsMutate, vm: name, "op=rm path={path} recursive={recursive} entries={entries_removed}");
-            Ok(())
-        }
-        other => bail!("Unexpected FsResult variant for Remove: {:?}", other),
-    }
+    let entries_removed = guest::remove(name, path, recursive)?;
+    eprintln!("removed {} entries", entries_removed);
+    Ok(())
 }
 
 fn cmd_mv(name: &str, from: &str, to: &str) -> Result<()> {
-    let req = GuestRequest::FsMove {
-        from: from.to_string(),
-        to: to.to_string(),
-        follow_symlinks: false,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Move => {
-            mvm_core::audit_emit!(VmFsMutate, vm: name, "op=mv from={from} to={to}");
-            Ok(())
-        }
-        other => bail!("Unexpected FsResult variant for Move: {:?}", other),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_request_preserves_symlink_policy() {
-        let request = fs_read_request("/deps/site.py", 8, 16, false);
-        assert!(matches!(
-            request,
-            GuestRequest::FsRead {
-                path,
-                offset: Some(8),
-                length: 16,
-                follow_symlinks: false,
-            } if path == "/deps/site.py"
-        ));
-    }
+    guest::rename(name, from, to)
 }
