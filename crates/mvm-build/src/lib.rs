@@ -54,6 +54,7 @@ pub mod guest_elf;
 /// Which libc a materialized guest rootfs carries, observed while the tree is
 /// still a directory the host can read.
 pub mod guest_libc;
+pub mod image_source;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
 /// Universal initramfs build + cache resolution.

@@ -347,6 +347,11 @@ fn run_command() -> Result<()> {
         }
     };
     apply_startup_env(&cli);
+    refuse_local_image_source_in_release_build(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        &cli.command,
+        mvm_build::image_source::configured_images_dir().as_deref(),
+    )?;
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
@@ -558,6 +563,21 @@ pub(in crate::commands) fn set_cli_env(key: &str, value: impl AsRef<std::ffi::Os
     // (`crate::signal`), which blocks on a pipe read and never touches the
     // environment, so no `getenv` can race this `setenv`.
     unsafe { std::env::set_var(key, value) };
+}
+
+/// A release build refuses a configured local image checkout before any verb
+/// runs, so nothing a release binary acquires or boots can come from one.
+/// `doctor` is exempt so it can report the refusal instead of failing with it.
+fn refuse_local_image_source_in_release_build(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    command: &Commands,
+    configured: Option<&std::path::Path>,
+) -> Result<()> {
+    if matches!(command, Commands::Doctor(_)) {
+        return Ok(());
+    }
+    mvm_build::image_source::refuse_in_release_build(channel, configured)?;
+    Ok(())
 }
 
 fn apply_startup_env(cli: &Cli) {
@@ -782,6 +802,55 @@ fn maybe_converge_on_entry(command: &Commands) {
     }
     let _ =
         mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
+}
+
+#[cfg(test)]
+mod image_source_gate_tests {
+    use super::{Cli, refuse_local_image_source_in_release_build};
+    use clap::Parser;
+    use mvm_build::artifact_acquisition::DistributionChannel;
+    use std::path::Path;
+
+    fn command(args: &[&str]) -> super::Commands {
+        Cli::try_parse_from(std::iter::once("mvmctl").chain(args.iter().copied()))
+            .expect("the test argv parses")
+            .command
+    }
+
+    #[test]
+    fn a_release_build_refuses_a_configured_checkout_before_any_verb() {
+        let checkout = Some(Path::new("/nonexistent/mvm-images"));
+        let err = refuse_local_image_source_in_release_build(
+            DistributionChannel::Release,
+            &command(&["cache", "info"]),
+            checkout,
+        )
+        .expect_err("a release build must refuse MVM_IMAGES_DIR");
+        assert!(err.to_string().contains("release build"), "{err:#}");
+    }
+
+    #[test]
+    fn doctor_still_runs_so_it_can_report_the_refusal() {
+        refuse_local_image_source_in_release_build(
+            DistributionChannel::Release,
+            &command(&["doctor"]),
+            Some(Path::new("/nonexistent/mvm-images")),
+        )
+        .expect("doctor reports the refusal rather than failing with it");
+    }
+
+    #[test]
+    fn a_contributor_build_or_an_unset_variable_passes() {
+        let cmd = command(&["cache", "info"]);
+        refuse_local_image_source_in_release_build(
+            DistributionChannel::Source,
+            &cmd,
+            Some(Path::new("/nonexistent/mvm-images")),
+        )
+        .unwrap();
+        refuse_local_image_source_in_release_build(DistributionChannel::Release, &cmd, None)
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
