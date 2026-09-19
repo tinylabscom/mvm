@@ -52,9 +52,17 @@ pub(in crate::commands) enum CacheAction {
         /// (`stage0/`), the prebuilt default microVM image (`default-microvm/`),
         /// pulled OCI layers (`oci/`), and content-addressed mount images
         /// (`mount-images/`). These cost a re-fetch or rebuild the next time
-        /// they're needed, so they're opt-in. Implies `--orphan-dirs`.
+        /// they're needed, so they're opt-in. Implies `--orphan-dirs` and
+        /// `--stage0-store`.
         #[arg(long)]
         deep: bool,
+        /// Remove the Stage 0 Nix store image (`nix-store-stage0-<arch>.img`),
+        /// keeping the builder image it produced and the steady-state store.
+        /// Stage 0 keeps that store only to warm the next bootstrap, so this
+        /// trades a slower next `mvmctl bootstrap` for its disk. Refuses while
+        /// a Stage 0 bootstrap is running.
+        #[arg(long)]
+        stage0_store: bool,
     },
     /// Show cache directory path and disk usage
     Info {
@@ -361,10 +369,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             no_reap_orphans,
             orphan_dirs,
             deep,
+            stage0_store,
         } => {
             // `--deep` is the "reclaim everything regenerable" sledgehammer; it
             // subsumes the orphan-dir sweep.
             let orphan_dirs = orphan_dirs || deep;
+            // Decided before anything is removed, so an explicit request that
+            // has to refuse leaves the cache untouched.
+            let stage0_store_action = stage0_store_reclaim_action(
+                stage0_store,
+                deep,
+                super::super::env::builder_vm::stage0_bootstrap_in_flight(),
+            );
+            if stage0_store_action == Stage0StoreReclaim::Refuse {
+                anyhow::bail!(
+                    "a Stage 0 bootstrap appears to be in progress (lock held at \
+                     {}/builder-vm/stage0.lock). Refusing to remove the Stage 0 store from \
+                     under it; run this again once the bootstrap finishes.",
+                    cache_dir,
+                );
+            }
             // Reap orphaned per-VM helpers by default (liveness-aware: live VMs
             // are spared). Done first so subsequent steps see a clean process
             // list and so the sweeper can drop the per-VM cache dirs along with
@@ -663,6 +687,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            match stage0_store_action {
+                Stage0StoreReclaim::Clear => {
+                    let repair = mvm_build::builder_vm::clear_stage0_store_image(dry_run)
+                        .map_err(|e| anyhow::anyhow!("removing the Stage 0 store image: {e}"))?;
+                    if repair.existed {
+                        ui::info(&format!(
+                            "  Stage 0 Nix store {} ({}; the next bootstrap starts cold)",
+                            repair.path,
+                            human_bytes(repair.bytes_freed)
+                        ));
+                        removed += 1;
+                        freed += repair.bytes_freed;
+                    }
+                }
+                Stage0StoreReclaim::SkipInFlight => {
+                    ui::warn("Skipping the Stage 0 store: a Stage 0 bootstrap is in progress.")
+                }
+                Stage0StoreReclaim::Keep | Stage0StoreReclaim::Refuse => {}
+            }
+
             if removed == 0 {
                 ui::notice("Nothing to prune.");
             } else if dry_run {
@@ -695,6 +739,34 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
             Ok(())
         }
+    }
+}
+
+/// What `prune` does with the Stage 0 Nix store image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage0StoreReclaim {
+    /// Not asked for.
+    Keep,
+    /// Asked for and safe to remove.
+    Clear,
+    /// Named explicitly while a bootstrap holds it: fail the whole prune, so
+    /// the operator knows the one thing they asked for did not happen.
+    Refuse,
+    /// Swept up by `--deep` while a bootstrap holds it: leave it and say so,
+    /// rather than failing everything else `--deep` would reclaim.
+    SkipInFlight,
+}
+
+fn stage0_store_reclaim_action(
+    requested: bool,
+    deep: bool,
+    bootstrap_in_flight: bool,
+) -> Stage0StoreReclaim {
+    match (requested, deep, bootstrap_in_flight) {
+        (false, false, _) => Stage0StoreReclaim::Keep,
+        (_, _, false) => Stage0StoreReclaim::Clear,
+        (true, _, true) => Stage0StoreReclaim::Refuse,
+        (false, true, true) => Stage0StoreReclaim::SkipInFlight,
     }
 }
 
@@ -1154,6 +1226,47 @@ fn remove_cache_path(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stage0_store_is_kept_unless_asked_for() {
+        assert_eq!(
+            stage0_store_reclaim_action(false, false, false),
+            Stage0StoreReclaim::Keep
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, false, true),
+            Stage0StoreReclaim::Keep
+        );
+    }
+
+    #[test]
+    fn the_stage0_store_is_cleared_when_named_or_swept_by_deep() {
+        assert_eq!(
+            stage0_store_reclaim_action(true, false, false),
+            Stage0StoreReclaim::Clear
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, true, false),
+            Stage0StoreReclaim::Clear
+        );
+    }
+
+    #[test]
+    fn a_running_bootstrap_refuses_an_explicit_request_and_is_skipped_by_deep() {
+        assert_eq!(
+            stage0_store_reclaim_action(true, false, true),
+            Stage0StoreReclaim::Refuse
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(true, true, true),
+            Stage0StoreReclaim::Refuse,
+            "naming it explicitly still refuses under --deep"
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, true, true),
+            Stage0StoreReclaim::SkipInFlight
+        );
+    }
 
     /// Checkpoint fixtures for the sweep tests. `created_unix` of 0 is aged out
     /// under every cut the tests use; [`SWEEP_NOW`] is young under a one-second

@@ -83,11 +83,11 @@ pub struct SubstitutionService {
     reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy,
     /// Request-scoped replacement / reinjection engine.
     replacement_engine: ReplacementEngine,
-    /// Claim-10 egress gate. When present, every outbound destination is checked
-    /// against the VM's resolved network policy before any forward — an
-    /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
-    /// gate (the run loop's gate is still active); a `Some` gate fails closed.
-    egress_gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    /// Claim-10 egress gate. Every outbound destination is checked against the
+    /// VM's resolved network policy before any forward, and an unadmitted
+    /// `host:port` is refused here. Not optional: a VM with no admitted policy
+    /// carries a default-deny gate, so no service forwards undecided.
+    egress_gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
     /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
     /// metered and no budget is enforced.
     ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
@@ -102,4 +102,4 @@ pub struct SubstitutionService {
 }
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;

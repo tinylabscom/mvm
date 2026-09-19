@@ -171,6 +171,26 @@ pub fn builder_store_gc_cap_kib() -> u64 {
     u64::from(gib) * 1024 * 1024
 }
 
+/// Kernel-cmdline token carrying [`builder_store_gc_cap_kib`] into the Stage 0
+/// guest.
+///
+/// The guest cannot read the host's environment, so without this the
+/// [`MVM_BUILDER_STORE_GC_GIB_ENV`] override would govern the steady-state
+/// store and silently not the Stage 0 one. It rides the cmdline rather than
+/// `stage0-build.conf` because the ordinary builder-image bootstrap writes no
+/// config at all — only the SDK-sidecar and external-kernel paths do — so a
+/// config-carried cap reached the guest on exactly the paths that did not need
+/// it.
+pub const STAGE0_STORE_GC_KIB_CMDLINE_KEY: &str = "mvm.store_gc_kib";
+
+/// The cmdline token every Stage 0 boot carries.
+pub fn stage0_store_gc_cmdline_token() -> String {
+    format!(
+        "{STAGE0_STORE_GC_KIB_CMDLINE_KEY}={}",
+        builder_store_gc_cap_kib()
+    )
+}
+
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
 /// through the application-dependency install pipeline. Migrated
 /// from `libkrun_builder.rs` because the install spec staging is a
@@ -2212,5 +2232,21 @@ mod tests {
         // Zero → also falls back (zero would GC the just-built closure).
         env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+    }
+
+    #[test]
+    fn the_stage0_cmdline_carries_the_same_cap_the_steady_state_builder_uses() {
+        let mut env = TestEnv::new();
+
+        env.remove(MVM_BUILDER_STORE_GC_GIB_ENV);
+        assert_eq!(stage0_store_gc_cmdline_token(), "mvm.store_gc_kib=25165824");
+
+        // The override reaches the guest; before this token it governed only
+        // the steady-state store.
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "2");
+        assert_eq!(
+            stage0_store_gc_cmdline_token(),
+            format!("{STAGE0_STORE_GC_KIB_CMDLINE_KEY}={}", 2 * 1024 * 1024)
+        );
     }
 }

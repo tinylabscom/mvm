@@ -348,6 +348,16 @@ jobs:
         # fuzz_guest_request applies.
         run: cargo fuzz run fuzz_input_frame -- -max_total_time="$DURATION"
 
+      - name: Fuzz bounded telemetry records
+        working-directory: crates/mvm-agentd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: |
+          telemetry_corpus=$(mktemp -d)
+          cp ../mvm-core/tests/fixtures/telemetry-v1/*.json "$telemetry_corpus/"
+          cargo fuzz run fuzz_telemetry_record "$telemetry_corpus" -- -max_total_time="$DURATION" -max_len=40000
+
       - name: Fuzz authed path (signed-side)
         working-directory: crates/mvm-agentd
         env:

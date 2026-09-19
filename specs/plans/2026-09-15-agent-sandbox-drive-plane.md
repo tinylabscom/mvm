@@ -211,6 +211,11 @@ retires the second guest proxy (#3288).
       the ADR-001 rows for claims 12, 13 and 16 in the same change.
 - [ ] T14. Correct ADR-001's claim-10 row, which still describes nftables, TAP
       and gateway enforcement plus an acknowledgement hatch that does not exist.
+- [x] T15. Make the claim-10 gate a required argument of `SubstitutionService`
+      and `FromPlanInputs`, so a service that forwards without deciding the
+      destination cannot be built (#3301, the last item of #3302). An endpoint
+      config with no network policy now projects default-deny in every egress
+      mode; `Wire` used to project no gate at all.
 
 ### Residual risk to record, not to hide
 

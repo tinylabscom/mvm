@@ -596,10 +596,8 @@ mod tests {
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
-    use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use mvm_core::plan::TenantId;
-    use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use rustls::pki_types::pem::PemObject;
     use secrecy::SecretBox;
 
@@ -607,6 +605,7 @@ mod tests {
     use crate::keyholder::{LocalResolver, SecretResolver};
     use crate::supervisor::audit_file::FileAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;
+    use crate::supervisor::network_endpoint_proxy::test_support::gate_admitting;
     use crate::supervisor::network_endpoint_proxy::{
         ForwardError, ForwardResponse, Forwarder, PreparedRequest,
     };
@@ -618,20 +617,10 @@ mod tests {
     /// A second admitted name, so the deny test can point the policy somewhere
     /// real rather than at an empty allow-list.
     const OTHER_HOST: &str = "api.other.test";
-    /// Where the two names are pinned. Both must be routable public unicast or
-    /// the claim-10 gate mandatory-denies them regardless of the allow-list,
-    /// and they must differ from each other, because the gate decides on
-    /// addresses: two names behind one address are one destination to it.
-    /// Nothing is ever dialed, because the forward leg is a double —
-    /// production's forwarder refuses loopback by construction, which is why
-    /// it is the one piece swapped out.
-    const BOUND_IP: &str = "93.184.216.34";
-    const OTHER_IP: &str = "198.51.100.9";
-    /// A subdomain wildcard binding, a name two labels below it that the
-    /// binding admits, and where that name is pinned.
+    /// A subdomain wildcard binding, and a name two labels below it that the
+    /// binding admits.
     const WILDCARD_PATTERN: &str = "*.wild.test";
     const WILDCARD_SUBDOMAIN: &str = "api.eu.wild.test";
-    const WILDCARD_IP: &str = "203.0.113.17";
 
     /// Records the request the forward leg was handed, so a test can prove the
     /// destination received the real credential without a network call.
@@ -741,11 +730,17 @@ mod tests {
         .expect("the endpoint rebuilds its ca from the delivered pems");
         let intermediate_pem = delivery.cert_pem().to_string();
 
-        let service = SubstitutionService::new(Arc::new(registry), resolver, forwarder.clone())
-            .with_tenant(TENANT)
-            .with_recorder(recorder)
-            .with_tls_intermediate(intermediate)
-            .with_egress_gate(pinned_gate(admitted));
+        // Nothing is ever dialed: the forward leg is a double, and the gate pins
+        // the admitted name without DNS.
+        let service = SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+            gate_admitting(&[(admitted, 443)]),
+        )
+        .with_tenant(TENANT)
+        .with_recorder(recorder)
+        .with_tls_intermediate(intermediate);
 
         Harness {
             service: Arc::new(service),
@@ -756,32 +751,6 @@ mod tests {
             audit_key,
             _dir: dir,
         }
-    }
-
-    /// A gate admitting `admitted:443`, with both test names pinned to a
-    /// routable address so no test needs DNS.
-    fn pinned_gate(admitted: &str) -> mvm_runtime::vmm::egress_gate::EgressGate {
-        let now = chrono::Utc::now();
-        let later = now + chrono::Duration::hours(1);
-        let mut pins = DnsPinRegistry::new();
-        for (name, ip) in [
-            (BOUND_HOST, BOUND_IP),
-            (OTHER_HOST, OTHER_IP),
-            (WILDCARD_SUBDOMAIN, WILDCARD_IP),
-        ] {
-            pins.add(DnsPin::at(
-                name,
-                vec![ip.parse().expect("pinned ip parses")],
-                now.to_rfc3339(),
-                later.to_rfc3339(),
-            ));
-        }
-        let policy = NetworkPolicy::allow_list(vec![HostPort::new(admitted, 443)]);
-        mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(
-            &policy,
-            &pins,
-            &now.to_rfc3339(),
-        )
     }
 
     /// A rustls client that trusts only the per-VM intermediate, which is what
@@ -1334,6 +1303,11 @@ mod tests {
         assert!(
             status_line(&response).starts_with("HTTP/1.1 502"),
             "a denied destination must be refused: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(
+            String::from_utf8_lossy(&response).contains("claim-10"),
+            "the refusal must be the gate's, not another 502: {}",
             String::from_utf8_lossy(&response)
         );
         assert!(

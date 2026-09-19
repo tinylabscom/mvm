@@ -4668,6 +4668,7 @@ fn test_cache_prune_combined_flags() {
         "--no-reap-orphans",
         "--orphan-dirs",
         "--deep",
+        "--stage0-store",
     ])
     .unwrap();
     match cli.command {
@@ -4679,6 +4680,7 @@ fn test_cache_prune_combined_flags() {
                     no_reap_orphans,
                     orphan_dirs,
                     deep,
+                    stage0_store,
                 },
         }) => {
             assert!(dry_run);
@@ -4686,7 +4688,19 @@ fn test_cache_prune_combined_flags() {
             assert!(no_reap_orphans);
             assert!(orphan_dirs);
             assert!(deep);
+            assert!(stage0_store);
         }
+        _ => panic!("Expected Cache Prune command"),
+    }
+}
+
+#[test]
+fn test_cache_prune_stage0_store_is_off_by_default() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune"]).unwrap();
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action: CacheAction::Prune { stage0_store, .. },
+        }) => assert!(!stage0_store, "the warm Stage 0 cache is kept by default"),
         _ => panic!("Expected Cache Prune command"),
     }
 }

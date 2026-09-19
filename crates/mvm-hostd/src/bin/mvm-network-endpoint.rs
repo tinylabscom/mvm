@@ -963,7 +963,7 @@ impl FlowMuxEndpointProjection {
             .collect::<Vec<_>>();
         Ok(Self {
             identity,
-            gate: network.flowmux_gate()?,
+            gate: network.gate(),
             recorder: network.recorder(),
             resources,
             limits,

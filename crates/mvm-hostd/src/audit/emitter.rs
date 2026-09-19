@@ -74,6 +74,7 @@ pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 mod session_events;
 
 pub mod checkpoint_audit;
+pub mod grants_audit;
 pub mod wall_clock_audit;
 pub use checkpoint_audit::CheckpointForkedAudit;
 pub mod image_audit;
@@ -660,36 +661,6 @@ impl AuditEmitter {
             plan,
             "plan.launched",
             [("backend".to_string(), backend.to_string())],
-        )
-    }
-
-    /// Emit `plan.grants_enforced` — records what actually bounded this
-    /// workload, as read back off the live controls after the backend started
-    /// it.
-    ///
-    /// Deliberately a separate entry from `plan.admitted`, which records the
-    /// bounds that were *requested*. A reader who only ever sees the request
-    /// cannot tell a run that was bounded from one that declared a bound
-    /// nothing implemented — and those two are the whole point of the
-    /// distinction.
-    pub fn emit_grants_enforced(
-        &self,
-        plan: &ExecutionPlan,
-        enforced: &mvm_contract::protocol::resource_controls::EnforcedGrants,
-    ) -> Result<()> {
-        self.emit(
-            plan,
-            "plan.grants_enforced",
-            [
-                (
-                    "grants_cpu_tier".to_string(),
-                    enforced.cpu.label().to_string(),
-                ),
-                (
-                    "grants_wall_clock_tier".to_string(),
-                    enforced.wall_clock.label().to_string(),
-                ),
-            ],
         )
     }
 
@@ -2389,6 +2360,70 @@ mod tests {
             content.contains("captured"),
             "capture fidelity is unchanged"
         );
+    }
+
+    #[test]
+    fn emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-OOM");
+        emitter
+            .emit_memory_limit_exceeded(
+                &plan,
+                &mvm_core::spawn_scope::MemoryLimitExceeded {
+                    memory_max_bytes: Some(335_544_320),
+                },
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains(grants_audit::MEMORY_LIMIT_EXCEEDED_EVENT));
+        assert!(content.contains("\"335544320\""), "{content}");
+        assert!(content.contains("cgroup2:memory.max"), "{content}");
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn emit_grants_enforced_carries_the_read_back_ceilings() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-CEIL");
+        use mvm_contract::protocol::resource_controls::{
+            EnforcedCeiling, EnforcedGrants, EnforcedTier,
+        };
+        emitter
+            .emit_grants_enforced(
+                &plan,
+                &EnforcedGrants {
+                    cpu: EnforcedTier::Declared,
+                    wall_clock: EnforcedTier::Declared,
+                    memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
+                    tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
+                },
+            )
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
+        for needle in [
+            grants_audit::LABEL_MEMORY_TIER,
+            "cgroup2:memory.max",
+            "805306368",
+            grants_audit::LABEL_TASKS_TIER,
+            "cgroup2:pids.max",
+        ] {
+            assert!(content.contains(needle), "{needle} missing: {content}");
+        }
     }
 
     #[test]

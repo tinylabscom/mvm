@@ -612,8 +612,16 @@ mod tests {
             allowed_hosts: vec![bound_host.to_string()],
             sigv4: None,
         });
-        let mut service =
-            SubstitutionService::new(Arc::new(registry), resolver, Arc::new(UnusedForwarder));
+        // Every flow in these tests is decided on the FlowMux connect path, by
+        // the session's own gate, before any request reaches the service. Its
+        // gate denies everything so a test that did reach it would fail rather
+        // than forward.
+        let mut service = SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            Arc::new(UnusedForwarder),
+            Arc::new(EgressGate::default_deny()),
+        );
         if with_intermediate {
             service = service.with_tls_intermediate(
                 mvm_core::crypto::egress_ca::VmEgressCa::mint(&[bound_host])

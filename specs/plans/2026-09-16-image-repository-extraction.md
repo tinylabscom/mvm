@@ -123,22 +123,47 @@ have separate owners and compatibility contracts.
 
 ### `mvm-images` owns
 
-- `nix/images/builder-vm/`;
-- `nix/images/default-tenant/` and the production workload kernel build;
-- `nix/images/runtime-overlay/`;
-- `nix/images/sdk-sidecar/`;
-- image-specific Nix libraries and lock files;
+- `nix/images/builder-vm/` — the builder kernel and rootfs, `stage0-rootfs`,
+  the kernel attributes, and the SDK sidecar re-export;
+- `nix/images/default-tenant/`;
+- `nix/images/runtime-overlay/` — the overlay **and** the glibc and musl SDK
+  sidecars (there is no separate `nix/images/sdk-sidecar/`);
+- `nix/images/initramfs/`, which `release.yml` publishes on the CLI train today;
+- `nix/images/kernel/` (base, builder and workload configs, flake, README),
+  `scripts/build-kernel-artifacts.sh`, the kernel config budget, and kernel
+  publication, which `kernel-build.yml` uploads to the CLI release today;
+- the QEMU/WebAssembly smoke pack: `nix/packages/qemu-wasm.nix`,
+  `qemu-wasm-smoke-image.nix`, `qemu-wasm-smoke-pack.nix`,
+  `emscripten-cross.meson`, `scripts/build-qemu-wasm-smoke-pack.sh`, and the
+  `scripts/run-qemu-wasm-*.py` and `serve-qemu-wasm-smoke-pack.py` harnesses;
+- `nix/packaging/release/assert-sidecar-coherent.sh`;
+- the image-only CI lanes: builder and pack reproducibility, verified-boot
+  artifacts, cache warming, and the kernel CVE watch;
 - image assembly, boot tests, SBOM generation, signing, and publication;
 - the immutable image-set manifest and revocation documents; and
 - reproducibility instructions for every published artifact.
 
-The exact file inventory is established mechanically before any move. Shared
-Nix helpers move only if all remaining consumers are image concerns; otherwise
-they become a small versioned interface rather than being copied.
+The guest and builder binaries inside the images are **not** moved. They are
+compiled from `mvm` source against `mvm`'s `Cargo.lock`, so their recipes stay
+beside that lockfile and the tests that pin them. `mvm-images` consumes them
+from an `mvm` flake input pinned to an exact commit: `mvm.packages.<system>.*`
+for the guest recipes, `mvm.lib.<system>.mkGuest` for the guest assembly, and a
+`cargo zigbuild` of `mvm-host-vm-init`, `mvm-egress-proxy` and `mvm-builderd`
+from a checkout of the same commit. Nothing is copied from `mvm` into
+`mvm-images`.
 
 ### `mvm` continues to own
 
 - host CLI/runtime source and guest-agent source;
+- the Nix recipes that compile that source for a guest
+  (`nix/packages/mvm-guest-agent*.nix`, `mvm-setpriv.nix`,
+  `mvm-egress-client.nix`, `mvm-addon-dns.nix`, `mvm-exit-report.nix`,
+  `mvm-sdk-cdylib.nix`, `workspace-unpack.nix`, `embedded-rust-toolchain.nix`)
+  and the helpers they share with host packages (`nix/lib/workspace-filter.nix`,
+  `static-crates-cargo-deps.nix`, `crates-io.nix`, `mvm-host-binaries.nix`),
+  exported as flake outputs;
+- the user-facing flake API (`nix/lib/default.nix`, `mk-guest.nix`,
+  `mkFunctionWorkload.nix`, `factories/`, `wrappers/`, `profiles/`);
 - artifact acquisition, verification, cache, and admission code;
 - the guest/host protocol and compatibility declarations;
 - the compiled default image-set pin;
@@ -435,7 +460,7 @@ Delivery slices, one PR each:
 
 ### W4 — Move image sources and reproduce current bytes (#3362)
 
-- [ ] Inventory the exact image-owned paths and shared helper edges.
+- [x] Inventory the exact image-owned paths and shared helper edges.
 - [ ] Move image flakes, locks, assembly scripts, and image-specific tests to
       `mvm-images` without copying product runtime source.
 - [ ] Build guest/builder binaries from an explicit `mvm` source commit.
@@ -445,6 +470,75 @@ Delivery slices, one PR each:
 
 Acceptance: both architecture sets build, verify, and boot; every unexplained
 byte or closure difference blocks publication.
+
+Inventory taken 2026-09-18 against `main` at `713bf1c172`. The ownership lists
+above are its result; what follows is what shapes the order of work.
+
+- **The image flakes import `mvm` by path, not by flake input.** Every one
+  resolves `workspaceRoot` (`../../..`, or `$MVM_WORKSPACE_PATH`) and imports
+  `nix/lib` and `nix/packages` files from it. Moving a flake means rewriting
+  each of those imports onto a pinned `mvm` input. `nix/flake.nix` does not
+  export the guest recipes today — its `packages` are `mvmctl`, the tpm2
+  variants, libkrun and the QEMU-wasm outputs — so `mvm` has to export them
+  before anything can move.
+- **Three builder binaries are built outside Nix.** `release-boot-image.yml`
+  runs `cargo zigbuild` for `mvm-host-vm-init`, `mvm-egress-proxy` and
+  `mvm-builderd`, and the builder-vm flake reads them from `MVM_HOST_BIN_DIR`
+  under `--impure`.
+- **Two published image assets are not on the boot-image train.** The
+  initramfs is built by `release.yml`, and kernels are published by
+  `kernel-build.yml` into the CLI release. Both join the image set.
+- **Changing `mvmSrc` from a filtered path to a flake-input store path changes
+  derivation inputs.** Whether that reaches the output bytes is the question
+  the comparison below answers; it is not assumed.
+- **The builder-vm flake is also a "source checkout" marker for things that
+  are not images**, such as the libkrun supervisor auto-build
+  (`libkrun_builder.rs`). Removing the flake before W5 would quietly turn a
+  contributor build into an installed build.
+- **The builder cache fingerprint misses inputs today.** It does not hash the
+  kernel configs, the runtime-overlay flake or the setpriv recipe the
+  builder-vm flake imports. That is a current bug (#3447), fixed in `mvm`
+  independently of this migration.
+- `xtask build-dev-image` targets `nix/images/builder`, which does not exist.
+  It is removed rather than moved.
+
+Rust code that builds from `nix/images/*` in a source checkout, all of which W5
+must route through the explicit sibling selector before W8 deletes anything:
+`find_builder_vm_flake` / `builder_vm_is_source_checkout` and their callers
+(bootstrap, default microVM, kernel acquisition, doctor, `image boot update`,
+`up`), the `MVM_BOOT_IMAGE=build|fetch` resolver, the builder source
+fingerprint in `stage0_cache.rs`, the hard-coded flake references in
+`stage0-init.rs`, the kernel and image attribute-name contract,
+`default_microvm.rs`'s default-tenant reference, both SDK sidecar build paths,
+runtime-overlay checkout detection (`commands/runtime_overlay.rs` and its
+duplicate in `mvm-build/src/runtime_overlay.rs`), and
+`builder_vm_source_checkout_root` in `libkrun_builder.rs`.
+
+Gates and tests: the kernel config budget, `check-runtime-overlay-version`, the
+image tests in `tests/nix_flake_structure.rs`, and the `tests/release_assets.rs`
+tests that read `release-boot-image.yml` move with the images.
+`check-kernel-pin-freshness` splits (libkrunfw stays, the kernel flake moves).
+The guest-image, guest-agent, host-binary-sync and guest-init parity gates stay
+in `mvm` as contract checks.
+
+No open PR touches `nix/`. Two local branches without PRs do
+(`fix/3330-extended-ci-privilege` on `workspace-filter.nix`, and
+`fix/github-actions-issues-20260915` on `kernel/base.nix` and `libkrunfw.nix`);
+nothing is deleted from `mvm` until W8, but the copy into `mvm-images` should be
+taken after they land or are abandoned.
+
+Delivery slices, one PR each:
+
+- [ ] W4a (`mvm`) — export the guest recipes and a filtered-source helper from
+      `nix/flake.nix` for Linux systems, and have the in-tree image flakes
+      consume those outputs, so the interface `mvm-images` will pin is the one
+      `mvm` already builds through.
+- [ ] W4b (`mvm-images`) — the image flakes, kernel, initramfs and QEMU-wasm
+      pack, with every `mvm` import rewritten onto an `mvm` input pinned to an
+      exact commit, plus a no-publish build workflow for both architectures.
+- [ ] W4c (`mvm-images`) — compare the outputs against the published
+      `boot-image/v0.1.5` set: file set, digests, closures, and boot on
+      Firecracker (x86_64 and aarch64) and HVF, with every difference explained.
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 

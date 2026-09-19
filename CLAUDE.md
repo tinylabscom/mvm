@@ -653,7 +653,18 @@ primitive, so the run loop enforces the share in-process using the summed Mach
 CPU time of every vCPU thread — the sum, so the bound stays a bound on the
 machine rather than on one CPU of an SMP guest; the achieved tier is read back
 from the scheduler's measured record and audited. libkrun has no in-process vCPU control, so a CPU
-grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
+grant there stays `declared` and `--prod` refuses it. Memory and tasks are
+bounded at spawn on that same scope, for every VMM spawn and not only a granted
+one, but only on a Linux host with a systemd user session: the scope carries
+`MemoryMax=` of guest RAM plus a fixed 256 MiB overhead margin (swap excluded)
+and `TasksMax=1024`, `memory.max` and `pids.max` are read back with their values
+into the same `plan.grants_enforced` entry, and a scope the OOM killer ended is
+recorded as `plan.memory_limit_exceeded` when a waited run's exit is reported. A
+service manager that never creates the scope fails the launch after 10 s instead
+of hanging it. macOS, and a Linux host without the mechanism, record both as
+`declared`, and that is not a `--prod` refusal: nobody asked for these ceilings,
+so their absence refuses nothing. The admission budget still charges guest RAM
+only, not the margin. Wall clock is enforced
 by the per-VM supervisor on libkrun and HVF: the process that owns the guest
 for its whole life arms a timer from the admitted plan, and a workload that
 outruns its bound is killed with exit `124` and a chain-signed entry. A bound

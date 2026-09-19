@@ -210,20 +210,28 @@ pub fn hvf_child_restore_config(
     })
 }
 
-/// The restore's supervisor launch, bounded by the CPU share the restored
-/// child's plan was admitted under.
+/// The restore's supervisor launch, bounded by the restored guest's memory and
+/// task ceilings and by the CPU share the child's plan was admitted under.
 ///
 /// The same seam a cold HVF boot goes through, for the same reason: the HVF VMM
 /// runs inside this supervisor process, so the supervisor is what has to be born
 /// inside the scope. A restore that spawned unwrapped would come up perfectly
 /// well and simply be unbounded, so nothing but reading the argv back catches a
 /// regression — hence a function to read.
-fn bounded_restore_command(supervisor: &Path, req: &HvfRestoreRequest<'_>) -> Command {
-    mvm_core::cpu_scope::bind_cpu_grant(
+///
+/// The guest's memory is the parent's: a restore maps the saved RAM back at the
+/// size it was captured with.
+fn bounded_restore_command(
+    supervisor: &Path,
+    req: &HvfRestoreRequest<'_>,
+    guest_memory_mib: u32,
+) -> mvm_core::spawn_scope::BoundCommand {
+    mvm_core::spawn_scope::bind_spawn(
         Command::new(supervisor),
         req.vm_name,
         req.state_dir,
-        req.cpu_grant.as_ref(),
+        &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(guest_memory_mib)
+            .with_cpu_grant(req.cpu_grant),
     )
 }
 
@@ -271,7 +279,7 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
 
     let supervisor = resolve_supervisor_path_verified()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
-    let mut child = bounded_restore_command(&supervisor, req)
+    let mut child = bounded_restore_command(&supervisor, req, cfg.memory_mib)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
@@ -616,12 +624,12 @@ mod tests {
         );
     }
 
-    /// A fake `systemctl --user show <unit> -p ControlGroup --value` plus the
-    /// cgroup it names, so the read-back can be exercised off a Linux session.
+    /// A fake `systemctl --user show <unit> -p ControlGroup` plus the cgroup it
+    /// names, so the read-back can be exercised off a Linux session.
     fn probe_over_a_scope_with_quota(
         scratch: &Path,
         quota: &str,
-    ) -> mvm_core::cpu_scope::ScopeProbe {
+    ) -> mvm_core::spawn_scope::ScopeProbe {
         let cgroup_root = scratch.join("cgroup");
         std::fs::create_dir_all(cgroup_root.join("mvm-restored.scope")).unwrap();
         std::fs::write(
@@ -630,13 +638,17 @@ mod tests {
         )
         .unwrap();
         let systemctl = scratch.join("systemctl");
-        std::fs::write(&systemctl, "#!/bin/sh\necho /mvm-restored.scope\n").unwrap();
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\necho ControlGroup=/mvm-restored.scope\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        mvm_core::cpu_scope::ScopeProbe::with_root_and_systemctl(cgroup_root, systemctl)
+        mvm_core::spawn_scope::ScopeProbe::with_root_and_systemctl(cgroup_root, systemctl)
     }
 
     /// The whole point of the restore-side grant thread: the supervisor that
@@ -647,7 +659,7 @@ mod tests {
     fn an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
         let state = scratch.path().join("child-state");
         std::fs::create_dir_all(&state).unwrap();
@@ -659,11 +671,19 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
             },
+            1024,
         );
 
-        let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
         assert_eq!(argv[0], "systemd-run");
         assert!(argv.contains(&"CPUQuota=150%".to_string()), "{argv:?}");
+        assert!(
+            argv.contains(&format!(
+                "MemoryMax={}M",
+                1024 + mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB
+            )),
+            "the restored guest's saved RAM sizes its ceiling: {argv:?}"
+        );
         assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
     }
 
@@ -674,7 +694,7 @@ mod tests {
     fn a_restored_child_reports_its_enforced_tier() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
         let state = scratch.path().join("child-state");
         std::fs::create_dir_all(&state).unwrap();
@@ -686,30 +706,36 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
             },
+            1024,
         );
 
         // Rewrite the recorded name to the one the fake systemctl answers for:
         // the real name carries a per-boot suffix that cannot be reconstructed.
-        let recorded = mvm_core::cpu_scope::read_scope_unit(&state)
+        let recorded = mvm_core::spawn_scope::read_scope_unit(&state)
             .expect("a bound restore records the scope it was born into");
         assert!(recorded.ends_with(".scope"), "{recorded}");
-        std::fs::write(state.join("cpu-scope"), "mvm-restored.scope").unwrap();
+        std::fs::write(state.join("spawn-scope"), "mvm-restored.scope").unwrap();
 
         assert_eq!(
-            probe_over_a_scope_with_quota(scratch.path(), "150000 100000\n").tier_for_vm(&state),
+            probe_over_a_scope_with_quota(scratch.path(), "150000 100000\n")
+                .readback_for_vm(&state)
+                .cpu,
             mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2CpuMax
         );
     }
 
-    /// The honest other half. A plan granting no share leaves the restore
-    /// unwrapped, and the read-back says `Declared` rather than claiming a bound
-    /// nobody asked for.
+    /// The honest other half. A plan granting no share leaves the restore with
+    /// no CPU quota, and on a host without the mechanism the read-back says
+    /// `Declared` rather than claiming a bound nothing applied.
     #[test]
-    fn a_restored_child_without_a_grant_runs_unbounded_and_says_so() {
+    fn a_restored_child_without_the_mechanism_runs_unbounded_and_says_so() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
-            .expect("fake mechanism");
+        let empty_path = scratch.path().join("empty-path");
+        std::fs::create_dir_all(&empty_path).unwrap();
+        env.set("PATH", &empty_path);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
         let state = scratch.path().join("child-state");
         std::fs::create_dir_all(&state).unwrap();
 
@@ -720,16 +746,17 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: None,
             },
+            1024,
         );
 
         assert_eq!(
-            mvm_core::cpu_scope::rendered_argv(&cmd),
+            mvm_core::spawn_scope::rendered_argv(cmd.as_command()),
             vec!["/usr/bin/mvm-hvf-supervisor".to_string()]
         );
-        assert!(mvm_core::cpu_scope::read_scope_unit(&state).is_none());
+        assert!(mvm_core::spawn_scope::read_scope_unit(&state).is_none());
         assert_eq!(
-            mvm_core::cpu_scope::enforced_grants_for_vm(&state).cpu,
-            mvm_contract::protocol::resource_controls::EnforcedTier::Declared
+            mvm_core::spawn_scope::enforced_grants_for_vm(&state),
+            mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared()
         );
     }
 

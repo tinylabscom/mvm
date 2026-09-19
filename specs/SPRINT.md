@@ -22,7 +22,12 @@
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:
       `specs/sprint/delivery/3422-bounded-capture-handoff.md`.
-      The independent telemetry service and VM-lifetime collector remain open.
+      W2a transport foundation is tested: bounded typed records,
+      encrypted worker sessions with peer pinning and a dedicated semantic port.
+      Twenty-one focused tests, host workspace tests, clippy, Linux cross-check,
+      seeded fuzz smoke and all 69 repository gates pass; queued delivery is pending.
+      Evidence: `specs/sprint/delivery/3421-telemetry-transport.md`.
+      Runtime endpoint provisioning and the VM-lifetime collector remain open.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 
@@ -140,6 +145,9 @@
       against the lock before the bytes are parsed, the detached signature under
       the locked identity next, then structure, lock fields, on-disk artifact
       size and digest, and revocation keyed on the locked signer.
+      W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
+      pack move; the guest binary recipes stay in `mvm` and are consumed from a
+      pinned `mvm` flake input, so nothing is copied between the repositories.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

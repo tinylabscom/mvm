@@ -74,6 +74,7 @@ use mvm_core::plan::{
     check_window, sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
+use mvm_core::spawn_scope;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
@@ -953,8 +954,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // user session to delegate from. Without this second question a sealed run
     // on a Linux host with no session bus is admitted, boots unbounded, and
     // reports `declared`: refused in prose and permitted in code.
-    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, mvm_core::cpu_scope::mechanism_gap())
-    {
+    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, spawn_scope::mechanism_gap()) {
         return refuse_or_warn(posture.variant, detail);
     }
     Ok(())
@@ -969,7 +969,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
 fn host_cpu_mechanism_gap(
     grants: &Grants,
     kind: BackendKind,
-    gap: Option<mvm_core::cpu_scope::MechanismGap>,
+    gap: Option<spawn_scope::MechanismGap>,
 ) -> Option<String> {
     // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
     // absent CPU grant has nothing to enforce.
@@ -3429,10 +3429,39 @@ mod tests {
         .expect("a 500 millicore share is enforceable on HVF");
     }
 
+    /// The spawn-time memory and task ceilings are host protection nobody
+    /// requested, so a host that cannot attach them is no reason to refuse a
+    /// sealed run: without a CPU share there is no mechanism gap to report,
+    /// whichever half of the mechanism is missing.
+    #[test]
+    fn a_missing_scope_mechanism_refuses_nothing_that_did_not_ask_for_cpu() {
+        use mvm_core::spawn_scope::MechanismGap;
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Qemu,
+            BackendKind::Libkrun,
+        ] {
+            for gap in [
+                MechanismGap::SystemdRunMissing,
+                MechanismGap::NoUserSessionBus,
+            ] {
+                assert_eq!(
+                    host_cpu_mechanism_gap(
+                        &mvm_contract::grants::Grants::default(),
+                        kind,
+                        Some(gap)
+                    ),
+                    None,
+                    "{kind:?} with {gap:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
-        use mvm_core::cpu_scope::MechanismGap;
+        use mvm_core::spawn_scope::MechanismGap;
 
         let missing_bus = Some(MechanismGap::NoUserSessionBus);
         assert_eq!(
@@ -5311,6 +5340,17 @@ mod tests {
         assert!(
             chain.contains("grants_cpu_tier"),
             "the CPU dimension must be named: {chain}"
+        );
+        // The spawn ceilings are written beside the CPU tier even when nothing
+        // held them: the mock backend has no scope, so both say `declared` and
+        // neither carries a number that could be read as a bound.
+        assert!(
+            chain.contains("grants_memory_tier") && chain.contains("grants_tasks_tier"),
+            "the memory and task dimensions must be named: {chain}"
+        );
+        assert!(
+            !chain.contains("grants_memory_max_bytes") && !chain.contains("grants_tasks_max"),
+            "a declared ceiling must not carry a value: {chain}"
         );
     }
 

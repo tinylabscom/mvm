@@ -14,6 +14,11 @@ Last updated: 2026-09-18
       W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
       `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
       and limits. This does not enable the independent telemetry service.
+      W2a typed contract and peer-pinned worker transport pass 21 focused tests,
+      host workspace tests, clippy, Linux cross-check, seeded fuzz smoke and all
+      69 repository gates; queued delivery is pending.
+      `specs/sprint/delivery/3421-telemetry-transport.md` records the scope.
+      No runtime listener, source capture or VM-generation binding is enabled.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.
@@ -22,6 +27,12 @@ Last updated: 2026-09-18
       Close non-contract descriptors in the RPC, streaming-exec, and
       warm-worker child paths. Linux regression and Firecracker/KVM validation
       pass; promotion is pending.
+
+- [x] **The unused x86_64 KVM VMM is deleted.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` B1.1 + G1, issue #3306.
+      1,125 lines with no production caller, its two examples, and the
+      `kvm-ioctls`/`kvm-bindings` dependencies. `vmm-sys-util` now resolves at
+      one major; the Linux closure budget drops 238 → 235.
 
 - [x] **No always-accept integrity checker in the binary-integrity module.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A3.2, issue #3310.
@@ -60,6 +71,8 @@ Last updated: 2026-09-18
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.
+  - [x] W6 (#3383): every VMM spawn is scoped with memory and task ceilings,
+        scope creation is bounded, and the ceilings are read back and audited.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`
@@ -93,6 +106,11 @@ Last updated: 2026-09-18
       - [x] W3b #3365: offline signed verification and revocation.
       - [ ] W3c #3365: checked-in lock and generated pins.
       - [ ] W3d #3365: offline verifier command.
+      - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
+            Rust consumers W5 must replace.
+      - [ ] W4a #3362: `mvm` exports its guest recipes as flake outputs.
+      - [ ] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input.
+      - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
@@ -133,7 +151,9 @@ Last updated: 2026-09-18
       states the mechanism's limits alongside it. WS-S, added after
       documenting the path turned up six gaps, is underway — the host now
       terminates a CONNECT flow to a host carrying a bound secret (#3283
-      T0-T4), and the per-VM CA that turns it on is in review. Open: the
+      T0-T4), and the per-VM CA that turns it on is in review. The claim-10
+      gate is now a required constructor argument, and an endpoint with no
+      policy denies everything in every egress mode (T15, #3301, #3302). Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
       transport (#3261), MCP (#3262) — whose existing tool surface is now pinned
       by a checked-in contract fixture, so the new tools land as reviewed

@@ -17,7 +17,7 @@ substrate_server_category = "per-VM provider plumbing (backend-local vsock liste
 [dependencies]
 mvm-vmm = { workspace = true }
 mvm-core = { workspace = true }
-# `CpuGrant` — the admitted CPU bound a driver hands to `mvm_core::cpu_scope`
+# `CpuGrant` — the admitted CPU bound a driver hands to `mvm_core::spawn_scope`
 # when it spawns its per-VM process.
 mvm-contract = { workspace = true }
 mvm-net = { workspace = true }
@@ -42,9 +42,9 @@ workspace = true
 
 [dev-dependencies]
 mvm-vmm = { workspace = true, features = ["test-support"] }
-# `TestEnv` + `cpu_scope::pretend_mechanism_present` — the driver tests assert
-# the argv a CPU-bounded spawn produces, which needs the mechanism probe to
-# answer the same way on every host.
+# `TestEnv` + `spawn_scope::pretend_mechanism_present` — the driver tests assert
+# the argv a scoped spawn produces, which needs the mechanism probe to answer
+# the same way on every host.
 mvm-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

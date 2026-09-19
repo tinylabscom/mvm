@@ -39,6 +39,9 @@ use xtask::network_perf::{
 const PAYLOAD_BYTES: [u64; 2] = [64, 1024];
 const CONCURRENCY: [u32; 1] = [1];
 const TIMEOUT: Duration = Duration::from_secs(5);
+/// The host the typed HTTP benchmark addresses. Never resolved or dialed: the
+/// gate pins it and the forwarder echoes locally.
+const TYPED_HTTP_FIXTURE: &str = "fixture.invalid";
 
 fn main() -> Result<()> {
     if cfg!(debug_assertions) {
@@ -222,7 +225,7 @@ fn benchmark_flowmux_udp(payload_bytes: usize, samples: u32) -> Result<ProbeCase
 
 fn benchmark_flowmux_dns(payload_bytes: u64, samples: u32) -> Result<ProbeCase> {
     const NAME: &str = "benchmark.test";
-    let (mut client, host) = start_flowmux_session(gate_for_dns(NAME), None)?;
+    let (mut client, host) = start_flowmux_session(gate_for_name(NAME, 53), None)?;
     let usage = Usage::start()?;
     let elapsed = Instant::now();
     let mut request = Vec::with_capacity(samples as usize);
@@ -252,7 +255,7 @@ fn benchmark_flowmux_typed_http(payload_bytes: usize, samples: u32) -> Result<Pr
     let (_secret_dir, service) = echo_substitution_service()?;
     let request_wire = WireRequest {
         method: "POST".into(),
-        url: "https://fixture.invalid/echo".into(),
+        url: format!("https://{TYPED_HTTP_FIXTURE}/echo"),
         headers: vec![],
         body_b64: B64.encode(vec![0x7c; payload_bytes]),
     };
@@ -309,10 +312,13 @@ fn echo_substitution_service() -> Result<(tempfile::TempDir, Arc<SubstitutionSer
     let secret_dir = tempfile::tempdir()?;
     let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::with_dir(secret_dir.path()));
     let resolver = Arc::new(LocalResolver::new("benchmark", store));
+    // The service decides every request before the echo forwarder sees it, so
+    // its gate admits the one fixture name the benchmark sends to.
     let service = SubstitutionService::new(
         Arc::new(SubstitutionRegistry::new()),
         resolver,
         Arc::new(EchoForwarder),
+        Arc::new(gate_for_name(TYPED_HTTP_FIXTURE, 443)),
     );
     Ok((secret_dir, Arc::new(service)))
 }
@@ -413,7 +419,9 @@ fn gate_for_addr(ip: IpAddr, proto: Proto, port: u16) -> EgressGate {
     }]))
 }
 
-fn gate_for_dns(name: &str) -> EgressGate {
+/// A gate admitting `name:port`, with `name` pinned to a fixed public address
+/// so nothing is resolved.
+fn gate_for_name(name: &str, port: u16) -> EgressGate {
     let now = "2026-01-01T00:00:00Z";
     let mut pins = DnsPinRegistry::new();
     pins.add(DnsPin::at(
@@ -422,7 +430,7 @@ fn gate_for_dns(name: &str) -> EgressGate {
         now,
         "2099-01-01T00:00:00Z",
     ));
-    let policy = NetworkPolicy::allow_list(vec![HostPort::new(name, 53)]);
+    let policy = NetworkPolicy::allow_list(vec![HostPort::new(name, port)]);
     EgressGate::from_network_policy(&policy, &pins, now)
 }
 

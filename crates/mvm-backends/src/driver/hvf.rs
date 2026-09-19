@@ -286,20 +286,25 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
     })
 }
 
-/// The supervisor launch, bounded by whatever CPU share this VM was admitted
-/// under.
+/// The supervisor launch, bounded by its guest's memory and task ceilings and
+/// by whatever CPU share this VM was admitted under.
 ///
 /// The HVF VMM runs inside this supervisor process, so the supervisor is the
 /// process to bound. Wired uniformly with the other drivers rather than skipped
 /// for the host it happens to run on today: the bind degrades to an unwrapped
 /// spawn wherever the mechanism is absent, which is the honest answer on macOS
 /// and needs no second code path to express.
-fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Path) -> Command {
-    mvm_core::cpu_scope::bind_cpu_grant(
+fn bounded_supervisor_command(
+    supervisor: &Path,
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> mvm_core::spawn_scope::BoundCommand {
+    mvm_core::spawn_scope::bind_spawn(
         Command::new(supervisor),
         &spec.name,
         state_dir,
-        spec.cpu_grant.as_ref(),
+        &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant),
     )
 }
 
@@ -337,7 +342,7 @@ fn boot_with_handoff(
             &paths.state_dir,
         ))
         .spawn()
-        .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
+        .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
     child
         .stdin
         .take()
@@ -1772,7 +1777,7 @@ mod tests {
     fn a_granted_share_wraps_the_supervisor_spawn() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
@@ -1782,10 +1787,17 @@ mod tests {
             &spec,
             scratch.path(),
         );
-        let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
 
         assert_eq!(argv[0], "systemd-run");
         assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
+        assert!(
+            argv.contains(&format!(
+                "MemoryMax={}M",
+                u64::from(spec.memory_mib) + mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB
+            )),
+            "{argv:?}"
+        );
         assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
     }
 

@@ -1,6 +1,6 @@
-//! Service assembly: the constructor, the builder methods that attach policy,
-//! audit and egress state, and `from_plan`, which builds a ready-to-serve
-//! service from an admitted plan.
+//! Service assembly: the constructor, the builder methods that attach policy
+//! and audit state, and `from_plan`, which builds a ready-to-serve service from
+//! an admitted plan.
 
 use std::sync::Arc;
 
@@ -27,8 +27,9 @@ pub enum FromPlanError {
 }
 
 /// Inputs to [`SubstitutionService::from_plan`] — the admitted plan's secret
-/// bindings plus the host substrate (stores, redaction, optional TLS
-/// intermediate, optional audit recorder) the per-VM endpoint assembles from.
+/// bindings plus the host substrate (stores, redaction, the claim-10 egress
+/// gate, optional TLS intermediate, optional audit recorder) the per-VM
+/// endpoint assembles from.
 pub struct FromPlanInputs<'a> {
     pub plan_secrets: &'a [SecretBinding],
     pub tenant: &'a str,
@@ -52,13 +53,23 @@ pub struct FromPlanInputs<'a> {
     /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
     /// metered and no budget is enforced.
     pub ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
+    /// The claim-10 gate every request is decided against before it is
+    /// forwarded. An endpoint with no admitted network policy passes a
+    /// default-deny gate; there is no way to pass none.
+    pub egress_gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
 }
 
 impl SubstitutionService {
+    /// Build a service over its registry, resolver, forward leg and claim-10
+    /// gate. The gate is a constructor argument rather than a builder step so
+    /// that a service which forwards without deciding the destination cannot
+    /// be built. It is an `Arc` because the endpoint shares one gate object
+    /// across every network surface.
     pub fn new(
         registry: Arc<SubstitutionRegistry>,
         resolver: Arc<dyn SecretResolver>,
         forwarder: Arc<dyn Forwarder>,
+        egress_gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
     ) -> Self {
         Self {
             tenant: "local".to_string(),
@@ -71,7 +82,7 @@ impl SubstitutionService {
             redaction_policy: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy::default(),
             replacement_engine: ReplacementEngine::new(),
-            egress_gate: None,
+            egress_gate,
             ai_policy: None,
             ai_tracker: None,
             instance_id: None,
@@ -120,22 +131,6 @@ impl SubstitutionService {
         intermediate: mvm_core::crypto::egress_ca::VmEgressCa,
     ) -> Self {
         self.tls_intermediate = Some(Arc::new(intermediate));
-        self
-    }
-
-    /// Attach the claim-10 egress gate. Once attached, `process` refuses any
-    /// destination the VM's network policy doesn't admit before forwarding.
-    pub fn with_egress_gate(mut self, gate: mvm_runtime::vmm::egress_gate::EgressGate) -> Self {
-        self.egress_gate = Some(Arc::new(gate));
-        self
-    }
-
-    /// Attach the endpoint's shared claim-10 policy object.
-    pub fn with_shared_egress_gate(
-        mut self,
-        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
-    ) -> Self {
-        self.egress_gate = Some(gate);
         self
     }
 
@@ -193,11 +188,12 @@ impl SubstitutionService {
             tls_intermediate,
             recorder,
             ai_policy,
+            egress_gate,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let forwarder: Arc<dyn Forwarder> =
             Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
-        let mut service = Self::new(Arc::new(registry), resolver, forwarder)
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder, egress_gate)
             .with_tenant(tenant)
             .with_instance_id(instance_id);
         service = service.with_redaction_policy(redaction);
@@ -242,11 +238,9 @@ impl SubstitutionService {
     }
 
     #[cfg(test)]
-    pub(crate) fn shared_projection_ids(&self) -> (Option<usize>, Option<usize>) {
+    pub(crate) fn shared_projection_ids(&self) -> (usize, Option<usize>) {
         (
-            self.egress_gate
-                .as_ref()
-                .map(|gate| Arc::as_ptr(gate).cast::<()>() as usize),
+            Arc::as_ptr(&self.egress_gate).cast::<()>() as usize,
             self.recorder
                 .as_ref()
                 .map(|recorder| Arc::as_ptr(recorder).cast::<()>() as usize),
@@ -261,9 +255,62 @@ mod server_tests {
     use crate::supervisor::network_endpoint_proxy::SubstitutionService;
     use mvm_contract::ir::AuthType;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
+    use mvm_runtime::vmm::egress_gate::EgressGate;
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// A service assembled the way the endpoint assembles one, under the
+    /// default-deny gate an endpoint with no admitted policy carries, refuses a
+    /// request that carries no placeholder at all. The binding check has nothing
+    /// to refuse there, so this is the claim-10 gate alone, and the refusal comes
+    /// before the hardened forwarder could dial anything.
+    #[tokio::test]
+    async fn from_plan_service_refuses_an_unadmitted_destination_without_a_placeholder() {
+        use crate::keyholder::FileBindingStore;
+        use mvm_core::substitution_wire::{WireRequest, WireResponse};
+
+        let dir = tempdir().unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let (service, handed) = SubstitutionService::from_plan(FromPlanInputs {
+            plan_secrets: &[],
+            tenant: "local",
+            instance_id: "",
+            ai_policy: None,
+            bindings: &bindings,
+            resolver,
+            forward_timeout_secs: 30,
+            proxy: None,
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            tls_intermediate: None,
+            recorder: None,
+            egress_gate: Arc::new(EgressGate::default_deny()),
+        })
+        .unwrap();
+        assert!(handed.is_empty());
+
+        let resp = service
+            .process(WireRequest {
+                method: "GET".into(),
+                url: "https://93.184.216.34/".into(),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .await;
+        match resp {
+            WireResponse::Refused { message } => assert_eq!(
+                message,
+                "egress destination not admitted by network policy (claim-10)"
+            ),
+            WireResponse::Ok { status, .. } => {
+                panic!("an unadmitted destination was forwarded (status {status})")
+            }
+        }
+    }
 
     #[test]
     fn from_plan_builds_a_service_and_handed_placeholders() {
@@ -315,6 +362,7 @@ mod server_tests {
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
             recorder: None,
+            egress_gate: Arc::new(EgressGate::default_deny()),
         })
         .unwrap();
         assert_eq!(handed.len(), 1);
@@ -389,6 +437,7 @@ mod server_tests {
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
             recorder: None,
+            egress_gate: Arc::new(EgressGate::default_deny()),
         })
         .unwrap();
         let resolved = crate::supervisor::redaction_resolve::resolve(

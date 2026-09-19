@@ -236,8 +236,8 @@ pub fn map_kernel_for_test(
     Ok((config.krun.kernel_path, config.krun.kernel_format))
 }
 
-/// The supervisor launch, bounded by whatever CPU share this VM was admitted
-/// under.
+/// The supervisor launch, bounded by its guest's memory and task ceilings and
+/// by whatever CPU share this VM was admitted under.
 ///
 /// libkrun runs *inside* the supervisor process, so bounding the supervisor
 /// bounds the VM. Wrapping the spawn rather than adjusting the process
@@ -247,12 +247,17 @@ pub fn map_kernel_for_test(
 /// A function rather than three inline lines so a test can read the argv back
 /// and prove the wrap is there. An unwrapped spawn is silent: the VM boots
 /// perfectly and simply is not bounded.
-fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Path) -> Command {
-    mvm_core::cpu_scope::bind_cpu_grant(
+fn bounded_supervisor_command(
+    supervisor: &Path,
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> mvm_core::spawn_scope::BoundCommand {
+    mvm_core::spawn_scope::bind_spawn(
         Command::new(supervisor),
         &spec.name,
         state_dir,
-        spec.cpu_grant.as_ref(),
+        &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant),
     )
 }
 
@@ -400,7 +405,7 @@ impl VmmDriver for LibkrunDriver {
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
-            .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
+            .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
         child
             .stdin
             .take()
@@ -1143,7 +1148,7 @@ mod tests {
     fn a_granted_share_wraps_the_supervisor_spawn() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
@@ -1156,13 +1161,18 @@ mod tests {
 
         // The unit carries a per-boot suffix, so it is matched by shape; every
         // other token is still pinned exactly.
-        let mut argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        let mut argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
         assert!(
             argv[5].starts_with("w-") && argv[5].ends_with(".scope"),
             "unit should be the machine name plus a per-boot suffix, got {}",
             argv[5]
         );
         argv[5] = "<unit>".to_string();
+        let memory_max = format!(
+            "MemoryMax={}M",
+            spec.memory_mib as u64 + mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB
+        );
+        let tasks_max = format!("TasksMax={}", mvm_core::spawn_scope::VMM_TASKS_MAX);
         assert_eq!(
             argv,
             vec![
@@ -1174,24 +1184,41 @@ mod tests {
                 "<unit>",
                 "-p",
                 "CPUQuota=150%",
+                "-p",
+                memory_max.as_str(),
+                "-p",
+                "MemorySwapMax=0",
+                "-p",
+                tasks_max.as_str(),
+                "-p",
+                "OOMPolicy=stop",
                 "--",
                 "/usr/bin/mvm-libkrun-supervisor",
             ]
         );
     }
 
+    /// No CPU share is no reason to leave the supervisor without a memory or
+    /// task ceiling: those bound the VMM, not the grant.
     #[test]
-    fn an_ungranted_launch_spawns_the_supervisor_directly() {
+    fn an_ungranted_launch_is_still_memory_and_task_bounded() {
         let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
         let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         let cmd = bounded_supervisor_command(
             Path::new("/usr/bin/mvm-libkrun-supervisor"),
             &spec,
             scratch.path(),
         );
+        let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
+        assert_eq!(argv[0], "systemd-run");
+        assert!(argv.contains(&"MemoryMax=768M".to_string()), "{argv:?}");
+        assert!(!argv.iter().any(|a| a.starts_with("CPUQuota=")), "{argv:?}");
         assert_eq!(
-            mvm_core::cpu_scope::rendered_argv(&cmd),
-            vec!["/usr/bin/mvm-libkrun-supervisor"]
+            argv.last().map(String::as_str),
+            Some("/usr/bin/mvm-libkrun-supervisor")
         );
     }
 

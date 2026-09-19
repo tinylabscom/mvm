@@ -908,22 +908,10 @@ fn deps_volume_audit_extras(binding: Option<&DepsVolumeBinding>) -> Vec<(String,
     }
 }
 
-/// Audit labels naming the mechanism that bounded each dimension.
-///
-/// The tier labels, never the requested numbers: a run that asked for 1.5 cores
-/// and got nothing must not leave a record that mentions 1.5 cores, or the
-/// audit trail asserts an enforcement that did not happen.
+/// Audit labels naming the mechanism that bounded each dimension. One shared
+/// spelling with the launch path's `plan.grants_enforced` entry.
 fn enforced_grants_audit_extras(enforced: &EnforcedGrants) -> Vec<(String, String)> {
-    vec![
-        (
-            "grants_cpu_tier".to_string(),
-            enforced.cpu.label().to_string(),
-        ),
-        (
-            "grants_wall_clock_tier".to_string(),
-            enforced.wall_clock.label().to_string(),
-        ),
-    ]
+    crate::audit::emitter::grants_audit::enforced_grants_labels(enforced)
 }
 
 /// Stable identifiers for every inspector the canonical
@@ -1536,6 +1524,7 @@ mod tests {
             enforced: EnforcedGrants {
                 cpu: mvm_core::vm_backend::EnforcedTier::Cgroup2CpuMax,
                 wall_clock: mvm_core::vm_backend::EnforcedTier::SupervisorTimer,
+                ..EnforcedGrants::all_declared()
             },
             ..MockBackend::new()
         });
@@ -1554,6 +1543,7 @@ mod tests {
             Some(&EnforcedGrants {
                 cpu: mvm_core::vm_backend::EnforcedTier::Cgroup2CpuMax,
                 wall_clock: mvm_core::vm_backend::EnforcedTier::SupervisorTimer,
+                ..EnforcedGrants::all_declared()
             })
         );
 
