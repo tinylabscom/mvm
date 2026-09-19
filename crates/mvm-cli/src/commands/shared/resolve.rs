@@ -196,33 +196,6 @@ pub fn egress_enforcement_label(
 // Function deleted; the `resolve_network_policy` form (always returns
 // Some) is the only remaining helper.
 
-/// Resolve the requested hypervisor to the effective one for this host. `firecracker`
-/// (the default `--hypervisor`) delegates to the runtime's canonical auto-detect
-/// ladder: KVM → firecracker, supported Apple Silicon macOS → hvf, else
-/// firecracker (surfaces a clear "not available" error). Any explicit value is
-/// returned as-is. The `MVM_HYPERVISOR`
-/// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
-/// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
-/// `libkrun` instead of the Firecracker default. Single source of truth, shared by
-/// the run/pool paths so they agree on the backend.
-pub fn resolve_effective_hypervisor(requested: &str) -> String {
-    if requested != "firecracker" {
-        return requested.to_string();
-    }
-    // Env override (auto-detect mode only — an explicit `--hypervisor` flag already
-    // won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`, with the older
-    // `MVM_BACKEND` kept as a back-compat alias. Does not change the platform default.
-    for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
-        if let Some(name) = std::env::var_os(var) {
-            let name = name.to_string_lossy().trim().to_ascii_lowercase();
-            if !name.is_empty() {
-                return name;
-            }
-        }
-    }
-    mvm_client::auto_selected_backend_name()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,48 +427,6 @@ mod tests {
             egress_enforcement_label("libkrun", &p),
             "libkrun:l4-host-port"
         );
-    }
-
-    /// An explicit `--hypervisor <x>` (anything but the `firecracker`
-    /// auto-detect sentinel) is returned verbatim — so a Linux/KVM host can
-    /// select `libkrun` (or any other backend) without env.
-    #[test]
-    fn explicit_hypervisor_is_returned_verbatim() {
-        assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
-        assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
-        assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-    }
-
-    /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
-    /// back-compat alias); an explicit flag still wins over both. Process-isolated
-    /// under nextest; restored here so a threaded runner doesn't leak it.
-    #[test]
-    fn env_overrides_auto_detect_with_alias() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
-        env.set("MVM_HYPERVISOR", "libkrun");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
-        // An explicit flag wins over the env override.
-        assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-        // The older alias is still honored.
-        env.remove("MVM_HYPERVISOR");
-        env.set("MVM_BACKEND", "hvf");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
-    }
-
-    /// On the macOS-26 Apple Silicon tier the auto-detect default is the
-    /// HVF VMM (`hvf`). Host-conditioned: the assertion only fires on a host
-    /// that actually reports the tier.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_26_default_is_hvf() {
-        if !mvm_core::platform::current().is_hvf_default_tier() {
-            return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
-        }
-        let mut env = TestEnv::new();
-        env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 
     /// The module path handed on is absolute either way the manifest names it,

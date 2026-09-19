@@ -18,13 +18,12 @@ pub(super) use build_mode::BuildModeFlags;
 pub(super) use event::PhaseEvent;
 pub(super) use format::{human_age_secs, human_bytes};
 pub(super) use hints::with_hints;
-pub(in crate::commands) use mvm_client::admission::run_grants::{
-    GrantInputs, enforced_network_policy, resolve_run_grants,
-};
+pub(in crate::commands) use mvm_client::admission::run_grants::{GrantInputs, resolve_run_grants};
 pub(super) use mvm_client::admission::run_network::{
     parse_run_network_preset, persisted_run_network, resolve_ai_policy, resolve_run_network_policy,
     resolve_run_network_policy_with_preset_and_peers,
 };
+pub(super) use mvm_client::launch::machine_start::resolve_effective_hypervisor;
 pub(crate) use parse::AssetSpec;
 pub(crate) use parse::materialize_disk_volume;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
@@ -34,8 +33,7 @@ pub(super) use parse::{
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg,
+    ManifestArgRef, egress_enforcement_label, resolve_flake_ref, resolve_manifest_arg,
 };
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;

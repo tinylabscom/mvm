@@ -306,13 +306,19 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       path the SDK's invocations take (`crates/mvm-client/src/launch/`).
       `mvm_client::launch` still admits through
       `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
-  - [ ] Extract the lifecycle half of the CLI's `machine::lifecycle::start_machine`
+  - [x] Extract the lifecycle half of the CLI's `machine::lifecycle::start_machine`
         (spec reconcile, deployment/manifest/image to rootfs, network policy,
         memory, volume config, start) into `mvm-client`, leaving dry-run
         output, JSON and prompts in the CLI. Kernel resolution and volume
         preparation sit behind one trait with two implementations: the CLI's
         may build a kernel through the builder VM and uses the mount cache;
         the library's resolves only cached or fetched kernels.
+        Landed as `mvm_client::launch::machine_start`. Image acquisition sits
+        behind the same trait for now, because the CLI's OCI pipeline and
+        `mvm-client`'s own OCI resolution still differ.
+  - [ ] Converge the two OCI pull paths (the CLI's `image::pull_core` and
+        `mvm_client::local::resolve_local_rootfs`), so an image reference
+        resolves to the same rootfs and provenance whoever starts the machine.
   - [ ] Merge `mvm_client::launch`'s persistent lifecycle (its own spec,
         secret-reference sidecar, attachments and leases) with the CLI's, so
         there is one persistent machine lifecycle. Fold fleet-signed plans and
