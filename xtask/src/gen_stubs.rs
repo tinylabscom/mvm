@@ -372,12 +372,82 @@ fn emitter_bin_name<'a>(args: &[&'a str]) -> Option<&'a str> {
 /// alongside `mvmctl` and `xtask` for exactly that reason; the `cargo run`
 /// fallback below keeps a direct `cargo run -p xtask -- gen-stubs` working for
 /// anyone who has not.
+///
+/// A prebuilt binary is used only while it is current. One left over from
+/// before a merge emits the old schema: the gate then reports drift that is not
+/// there, and its suggested `gen-stubs` quietly deletes the schema the merge
+/// brought in. A stale binary falls through to `cargo run`, which rebuilds it.
 fn prebuilt_emitter(workspace: &Path, bin: &str) -> Option<std::path::PathBuf> {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
+    prebuilt_emitter_in(workspace, &target, bin)
+}
+
+/// [`prebuilt_emitter`] against an explicit target directory.
+fn prebuilt_emitter_in(workspace: &Path, target: &Path, bin: &str) -> Option<std::path::PathBuf> {
     let path = target.join("debug").join(bin);
-    path.is_file().then_some(path)
+    (path.is_file() && emitter_is_current(workspace, &path)).then_some(path)
+}
+
+/// Whether the binary at `bin` is at least as new as everything it was built
+/// from.
+///
+/// Cargo writes `<bin>.d` beside the binary, naming every source file that went
+/// into it. The binary is current when none of them, and not the workspace
+/// `Cargo.lock` either, is newer than the binary. The lock file is included
+/// because a dependency bump points the build at other files and leaves the old
+/// ones, which the `.d` still names, untouched. Anything that cannot be read (no
+/// `.d`, a named source that is gone) counts as stale: the cost of a wrong
+/// "stale" is one rebuild, and the cost of a wrong "current" is a gate that
+/// lies.
+fn emitter_is_current(workspace: &Path, bin: &Path) -> bool {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let Some(built) = modified(bin) else {
+        return false;
+    };
+    let Ok(dep_info) = std::fs::read_to_string(bin.with_extension("d")) else {
+        return false;
+    };
+    let Some(sources) = dep_file_sources(&dep_info) else {
+        return false;
+    };
+    let lock = workspace.join("Cargo.lock");
+    sources
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .chain(std::iter::once(lock.as_path()))
+        .all(|source| modified(source).is_some_and(|at| at <= built))
+}
+
+/// The source files a cargo dep-info file lists for its one target.
+///
+/// The format is a make rule, `target: dep dep ...`, with a space inside a
+/// path escaped as `\ `. `None` when there is no rule or it names nothing, so
+/// an unreadable file cannot pass as "no sources, therefore current".
+fn dep_file_sources(dep_info: &str) -> Option<Vec<std::path::PathBuf>> {
+    let (_, deps) = dep_info.lines().next()?.split_once(": ")?;
+    let mut sources = Vec::new();
+    let mut current = String::new();
+    let mut chars = deps.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(escaped) => current.push(escaped),
+                None => current.push('\\'),
+            },
+            ' ' => {
+                if !current.is_empty() {
+                    sources.push(std::path::PathBuf::from(std::mem::take(&mut current)));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        sources.push(std::path::PathBuf::from(current));
+    }
+    (!sources.is_empty()).then_some(sources)
 }
 
 /// Run an emitter and capture its stdout, failing loudly on a nonzero exit.
@@ -510,6 +580,127 @@ fn diff_or_report(fresh: &Path, committed: &Path) -> Result<bool> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A fake workspace and target dir holding one emitter, its dep-info file
+    /// naming one source, and a `Cargo.lock`. Each file is stamped with the
+    /// given age in seconds, so a test controls which is newer.
+    struct EmitterFixture {
+        _dir: tempfile::TempDir,
+        workspace: std::path::PathBuf,
+        target: std::path::PathBuf,
+        source: std::path::PathBuf,
+    }
+
+    const EMITTER: &str = "emit_fixture_schema";
+
+    fn stamp(path: &Path, seconds_ago: u64) {
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds_ago);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn emitter_fixture(binary_age: u64, source_age: u64, lock_age: u64) -> EmitterFixture {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("work space");
+        let target = dir.path().join("target");
+        let debug = target.join("debug");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(&debug).unwrap();
+        let source = workspace.join("src").join("schema.rs");
+        std::fs::write(&source, "pub struct Schema;").unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
+        let bin = debug.join(EMITTER);
+        std::fs::write(&bin, "binary").unwrap();
+        let escaped = source.display().to_string().replace(' ', "\\ ");
+        std::fs::write(
+            debug.join(format!("{EMITTER}.d")),
+            format!("{}: {escaped}\n", bin.display()),
+        )
+        .unwrap();
+        stamp(&bin, binary_age);
+        stamp(&source, source_age);
+        stamp(&workspace.join("Cargo.lock"), lock_age);
+        EmitterFixture {
+            _dir: dir,
+            workspace,
+            target,
+            source,
+        }
+    }
+
+    /// The failure the gate used to have: a source changed (a merge brought in
+    /// new schema) after the emitter was built, so the emitter would print the
+    /// old schema. It is not run, and `cargo run` rebuilds it instead.
+    #[test]
+    fn a_stale_prebuilt_emitter_is_not_run() {
+        let fixture = emitter_fixture(100, 10, 1000);
+        assert_eq!(
+            prebuilt_emitter_in(&fixture.workspace, &fixture.target, EMITTER),
+            None
+        );
+    }
+
+    /// A binary newer than every source is run directly, without cargo and
+    /// its machine-wide lock.
+    #[test]
+    fn a_current_prebuilt_emitter_is_run_without_cargo() {
+        let fixture = emitter_fixture(10, 100, 1000);
+        assert_eq!(
+            prebuilt_emitter_in(&fixture.workspace, &fixture.target, EMITTER),
+            Some(fixture.target.join("debug").join(EMITTER))
+        );
+    }
+
+    /// A dependency bump changes what the binary would be built from without
+    /// touching any file the old dep-info names.
+    #[test]
+    fn a_lock_file_newer_than_the_emitter_makes_it_stale() {
+        let fixture = emitter_fixture(100, 1000, 10);
+        assert_eq!(
+            prebuilt_emitter_in(&fixture.workspace, &fixture.target, EMITTER),
+            None
+        );
+    }
+
+    /// Whatever cannot be checked counts as stale.
+    #[test]
+    fn an_emitter_that_cannot_be_checked_is_not_run() {
+        let fixture = emitter_fixture(10, 100, 1000);
+        std::fs::remove_file(&fixture.source).unwrap();
+        assert_eq!(
+            prebuilt_emitter_in(&fixture.workspace, &fixture.target, EMITTER),
+            None,
+            "a source named in the dep-info is gone"
+        );
+
+        let fixture = emitter_fixture(10, 100, 1000);
+        std::fs::remove_file(fixture.target.join("debug").join(format!("{EMITTER}.d"))).unwrap();
+        assert_eq!(
+            prebuilt_emitter_in(&fixture.workspace, &fixture.target, EMITTER),
+            None,
+            "no dep-info"
+        );
+    }
+
+    #[test]
+    fn dep_file_sources_reads_the_rule_and_unescapes_spaces() {
+        let sources = dep_file_sources("/t/emit: /a/b.rs /c\\ d/e.rs  /f.txt\n").unwrap();
+        assert_eq!(
+            sources,
+            vec![
+                std::path::PathBuf::from("/a/b.rs"),
+                std::path::PathBuf::from("/c d/e.rs"),
+                std::path::PathBuf::from("/f.txt"),
+            ]
+        );
+        assert_eq!(dep_file_sources(""), None);
+        assert_eq!(dep_file_sources("/t/emit:"), None);
+        assert_eq!(dep_file_sources("/t/emit: "), None);
+    }
 
     #[test]
     fn diff_or_report_returns_false_when_identical() {
