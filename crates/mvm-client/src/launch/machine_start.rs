@@ -58,10 +58,12 @@ pub struct MachineStartParams<'a> {
 }
 
 /// What a start resolved, for the caller to record once the machine is up.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct MachineStart {
     /// The digest of the artifact that booted.
     pub resolved_digest: String,
+    /// The plan the machine was admitted and booted under.
+    pub admitted: mvm_hostd::plan_admission::AdmittedPlan,
 }
 
 /// A validated local deployment: its directory, the rootfs it boots, and that
@@ -222,7 +224,7 @@ pub fn start_machine_spec(
     let prepared_volumes = host
         .prepare_volumes(&spec.name, &spec.volumes)
         .context("resolving registered local volumes before admission")?;
-    start_persistent_oci_machine(PersistentImageStartParams {
+    let admitted = start_persistent_oci_machine(PersistentImageStartParams {
         name: &spec.name,
         image_label: &boot.label,
         resolved_digest: &boot.digest,
@@ -243,6 +245,91 @@ pub fn start_machine_spec(
     })?;
     Ok(MachineStart {
         resolved_digest: boot.digest,
+        admitted,
+    })
+}
+
+/// How a library embedder supplies a start.
+///
+/// It never builds. The workload kernel comes only from the verified cache,
+/// the image is one the caller resolved before the start (resolution is
+/// asynchronous, the start is not), and volumes are leased from the local
+/// catalog. A spec carrying CLI-grammar volume strings is refused: there is no
+/// parser for them on this side, and dropping them would boot a machine
+/// without mounts its spec asked for.
+pub struct EmbedderStartHost {
+    image: Option<BootImage>,
+    profile: crate::volume::AdmittedProfile,
+}
+
+impl EmbedderStartHost {
+    /// A host for a machine running under `profile`, booting `image` if its
+    /// spec names one.
+    pub fn new(image: Option<BootImage>, profile: &str) -> Self {
+        Self {
+            image,
+            profile: crate::volume::AdmittedProfile::from_profile_name(profile),
+        }
+    }
+}
+
+impl StartHost for EmbedderStartHost {
+    fn workload_kernel(&self) -> Result<String> {
+        let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
+            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                Ok(verified.path().display().to_string())
+            }
+            _ => bail!(
+                "starting a machine needs a verified workload kernel at {}, and this process \
+                 does not build one — create it once with `mvmctl kernel build --which \
+                 workload`, then retry",
+                mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload").display()
+            ),
+        }
+    }
+
+    fn resolve_image(&self, reference: &str) -> Result<BootImage> {
+        match &self.image {
+            Some(image) if image.label == reference => Ok(image.clone()),
+            _ => bail!("the image {reference:?} was not resolved before the start"),
+        }
+    }
+
+    fn prepare_volumes(&self, name: &str, volume_specs: &[String]) -> Result<LaunchPreparation> {
+        if !volume_specs.is_empty() {
+            bail!(
+                "machine {name:?} declares CLI-grammar volume strings, which a library start \
+                 cannot parse; attach managed volumes instead"
+            );
+        }
+        use crate::volume::VolumeService as _;
+        let request = crate::volume::LaunchLeaseRequest::builder(name)?
+            .profile(self.profile)
+            .unlock(crate::volume::UnlockPolicy::JustInTime)
+            .build();
+        crate::volume::LocalVolumeService::new()
+            .acquire_launch_lease(&request)
+            .with_context(|| format!("volume leases for {name:?}"))
+    }
+}
+
+/// Resolve the OCI image or rootfs `reference` to a bootable rootfs for the
+/// machine `name`, recording the digest of the bytes that will boot.
+pub async fn resolve_boot_image(reference: &str, name: &str) -> Result<BootImage> {
+    let source: mvm_core::rootfs_source::RootfsSource = reference
+        .parse()
+        .map_err(|e| anyhow::anyhow!("image {reference:?}: {e}"))?;
+    let rootfs = crate::local::resolve_local_rootfs(&source, name)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let digest = mvm_core::crypto::image_verify::sha256_file_cached(&rootfs)
+        .with_context(|| format!("hashing rootfs at {}", rootfs.display()))?;
+    Ok(BootImage {
+        label: reference.to_string(),
+        rootfs,
+        digest: format!("sha256:{digest}"),
     })
 }
 
@@ -385,6 +472,57 @@ mod tests {
         assert_eq!(boot.kernel.as_deref(), Some("/k/vmlinux"));
         assert_eq!(boot.rootfs, PathBuf::from("/r/rootfs.ext4"));
         assert!(host.asked.borrow().is_empty());
+    }
+
+    /// The embedder host only boots the image it was handed, and only for
+    /// the reference it was handed it for.
+    #[test]
+    fn the_embedder_host_boots_only_the_image_it_was_given() {
+        let image = BootImage {
+            label: "alpine:3.20".to_string(),
+            rootfs: PathBuf::from("/cache/rootfs.ext4"),
+            digest: "sha256:abc".to_string(),
+        };
+        let host = EmbedderStartHost::new(Some(image.clone()), "standard");
+        assert_eq!(host.resolve_image("alpine:3.20").unwrap(), image);
+        assert!(host.resolve_image("alpine:3.19").is_err());
+        assert!(
+            EmbedderStartHost::new(None, "standard")
+                .resolve_image("alpine:3.20")
+                .is_err()
+        );
+    }
+
+    /// A spec with CLI-grammar volume strings is refused rather than started
+    /// without the mounts it asked for.
+    #[test]
+    fn the_embedder_host_refuses_cli_grammar_volumes() {
+        let host = EmbedderStartHost::new(None, "standard");
+        let err = host
+            .prepare_volumes("web", &["/host:/guest".to_string()])
+            .expect_err("refused");
+        assert!(
+            err.to_string().contains("CLI-grammar volume strings"),
+            "{err:#}"
+        );
+    }
+
+    /// With nothing in the kernel cache the embedder refuses and says how to
+    /// fill it, rather than building one.
+    #[test]
+    fn the_embedder_host_does_not_build_a_missing_kernel() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let err = EmbedderStartHost::new(None, "standard")
+            .workload_kernel()
+            .expect_err("no cached kernel");
+        let message = err.to_string();
+        assert!(message.contains("does not build one"), "{message}");
+        assert!(
+            message.contains("mvmctl kernel build --which workload"),
+            "{message}"
+        );
     }
 
     #[test]
