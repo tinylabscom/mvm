@@ -95,6 +95,14 @@ Last updated: 2026-09-18
     - [ ] C6 — index digest as the audited content address.
     - [ ] C7 — dedup confined to one key domain.
     - [ ] C8 — retire the whole-blob layout (no migration).
+  - [x] W8 (#3385): measured, then cut. A guest flush on a writable HVF disk
+        is `fsync(2)` instead of a full device flush, and the full flush runs
+        once when the disk is released at stop. The fsync-heavy volume
+        workload dropped from 6.4 s to 2.2 s (median, N=10); cold boot sends
+        no flushes and is unchanged. W8.2a (scratch disks) is left open
+        because it is not material, and W8.4's checkpoint test does not apply
+        because HVF capture refuses writable disks. The refusal is pinned by
+        a test instead.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`

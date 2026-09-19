@@ -251,16 +251,66 @@ every guest flush with `sync_data`, which on the HVF host is a full device
 flush, and it offers flush on every writable disk. We have never measured the
 cost.
 
-- [ ] W8.1 Measure flush count and total flush time during a cold boot and a
+- [x] W8.1 Measure flush count and total flush time during a cold boot and a
       representative workload. Post the numbers on #3385.
+      Measured on macOS 26 Apple Silicon under host load 250–320, isolated
+      `MVM_HOME`, `alpine:3.20` workloads, N=5 per cell:
+      - A cold workload boot sends **no** flushes. Every disk the HVF workload
+        runner attaches is read-only (rootfs, verity, runtime overlay, identity
+        drive), and a read-only disk does not offer flush.
+      - A writable `--volume` disk doing 500 × (4 KiB write + fsync) sent 502
+        flushes costing 3.1 s (median) of a 5.1 s workload. The same run with
+        flushes served by `fsync(2)` spent 0.12 s in them (2.6 s workload); with
+        flushes made no-ops, 2.0 s.
+      - Bulk writes (256 MiB, fsync per 16 MiB) sent 18 flushes (0.21 s) and an
+        untar of 5000 files plus `sync` sent 3 (0.05 s): below the noise.
+      - One builder VM build sent 654 flushes costing 11.7 s over a 32-minute
+        run on the nix-store disk, with a single flush taking up to 545 ms.
+      - Host microbenchmark, 4 KiB write then sync: `F_FULLFSYNC` p50 4.9–5.7
+        ms, `fsync(2)` p50 0.03–0.04 ms.
 - [ ] W8.2 If the cost is material:
-  - [ ] W8.2a stop offering flush on scratch disks that are thrown away at stop;
-  - [ ] W8.2b serve guest flushes on persistent disks with a plain `fsync`, and
+  - [ ] W8.2a stop offering flush on scratch disks that are thrown away at stop.
+        **Not done: not material.** The scratch disks already cost nothing. An
+        ephemeral disk is served from RAM, where a flush is a no-op, and the
+        builder's per-job output disk sent zero flushes in a full build. The
+        Stage 0 root disk is the one scratch disk left that still takes
+        flushes. Stage 0 is a one-off bootstrap and was not measured.
+  - [x] W8.2b serve guest flushes on persistent disks with a plain `fsync`, and
         keep the full flush for stop, checkpoint and snapshot.
+        A guest flush on a writable file-backed disk is now `fsync(2)` on
+        Apple hosts. On other hosts it stays `fdatasync`, which already is the
+        cheap operation. A disk that took any write or discard gets exactly one
+        full flush (`F_FULLFSYNC` on Apple) when the device is released at VM
+        stop. Checkpoint and snapshot need no flush: HVF full-VM capture
+        refuses a VM with any writable disk before asking the supervisor for
+        anything, so there is no checkpoint of a writable disk to make durable.
+        The trade is documented in the machine-limitations guide: a guest
+        fsync survives a guest or VMM crash, but not a host power loss before
+        the VM stops.
+        Before/after, the two builds' supervisors interleaved in the same
+        session (N=10 each, two batches of 5; median [min–max]):
+        | | before | after |
+        | --- | --- | --- |
+        | 500 × fsync, guest workload | 6430 ms [4460–9200] | 2210 ms [1140–7190] |
+        | same, whole run | 8238 ms [5701–10870] | 3880 ms [2049–12326] |
+        | cold boot, whole run | 1430 ms [633–3423] | 1543 ms [1007–3246] |
+        | cold boot, backend start | 643 ms [214–1175] | 654 ms [431–1577] |
+        The cold-boot difference is noise: that path attaches no writable disk,
+        so neither build flushes anything on it.
 - [ ] W8.3 If the cost is not material, close #3385 with the numbers.
+      Not applicable: the cost was material for writable persistent disks.
 - [ ] W8.4 Tests:
-  - [ ] persistent-disk data survives stop and start;
+  - [x] persistent-disk data survives stop and start. The device-level test
+        writes through the virtio queue, releases the device and reads the
+        bytes back from a fresh open. One live HVF check wrote a marker and an
+        8 MiB random blob to a `--volume` disk in one `machine run` and read
+        both back, with the same SHA-256, in a second run.
   - [ ] a checkpoint captured right after writes verifies after restore.
+        Not applicable on HVF as the code stands. HVF full-VM capture
+        refuses any VM with a writable disk, so no such checkpoint can exist,
+        and no test can capture one. The test that stands in pins the refusal
+        instead: a VM with a writable disk is refused before any snapshot
+        request is written, and an all-read-only VM is admitted.
 
 ## W9 — Signed bundles through image registries (#3386)
 
