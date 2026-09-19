@@ -158,93 +158,6 @@ pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-/// Resolve the transient-run egress flags (`--net` / `--allow-host`) into a
-/// single `NetworkPolicy`, identical for every backend.
-///
-/// Precedence (one tested place so it can't drift):
-/// - any `--allow-host` ⇒ allow-list (narrowest intent **wins** over `--net`);
-/// - else `--net` ⇒ the `dev` preset (broad outbound + DNS, never
-///   `unrestricted`, so it never trips the claim-10 unrestricted ack);
-/// - else ⇒ `deny_all` (the safe default).
-///
-/// `HOST` with no `:PORT` defaults to `443`.
-pub fn resolve_run_network_policy(
-    net: bool,
-    allow_host: &[String],
-) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    resolve_run_network_policy_with_peers(net, allow_host, &[])
-}
-
-/// As [`resolve_run_network_policy`], plus the `--peer` routes.
-///
-/// Peers are orthogonal to the egress arms above: a workload may dial a peer
-/// while admitting no outbound egress at all, which is the common shape for a
-/// service that only talks to its own database. So the peer set is attached to
-/// whichever policy the egress precedence selected rather than being an arm of
-/// it.
-pub fn resolve_run_network_policy_with_peers(
-    net: bool,
-    allow_host: &[String],
-    peer: &[String],
-) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    use mvm_core::network_policy::{NetworkPolicy, NetworkPreset};
-
-    let base = if !allow_host.is_empty() {
-        let rules = allow_host
-            .iter()
-            .map(|s| parse_allow_host(s))
-            .collect::<Result<Vec<_>>>()?;
-        NetworkPolicy::allow_list(rules)
-    } else if net {
-        NetworkPolicy::preset(NetworkPreset::Dev)
-    } else {
-        NetworkPolicy::deny_all()
-    };
-
-    if peer.is_empty() {
-        return Ok(base);
-    }
-    let peers = peer
-        .iter()
-        .map(|s| parse_peer_binding(s))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(base.with_peers(peers))
-}
-
-/// Parse `--peer NAME:PORT=ADDR:PORT` into a validated binding.
-///
-/// Both halves are required and neither is inferred. The left is what the
-/// guest dials; the right is the peer's admitted ingress address. Refusing
-/// here rather than at the gate keeps a malformed route out of the signed
-/// plan, where it would read as an admitted destination that never resolves.
-pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> {
-    let (dialed, target) = raw
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': expected NAME:PORT=ADDR:PORT"))?;
-    let (name, port) = dialed
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': the dialed side needs a :PORT"))?;
-    let (host_addr, host_port) = target
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': the target side needs a :PORT"))?;
-
-    let binding = mvm_contract::peer::PeerBinding {
-        name: mvm_contract::peer::PeerName::parse(name)
-            .map_err(|e| anyhow::anyhow!("invalid --peer '{raw}': {e}"))?,
-        port: port
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid --peer '{raw}': '{port}' is not a port"))?,
-        host_addr: host_addr.to_string(),
-        host_port: host_port
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid --peer '{raw}': '{host_port}' is not a port"))?,
-    };
-    binding
-        .validate()
-        .map_err(|e| anyhow::anyhow!("invalid --peer '{raw}': {e}"))?;
-    Ok(binding)
-}
-
 /// How faithfully the resolved `backend` enforces `policy` on the transient
 /// (no-signed-bundle) run path. Recorded in the signed receipt **alongside**
 /// the requested `network_posture` so a verifier never mistakes a requested
@@ -275,28 +188,6 @@ pub fn egress_enforcement_label(
     }
 }
 
-/// Parse one `--allow-host` entry. `HOST:PORT` is parsed strictly;
-/// `HOST` with no port defaults to `443` (https). Fails closed on a
-/// malformed port or empty host before any VM work.
-fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
-    use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
-    let parsed = match entry.rsplit_once(':') {
-        // Has an explicit `:PORT` — strict parse (rejects empty host / bad port).
-        Some(_) => entry
-            .parse()
-            .with_context(|| format!("invalid --allow-host {entry:?}")),
-        // Bare host — default to the https port.
-        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
-        None => Ok(HostPort::new(entry, 443)),
-    }?;
-    if is_banned_ssh_port(parsed.port) {
-        anyhow::bail!(
-            "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
-        );
-    }
-    Ok(parsed)
-}
-
 // `resolve_optional_network_policy` was used by a since-removed
 // template-create flag to bake a default policy into the TemplateSpec.
 // With that namespace gone and `[network]` removed from `mvm.toml`,
@@ -305,38 +196,11 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 // Function deleted; the `resolve_network_policy` form (always returns
 // Some) is the only remaining helper.
 
-/// Resolve the requested hypervisor to the effective one for this host. `firecracker`
-/// (the default `--hypervisor`) delegates to the runtime's canonical auto-detect
-/// ladder: KVM → firecracker, supported Apple Silicon macOS → hvf, else
-/// firecracker (surfaces a clear "not available" error). Any explicit value is
-/// returned as-is. The `MVM_HYPERVISOR`
-/// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
-/// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
-/// `libkrun` instead of the Firecracker default. Single source of truth, shared by
-/// the run/pool paths so they agree on the backend.
-pub fn resolve_effective_hypervisor(requested: &str) -> String {
-    if requested != "firecracker" {
-        return requested.to_string();
-    }
-    // Env override (auto-detect mode only — an explicit `--hypervisor` flag already
-    // won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`, with the older
-    // `MVM_BACKEND` kept as a back-compat alias. Does not change the platform default.
-    for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
-        if let Some(name) = std::env::var_os(var) {
-            let name = name.to_string_lossy().trim().to_ascii_lowercase();
-            if !name.is_empty() {
-                return name;
-            }
-        }
-    }
-    mvm_client::auto_selected_backend_name()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::manifest::{MANIFEST_SCHEMA_VERSION, PersistedManifest, Provenance};
-    use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+    use mvm_core::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::util::test_env::TestEnv;
 
     fn persist_flake_slot(slot_hash: &str) {
@@ -534,70 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn run_net_default_is_deny_all() {
-        assert_eq!(
-            resolve_run_network_policy(false, &[]).unwrap(),
-            NetworkPolicy::deny_all()
-        );
-    }
-
-    #[test]
-    fn run_net_flag_maps_to_dev_preset_not_unrestricted() {
-        let p = resolve_run_network_policy(true, &[]).unwrap();
-        assert_eq!(p, NetworkPolicy::preset(NetworkPreset::Dev));
-        assert!(!p.is_unrestricted(), "--net must never be unrestricted");
-    }
-
-    #[test]
-    fn allow_host_defaults_to_port_443() {
-        let p = resolve_run_network_policy(false, &["api.example.com".to_string()]).unwrap();
-        assert_eq!(
-            p,
-            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
-        );
-    }
-
-    #[test]
-    fn allow_host_honors_explicit_port_and_multiple_hosts() {
-        let p = resolve_run_network_policy(false, &["a.com".to_string(), "b.com:8443".to_string()])
-            .unwrap();
-        assert_eq!(
-            p,
-            NetworkPolicy::allow_list(vec![
-                HostPort::new("a.com", 443),
-                HostPort::new("b.com", 8443),
-            ])
-        );
-    }
-
-    #[test]
-    fn allow_host_wins_over_net() {
-        let p = resolve_run_network_policy(true, &["a.com".to_string()]).unwrap();
-        assert_eq!(
-            p,
-            NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]),
-            "--allow-host must narrow, winning over --net"
-        );
-    }
-
-    #[test]
-    fn allow_host_rejects_malformed_entries_fail_closed() {
-        assert!(resolve_run_network_policy(false, &["host:0notaport".to_string()]).is_err());
-        assert!(resolve_run_network_policy(false, &[":443".to_string()]).is_err());
-        assert!(resolve_run_network_policy(false, &["".to_string()]).is_err());
-    }
-
-    #[test]
-    fn allow_host_rejects_ssh_port() {
-        let err = resolve_run_network_policy(false, &["github.com:22".to_string()])
-            .expect_err("TCP/22 must be refused");
-        assert!(
-            err.to_string().contains("SSH sessions are banned"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
     fn enforcement_tier_uniform_for_deny_all_and_unrestricted() {
         // deny-all and unrestricted are enforced the same way on every backend,
         // so the receipt records a backend-independent tier.
@@ -627,48 +427,6 @@ mod tests {
             egress_enforcement_label("libkrun", &p),
             "libkrun:l4-host-port"
         );
-    }
-
-    /// An explicit `--hypervisor <x>` (anything but the `firecracker`
-    /// auto-detect sentinel) is returned verbatim — so a Linux/KVM host can
-    /// select `libkrun` (or any other backend) without env.
-    #[test]
-    fn explicit_hypervisor_is_returned_verbatim() {
-        assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
-        assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
-        assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-    }
-
-    /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
-    /// back-compat alias); an explicit flag still wins over both. Process-isolated
-    /// under nextest; restored here so a threaded runner doesn't leak it.
-    #[test]
-    fn env_overrides_auto_detect_with_alias() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
-        env.set("MVM_HYPERVISOR", "libkrun");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
-        // An explicit flag wins over the env override.
-        assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-        // The older alias is still honored.
-        env.remove("MVM_HYPERVISOR");
-        env.set("MVM_BACKEND", "hvf");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
-    }
-
-    /// On the macOS-26 Apple Silicon tier the auto-detect default is the
-    /// HVF VMM (`hvf`). Host-conditioned: the assertion only fires on a host
-    /// that actually reports the tier.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_26_default_is_hvf() {
-        if !mvm_core::platform::current().is_hvf_default_tier() {
-            return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
-        }
-        let mut env = TestEnv::new();
-        env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 
     /// The module path handed on is absolute either way the manifest names it,
@@ -790,64 +548,5 @@ mod tests {
                 "an existing path must not be rejected as a missing one: {got:?}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod peer_flag_tests {
-    use super::*;
-
-    #[test]
-    fn a_well_formed_peer_parses_into_a_binding() {
-        let b = parse_peer_binding("db.mvm.peer:5432=127.0.0.1:34567").expect("parses");
-        assert_eq!(b.name.as_str(), "db.mvm.peer");
-        assert_eq!(b.port, 5432);
-        assert_eq!(b.host_addr, "127.0.0.1");
-        assert_eq!(b.host_port, 34567);
-    }
-
-    /// Refused at the CLI rather than at the gate, so a malformed route never
-    /// reaches the signed plan, where it would read as an admitted
-    /// destination that happens never to resolve.
-    #[test]
-    fn a_malformed_peer_is_refused_at_the_boundary() {
-        for bad in [
-            "db.mvm.peer:5432",                 // no target
-            "db.mvm.peer=127.0.0.1:34567",      // no dialed port
-            "db.mvm.peer:5432=127.0.0.1",       // no target port
-            "api.example.com:443=127.0.0.1:80", // not a peer name
-            "db.mvm.peer:0=127.0.0.1:34567",    // zero port
-            "db.mvm.peer:5432=db.internal:80",  // target is not a literal ip
-            "db.mvm.peer:x=127.0.0.1:34567",    // port is not a number
-        ] {
-            assert!(
-                parse_peer_binding(bad).is_err(),
-                "expected `{bad}` to be refused"
-            );
-        }
-    }
-
-    /// Peers are orthogonal to the egress arms: the common shape is a service
-    /// that talks only to its own database and admits no outbound egress.
-    #[test]
-    fn peers_attach_to_whichever_egress_arm_was_selected() {
-        let peer = vec!["db.mvm.peer:5432=127.0.0.1:34567".to_string()];
-
-        let denied = resolve_run_network_policy_with_peers(false, &[], &peer).expect("resolves");
-        assert_eq!(denied.peers().len(), 1, "deny-all still carries its peers");
-
-        let dev = resolve_run_network_policy_with_peers(true, &[], &peer).expect("resolves");
-        assert_eq!(dev.peers().len(), 1);
-
-        let allow = resolve_run_network_policy_with_peers(false, &["a.com".to_string()], &peer)
-            .expect("resolves");
-        assert_eq!(allow.peers().len(), 1);
-    }
-
-    #[test]
-    fn no_peer_flag_leaves_the_policy_unchanged() {
-        let p = resolve_run_network_policy_with_peers(false, &[], &[]).expect("resolves");
-        assert!(p.peers().is_empty());
-        assert_eq!(p, resolve_run_network_policy(false, &[]).expect("resolves"));
     }
 }

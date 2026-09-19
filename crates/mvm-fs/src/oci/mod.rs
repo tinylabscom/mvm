@@ -42,6 +42,9 @@
 //! `mvmd` consume `mvm-oci` as a library without inheriting the
 //! Nix-flake builder closure.
 
+// Single-layer artifact push and pull: transport for payloads that are not
+// container images, verified against digests and bounded in size.
+pub mod artifact;
 // Local OCI image-layout archive reader (`oci-archive:` / stdin). Public so
 // `mvm-cli`'s `run --image` can ingest a local archive through the same
 // digest-verified path as a registry pull. Filesystem-free (reads a `Read`).
@@ -59,9 +62,16 @@ mod registry;
 // need the `UnpackOptions` / `UnpackReport` / `RefusalReason` surface to
 // drive the unpack and to surface refusals in audit-chain entries.
 pub mod unpack;
+// In-process registry that accepts uploads, for tests in this crate and in
+// crates that enable `test-support`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_registry;
 
 pub use archive::{
     OciArchiveImage, OciArchiveLayer, OciArchiveMetadata, read_oci_archive, stream_oci_archive,
+};
+pub use artifact::{
+    ArtifactKind, ArtifactLimits, OciArtifactClient, PulledArtifact, PushedArtifact,
 };
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
@@ -69,7 +79,7 @@ pub use manifest::{FetchedManifest, ManifestFetcher, OciManifestFetcher, current
 pub use mvm_contract::oci::verify_sha256_digest;
 pub use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 pub use reference::ImageReference;
-pub use registry::{ClientConfig, ClientProtocol, RegistryAuthConfig};
+pub use registry::{BearerRefusal, ClientConfig, ClientProtocol, RegistryAuthConfig};
 pub use unpack::{
     RefusalReason, RefusedEntry, UnpackError, UnpackOptions, UnpackReport, unpack_layer,
     unpack_layer_with_prior_paths,

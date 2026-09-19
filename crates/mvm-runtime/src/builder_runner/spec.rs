@@ -231,9 +231,10 @@ pub fn stage0_spec(inputs: &Stage0SpecInputs<'_>) -> VmmSpec {
     // HTTPS substituter fetch fails certificate validation before `nix build`
     // gets anywhere.
     let cmdline = format!(
-        "{} {STAGE0_CMDLINE_TAIL} {}",
+        "{} {STAGE0_CMDLINE_TAIL} {} {}",
         inputs.console_base.trim(),
-        mvm_build::builder_vm::builder_hostepoch_cmdline_token()
+        mvm_build::builder_vm::builder_hostepoch_cmdline_token(),
+        mvm_build::builder_vm_runtime::stage0_store_gc_cmdline_token()
     );
 
     VmmSpec {

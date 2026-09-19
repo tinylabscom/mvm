@@ -448,20 +448,24 @@ impl NetworkPolicy {
             Self::Preset {
                 preset,
                 egress_mode,
+                peers,
                 ..
             } => Self::Preset {
                 preset,
                 egress_mode,
                 ai,
-                peers: Vec::new(),
+                peers,
             },
             Self::AllowList {
-                rules, egress_mode, ..
+                rules,
+                egress_mode,
+                peers,
+                ..
             } => Self::AllowList {
                 rules,
                 egress_mode,
                 ai,
-                peers: Vec::new(),
+                peers,
             },
         }
     }
@@ -1472,6 +1476,30 @@ mod tests {
         assert_eq!(
             back.ai().unwrap().budget.unwrap().max_total_tokens,
             Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn attaching_ai_policy_preserves_peer_routes() {
+        let peer = PeerBinding {
+            name: PeerName::parse("database.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".into(),
+            host_port: 34567,
+        };
+        let policy = NetworkPolicy::preset(NetworkPreset::Agent)
+            .with_peers(vec![peer.clone()])
+            .with_ai(Some(AiPolicy::metered_with_total_budget(12_000)));
+
+        assert_eq!(policy.peers(), core::slice::from_ref(&peer));
+        assert_eq!(
+            policy
+                .ai()
+                .expect("AI policy attached")
+                .budget
+                .expect("token budget attached")
+                .max_total_tokens,
+            Some(12_000)
         );
     }
 

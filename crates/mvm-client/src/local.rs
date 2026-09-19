@@ -39,9 +39,9 @@ use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
-    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, SnapshotIO, VsockPostRestoreSignal,
-    VsockPrimedSignalSource, await_primed_barrier, pause_and_seal, signal_post_restore,
-    verify_and_resume,
+    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, SnapshotIO,
+    VsockPostRestoreSignal, VsockPrimedSignalSource, await_primed_barrier, describe_missing_reseed,
+    pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
@@ -251,16 +251,18 @@ impl LocalBackend {
         // simply re-run resume.
         set_registry_resumed(name);
 
-        if !Self::is_mock_backend(backend) {
-            signal_guest_post_restore(name)?;
-        }
+        let reseed = if Self::is_mock_backend(backend) {
+            None
+        } else {
+            Some(resume_reseed_summary(&signal_guest_post_restore(name)?))
+        };
         // Report the verified snapshot's epoch + artifact lengths so the caller's
         // WorkloadWake audit entry carries the same detail the pause did.
         Ok(ResumeOutcome {
             epoch: sidecar.epoch,
             vmstate_len: sidecar.vmstate_len,
             mem_len: sidecar.mem_len,
-            reseed: None,
+            reseed,
         })
     }
 }
@@ -270,7 +272,23 @@ impl LocalBackend {
 /// clones of one snapshot must not draw identical randomness), audits the vsock
 /// RPC, then sends it — failing closed if the guest does not acknowledge (its
 /// config/secret drives may still be unmounted).
-fn signal_guest_post_restore(name: &str) -> Result<()> {
+/// Summarize the reseed for a plain resume.
+///
+/// A plain resume brings back the one VM that was paused; there is no sibling
+/// restored from the same memory, so a guest that could not reseed is reported
+/// rather than refused. Forks and warm claims, which do create siblings, refuse
+/// it instead.
+fn resume_reseed_summary(outcome: &PostRestoreOutcome) -> String {
+    use mvm_core::vm_backend::ReseedStatus;
+    if outcome.reseeded {
+        return ReseedStatus::Rotated.resume_summary().to_string();
+    }
+    let why = describe_missing_reseed(outcome.reseed_shortfall, outcome.detail.as_deref());
+    tracing::warn!(detail = %why, "resumed guest did not reseed its kernel generator");
+    format!("{}: {why}", ReseedStatus::NotRotated.resume_summary())
+}
+
+fn signal_guest_post_restore(name: &str) -> Result<PostRestoreOutcome> {
     let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
     // The verb-emits-at-least-one-audit invariant extends to the vsock messages a
     // verb dispatches; this records the PostRestore RPC alongside where it fires.
@@ -289,8 +307,7 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
         },
         POST_RESTORE_READY_TIMEOUT,
     )
-    .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
-    Ok(())
+    .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))
 }
 
 /// The primed-barrier timeout to enforce before sealing, or `None` when the
@@ -537,11 +554,11 @@ pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Re
         RootfsPlan::Materialized(path) => Ok(path),
         // An already-unpacked tree carries no unpack report, so there is
         // nothing the host filesystem deferred to merge back in.
-        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, Vec::new()),
+        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
         RootfsPlan::Pull(image_ref) => {
             let staging = tempfile::tempdir().map_err(backend_err)?;
-            let deferred_nodes = pull_image_to_dir(&image_ref, staging.path()).await?;
-            materialize_from_dir(staging.path(), name, deferred_nodes)
+            let layers = pull_image_to_dir(&image_ref, staging.path()).await?;
+            materialize_from_dir(staging.path(), name, layers)
         }
     }
 }
@@ -558,13 +575,17 @@ fn run_rootfs_output(name: &str) -> PathBuf {
         .join("rootfs.ext4")
 }
 
+/// What unpacking an image's layers produced beyond the host tree: the nodes
+/// the host filesystem could not hold, and the owners it could not apply.
+#[derive(Default)]
+struct UnpackedLayers {
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
+}
+
 /// Inject the mvm runtime into an unpacked tree and materialize it into the
 /// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
-fn materialize_from_dir(
-    dir: &Path,
-    name: &str,
-    deferred_nodes: Vec<mvm_fs::ext4::Node>,
-) -> Result<PathBuf> {
+fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no guest binaries; remaining legacy injection needs
@@ -572,7 +593,8 @@ fn materialize_from_dir(
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
             .sealed(false)
-            .deferred_nodes(deferred_nodes)
+            .deferred_nodes(layers.deferred_nodes)
+            .owners(layers.owners)
             .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
@@ -582,10 +604,7 @@ fn materialize_from_dir(
 /// Pull a public OCI registry reference and unpack every layer into `dest`,
 /// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
 /// crate boundary, keeping mvm-oci decompressor-free by design).
-async fn pull_image_to_dir(
-    image_ref: &ImageReference,
-    dest: &Path,
-) -> Result<Vec<mvm_fs::ext4::Node>> {
+async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<UnpackedLayers> {
     let reference = image_ref.canonical();
     let manifest_fetcher = OciManifestFetcher::new();
     let manifest = manifest_fetcher
@@ -601,7 +620,7 @@ async fn pull_image_to_dir(
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
     let mut prior_layer_paths = std::collections::HashSet::new();
-    let mut deferred_nodes = Vec::new();
+    let mut unpacked = UnpackedLayers::default();
     for layer in &layers {
         let mut bytes = Vec::new();
         layer_fetcher
@@ -609,10 +628,11 @@ async fn pull_image_to_dir(
             .await
             .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
         let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
+        unpacked.owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
-        deferred_nodes.extend(report.deferred_nodes);
+        unpacked.deferred_nodes.extend(report.deferred_nodes);
     }
-    Ok(deferred_nodes)
+    Ok(unpacked)
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
@@ -1016,6 +1036,32 @@ mod tests {
     use super::*;
     #[cfg(feature = "test-support")]
     use mvm_core::util::test_env::TestEnv;
+
+    /// A plain resume reports a guest that could not reseed instead of failing
+    /// the resume, and says what to do about it.
+    #[test]
+    fn a_resume_without_a_reseed_is_reported_with_the_fix() {
+        let outcome = PostRestoreOutcome {
+            acknowledged: true,
+            detail: Some("restore reseed unavailable: no helper".into()),
+            reseeded: false,
+            clock_resynced: true,
+            reseed_shortfall: Some(
+                mvm_runtime::vm::instance_snapshot::ReseedShortfall::HelperMissing,
+            ),
+        };
+        let summary = resume_reseed_summary(&outcome);
+        assert!(summary.contains("NOT rotated"), "{summary}");
+        assert!(summary.contains("rebuild the image"), "{summary}");
+
+        let rotated = PostRestoreOutcome {
+            reseeded: true,
+            detail: None,
+            reseed_shortfall: None,
+            ..outcome
+        };
+        assert!(!resume_reseed_summary(&rotated).contains("NOT"));
+    }
 
     #[test]
     fn auto_selected_backend_name_exposes_only_standard_backends() {

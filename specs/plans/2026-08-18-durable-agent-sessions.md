@@ -91,7 +91,9 @@ approval ledger head            (built, as a digest only — see note below)
 storage tier                    (built — Resident | Parked | Cold)
 park reason                     (built)
 audit-chain head                (not built)
-retention class + expiry        (not built)
+retention expiry                (built — deadline, extend-only renew)
+retention class                 (not built)
+last transition identity        (built — exact retry of park / resume)
 ```
 
 `2026-08-18-durable-session-park` Task 3 landed the first seven
@@ -115,8 +117,11 @@ exist, so today a caller of `park`/`resume` supplies the digest itself. And a
 session parked with `approval_head: None` has nothing recorded to compare
 against, so such a resume proceeds with no ledger fence at all; that is a
 documented gap, not an oversight.
-`audit-chain head` and `retention class + expiry` remain entirely absent; both
-belong to WS5 (the retention plan) and WS7 (chain records).
+`audit-chain head` and `retention class` remain absent; both belong to WS5 (the
+retention plan) and WS7 (chain records). Expiry is built as a single deadline,
+`retain_until_unix`: park sets it from `--retain-for` or a per-reason default,
+`renew` only moves it later, and resume clears it. It is reported, not enforced
+(see WS5).
 
 This is deliberately close in shape to ADR-046 §13's tombstone. A tombstone
 records a session that ended; a hibernation record records one that paused.
@@ -212,6 +217,18 @@ consults `mvm_runtime::agent_session::pinned_checkpoints` and a manual
 `mvmctl vm checkpoint rm` refuses the same way. Retention classes, expiry,
 and a scheduler that calls `demote` remain undelivered — see that plan's
 "Deferred to later plans" section.)
+
+Holding the resume point alone was not enough. Restoring a checkpoint walks its
+whole parent chain and refuses when any ancestor's record is missing, so the
+sweep decides by reachability: a checkpoint kept for its own sake — tagged,
+inside the age cut, or a live session's resume point — keeps every ancestor it
+restores through, whatever their tag or age, and only checkpoints outside that
+closure are reaped (`mvm_runtime::checkpoint::retention_verdicts`). An ancestor
+kept this way is reported as such by `mvmctl cache prune`. A parent link that
+resolves to nothing ends that branch of the walk rather than aborting the
+prune. `mvmctl machine checkpoint rm` likewise refuses to remove a checkpoint any
+stored checkpoint names as its parent, and names the descendant; removing
+leaf-first still works.
 
 ### D5 — Resume is re-admission, and it is incremental
 
@@ -330,7 +347,7 @@ migrating every stored session and re-cutting every digest.
 | Approval arrives after generation fence | Rejected as stale; the ledger's existing stale-response handling applies. |
 | Audit chain head mismatch | Refuse resume. A session whose continuity is not verifiable does not resume under its old identity. |
 | Host loss with `Parked` image | Record and journal survive if replicated; memory image does not. Resume degrades to `Cold`. |
-| Retention GC races a resume | GC refuses any checkpoint named as a parent by a live or hibernated session. |
+| Retention GC races a resume | GC refuses any checkpoint named as a parent by a live or hibernated session, or any ancestor that checkpoint restores through. |
 | Fresh plan fails admission on resume | Session stays hibernated. Failure is recorded; no partial boot. |
 
 Every refusal is fail-closed and matches the existing `StandbyError`
@@ -411,6 +428,12 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       D3 describes has no way to find the parked session an incoming response
       belongs to. That lookup is unbuilt and is not tracked as anyone's task
       today.
+      A park is retry-exact (`specs/sprint/delivery/session-exact-replay-and-retention.md`):
+      the record keeps the identity of its last transition — a domain-separated,
+      length-prefixed SHA-256 over kind, session, observed generation and every
+      `ParkInput` field (`mvm_core::session_transition`) — and a park retried
+      with `--expected-generation` either replays the recorded result without a
+      write or refuses naming the input that changed.
 - [~] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.
@@ -443,13 +466,25 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       real resume; the steps it does not implement — tier selection,
       `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
+      A resume is retry-exact (`specs/sprint/delivery/session-exact-replay-and-retention.md`):
+      its identity covers the asserted approval head, every
+      `ResumePlanMaterial` field, and whether it boots; `resume_session`
+      checks it before the residency check and before admission, so a replay
+      signs no second plan and reports the recorded `admitted_plan_id`. A
+      retried `resume --boot` that already applied is refused rather than
+      replayed — the record moves before the boot, so it cannot say whether the
+      boot succeeded.
 - [~] **WS5 — Retention ladder + GC.** Partially delivered by
       `2026-08-18-session-retention`: the existing
       `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
       checkpoint any live or hibernated session names as its parent, a manual
       `mvmctl vm checkpoint rm` carries the same refusal, and
       `AgentSessionRecord::demote` gives a parked session a one-way step down
-      the storage ladder. Not yet delivered: retention classes or expiry on
+      the storage ladder. The sweep keeps the lineage closure of everything it
+      retains, not just the directly retained checkpoints, so a tagged
+      checkpoint or a resume point never loses an ancestor its restore walks
+      through; `rm` refuses a checkpoint a stored descendant names as its
+      parent. Not yet delivered: retention classes or expiry on
       the record, a scheduler that calls `demote`, or any actual movement of
       bytes between tiers — demoting only sets a field, nothing relocates a
       memory image, and nothing reads `storage_tier` to decide how to resume.
@@ -457,6 +492,26 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       regardless of tier, so the ladder does not yet make anything
       reclaimable — closing a session remains the only thing that frees its
       resume point.
+      Retention expiry landed
+      (`specs/sprint/delivery/session-exact-replay-and-retention.md`): a
+      hibernated record carries `retain_until_unix`, set at park from
+      `--retain-for` or a named per-reason default (`APPROVAL_WAIT_RETENTION`
+      = `MAX_APPROVAL_TTL_MS`, `IDLE_RETENTION` = `STANDBY_POOL_TTL`,
+      `HOST_SHUTDOWN_RETENTION` / `OPERATOR_RETENTION` 48h,
+      `RETENTION_DEMOTION_RETENTION` 30d); `mvmctl agent-session renew` extends
+      it through the same generation fence and exact-replay identity as park,
+      refusing to shorten, to renew a closed session, or to renew an expired
+      one; `ls`/`show` report the deadline alive or expired in text and JSON.
+      Separate memory-image and record retention classes are still unbuilt —
+      there is one deadline per record.
+- [ ] **WS5 — Expiry scheduler.** Nothing acts on an expired deadline: an
+      expired session is reported, still resumes, and still pins its resume
+      point. Wiring a scheduler waits on a demotion that releases what the
+      lower tier claims to release. `AgentSessionRecord::demote` only rewrites
+      `storage_tier`, and `SupervisorStandbyPool::demote_to_saved_state` acts
+      on pool standbys, which no session record names. A scheduler that called
+      either would report RAM or a memory image released while both stayed
+      where they were.
 - [x] **WS6 — CLI.** Delivered as `mvmctl agent-session
       {open,ls,show,park,resume}`
       (`crates/mvm-cli/src/commands/agent_session.rs`,
@@ -487,6 +542,11 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `session.opened`, `sandbox.admitted`, `approval.requested`,
       `approval.granted` and `session.hibernated` are unwritten, and nothing
       yet routes through the `AgentApprovalEvent::audit_action` projection.
+      A replayed park or resume adds no entry: the entry the original
+      transition wrote is the record of it. `session.renewed`
+      (`AuditEmitter::emit_session_renewed`) records a renewal under the member
+      sandbox's plan, as a park is, with `renewed_until_unix` and
+      `renewed_from_unix`; a replayed renewal adds none either.
 
       **Event naming.** The two entries that exist are spelled `session.parked`
       and `session.resumed`, not the `sandbox.parked` / `sandbox.resumed` this
@@ -509,7 +569,9 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 ## Open questions
 
 - Default retention class for a hibernated session's memory image. 48h is a
-  starting proposal, not a measured one; it wants disk-pressure data.
+  starting proposal, not a measured one; it wants disk-pressure data. The
+  per-reason park defaults (`HOST_SHUTDOWN_RETENTION`, `OPERATOR_RETENTION`)
+  use it for the same reason and carry the same caveat.
 - Whether a hibernated session should hold a reservation against the host
   memory budget for its eventual resume, or re-contend on wake. Re-contending
   is simpler and can starve a long-parked task.

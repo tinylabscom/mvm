@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: W1–W7 COMPLETE** (HVF Stage 0 and x86_64 Firecracker Stage 0 + builds live-proven — see Validation).
+**Status: W1–W8 COMPLETE** (HVF Stage 0 and x86_64 Firecracker Stage 0 + builds live-proven — see Validation).
 
 Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
 last builder path that talked to a VMM directly instead of through the
@@ -138,6 +138,11 @@ appends the token unconditionally, fixes it for every backend.
   more: the runner stops a guest whose kernel halts instead of powering off
   (Firecracker does not exit on a halt), and `FcRunningVm::kill` no longer
   requires a guest agent to flush through.
+- [x] **W8 — bootstrap helpers preserve backend selection (issue #3390).**
+  The helper subprocess inherits the caller's backend environment unchanged,
+  so Linux auto-detection can select Firecracker instead of being overwritten
+  with QEMU. Regression coverage verifies both an unset backend and an explicit
+  Firecracker choice.
 
 ## Deliberately out of scope
 - **Deleting the libkrun Stage 0 body.** It stays as the second working

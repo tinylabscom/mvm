@@ -114,6 +114,79 @@ ComponentState = Union[
 
 
 @dataclass
+class Read:
+    length: int
+    path: str
+    follow_symlinks: Optional[bool] = True
+    offset: Optional[int] = None
+
+
+@dataclass
+class DriveFileOperation1:
+    Read: Read
+
+
+@dataclass
+class Write:
+    content: List[int]
+    mode: int
+    path: str
+    create_parents: Optional[bool] = False
+    follow_symlinks: Optional[bool] = False
+    offset: Optional[int] = None
+    truncate: Optional[bool] = True
+
+
+@dataclass
+class DriveFileOperation2:
+    Write: Write
+
+
+@dataclass
+class ListModel:
+    path: str
+    follow_symlinks: Optional[bool] = True
+
+
+@dataclass
+class DriveFileOperation3:
+    List: ListModel
+
+
+@dataclass
+class Stat:
+    path: str
+    follow_symlinks: Optional[bool] = True
+
+
+@dataclass
+class DriveFileOperation4:
+    Stat: Stat
+
+
+DriveFileOperation = Union[
+    DriveFileOperation1, DriveFileOperation2, DriveFileOperation3, DriveFileOperation4
+]
+
+
+@dataclass
+class DriveGrant:
+    max_bytes_in: int
+    max_bytes_out: int
+    program_id: str
+    ttl: int
+    workspace_roots: List[str]
+
+
+class DriveRefusal(Enum):
+    not_granted = 'not_granted'
+    program_mismatch = 'program_mismatch'
+    outside_workspace_roots = 'outside_workspace_roots'
+    input_limit_exceeded = 'input_limit_exceeded'
+    output_limit_exceeded = 'output_limit_exceeded'
+
+
+@dataclass
 class Stdout:
     chunk: List[int]
 
@@ -276,24 +349,24 @@ FsErrorKind = Union[
 
 
 @dataclass
-class Read:
+class Read1:
     content: List[int]
     total_size: int
 
 
 @dataclass
 class FsResult1:
-    Read: Read
+    Read: Read1
 
 
 @dataclass
-class Write:
+class Write1:
     bytes_written: int
 
 
 @dataclass
 class FsResult2:
-    Write: Write
+    Write: Write1
 
 
 class FsResult5(Enum):
@@ -340,6 +413,7 @@ class GuestCapability1(Enum):
     integration_status = 'integration_status'
     entrypoint_status = 'entrypoint_status'
     run_entrypoint = 'run_entrypoint'
+    drive = 'drive'
     run_extension = 'run_extension'
     filesystem_rpc = 'filesystem_rpc'
     process_rpc = 'process_rpc'
@@ -446,20 +520,42 @@ class GuestRequest14:
 
 
 @dataclass
+class DriveOpen:
+    cwd: str
+    program_id: str
+    env: Optional[List[List[str]]] = field(default_factory=lambda: [])
+
+
+@dataclass
+class GuestRequest15:
+    DriveOpen: DriveOpen
+
+
+@dataclass
+class DriveFile:
+    operation: DriveFileOperation
+
+
+@dataclass
+class GuestRequest16:
+    DriveFile: DriveFile
+
+
+@dataclass
 class RunDetached:
     argv: List[str]
     env: Optional[List[List[str]]] = field(default_factory=lambda: [])
 
 
 @dataclass
-class GuestRequest17:
+class GuestRequest19:
     RunDetached: RunDetached
 
 
 TokenItem = int
 
 
-class GuestRequest19(Enum):
+class GuestRequest21(Enum):
     FsDiff = 'FsDiff'
 
 
@@ -471,7 +567,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest22:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -484,7 +580,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest23:
     ConsoleOpen: ConsoleOpen
 
 
@@ -494,7 +590,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest22:
+class GuestRequest24:
     ConsoleClose: ConsoleClose
 
 
@@ -506,15 +602,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest23:
+class GuestRequest25:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest24(Enum):
+class GuestRequest26(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest25(Enum):
+class GuestRequest27(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -527,7 +623,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest28:
     FsRead: FsRead
 
 
@@ -543,7 +639,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest29:
     FsWrite: FsWrite
 
 
@@ -554,7 +650,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest30:
     FsList: FsList
 
 
@@ -565,7 +661,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest31:
     FsStat: FsStat1
 
 
@@ -577,7 +673,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest32:
     FsMkdir: FsMkdir
 
 
@@ -589,7 +685,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest33:
     FsRemove: FsRemove
 
 
@@ -601,7 +697,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest34:
     FsMove: FsMove
 
 
@@ -615,11 +711,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest35:
     ProcStart: ProcStart
 
 
-class GuestRequest34(Enum):
+class GuestRequest36(Enum):
     ProcList = 'ProcList'
 
 
@@ -630,7 +726,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest37:
     ProcSignal: ProcSignal
 
 
@@ -641,7 +737,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest38:
     ProcSendInput: ProcSendInput
 
 
@@ -652,7 +748,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest39:
     ProcWait: ProcWait
 
 
@@ -662,7 +758,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest40:
     ProcKill: ProcKill
 
 
@@ -674,7 +770,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest41:
     MountVolume: MountVolume
 
 
@@ -685,7 +781,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest42:
     UnmountVolume: UnmountVolume
 
 
@@ -695,7 +791,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest41:
+class GuestRequest43:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -706,12 +802,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest42:
+class GuestRequest44:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest44:
+class GuestRequest46:
     CloseStreamInput: CloseInput
 
 
@@ -856,12 +952,22 @@ class GuestResponse18:
     PrimedStatusReport: PrimedStatusReport
 
 
-class GuestResponse20(Enum):
-    ExtensionCancellationAck = 'ExtensionCancellationAck'
+@dataclass
+class DriveRefused:
+    reason: DriveRefusal
 
 
 @dataclass
 class GuestResponse21:
+    DriveRefused: DriveRefused
+
+
+class GuestResponse22(Enum):
+    ExtensionCancellationAck = 'ExtensionCancellationAck'
+
+
+@dataclass
+class GuestResponse23:
     ExecEvent: ExecEvent
 
 
@@ -871,7 +977,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse24:
     ExecBatchResult: ExecBatchResult
 
 
@@ -881,21 +987,8 @@ class DetachedStarted:
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse25:
     DetachedStarted: DetachedStarted
-
-
-@dataclass
-class PostRestoreAck:
-    success: bool
-    clock_resynced: Optional[bool] = None
-    detail: Optional[str] = None
-    reseeded: Optional[bool] = False
-
-
-@dataclass
-class GuestResponse24:
-    PostRestoreAck: PostRestoreAck
 
 
 @dataclass
@@ -905,7 +998,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse28:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -916,7 +1009,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse29:
     ConsoleOpened: ConsoleOpened
 
 
@@ -927,7 +1020,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse28:
+class GuestResponse30:
     ConsoleExited: ConsoleExited
 
 
@@ -937,7 +1030,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse31:
     ConsoleResized: ConsoleResized
 
 
@@ -949,7 +1042,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse32:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -960,7 +1053,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse36:
+class GuestResponse38:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1202,6 +1295,17 @@ class ReadinessReport:
     warm_pool: ComponentState
 
 
+class ReseedShortfall1(Enum):
+    helper_missing = 'helper_missing'
+
+
+class ReseedShortfall2(Enum):
+    failed = 'failed'
+
+
+ReseedShortfall = Union[ReseedShortfall1, ReseedShortfall2]
+
+
 @dataclass
 class RootfsConfig:
     data_dev: str
@@ -1293,11 +1397,19 @@ class StreamInputRefusal3(Enum):
 
 
 class StreamInputRefusal4(Enum):
+    cap_exceeded = 'cap_exceeded'
+
+
+class StreamInputRefusal5(Enum):
     workload_gone = 'workload_gone'
 
 
 StreamInputRefusal = Union[
-    StreamInputRefusal1, StreamInputRefusal2, StreamInputRefusal3, StreamInputRefusal4
+    StreamInputRefusal1,
+    StreamInputRefusal2,
+    StreamInputRefusal3,
+    StreamInputRefusal4,
+    StreamInputRefusal5,
 ]
 
 
@@ -1482,14 +1594,14 @@ class FsEntry:
 
 
 @dataclass
-class ListModel:
+class List1:
     entries: List[FsEntry]
     truncated: bool
 
 
 @dataclass
 class FsResult3:
-    List: ListModel
+    List: List1
 
 
 @dataclass
@@ -1527,7 +1639,7 @@ class RunExtension:
 
 
 @dataclass
-class GuestRequest15:
+class GuestRequest17:
     RunExtension: RunExtension
 
 
@@ -1537,12 +1649,12 @@ class CancelExtension:
 
 
 @dataclass
-class GuestRequest16:
+class GuestRequest18:
     CancelExtension: CancelExtension
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest45:
     StreamInput: InputFrame
 
 
@@ -1575,37 +1687,56 @@ class GuestResponse19:
 
 
 @dataclass
+class GuestResponse20:
+    DriveEvent: EntrypointEvent
+
+
+@dataclass
+class PostRestoreAck:
+    success: bool
+    clock_resynced: Optional[bool] = None
+    detail: Optional[str] = None
+    reseed_shortfall: Optional[ReseedShortfall] = None
+    reseeded: Optional[bool] = False
+
+
+@dataclass
+class GuestResponse26:
+    PostRestoreAck: PostRestoreAck
+
+
+@dataclass
 class FsDiffResult:
     changes: List[FsChange]
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse27:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse33:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse34:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse34:
+class GuestResponse36:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse35:
+class GuestResponse37:
     VolumeMountResult: VolumeMountResult
 
 
 @dataclass
-class GuestResponse37:
+class GuestResponse39:
     StreamInputResult: StreamInputResult
 
 
@@ -1627,13 +1758,13 @@ class ProcInfo:
 
 
 @dataclass
-class List1:
+class List2:
     processes: List[ProcInfo]
 
 
 @dataclass
 class ProcResult2:
-    List: List1
+    List: List2
 
 
 ProcResult = Union[
@@ -1648,6 +1779,7 @@ class VerbGrant:
     session_id: str
     sig: str
     verbs: List[VerbId]
+    drive: Optional[DriveGrant] = None
 
 
 @dataclass
@@ -1699,7 +1831,7 @@ class PostRestore:
 
 
 @dataclass
-class GuestRequest18:
+class GuestRequest20:
     PostRestore: PostRestore
 
 
@@ -1714,7 +1846,7 @@ class GuestResponse15:
 
 
 @dataclass
-class GuestResponse33:
+class GuestResponse35:
     ProcResult: ProcResult
 
 
@@ -1756,6 +1888,8 @@ GuestResponse = Union[
     GuestResponse35,
     GuestResponse36,
     GuestResponse37,
+    GuestResponse38,
+    GuestResponse39,
 ]
 
 
@@ -1826,6 +1960,8 @@ GuestRequest = Union[
     GuestRequest42,
     GuestRequest43,
     GuestRequest44,
+    GuestRequest45,
+    GuestRequest46,
 ]
 
 

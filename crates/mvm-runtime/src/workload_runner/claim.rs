@@ -247,22 +247,7 @@ impl<'a> ClaimGuards<'a> {
         vm: &VmId,
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
-        if inputs.secrets.is_empty()
-            && !inputs.network_policy.admits_outbound()
-            && inputs.ingress.is_empty()
-        {
-            return Ok(EndpointHandle {
-                egress_uds: None,
-                identity_drive: None,
-                guard: EndpointGuard::defused(),
-            });
-        }
-        // No protocol choice is made here any more. Whether a workload carries
-        // secrets decides what the endpoint *does* with a flow, not which
-        // protocol the guest speaks: there is one authenticated session either
-        // way. The old `raw_egress = secrets.is_empty()` fork is what let the
-        // guest and the host disagree.
-        let spawned = self.spawner.spawn(&NetworkEndpointSpawnRequest {
+        let request = NetworkEndpointSpawnRequest {
             vm_name: &vm.0,
             state_dir: inputs.state_dir,
             tenant: inputs.tenant,
@@ -272,7 +257,23 @@ impl<'a> ClaimGuards<'a> {
             network_limits: inputs.network_limits,
             ingress: inputs.ingress,
             identity: inputs.identity,
-        })?;
+        };
+        if inputs.secrets.is_empty()
+            && !inputs.network_policy.admits_outbound()
+            && inputs.ingress.is_empty()
+        {
+            return Ok(EndpointHandle {
+                egress_uds: None,
+                identity_drive: self.spawner.prepare_identity(&request)?,
+                guard: EndpointGuard::defused(),
+            });
+        }
+        // No protocol choice is made here any more. Whether a workload carries
+        // secrets decides what the endpoint *does* with a flow, not which
+        // protocol the guest speaks: there is one authenticated session either
+        // way. The old `raw_egress = secrets.is_empty()` fork is what let the
+        // guest and the host disagree.
+        let spawned = self.spawner.spawn(&request)?;
         Ok(EndpointHandle {
             egress_uds: Some(spawned.egress_uds),
             identity_drive: spawned.identity_drive,
@@ -357,9 +358,25 @@ mod tests {
     #[derive(Default)]
     struct FakeSpawner {
         seen_vm: Mutex<Option<String>>,
+        identity_vm: Mutex<Option<String>>,
+        fail_identity: bool,
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
+        fn prepare_identity(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> anyhow::Result<Option<PathBuf>> {
+            *self.identity_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            anyhow::ensure!(!self.fail_identity, "identity provisioning failed");
+            Ok(
+                matches!(req.identity, FlowMuxIdentitySource::Mint).then(|| {
+                    req.state_dir
+                        .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+                }),
+            )
+        }
+
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
             Ok(SpawnedEndpoint {
@@ -440,6 +457,39 @@ mod tests {
             .expect("deny-all fast path succeeds");
 
         assert_eq!(child.egress_uds(), None);
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
+        assert_eq!(
+            spawner.identity_vm.lock().unwrap().as_deref(),
+            Some("child-deny-all")
+        );
+        assert_eq!(
+            child.identity_drive(),
+            Some(
+                state
+                    .path()
+                    .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+                    .as_path()
+            )
+        );
+    }
+
+    #[test]
+    fn deny_all_identity_failure_prevents_launch_without_starting_egress() {
+        let spawner = FakeSpawner {
+            fail_identity: true,
+            ..FakeSpawner::default()
+        };
+        let guards = ClaimGuards::new(&spawner);
+        let state = tempfile::tempdir().unwrap();
+        let result = guards.spawn_endpoint(
+            &VmId("unauthenticated".into()),
+            &endpoint_inputs(
+                state.path(),
+                &RedactionPolicy::default(),
+                &NetworkPolicy::deny_all(),
+            ),
+        );
+        assert!(result.is_err());
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
     }
 

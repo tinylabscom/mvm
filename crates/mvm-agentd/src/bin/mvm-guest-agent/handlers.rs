@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, EntrypointCall, ProcessResourceLimits};
+use mvm_agentd::entrypoint::{CallCaps, CancellationToken, EntrypointCall, ProcessResourceLimits};
 use mvm_agentd::entrypoint_stream::stream_call;
 use mvm_agentd::stream_input::InputDesk;
 use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
-    ComponentState, EntrypointEvent, ExtensionCancellation, ExtensionDispatch, FsChange,
-    FsChangeKind, GuestResponse, RunEntrypointError,
+    ComponentState, DriveFileOperation, DriveRefusal, EntrypointEvent, ExtensionCancellation,
+    ExtensionDispatch, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
@@ -99,6 +99,10 @@ impl Drop for CallTmpdir {
 /// Wrap an `EntrypointEvent` in a `GuestResponse` for vsock framing.
 fn evt(e: EntrypointEvent) -> GuestResponse {
     GuestResponse::EntrypointEvent(e)
+}
+
+fn drive_evt(e: EntrypointEvent) -> GuestResponse {
+    GuestResponse::DriveEvent(e)
 }
 
 fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
@@ -600,15 +604,12 @@ pub(crate) fn handle_post_restore(
     host_epoch_secs: Option<u64>,
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> GuestResponse {
-    // First, rotate the VMGenID: feed the host-minted token to the
+    // First, rotate the generation token: feed the host-minted token to the
     // process-resident reseeder. Its state is captured in the snapshot,
     // so two clones of one snapshot both diverge from the captured
     // value when the host delivers each a distinct fresh token. A
     // zero token (no-rotation restore) is a no-op.
-    let reseeded = matches!(
-        reseed_on_post_restore(token),
-        mvm_agentd::genid::GenIdAction::Reseeded
-    );
+    let reseed = reseed_on_post_restore(token);
     let (clock_resynced, clock_error) = match host_epoch_secs {
         None => (false, None),
         Some(epoch_secs) => match mvm_agentd::restore_clock::resync(epoch_secs) {
@@ -648,9 +649,10 @@ pub(crate) fn handle_post_restore(
         }
     }
     // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
-    let result = std::process::Command::new("kill")
-        .args(["-USR1", "1"])
-        .output();
+    let mut command = std::process::Command::new("kill");
+    command.args(["-USR1", "1"]);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    let result = command.output();
     let signal_detail = match result {
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(format!(
@@ -659,29 +661,78 @@ pub(crate) fn handle_post_restore(
         )),
         Err(e) => Some(format!("failed to send signal: {}", e)),
     };
-    let errors = [hostname_error, clock_error, signal_detail]
+    post_restore_ack(PostRestoreSteps {
+        reseed,
+        hostname_requested: hostname.is_some(),
+        hostname_error,
+        clock_requested: host_epoch_secs.is_some(),
+        clock_resynced,
+        clock_error,
+        signal_error: signal_detail,
+    })
+}
+
+/// What each post-restore step did, gathered so the acknowledgement is decided
+/// in one place that can be tested without a guest.
+struct PostRestoreSteps {
+    reseed: mvm_agentd::genid::GenIdAction,
+    hostname_requested: bool,
+    hostname_error: Option<String>,
+    clock_requested: bool,
+    clock_resynced: bool,
+    clock_error: Option<String>,
+    signal_error: Option<String>,
+}
+
+/// Build the `PostRestoreAck`.
+///
+/// `success` covers the steps that finish bringing the guest back — hostname,
+/// clock, the init signal. The reseed is reported on its own, as `reseeded`
+/// plus a shortfall and a reason in `detail`, so a guest that could not reseed
+/// is not mistaken for one whose drives are still unmounted.
+fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
+    let reseeded = steps.reseed.reseeded();
+    let (reseed_shortfall, reseed_note) = match steps.reseed {
+        mvm_agentd::genid::GenIdAction::ReseedFailed(failure) => {
+            let label = match failure.shortfall {
+                mvm_agentd::vsock::ReseedShortfall::HelperMissing => "restore reseed unavailable",
+                mvm_agentd::vsock::ReseedShortfall::Failed => "restore reseed failed",
+            };
+            (
+                Some(failure.shortfall),
+                Some(format!("{label}: {}", failure.reason)),
+            )
+        }
+        mvm_agentd::genid::GenIdAction::Unchanged | mvm_agentd::genid::GenIdAction::Reseeded => {
+            (None, None)
+        }
+    };
+    let errors = [steps.hostname_error, steps.clock_error, steps.signal_error]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     let success = errors.is_empty();
-    let detail = if success {
-        Some(
-            match (hostname.is_some(), host_epoch_secs.is_some()) {
-                (true, true) => "post-restore hostname, clock sync, and init signal completed",
-                (true, false) => "post-restore hostname and init signal completed",
-                (false, true) => "post-restore clock sync and init signal completed",
-                (false, false) => "post-restore signal sent to init",
-            }
-            .to_string(),
-        )
+    let summary = if success {
+        match (steps.hostname_requested, steps.clock_requested) {
+            (true, true) => "post-restore hostname, clock sync, and init signal completed",
+            (true, false) => "post-restore hostname and init signal completed",
+            (false, true) => "post-restore clock sync and init signal completed",
+            (false, false) => "post-restore signal sent to init",
+        }
+        .to_string()
     } else {
-        Some(errors.join("; "))
+        errors.join("; ")
+    };
+    let detail = match reseed_note {
+        Some(note) => format!("{summary}; {note}"),
+        None => summary,
     };
     GuestResponse::PostRestoreAck {
         success,
-        detail,
+        detail: Some(detail),
         reseeded,
-        clock_resynced,
+        clock_resynced: steps.clock_resynced,
+        reseed_shortfall,
     }
 }
 
@@ -709,6 +760,132 @@ pub(crate) fn handle_run_entrypoint_request(
     } else {
         handle_run_entrypoint(ctx.file, stdin, timeout_secs, env, stream_input)
     }
+}
+
+/// Start the boot-validated entrypoint under the pinned drive authority. The
+/// program identity has already been compared by the dispatcher gate; this
+/// handler independently canonicalizes the working directory against the
+/// granted roots before spawning and derives every cap from the grant.
+pub(crate) fn handle_drive_open(
+    ctx: &mut HandlerCtx,
+    cwd: &str,
+    env: Vec<(String, String)>,
+    grant: Option<&mvm_contract::grants::DriveGrant>,
+) -> GuestResponse {
+    let Some(grant) = grant else {
+        return GuestResponse::DriveRefused {
+            reason: DriveRefusal::NotGranted,
+        };
+    };
+    if matches!(
+        ctx.boot_state.snapshot().entrypoint,
+        ComponentState::Starting
+    ) {
+        return drive_evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::NotReady,
+            message: "entrypoint validation in progress; poll ReadinessStatus and retry".into(),
+        });
+    }
+    let policy = mvm_core::crypto::policy::PathPolicy::default().with_allow_roots(
+        grant
+            .workspace_roots
+            .iter()
+            .map(mvm_contract::grants::WorkspaceRoot::as_str),
+    );
+    let canonical = match policy.validate(
+        &mvm_core::crypto::policy::OsCanonicalizer,
+        cwd,
+        mvm_core::crypto::policy::PathOp::Read,
+    ) {
+        Ok(path) => path,
+        Err(_) => {
+            return GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots,
+            };
+        }
+    };
+    let _guard = match RUN_ENTRYPOINT_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Busy,
+                message: "another driven program is in flight".into(),
+            });
+        }
+    };
+    let entrypoint = match VALIDATED_ENTRYPOINT.get() {
+        Some(Ok(entrypoint)) => entrypoint,
+        Some(Err(message)) => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: message.clone(),
+            });
+        }
+        None => {
+            return drive_evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: "entrypoint validation never ran".into(),
+            });
+        }
+    };
+    let mut caps = CallCaps::v1();
+    caps.stdin_max = usize::try_from(grant.max_bytes_in.get()).unwrap_or(usize::MAX);
+    let output_max = usize::try_from(grant.max_bytes_out.get()).unwrap_or(usize::MAX);
+    caps.stdout_max = output_max;
+    caps.stderr_max = output_max;
+    let cancellation = CancellationToken::default();
+    let call = EntrypointCall {
+        entrypoint,
+        cwd: canonical.as_path(),
+        stdin: &[],
+        timeout: Duration::from_secs(u64::from(grant.ttl.get())),
+        caps,
+        resource_limits: None,
+        cancellation: Some(cancellation.clone()),
+        env,
+        stream_input: true,
+    };
+    let mut output_bytes = 0u64;
+    let mut output_exceeded = false;
+    let terminal = stream_call(call, &mut |event| {
+        let chunk_len = match &event {
+            EntrypointEvent::Stdout { chunk } | EntrypointEvent::Stderr { chunk } => {
+                u64::try_from(chunk.len()).unwrap_or(u64::MAX)
+            }
+            EntrypointEvent::Control { .. }
+            | EntrypointEvent::Exit { .. }
+            | EntrypointEvent::Error { .. } => 0,
+        };
+        output_bytes = output_bytes.saturating_add(chunk_len);
+        if output_bytes > grant.max_bytes_out.get() {
+            output_exceeded = true;
+            cancellation.request();
+            return;
+        }
+        write_response(&mut *ctx.file, &drive_evt(event));
+    });
+    if output_exceeded {
+        drive_evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::PayloadCap,
+            message: "drive output exceeded max_bytes_out".into(),
+        })
+    } else {
+        drive_evt(terminal)
+    }
+}
+
+pub(crate) fn handle_drive_file(
+    operation: &DriveFileOperation,
+    grant: Option<&mvm_contract::grants::DriveGrant>,
+) -> GuestResponse {
+    let Some(grant) = grant else {
+        return GuestResponse::DriveRefused {
+            reason: DriveRefusal::NotGranted,
+        };
+    };
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_drive_with_defaults(
+        operation, grant,
+    ))
 }
 
 /// Deliver one host-admitted input frame to the running workload's stdin.
@@ -937,6 +1114,132 @@ pub(crate) fn handle_update_idle_timeout(secs: u64) -> GuestResponse {
             previous_secs: 0,
             applied_secs: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod post_restore_ack_tests {
+    use mvm_agentd::genid::{GenIdAction, ReseedFailure};
+    use mvm_agentd::vsock::ReseedShortfall;
+
+    use super::*;
+
+    fn steps(reseed: GenIdAction) -> PostRestoreSteps {
+        PostRestoreSteps {
+            reseed,
+            hostname_requested: true,
+            hostname_error: None,
+            clock_requested: true,
+            clock_resynced: true,
+            clock_error: None,
+            signal_error: None,
+        }
+    }
+
+    fn failed(shortfall: ReseedShortfall, reason: &str) -> GenIdAction {
+        GenIdAction::ReseedFailed(ReseedFailure {
+            shortfall,
+            reason: reason.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_failed_reseed_is_reported_as_not_reseeded_and_names_the_reason() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            detail,
+            reseeded,
+            clock_resynced,
+            reseed_shortfall,
+        } = post_restore_ack(steps(failed(
+            ReseedShortfall::Failed,
+            "forcing the kernel generator to rekey failed: EPERM",
+        )))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!reseeded, "a failed reseed must never be reported as done");
+        assert_eq!(reseed_shortfall, Some(ReseedShortfall::Failed));
+        assert!(
+            success,
+            "the restore steps themselves completed; the reseed is reported on its own"
+        );
+        let detail = detail.expect("a failure carries its reason");
+        assert!(
+            detail.contains("restore reseed failed") && detail.contains("EPERM"),
+            "{detail}"
+        );
+        assert!(clock_resynced);
+    }
+
+    #[test]
+    fn a_guest_without_a_helper_says_so_distinctly() {
+        let GuestResponse::PostRestoreAck {
+            reseeded,
+            reseed_shortfall,
+            detail,
+            ..
+        } = post_restore_ack(steps(failed(
+            ReseedShortfall::HelperMissing,
+            "no CRNG reseed helper is running in this guest",
+        )))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!reseeded);
+        assert_eq!(reseed_shortfall, Some(ReseedShortfall::HelperMissing));
+        assert!(
+            detail.is_some_and(|d| d.contains("restore reseed unavailable")),
+            "an image without a helper is not reported as a failed reseed"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_step_and_a_failed_reseed_are_both_reported() {
+        let mut both = steps(failed(ReseedShortfall::Failed, "EPERM"));
+        both.signal_error = Some("kill failed".to_string());
+        let GuestResponse::PostRestoreAck {
+            success, detail, ..
+        } = post_restore_ack(both)
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!success);
+        let detail = detail.unwrap_or_default();
+        assert!(
+            detail.contains("kill failed") && detail.contains("restore reseed failed"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_completed_reseed_is_reported_as_reseeded() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            reseeded,
+            reseed_shortfall,
+            ..
+        } = post_restore_ack(steps(GenIdAction::Reseeded))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(success && reseeded);
+        assert_eq!(reseed_shortfall, None);
+    }
+
+    #[test]
+    fn a_no_rotation_restore_succeeds_without_claiming_a_reseed() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            reseeded,
+            reseed_shortfall,
+            ..
+        } = post_restore_ack(steps(GenIdAction::Unchanged))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(success && !reseeded);
+        assert_eq!(reseed_shortfall, None);
     }
 }
 

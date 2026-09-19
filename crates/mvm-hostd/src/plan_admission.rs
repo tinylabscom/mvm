@@ -74,6 +74,7 @@ use mvm_core::plan::{
     check_window, sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
+use mvm_core::spawn_scope;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
@@ -84,6 +85,9 @@ use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
+
+mod verb_grant_sidecar;
+use verb_grant_sidecar::mint_verb_grant_sidecar;
 
 pub use mvm_core::time::{Clock, SystemClock};
 
@@ -953,8 +957,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // user session to delegate from. Without this second question a sealed run
     // on a Linux host with no session bus is admitted, boots unbounded, and
     // reports `declared`: refused in prose and permitted in code.
-    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, mvm_core::cpu_scope::mechanism_gap())
-    {
+    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, spawn_scope::mechanism_gap()) {
         return refuse_or_warn(posture.variant, detail);
     }
     Ok(())
@@ -969,7 +972,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
 fn host_cpu_mechanism_gap(
     grants: &Grants,
     kind: BackendKind,
-    gap: Option<mvm_core::cpu_scope::MechanismGap>,
+    gap: Option<spawn_scope::MechanismGap>,
 ) -> Option<String> {
     // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
     // absent CPU grant has nothing to enforce.
@@ -1197,83 +1200,6 @@ pub fn stash_plan_and_mint_verb_grant(
         write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
     }
     mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)
-}
-
-/// If the plan carries `agent_verbs`, mint a signed `VerbGrantEnvelope` and
-/// write it to `<state_dir>/verb-grant.json` (mode 0600). Absent verbs ⇒ no
-/// file written (grant-less boot). Best-effort key load — the key is created
-/// on first use by `load_or_init_at` against the default keys dir.
-///
-/// The sidecar is consumed by the backend's `verb_grant_cmdline_token` at
-/// launch time and carried to the guest on the kernel cmdline.
-fn mint_verb_grant_sidecar(
-    plan_json: &str,
-    vm_name: &str,
-    state_dir: &std::path::Path,
-) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
-    use mvm_core::plan::SignedExecutionPlan;
-    use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
-
-    // Remove any pre-existing sidecar so that a grant-less re-run of a
-    // reused VM name does not inherit the previous boot's grant.
-    let sidecar_path = state_dir.join("verb-grant.json");
-    match std::fs::remove_file(&sidecar_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(anyhow::Error::from(e)).with_context(|| {
-                format!("remove stale verb-grant sidecar {}", sidecar_path.display())
-            });
-        }
-    }
-
-    // Best-effort parse: a missing or malformed plan_json skips the
-    // sidecar (grant-less boot), matching the fail-open posture of the
-    // other cmdline token producers.
-    let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) else {
-        return Ok(None);
-    };
-    let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) else {
-        return Ok(None);
-    };
-
-    let Some(verbs) = plan.agent_verbs else {
-        // No verb grant requested — grant-less boot, sidecar already removed.
-        return Ok(None);
-    };
-
-    let keys_dir = mvm_core::config::mvm_keys_dir();
-    let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
-        .context("load host signer for verb-grant mint")?;
-    let keystore = crate::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
-        .context("load Keystore from host-signer key file")?;
-
-    let grant = crate::host_signer::mint_verb_grant(
-        &keystore,
-        vm_name,
-        &plan.nonce,
-        plan.valid_until,
-        verbs,
-    )
-    .context("mint verb grant")?;
-
-    let pubkey_hex: String = keystore
-        .pub_key()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let plan_nonce_hex = plan.nonce.as_hex().to_string();
-
-    let envelope = VerbGrantEnvelope {
-        pubkey_hex,
-        plan_nonce_hex,
-        predecessor_session_id: None,
-        predecessor_plan_nonce_hex: None,
-        grant,
-    };
-    let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
-    write_secret_file(&state_dir.join("verb-grant.json"), &envelope_json)?;
-    Ok(Some(envelope))
 }
 
 /// Admission enforcement: every volume about to be attached must be
@@ -2438,6 +2364,7 @@ mod tests {
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            outputs: Vec::new(),
             grants: None,
             stream_edges: Vec::new(),
             kernel_sha256: None,
@@ -3428,10 +3355,39 @@ mod tests {
         .expect("a 500 millicore share is enforceable on HVF");
     }
 
+    /// The spawn-time memory and task ceilings are host protection nobody
+    /// requested, so a host that cannot attach them is no reason to refuse a
+    /// sealed run: without a CPU share there is no mechanism gap to report,
+    /// whichever half of the mechanism is missing.
+    #[test]
+    fn a_missing_scope_mechanism_refuses_nothing_that_did_not_ask_for_cpu() {
+        use mvm_core::spawn_scope::MechanismGap;
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Qemu,
+            BackendKind::Libkrun,
+        ] {
+            for gap in [
+                MechanismGap::SystemdRunMissing,
+                MechanismGap::NoUserSessionBus,
+            ] {
+                assert_eq!(
+                    host_cpu_mechanism_gap(
+                        &mvm_contract::grants::Grants::default(),
+                        kind,
+                        Some(gap)
+                    ),
+                    None,
+                    "{kind:?} with {gap:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
-        use mvm_core::cpu_scope::MechanismGap;
+        use mvm_core::spawn_scope::MechanismGap;
 
         let missing_bus = Some(MechanismGap::NoUserSessionBus);
         assert_eq!(
@@ -5310,6 +5266,17 @@ mod tests {
         assert!(
             chain.contains("grants_cpu_tier"),
             "the CPU dimension must be named: {chain}"
+        );
+        // The spawn ceilings are written beside the CPU tier even when nothing
+        // held them: the mock backend has no scope, so both say `declared` and
+        // neither carries a number that could be read as a bound.
+        assert!(
+            chain.contains("grants_memory_tier") && chain.contains("grants_tasks_tier"),
+            "the memory and task dimensions must be named: {chain}"
+        );
+        assert!(
+            !chain.contains("grants_memory_max_bytes") && !chain.contains("grants_tasks_max"),
+            "a declared ceiling must not carry a value: {chain}"
         );
     }
 

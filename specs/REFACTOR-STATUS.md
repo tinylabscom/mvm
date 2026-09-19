@@ -1,13 +1,144 @@
 # Refactor status
 
-Last updated: 2026-09-16
+Last updated: 2026-09-19
 
 ## In progress
+
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      W1a Rust binary inventory gate tested (17 focused tests, repository gates
+      and clippy pass). All 28 runtime entries
+      remain explicit capture gaps; 17 tools/fixtures carry no coverage credit.
+      Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
+      `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
+      and limits. This does not enable the independent telemetry service.
+      W2a typed contract and peer-pinned worker transport pass 21 focused tests,
+      host workspace tests, clippy, Linux cross-check, seeded fuzz smoke and all
+      69 repository gates. PR #3449 landed through the merge queue as
+      `a126a8299679b3c0a0b1022dc3bedca1504ce14f`.
+      `specs/sprint/delivery/3421-telemetry-transport.md` records the scope.
+      No runtime listener, source capture or VM-generation binding is enabled.
+      W2b backend channel and identity wiring passes 1,857 affected-crate tests (six ignored),
+      workspace clippy and Linux all-target cross-check. Both restore BDD scenarios
+      pass (ten steps, no skips). The host workspace passes 13,998 tests with zero failures,
+      31 existing ignores and three builder-only exclusions. Post-rebase clippy, gated checks,
+      3,886 affected-library tests, seven signer tests and all 69 repository gates pass.
+      PR #3472 is published; CI and queued delivery remain open.
+      Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
+      Wiring includes HVF cold boot, live handoff and child-local saved restore. Guest listener activation,
+      authoritative generation registration and real-VM witnesses remain open.
+      No-egress identity provisioning is implemented locally without granting
+      network access or loading the host private key. Identity/refusal and disk-isolation
+      regressions and the full host workspace pass.
+      Standby capture also provisions its own identity. Identity-stage policy
+      gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W3b prepared-record handoff passes nine new component tests, including a
+      stalled encrypted writer, atomic close and retrievable loss evidence.
+      Two allocation regressions pass natively and under Miri, including cold
+      admission after setup initializes the native mutex.
+      Workspace/core tests, clippy, Linux cross-check and repository gates pass;
+      PR #3464 merged through the queue as `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9`
+      after successful merge-group checks. Runtime integration remains open. Scope:
+      `specs/sprint/delivery/3422-telemetry-outbox.md`.
+      W4 receive-only authentication now integrates with the resident signer via
+      a typed, domain-restricted operation and deadline-bounded async client.
+      Seven integration tests, workspace clippy and Linux all-target cross-check
+      pass. VM-lifetime collection and generation registration remain unimplemented.
+      W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
+      VM-lifetime host collector, host views/export, real-backend certification,
+      default-on rollout and merge-queue delivery. Design is not implementation.
+
+- [ ] **Agent child descriptor isolation — issue #3404.**
+      Close non-contract descriptors in the RPC, streaming-exec, and
+      warm-worker child paths. Linux regression and Firecracker/KVM validation
+      pass; promotion is pending.
+
+- [x] **The unused x86_64 KVM VMM is deleted.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` B1.1 + G1, issue #3306.
+      1,125 lines with no production caller, its two examples, and the
+      `kvm-ioctls`/`kvm-bindings` dependencies. `vmm-sys-util` now resolves at
+      one major; the Linux closure budget drops 238 → 235.
+
+- [x] **No always-accept integrity checker in the binary-integrity module.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A3.2, issue #3310.
+      `NoopChecker` was `pub`, ungated and returned `Ok` for any binary; its
+      only caller was its own test. Deleted with that test. A3.3/F2 ride along:
+      the `#[ignore]`d `unimplemented!()` live-attach test in
+      `prelaunch_live.rs` is deleted too.
+
+- [ ] **`#[allow(dead_code)]` sweep.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A3.6 / D6, issue #3310.
+      57 of 61 attributes gone; dead paths deleted (an orphan 215-line HVF DAX
+      file and its trait, a signal-handler registry nothing ever populated,
+      unused HVF FFI, placeholder variants and fields). Four remain, each blocked
+      on #3483, #3484 or #3485.
+
+- [x] **Kept-alive entrypoint machines retain their requested names.**
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.
+      Persistent entrypoint sessions preserve `--name` and report both the
+      machine and session identities when they remain alive.
+
+- [x] **Bootstrap helpers inherit the selected builder backend.**
+      `specs/plans/2026-09-15-vmm-agnostic-stage0.md` W8, issue #3390.
+      Linux helper subprocesses no longer replace shared Firecracker
+      auto-detection with a local QEMU override.
+
+- [x] **Claim 11 and claim 13 evidence matches the shipped tree.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.2, issue #3316.
+      The dormant CVE severity gate is explicit, and function witnesses must
+      identify exactly one definition.
 
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
       measure-first and sequenced with #3360.
+      W1 is complete: the live Firecracker/KVM sibling-restore witness proves
+      immediate post-restore `getrandom(2)` divergence.
+      W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
+      the W3.6 live boot is still open. W3.7 done (#3430): files mvm injects
+      stay root-owned whatever a layer declares. W3.8 (builder-VM input
+      fidelity) is done except a macOS unpacker hard-link bug.
+      W4 done except W4.5 as written (#3381): HVF returns freed guest memory
+      by free page reporting, advertised as `free_page_reporting` rather than
+      `balloon`, since there is no inflate target for the controller to set.
+  - [x] W1a — issue #3404: every guest-agent child path uses the shared
+        descriptor-closing hook, shared vsock sockets are close-on-exec, and
+        real Linux cold-entrypoint and process-RPC witnesses pass. Public
+        release remains gated on clearance.
+  - [x] W9 — signed bundles push to and fetch from image registries
+        (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
+        W9.6 media-type alignment with #3365 stays open.
+  - [x] W6 (#3383): every VMM spawn is scoped with memory and task ceilings,
+        scope creation is bounded, and the ceilings are read back and audited.
+  - [ ] W7 (#3384): chunked, parallel, durable checkpoints, scoped into
+        `specs/plans/2026-09-18-chunked-durable-checkpoints.md`.
+    - [x] C0 — whole-blob capture staged, synced and published by one rename;
+          a failed recapture leaves the old checkpoint intact; parallel
+          per-blob verify (1.65–2.28x on 2–3 GiB checkpoints). Delivery:
+          `specs/sprint/delivery/3384-durable-checkpoint-capture.md`.
+    - [ ] C1 — chunk index and per-domain, hard-linked object pool.
+    - [ ] C2 — chunked capture; idle second checkpoint under 10% of the first.
+    - [ ] C3 — parallel chunk verify; contiguous verified materialization.
+    - [ ] C4 — diff restore from a cached materialization (with #3382).
+    - [ ] C5 — `cache prune` reclaims unlinked objects and abandoned staging.
+    - [ ] C6 — index digest as the audited content address.
+    - [ ] C7 — dedup confined to one key domain.
+    - [ ] C8 — retire the whole-blob layout (no migration).
+  - [x] W8 (#3385): measured, then cut. A guest flush on a writable HVF disk
+        is `fsync(2)` instead of a full device flush, and the full flush runs
+        once when the disk is released at stop. The fsync-heavy volume
+        workload dropped from 6.4 s to 2.2 s (median, N=10); cold boot sends
+        no flushes and is unchanged. W8.2a (scratch disks) is left open
+        because it is not material, and W8.4's checkpoint test does not apply
+        because HVF capture refuses writable disks. The refusal is pinned by
+        a test instead.
+  - [x] W10a — issue #3432: the six W10 review fixes. The image-reference
+        refusal runs before inference, capability-discovery failures carry
+        `code`/`retryable` in the JSON-RPC error `data`, every tool error is
+        coded, and the flag-after-`--` check reads every spelling from the
+        verb being run.
 
 - [x] **Linux release payloads no longer require the runner's glibc.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`
@@ -31,6 +162,31 @@ Last updated: 2026-09-16
       trust tier, and keeps legacy consumers working through dual publication.
       After cutover, separately measure and gate any history compaction rather
       than folding a destructive rewrite into the repository move.
+      - [x] W1 #3363: release E2E fetches the signed builder image; cold source
+            bootstrap is the nightly `source-bootstrap-linux` witness; phase
+            timings emitted; fetch staged atomically with arch refusals.
+      - [x] W1 #3363: two post-merge runs compared against the 2026-09-15
+            baseline: 118 min → 92 and 106 min. The 25-minute hypothesis is
+            rejected as stated; the SDK sidecar build is the remaining cost.
+      - [x] W3a #3365: image-set manifest and lock types with pure validation.
+      - [x] W3b #3365: offline signed verification and revocation.
+      - [x] W3c #3365: checked-in lock and generated pins.
+      - [x] W3d #3365: offline verifier command; `SignedManifest` family retired.
+      - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
+            Rust consumers W5 must replace.
+      - [x] W4a #3362: guest recipes exported from `nix/flake.nix`; image
+            flakes consume them with byte-identical derivations.
+      - [x] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input
+            (tinylabscom/mvm-images#4).
+      - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
+            Comparison done, every difference explained; x86_64 Firecracker
+            boots and builds, HVF boots; outstanding: aarch64 Firecracker boot
+            and a completed HVF builder build. Found #3499, #3500, #3502.
+      - [x] W5a #3364: explicit `MVM_IMAGES_DIR` selector, `local-dev` /
+            `verified-release` tiers, release-build and production refusals,
+            `doctor` image-source line; W5b–W5m sliced in the plan.
+      - [ ] W5b–W5m #3364: local manifest, cache identity, wrapper, and each
+            in-tree image consumer moved onto the selector.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
@@ -71,16 +227,33 @@ Last updated: 2026-09-16
       states the mechanism's limits alongside it. WS-S, added after
       documenting the path turned up six gaps, is underway — the host now
       terminates a CONNECT flow to a host carrying a bound secret (#3283
-      T0-T4), and the per-VM CA that turns it on is in review. Open: the
-      example (#3258), the drive plane itself (#3260), the SDK's argv
-      transport (#3261), MCP (#3262), and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
+      T0-T4), and the per-VM CA that turns it on is in review. The claim-10
+      gate is now a required constructor argument, and an endpoint with no
+      policy denies everything in every egress mode (T15, #3301, #3302),
+      and every refusal it makes is chain-signed (T16, #3300). A substitution is
+      audited when it is handed to the forward leg, with the outcome recorded
+      separately (T9, #3286). A placeholder outside a header is refused and
+      recorded rather than forwarded (T17, #3297). WS1's drive plane (#3260)
+      is complete in PR #3505:
+      the signed grant, dual host/guest workspace checks, bounded stream reuse,
+      substituted workload environment and chain-signed refusal witnesses all
+      pass; PR #3505 carries the implementation through queued delivery. Open: the
+      example (#3258), the SDK's argv
+      transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
+      with its versioned ABI and read-only machine methods; the bindings that
+      replace the argv transport are next), MCP (#3262) — whose existing tool surface is now pinned
+      by a checked-in contract fixture, so the new tools land as reviewed
+      contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
       transport in favour of one versioned C ABI from a new top-of-graph
       crate. The stale `host.secrets.v1` claim authority is resolved: claim 13
       and the SDK sidecar catalog now name the live substitution endpoint and
-      shipped typed services respectively.
+      shipped typed services respectively. WS-S T12 is complete: `machine run`
+      and Workload IR expose the agent preset and AI token budget across Rust,
+      Python, and TypeScript, while the undispatched legacy network fields are
+      removed (#3287).
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.
@@ -95,17 +268,23 @@ Last updated: 2026-09-16
       Epic #3277. Execution started. The stable install URL and its daily live
       monitor, production-host deploy check, and API-free normal install path
       are complete, as are versioned installs with atomic upgrade and rollback,
-      the full host-binary set, and the uninstaller; remaining work adds
-      in-process signature verification to close the claim 20 limits note,
-      installer and distro compat lanes, and Nix version-from-manifest.
+      the full host-binary set, the uninstaller, and the installer, distro and
+      install-page compat lanes; remaining work adds in-process signature
+      verification to close the claim 20 limits note.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
         every host binary the release carries (#3270, #3342)
   - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
-  - [ ] WS5–WS6 — verification and compat (#3272–#3273); Linux release
-        payloads are now static-musl while retaining compatible asset names
-        (#3371)
+  - [ ] WS5 — verification (#3272)
+  - [x] WS6 — installer back-compat, distro glibc, and install-page smoke lanes
+        in `installer-compat.yml` (#3273); Linux release payloads are now
+        static-musl while retaining compatible asset names (#3371), and the
+        installer accepts legacy entitlement profiles under `resources/`
+        (#3370); the immutable Rocky loader baseline is forwarded explicitly
+        into the distro container and pinned by the focused suite; the live
+        merge-queue BDD witness retains a bounded 45-minute budget so cold
+        cross-toolchain setup cannot crowd out the guest lifecycle
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`
@@ -302,7 +481,13 @@ Last updated: 2026-09-16
       mounts are admitted while directory snapshots remain read-only. A
       no-explicit-sync write survived a second fresh Alpine VM on macOS HVF;
       gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
-      policy checks, and BDD are green. Broader surface design and merge remain.
+      policy checks, and BDD are green. `--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]`
+      now hands results back through a fresh writable disk the host reads after
+      teardown: a signed `ExecutionPlan.outputs` grant, bounded link-refusing
+      collection in `mvm_fs::output`, a sorted manifest beside the outputs, and
+      a chain-signed `plan.outputs` entry. Live on macOS HVF (collected, symlink
+      refused, byte bound refused). Hard-link refusal needs inode identity the
+      ext4 reader does not expose; that item stays open.
 
 - [x] **Refresh host-directory snapshots at machine start.**
       `2026-09-03-refresh-host-snapshot-at-start`.
@@ -1602,9 +1787,15 @@ resume` takes a `current_head` and refuses when it differs from the
       credential minting are not implemented; the synthesized plan carries
       `grants: None`, so a resumed session re-arms neither a wall-clock bound
       nor a CPU share; a session parked with `approval_head: None` resumes
-      with no ledger fence at all. WS5 is partial: retention classes, expiry,
-      a scheduler that calls `demote`, and actual byte movement between tiers
-      remain undelivered.
+      with no ledger fence at all. WS5 is partial: a per-record retention
+      deadline landed (set at park, extend-only `agent-session renew`, alive or
+      expired in `ls`/`show`), but retention classes, a scheduler that acts on
+      expiry, and actual byte movement between tiers remain undelivered. The
+      scheduler is held back on purpose: no demotion yet releases what the
+      lower tier claims to. The checkpoint sweep keeps the parent-link closure
+      of every checkpoint it retains (tagged, inside the age cut, or a session
+      resume point), and `mvmctl machine checkpoint rm` refuses a checkpoint a
+      stored descendant restores through, naming it.
 
       WS6 is done and WS7 is partial, both via
       `2026-08-19-session-cli-and-audit` and
@@ -1622,6 +1813,15 @@ resume` takes a `current_head` and refuses when it differs from the
       derived from it; the derived file is not itself pinned. WS7 still lacks
       whole-session chain verification and several lifecycle events; WS8 BDD
       remains untouched.
+
+      Park and resume are retry-exact
+      (`specs/sprint/delivery/session-exact-replay-and-retention.md`): the
+      record keeps its last transition's identity
+      (`mvm_core::session_transition`), and a retry carrying
+      `--expected-generation` replays the recorded result with no write and no
+      chain entry, or refuses naming the input or generation that differs. A
+      retried `resume --boot` is refused rather than replayed. `renew` takes the
+      same fence plus `--expected-deadline`, and emits `session.renewed`.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
@@ -3255,8 +3455,11 @@ resume` takes a `current_head` and refuses when it differs from the
   - [~] WS4 — CPU quota via `systemd-run --user --scope` (born bounded for
     free: systemd registers the scope before exec'ing the payload). Per-boot
     unique unit name, recorded in the VM state dir so the read-back can
-    still resolve it. Prod gate consults host mechanism availability, not
-    just backend kind. STILL OPEN: `exec_secs` enforcement; and the live
+    still resolve it. The launcher is resolved once to an absolute path before
+    the spawn is bound, and the unresponsive-manager regression uses a real
+    executable named `systemd-run` instead of a racy shell script. Prod gate
+    consults host mechanism availability, not just backend kind. STILL OPEN:
+    `exec_secs` enforcement; and the live
     measurement predates the read-back landing, so a bounded boot's
     _reported tier_ is unwitnessed on hardware
   - [x] WS4b — the host admission budget: `HostBudget`/`MachineCharge` in

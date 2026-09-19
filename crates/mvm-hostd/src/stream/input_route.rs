@@ -481,6 +481,7 @@ fn refusal_word(kind: StreamInputRefusal) -> &'static str {
         StreamInputRefusal::OutOfOrder => "out-of-order",
         StreamInputRefusal::QueueFull => "queue-full",
         StreamInputRefusal::WorkloadGone => "workload-gone",
+        StreamInputRefusal::CapExceeded => "cap-exceeded",
     }
 }
 
@@ -497,6 +498,14 @@ mod tests {
 
     use super::*;
     use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
+
+    #[test]
+    fn input_cap_refusal_has_a_stable_operator_word() {
+        assert_eq!(
+            refusal_word(StreamInputRefusal::CapExceeded),
+            "cap-exceeded"
+        );
+    }
 
     use crate::stream::input_gate::InputBinding;
 

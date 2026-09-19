@@ -19,6 +19,65 @@ pub fn enforce_verb_grant(
         }),
     }
 }
+
+/// Enforce the pinned drive authority before a drive handler can touch the
+/// filesystem or resolve the boot-validated program. This check is repeated
+/// by the host drive API; neither side treats the other's path decision as a
+/// substitute for its own.
+pub fn enforce_drive_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    let drive_request = matches!(
+        req,
+        GuestRequest::DriveOpen { .. } | GuestRequest::DriveFile { .. }
+    );
+    if !drive_request {
+        return None;
+    }
+    let Some(drive) = grant.and_then(|grant| grant.drive.as_ref()) else {
+        return drive_refused(DriveRefusal::NotGranted);
+    };
+    match req {
+        GuestRequest::DriveOpen {
+            program_id, cwd, ..
+        } => {
+            if program_id != &drive.program_id {
+                return drive_refused(DriveRefusal::ProgramMismatch);
+            }
+            if !path_is_in_drive_roots(cwd, drive) {
+                return drive_refused(DriveRefusal::OutsideWorkspaceRoots);
+            }
+        }
+        GuestRequest::DriveFile { operation } => {
+            if !path_is_in_drive_roots(operation.path(), drive) {
+                return drive_refused(DriveRefusal::OutsideWorkspaceRoots);
+            }
+            if operation.input_len() > drive.max_bytes_in.get() {
+                return drive_refused(DriveRefusal::InputLimitExceeded);
+            }
+            if operation.requested_output_len() > drive.max_bytes_out.get() {
+                return drive_refused(DriveRefusal::OutputLimitExceeded);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn path_is_in_drive_roots(path: &str, drive: &mvm_contract::grants::DriveGrant) -> bool {
+    let Ok(path) = mvm_contract::grants::WorkspaceRoot::parse(path) else {
+        return false;
+    };
+    drive
+        .workspace_roots
+        .iter()
+        .any(|root| path.is_within(root))
+}
+
+fn drive_refused(reason: DriveRefusal) -> Option<GuestResponse> {
+    Some(GuestResponse::DriveRefused { reason })
+}
 /// Well-known guest path where `/init` copies the host-signer's Ed25519
 /// public key from the read-only config drive.
 /// Absent on grant-less boots.
@@ -385,6 +444,96 @@ pub fn launch_requires_grant(cmdline: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn drive_grant() -> mvm_contract::grants::DriveGrant {
+        use mvm_contract::grants::{DriveGrant, DriveProgramId, WorkspaceRoot};
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        DriveGrant::builder()
+            .workspace_root(WorkspaceRoot::parse("/workspace").unwrap())
+            .program_id(DriveProgramId::parse("agent").unwrap())
+            .max_bytes_in(NonZeroU64::new(16).unwrap())
+            .max_bytes_out(NonZeroU64::new(32).unwrap())
+            .ttl(NonZeroU32::new(30).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    fn verb_grant_with_drive() -> mvm_core::plan::VerbGrant {
+        mvm_core::plan::VerbGrant {
+            session_id: "drive-session".into(),
+            plan_nonce: mvm_core::plan::Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: Vec::new(),
+            drive: Some(drive_grant()),
+            sig: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn drive_open_refused_without_grant() {
+        let request = GuestRequest::DriveOpen {
+            program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
+            cwd: "/workspace".to_string(),
+            env: Vec::new(),
+        };
+
+        assert!(matches!(
+            enforce_drive_grant(&request, None),
+            Some(GuestResponse::DriveRefused {
+                reason: DriveRefusal::NotGranted
+            })
+        ));
+    }
+
+    #[test]
+    fn drive_file_refused_outside_workspace_roots() {
+        let grant = verb_grant_with_drive();
+        let request = GuestRequest::DriveFile {
+            operation: DriveFileOperation::Stat {
+                path: "/workspace-escape/secret".to_string(),
+                follow_symlinks: true,
+            },
+        };
+
+        assert!(matches!(
+            enforce_drive_grant(&request, Some(&grant)),
+            Some(GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots
+            })
+        ));
+    }
+
+    #[test]
+    fn drive_grant_refuses_program_and_byte_bound_escalation() {
+        let grant = verb_grant_with_drive();
+        let wrong_program = GuestRequest::DriveOpen {
+            program_id: mvm_contract::grants::DriveProgramId::parse("other-agent").unwrap(),
+            cwd: "/workspace".to_string(),
+            env: Vec::new(),
+        };
+        assert!(matches!(
+            enforce_drive_grant(&wrong_program, Some(&grant)),
+            Some(GuestResponse::DriveRefused {
+                reason: DriveRefusal::ProgramMismatch
+            })
+        ));
+
+        let oversized_read = GuestRequest::DriveFile {
+            operation: DriveFileOperation::Read {
+                path: "/workspace/file".to_string(),
+                offset: None,
+                length: 33,
+                follow_symlinks: true,
+            },
+        };
+        assert!(matches!(
+            enforce_drive_grant(&oversized_read, Some(&grant)),
+            Some(GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutputLimitExceeded
+            })
+        ));
+    }
+
     // ---- enforce_verb_grant ----
 
     #[test]
@@ -396,6 +545,7 @@ mod tests {
             plan_nonce: Nonce::from_bytes([0u8; 16]),
             not_after: now + chrono::Duration::minutes(1),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            drive: None,
             sig: vec![],
         };
         // listed => allowed
@@ -438,6 +588,7 @@ mod tests {
                 .iter()
                 .map(|name| VerbId::new(name).expect("the prod-safe catalog contains valid verbs"))
                 .collect(),
+            drive: None,
             sig: vec![],
         };
         let requests = [
@@ -609,6 +760,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after: now + chrono::Duration::minutes(1),
             verbs: vec![VerbId::new("ping").unwrap()],
+            drive: None,
             sig: vec![],
         };
         good.sig = {
@@ -694,6 +846,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after: now + chrono::Duration::minutes(valid_minutes),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            drive: None,
             sig: vec![],
         };
         grant.sig = {
@@ -751,6 +904,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after: now + chrono::Duration::minutes(10),
             verbs: vec![VerbId::new("ping").unwrap()],
+            drive: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1342,6 +1496,7 @@ mod tests {
             plan_nonce: nonce.clone(),
             not_after,
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            drive: None,
             sig: vec![],
         };
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();

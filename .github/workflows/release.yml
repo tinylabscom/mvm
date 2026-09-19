@@ -413,7 +413,7 @@ jobs:
       # boot-image release's own bundles are provenance for that train and are
       # simply overwritten here.
       #
-      # The window closes when the download side reads DEFAULT_BOOT_IMAGE_TAG
+      # The window closes when the download side reads the boot-image pin
       # instead of the CLI version. Until then this step is the only reason a
       # fresh install still finds its boot image. A CLI release with no image
       # assets is therefore not a degraded release, it is a broken one: every
@@ -695,38 +695,6 @@ jobs:
           else
             echo "ok: ${checked} artifact(s) verified through the end-user acquisition path."
           fi
-
-      # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
-      # SignedManifest JSON. The bundle (.bundle) carries the signature,
-      # the Fulcio short-lived cert, and the Rekor inclusion proof —
-      # mvm-security::image_verify consumes exactly this format.
-      - name: Sign image manifests (plan 36)
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          manifests=(artifacts/*-image-*.manifest.json)
-          if [ "${#manifests[@]}" -eq 0 ]; then
-            # Images are best-effort: an image-build failure must not block
-            # the binary release. Warn and skip rather than fail.
-            echo "::warning::no image manifests in artifacts/ — image jobs likely failed; publishing the binary release without image signatures" >&2
-            ls -la artifacts/ >&2 || true
-            exit 0
-          fi
-          for manifest in "${manifests[@]}"; do
-            # --new-bundle-format emits the Sigstore bundle (with
-            # verificationMaterial) that the in-binary Rust verifier
-            # (image_verify::verify_manifest) parses; the legacy --bundle
-            # format is rejected by that stack, which would hard-fail the
-            # dev-image download's signature check.
-            cosign sign-blob \
-              --yes \
-              --new-bundle-format \
-              --bundle "${manifest}.bundle" \
-              "${manifest}"
-            echo "Signed: ${manifest}"
-          done
 
       - name: Create GitHub Release
         env:

@@ -144,12 +144,13 @@ mod tests {
     /// A valid sidecar ext4 fixture carrying the cdylib the SDKs load, built
     /// with the in-repo pure-Rust writer (no `mkfs`).
     fn sidecar_ext4_bytes() -> Vec<u8> {
-        use mvm_fs::ext4::Node;
+        use mvm_fs::ext4::{Node, Owner};
         let nodes = vec![
             Node::Dir {
                 path: "/lib".into(),
                 mode: 0o555,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
@@ -161,6 +162,7 @@ mod tests {
                         .expect("a fixture names a real libc"),
                 ]),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
         ];
         mvm_fs::ext4::build_image(nodes).expect("build sidecar ext4 fixture")

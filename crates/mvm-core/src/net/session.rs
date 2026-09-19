@@ -205,10 +205,10 @@ pub struct SealedFrame {
 /// A transport-independent authenticated session.
 ///
 /// Created by [`Session::host`] or [`Session::guest`], then used to
-/// [`seal`](Self::seal) outbound plaintext and [`open`](Self::open) inbound
+/// [`seal`](Session::seal) outbound plaintext and [`open`](Self::open) inbound
 /// sealed frames. Sequence numbers are enforced exactly in both directions.
-pub struct Session {
-    signing_key: SigningKey,
+pub struct Session<Key = SigningKey> {
+    signing_key: Key,
     peer_verifying_key: VerifyingKey,
     session_id: String,
     key: Zeroizing<[u8; 32]>,
@@ -217,6 +217,18 @@ pub struct Session {
     next_receive_sequence: u64,
     poison: Option<Poison>,
 }
+
+/// Marker for a session that can only receive. It contains no signing key and
+/// has no public constructor; only a successfully authenticated host handshake
+/// can create this session. Outbound `seal` is unavailable for this key type.
+///
+/// ```compile_fail
+/// use mvm_core::net::session::{ReceiveOnly, Session};
+/// fn send_from_collector(session: &mut Session<ReceiveOnly>) {
+///     let _ = session.seal(b"outbound frame");
+/// }
+/// ```
+pub struct ReceiveOnly(());
 
 /// A sealed frame that was spent without reaching the peer.
 ///
@@ -232,7 +244,7 @@ struct Poison {
     reason: String,
 }
 
-impl fmt::Debug for Session {
+impl<Key> fmt::Debug for Session<Key> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
             .field("session_id", &self.session_id)
@@ -276,12 +288,10 @@ impl Session {
         let session = Self::from_material(signing_key, material, SessionRole::Guest);
         Ok((session, session_id))
     }
+}
 
-    fn from_material(
-        signing_key: SigningKey,
-        material: HandshakeMaterial,
-        role: SessionRole,
-    ) -> Self {
+impl<Key> Session<Key> {
+    fn from_material(signing_key: Key, material: HandshakeMaterial, role: SessionRole) -> Self {
         Self {
             peer_verifying_key: material.peer_verifying_key,
             session_id: material.session_id.clone(),
@@ -301,10 +311,10 @@ impl Session {
     /// this session.
     ///
     /// Callers that own the transport must call this when writing a sealed
-    /// frame fails. The sequence is spent either way — [`seal`](Self::seal)
+    /// frame fails. The sequence is spent either way — [`seal`](Session::seal)
     /// advances the counter before the frame can be handed to a transport, and
     /// it cannot be rewound without reusing an AES-GCM nonce. Every later
-    /// [`seal`](Self::seal) and [`open`](Self::open) then refuses and names
+    /// [`seal`](Session::seal) and [`open`](Self::open) then refuses and names
     /// this cause, so the failure is reported where it happened instead of as
     /// a sequence mismatch on the peer.
     ///
@@ -348,7 +358,9 @@ impl Session {
     pub fn peer_verifying_key(&self) -> &VerifyingKey {
         &self.peer_verifying_key
     }
+}
 
+impl Session {
     /// Seal `plaintext` into an authenticated, encrypted frame.
     ///
     /// Advances the outbound sequence counter. The returned [`SealedFrame`]
@@ -394,7 +406,9 @@ impl Session {
             ciphertext,
         })
     }
+}
 
+impl<Key> Session<Key> {
     /// Verify and decrypt a sealed frame from the peer.
     ///
     /// Rejects replay, wrong session, wrong signer, bad signature, and
@@ -461,6 +475,30 @@ impl Session {
             .ok_or(SessionError::SequenceExhausted)?;
 
         Ok(plaintext)
+    }
+}
+
+impl Session<ReceiveOnly> {
+    /// Authenticate a pinned guest using a signer owned outside the receiver.
+    /// The signer sees only a validated handshake, never payload frames.
+    pub(crate) fn host_receiver<S, F>(
+        stream: &mut S,
+        session_id: &str,
+        host_key: &VerifyingKey,
+        expected_guest: &VerifyingKey,
+        sign: F,
+    ) -> Result<Self, SessionError>
+    where
+        S: Read + Write,
+        F: FnOnce(&SessionHello, &SessionHelloAck) -> Result<Signature, SessionError>,
+    {
+        let material =
+            secure_host_handshake_signed(stream, session_id, host_key, Some(expected_guest), sign)?;
+        Ok(Self::from_material(
+            ReceiveOnly(()),
+            material,
+            SessionRole::Host,
+        ))
     }
 }
 
@@ -716,7 +754,7 @@ fn random_bytes() -> Vec<u8> {
     (0..32).map(|_| rand::random::<u8>()).collect()
 }
 
-fn session_transcript(
+pub(crate) fn session_transcript(
     hello: &SessionHello,
     ack: &SessionHelloAck,
 ) -> Result<Vec<u8>, SessionError> {
@@ -862,17 +900,62 @@ fn secure_host_handshake<S: Read + Write>(
     session_id: &str,
     host_signing_key: &SigningKey,
 ) -> Result<HandshakeMaterial, SessionError> {
+    secure_host_handshake_signed(
+        stream,
+        session_id,
+        &host_signing_key.verifying_key(),
+        None,
+        |hello, ack| Ok(host_signing_key.sign(&session_transcript(hello, ack)?)),
+    )
+}
+
+fn secure_host_handshake_signed<S, F>(
+    stream: &mut S,
+    session_id: &str,
+    host_key: &VerifyingKey,
+    expected_guest: Option<&VerifyingKey>,
+    sign: F,
+) -> Result<HandshakeMaterial, SessionError>
+where
+    S: Read + Write,
+    F: FnOnce(&SessionHello, &SessionHelloAck) -> Result<Signature, SessionError>,
+{
     let host_secret = StaticSecret::from(rand::random::<[u8; 32]>());
     let hello = SessionHello {
         version: PROTOCOL_VERSION_AUTHENTICATED,
         session_id: session_id.to_string(),
         challenge: random_bytes(),
-        host_pubkey: host_signing_key.verifying_key().to_bytes().to_vec(),
+        host_pubkey: host_key.to_bytes().to_vec(),
         host_ephemeral_pubkey: PublicKey::from(&host_secret).as_bytes().to_vec(),
     };
     write_json_frame(stream, &hello, 1 << 16)?;
 
     let ack: SessionHelloAck = read_json_frame(stream, 1 << 16)?;
+    let (guest_key, guest_public) = validate_host_ack(&hello, &ack, expected_guest)?;
+    let transcript = session_transcript(&hello, &ack)?;
+    let signature = sign(&hello, &ack)?;
+    verify_signature(&signature.to_bytes(), &transcript, host_key, "host signer")?;
+    write_json_frame(
+        stream,
+        &SessionHelloConfirm {
+            version: hello.version,
+            session_id: hello.session_id.clone(),
+            transcript_signature: signature.to_bytes().to_vec(),
+        },
+        1 << 16,
+    )?;
+    Ok(HandshakeMaterial {
+        peer_verifying_key: guest_key,
+        session_id: hello.session_id,
+        shared_secret: host_secret.diffie_hellman(&guest_public).to_bytes(),
+    })
+}
+
+pub(crate) fn validate_host_ack(
+    hello: &SessionHello,
+    ack: &SessionHelloAck,
+    expected_guest: Option<&VerifyingKey>,
+) -> Result<(VerifyingKey, PublicKey), SessionError> {
     if ack.version != hello.version || ack.session_id != hello.session_id {
         return Err(SessionError::InvalidHandshake(
             "invalid or mismatched HelloAck session".to_string(),
@@ -884,29 +967,20 @@ fn secure_host_handshake<S: Read + Write>(
         ));
     }
     let guest_key = parse_verifying_key(&ack.guest_pubkey, "guest")?;
-    let proof = guest_challenge_message(&hello, &ack)?;
+    if expected_guest.is_some_and(|expected| expected != &guest_key) {
+        return Err(SessionError::PeerIdentityMismatch(
+            "guest key does not match registered identity".into(),
+        ));
+    }
+    let proof = guest_challenge_message(hello, ack)?;
     verify_signature(
         &ack.challenge_response,
         &proof,
         &guest_key,
         "guest handshake",
     )?;
-    let transcript = session_transcript(&hello, &ack)?;
-    write_json_frame(
-        stream,
-        &SessionHelloConfirm {
-            version: hello.version,
-            session_id: hello.session_id.clone(),
-            transcript_signature: host_signing_key.sign(&transcript).to_bytes().to_vec(),
-        },
-        1 << 16,
-    )?;
     let guest_public = parse_public_key(&ack.guest_ephemeral_pubkey, "guest")?;
-    Ok(HandshakeMaterial {
-        peer_verifying_key: guest_key,
-        session_id: hello.session_id,
-        shared_secret: host_secret.diffie_hellman(&guest_public).to_bytes(),
-    })
+    Ok((guest_key, guest_public))
 }
 
 fn secure_guest_handshake<S: Read + Write>(

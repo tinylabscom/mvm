@@ -19,6 +19,8 @@ pub(super) struct MachineStartReceiptInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) mem_initial: Option<String>,
     pub(super) profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) ai_token_budget: Option<u64>,
     pub(super) network_posture: String,
     pub(super) egress_enforcement: String,
     pub(super) volumes: Vec<MachineStartVolumePolicy>,
@@ -193,6 +195,11 @@ pub(super) fn machine_start_receipt_input(
         memory: spec.memory.clone(),
         mem_initial: spec.mem_initial.clone(),
         profile: spec.profile.clone(),
+        ai_token_budget: spec
+            .ai
+            .as_ref()
+            .and_then(|ai| ai.budget.as_ref())
+            .and_then(|budget| budget.max_total_tokens),
         network_posture: network_policy.posture_label(),
         egress_enforcement: shared::egress_enforcement_label(backend, &network_policy),
         volumes,
@@ -281,6 +288,9 @@ pub(super) fn print_machine_start_preflight_human(summary: &MachineStartPrefligh
         println!("mem-initial: {mem_initial} ({mem_initial_mib} MiB)");
     }
     println!("profile: {}", summary.invocation.profile);
+    if let Some(tokens) = summary.invocation.ai_token_budget {
+        println!("ai token budget: {tokens}");
+    }
     println!("network: {}", summary.invocation.network_posture);
     println!("enforced: {}", summary.invocation.egress_enforcement);
     if summary.invocation.init.command_count == 0 {

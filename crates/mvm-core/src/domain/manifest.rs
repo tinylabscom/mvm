@@ -493,6 +493,10 @@ pub struct ManifestGrants {
     /// entry here is what the egress gate ends up enforcing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_hosts: Vec<String>,
+    /// Bounded production-safe agent drive authority. The program identifier
+    /// and workspace roots are plan-authored; a caller may select neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<mvm_contract::grants::DriveGrant>,
 }
 
 impl ManifestGrants {
@@ -501,6 +505,7 @@ impl ManifestGrants {
             && self.cpu_fuel.is_none()
             && self.wall_clock_secs.is_none()
             && self.allow_hosts.is_empty()
+            && self.drive.is_none()
     }
 
     /// Convert to the typed permission set the plan carries.
@@ -559,6 +564,7 @@ impl ManifestGrants {
             cpu,
             wall_clock,
             egress,
+            drive: self.drive.clone(),
         })
     }
 }
@@ -1215,6 +1221,48 @@ mod tests {
             .machine_workflow()
             .expect("image-backed machine workflow");
         assert_eq!(workflow.grants, mvm_contract::grants::Grants::default());
+    }
+
+    #[test]
+    fn a_drive_grant_is_validated_and_carried_into_workflow_grants() {
+        let toml = r#"
+            image = "alpine:3.20"
+
+            [grants.drive]
+            workspace_roots = ["/workspace", "/review"]
+            program_id = "coding-agent"
+            max_bytes_in = 1048576
+            max_bytes_out = 2097152
+            ttl = 300
+        "#;
+        let workflow = Manifest::from_toml_str(toml)
+            .expect("valid drive grant")
+            .machine_workflow()
+            .expect("image-backed machine workflow");
+        let drive = workflow.grants.drive.expect("drive grant");
+        assert_eq!(drive.program_id.as_str(), "coding-agent");
+        assert_eq!(drive.workspace_roots[0].as_str(), "/workspace");
+        assert_eq!(drive.max_bytes_in.get(), 1_048_576);
+        assert_eq!(drive.max_bytes_out.get(), 2_097_152);
+        assert_eq!(drive.ttl.get(), 300);
+    }
+
+    #[test]
+    fn a_manifest_drive_grant_rejects_an_unsafe_workspace_root() {
+        let err = Manifest::from_toml_str(
+            r#"
+            image = "alpine:3.20"
+
+            [grants.drive]
+            workspace_roots = ["/workspace/../etc"]
+            program_id = "coding-agent"
+            max_bytes_in = 1
+            max_bytes_out = 1
+            ttl = 1
+        "#,
+        )
+        .expect_err("unsafe workspace root must be refused");
+        assert!(format!("{err:#}").contains("unsafe"), "got: {err:#}");
     }
 
     #[test]

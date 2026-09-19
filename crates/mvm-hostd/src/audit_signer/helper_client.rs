@@ -13,6 +13,8 @@ use mvm_core::protocol::host_signer::{SignRequest, SignResponse};
 /// Default cap for helper control frames.
 pub const DEFAULT_HELPER_MAX_FRAME_BYTES: usize = 64 * 1024;
 
+mod telemetry;
+
 #[derive(Debug, Clone)]
 pub struct SignerHelperClient {
     uds_path: PathBuf,

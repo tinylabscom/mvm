@@ -11,7 +11,9 @@
   #
   # The host (mvmctl machine run --flake .) reads the reported code and exits with it.
   # This fixture bakes `sh -c 'exit 7'` as the sealed workload so a clean
-  # E2E run of `mvmctl machine run --flake ./examples/exit_code --timeout 120` must exit 7.
+  # E2E run of `mvmctl machine run --flake ./examples/exit_code` must exit 7.
+  # Adding `--timeout` declares a wall-clock grant, which a backend that cannot
+  # enforce one (Firecracker) refuses at admission instead of running.
   #
   # ── Canonical user-flake form (matches `mvmctl compile`'s output) ──
   #

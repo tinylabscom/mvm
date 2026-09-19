@@ -46,6 +46,10 @@ fn ir_fixtures_match_schemas(workspace: &Path) -> Result<()> {
 /// Order is presentation only — each gate reads the tree and writes
 /// nothing — but keeping it makes a diff against the old workflow legible.
 pub const GATES: &[Gate] = &[
+    (
+        "check-telemetry-inventory",
+        crate::check_telemetry_inventory::run,
+    ),
     ("check-adr-coverage", crate::check_adr_coverage::run),
     (
         "check-no-display-on-secret-types",
@@ -111,6 +115,7 @@ pub const GATES: &[Gate] = &[
     ("check-conformance", conformance_read_only),
     ("check-deferrals", crate::check_deferrals::run),
     ("check-honesty", crate::check_honesty::run),
+    ("check-image-lock", crate::check_image_lock::run),
     ("check-trust-gradient", crate::check_trust_gradient::run),
     (
         "check-single-network-path",
@@ -168,6 +173,10 @@ pub const GATES: &[Gate] = &[
     (
         "check-content-address-determinism",
         crate::check_content_address_determinism::run,
+    ),
+    (
+        "check-image-reproducibility",
+        crate::check_image_reproducibility::run,
     ),
     ("check-closure-budget", crate::check_closure_budget::run),
     (

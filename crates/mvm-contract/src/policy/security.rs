@@ -30,7 +30,7 @@ pub const SIG_ALG_ECDSA_P256: u8 = 0x02;
 // ============================================================================
 
 /// Host → Guest: initiate authenticated session after CONNECT/OK.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHello {
     /// Protocol version the host supports.
@@ -46,7 +46,7 @@ pub struct SessionHello {
 }
 
 /// Guest → Host: acknowledge session and prove key possession.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHelloAck {
     /// Protocol version the guest supports.

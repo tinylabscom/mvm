@@ -290,18 +290,19 @@ pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
 /// The mvm source workspace to build the legacy rootfs-injected guest runtime
 /// from, or `None` for an installed binary with no source fallback.
 ///
-/// Resolution: the running executable's checkout first, then the invoking
-/// process's current checkout, then the compile-time `CARGO_MANIFEST_DIR`
-/// ancestor. An explicitly invoked worktree binary must keep its host and guest
-/// code from the same tree even when the caller's shell is in another checkout.
-/// Installed binaries have no checkout ancestor and therefore retain the
-/// current-directory source fallback.
+/// Resolution: the checkout holding the host binary directory first — the
+/// running executable's, or the one a library embedder declared — then the
+/// invoking process's current checkout, then the compile-time
+/// `CARGO_MANIFEST_DIR` ancestor. An explicitly invoked worktree binary must
+/// keep its host and guest code from the same tree even when the caller's shell
+/// is in another checkout. Installed binaries have no checkout ancestor and
+/// therefore retain the current-directory source fallback.
 pub fn detect_source_workspace() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok();
+    let binary_dir = mvm_vmm::host::aux_bin::HostProcess::current().binary_dir();
     let current_dir = std::env::current_dir().ok();
     source_workspace_for_channel(
         crate::artifact_acquisition::compiled_channel(),
-        executable.as_deref(),
+        binary_dir.as_deref(),
         current_dir.as_deref(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
     )
@@ -309,13 +310,13 @@ pub fn detect_source_workspace() -> Option<PathBuf> {
 
 #[cfg(test)]
 fn source_workspace_for(
-    executable: Option<&Path>,
+    host_binary_dir: Option<&Path>,
     current_dir: Option<&Path>,
     compiled_manifest_dir: &Path,
 ) -> Option<PathBuf> {
     source_workspace_for_channel(
         crate::artifact_acquisition::DistributionChannel::Source,
-        executable,
+        host_binary_dir,
         current_dir,
         compiled_manifest_dir,
     )
@@ -323,14 +324,14 @@ fn source_workspace_for(
 
 fn source_workspace_for_channel(
     channel: crate::artifact_acquisition::DistributionChannel,
-    executable: Option<&Path>,
+    host_binary_dir: Option<&Path>,
     current_dir: Option<&Path>,
     compiled_manifest_dir: &Path,
 ) -> Option<PathBuf> {
     if !channel.permits_automatic_builds() {
         return None;
     }
-    executable
+    host_binary_dir
         .and_then(source_workspace_from)
         .or_else(|| current_dir.and_then(source_workspace_from))
         .or_else(|| source_workspace_from(compiled_manifest_dir))
@@ -1547,12 +1548,16 @@ rust = "1.91.1"
         make_fake_checkout(executable_checkout.path(), "fn main() { /* executable */ }");
         make_fake_checkout(current_checkout.path(), "fn main() { /* current */ }");
 
-        let executable = executable_checkout.path().join("target/debug/mvmctl");
+        let host_binary_dir = executable_checkout.path().join("target/debug");
         let current_dir = current_checkout.path().join("crates/mvm-agentd");
         let compiled_manifest = executable_checkout.path().join("crates/mvm-build");
 
         assert_eq!(
-            source_workspace_for(Some(&executable), Some(&current_dir), &compiled_manifest),
+            source_workspace_for(
+                Some(&host_binary_dir),
+                Some(&current_dir),
+                &compiled_manifest
+            ),
             Some(executable_checkout.path().to_path_buf()),
             "an explicitly invoked worktree binary must inject guest code from that worktree"
         );

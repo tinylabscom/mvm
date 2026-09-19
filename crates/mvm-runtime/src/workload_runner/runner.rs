@@ -851,6 +851,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 spec.id
             )));
         }
+        let identity = spawner::prepare_standby_identity(&self.spawner, spec)?;
+        let boot = mvm_vmm::host::spec_map::with_identity_drive(boot, identity.as_deref());
         let mut handle = self
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
@@ -1547,6 +1549,18 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for RecordingSpawner {
+        fn prepare_identity(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> Result<Option<PathBuf>> {
+            Ok(
+                matches!(req.identity, FlowMuxIdentitySource::Mint).then(|| {
+                    req.state_dir
+                        .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+                }),
+            )
+        }
+
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
             *self.seen.lock().unwrap() = Some(Recorded {
                 mints_identity: matches!(req.identity, FlowMuxIdentitySource::Mint),
@@ -1557,7 +1571,7 @@ mod tests {
             });
             Ok(SpawnedEndpoint {
                 egress_uds: self.uds.clone(),
-                identity_drive: None,
+                identity_drive: self.prepare_identity(req)?,
             })
         }
     }
@@ -2193,6 +2207,7 @@ mod tests {
                 plan_nonce: nonce,
                 not_after,
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -2592,16 +2607,21 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let spec = &specs[0];
 
-        // The rootfs takes /dev/vda; the volume disk lands right after it.
+        // The volume follows the rootfs; the private identity drive comes last.
         assert_eq!(
             spec.blocks
                 .iter()
                 .map(|b| b.device_node())
                 .collect::<Vec<_>>(),
-            vec!["/dev/vda", "/dev/vdb"]
+            vec!["/dev/vda", "/dev/vdb", "/dev/vdc"]
         );
         assert_eq!(spec.blocks[1].source, PathBuf::from("/vol/data.img"));
         assert!(spec.blocks[1].read_only);
+        assert_eq!(
+            spec.blocks[2].source,
+            vm_state_dir("w-uvol").join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+        );
+        assert!(spec.blocks[2].read_only);
 
         assert!(
             spec.cmdline.contains("mvm.uvols=uvol0:"),
@@ -2772,8 +2792,8 @@ mod tests {
         let specs = runner.driver.booted_specs();
         let spec = &specs[0];
 
-        // 3 standing + 128 console data = 131 vsock entries.
-        assert_eq!(spec.vsock.len(), 131);
+        // Four standing channels plus 128 console data channels.
+        assert_eq!(spec.vsock.len(), 132);
 
         // Every console port is in range and routed as HostDials.
         let console: Vec<_> = spec
@@ -2799,7 +2819,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
+    fn start_workload_without_dev_console_carries_only_four_vsock_entries() {
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -2827,7 +2847,7 @@ mod tests {
         let spec = &specs[0];
         assert_eq!(
             spec.vsock.len(),
-            3,
+            4,
             "sealed prod boot must carry no console listeners"
         );
     }
@@ -3002,6 +3022,13 @@ mod tests {
         // workloads live in disjoint namespaces and this is where that holds.
         let booted = runner.driver.booted_specs();
         assert_eq!(booted.len(), 1);
+        let identity = booted[0].blocks.last().unwrap();
+        assert_eq!(
+            identity.source,
+            Path::new(&spec.vm_state_dir)
+                .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+        );
+        assert!(identity.read_only);
         assert!(
             booted[0].vsock.is_empty(),
             "parent boot must carry no vsock channel (no egress, broker or exit channel), got: {:?}",
@@ -3022,6 +3049,43 @@ mod tests {
             runner.broker.seen.lock().unwrap().is_none(),
             "a standby parent must never get a host-services broker"
         );
+    }
+
+    #[test]
+    fn standby_parent_refuses_missing_identity_before_boot() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs").unwrap();
+        let launch = standby_launch_config(&rootfs);
+        let spec = standby_spec_for("no-identity", &home.path().join("parent"), &launch);
+        let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RealNetworkEndpointSpawner,
+            RecordingBrokerRegistrar::new(),
+        );
+        let error = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("provision standby guest identity"),
+            "{error}"
+        );
+        assert!(runner.driver.booted_specs().is_empty());
+        assert!(runner.broker.seen.lock().unwrap().is_none());
     }
 
     /// A parent's cmdline gets the same truncation refusal a workload's does,
@@ -3069,6 +3133,7 @@ mod tests {
                 plan_nonce: nonce,
                 not_after,
                 verbs: vec![mvm_core::plan::VerbId::new(&"a".repeat(4000)).unwrap()],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -3213,13 +3278,10 @@ mod tests {
         // or "the two match" would say nothing.
         assert_eq!(
             workload.blocks.len(),
-            4,
-            "fixture must boot rootfs + verity + overlay + overlay verity"
+            5,
+            "fixture must boot rootfs + verity + overlay + overlay verity + identity"
         );
-        assert_eq!(
-            parent.blocks, workload.blocks,
-            "the warm parent must attach the workload's whole disk stack, overlay included"
-        );
+        assert_boot_disks_and_private_identity(parent, workload, Path::new(&spec.vm_state_dir));
         assert_eq!(
             without_per_boot_tokens(&parent.cmdline),
             without_per_boot_tokens(&workload.cmdline)
@@ -3310,7 +3372,7 @@ mod tests {
             without_per_boot_tokens(&workload.cmdline)
         );
         assert!(!parent.cmdline.contains("mvm.hostname="));
-        assert_eq!(parent.blocks, workload.blocks);
+        assert_boot_disks_and_private_identity(parent, workload, Path::new(&spec.vm_state_dir));
         assert!(
             !parent.cmdline.contains("api.example.com"),
             "the parent's cmdline must name no destination: {}",
@@ -3321,6 +3383,35 @@ mod tests {
             "an egress-enabled parent still wires no egress channel to dial"
         );
         assert!(!parent.trusted_builder);
+    }
+
+    fn assert_boot_disks_and_private_identity(
+        parent: &mvm_vmm::driver::spec::VmmSpec,
+        workload: &mvm_vmm::driver::spec::VmmSpec,
+        parent_state: &Path,
+    ) {
+        let (parent_identity, parent_disks) = parent.blocks.split_last().unwrap();
+        let (workload_identity, workload_disks) = workload.blocks.split_last().unwrap();
+        assert_eq!(
+            parent_disks, workload_disks,
+            "parent retains the workload's disk stack"
+        );
+        for (identity, state) in [
+            (parent_identity, parent_state.to_path_buf()),
+            (workload_identity, vm_state_dir(&workload.name)),
+        ] {
+            assert_eq!(
+                identity.source,
+                state.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+            );
+            assert!(identity.read_only);
+            assert!(!identity.ephemeral);
+        }
+        assert_ne!(parent_identity.source, workload_identity.source);
+        assert_eq!(
+            parent_identity.device_node(),
+            workload_identity.device_node()
+        );
     }
 
     // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
@@ -3373,6 +3464,18 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for KeyingSpawner {
+        fn prepare_identity(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> Result<Option<PathBuf>> {
+            Ok(
+                matches!(req.identity, FlowMuxIdentitySource::Mint).then(|| {
+                    req.state_dir
+                        .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+                }),
+            )
+        }
+
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
             Ok(SpawnedEndpoint {
@@ -3670,9 +3773,11 @@ mod tests {
         fn issue(&self, config: &VmStartConfig) -> Result<Option<VerbGrantEnvelope>> {
             let plan_json = config.plan_json.as_deref().context("child plan missing")?;
             let plan = mvm_core::plan::plan_from_admitted_json(plan_json)?;
-            let Some(verbs) = plan.agent_verbs else {
+            let verbs = plan.agent_verbs.unwrap_or_default();
+            let drive = plan.grants.and_then(|grants| grants.drive);
+            if verbs.is_empty() && drive.is_none() {
                 return Ok(None);
-            };
+            }
             *self.seen_child.lock().unwrap() = Some(config.name.clone());
             Ok(Some(VerbGrantEnvelope {
                 pubkey_hex: "ab".repeat(32),
@@ -3684,6 +3789,7 @@ mod tests {
                     plan_nonce: plan.nonce,
                     not_after: plan.valid_until,
                     verbs,
+                    drive,
                     sig: vec![3u8; 64],
                 },
             }))
@@ -4262,6 +4368,7 @@ mod tests {
                 detail: None,
                 reseeded,
                 clock_resynced,
+                reseed_shortfall: None,
             })
         };
         let cases = [
@@ -4318,6 +4425,7 @@ mod tests {
                 detail: None,
                 reseeded: false,
                 clock_resynced: true,
+                reseed_shortfall: None,
             },
         ));
         assert!(out.result.is_err());

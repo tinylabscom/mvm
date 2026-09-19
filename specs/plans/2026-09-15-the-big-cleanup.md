@@ -94,15 +94,12 @@ opposite one, `drop_page_cache`).
       and fix the one tree-side residue
       (`crates/mvm-cli/src/commands/mod.rs:128` allows
       `clippy::large_enum_variant` for an `Up` variant ADR-027 deleted).
-- [ ] **A2.2** **Claim 11's CVE gate has no production caller.**
-      `apply_install_gate` (`crates/mvm-build/src/app_deps_gate.rs:149`) has 14
-      in-edges and every one is a test or the nightly fixture example.
-      `machine run` never reaches it, so ADR-001:151's "a production launch
-      fails closed on a high or critical CVE finding" describes a control that
-      does not run. And claim 13's **sole** witness `fn:substitute` matches
-      **six** definitions under `content.contains("fn substitute(")`, one of
-      them a trait default returning `None` — delete the real implementation
-      and the gate stays green. #3316.
+- [x] **A2.2** **Claim 11's CVE gate has no production caller.** #3316.
+      Restate claim 11 as seal-time CVE/SBOM evidence plus admission-time
+      integrity verification, and declare `apply_install_gate` dormant until a
+      typed launch posture reaches it. Claim-catalog function witnesses must
+      now resolve exactly once; claim 13 names the bound-credential production
+      control, and the Firecracker/HVF restore witnesses have distinct names.
 - [ ] **A2.3** No citation gate covers `specs/adrs/`. ADR-041 says
       `mvm_hostd::nodectl` is implemented and the module has zero bytes;
       ADR-015 pins `PROTOCOL_VERSION = 2` against a tree that says `3`, with a
@@ -177,7 +174,7 @@ rest being the secrets-substitution domain noun.
       Resolved: all five deleted. The fixture runs no services and is never
       sealed, so none applies; its header now says so, and `check-deferrals`
       walks `nix/`, `src/`, `install.sh` and the `Justfile`.
-- [ ] **A3.2** `NoopChecker` (`crates/mvm-hostd/src/supervisor/services/binary_integrity.rs:287`)
+- [x] **A3.2** `NoopChecker` (`crates/mvm-hostd/src/supervisor/services/binary_integrity.rs:287`)
       is `pub`, returns `Ok(())` unconditionally, and is not `#[cfg(test)]`
       gated — in the crate that gates subprocess binary integrity. Its own doc
       says "never register in production" and nothing enforces that. Same shape
@@ -185,10 +182,16 @@ rest being the secrets-substitution domain noun.
       All three have only test callers. _The two `stages.rs` doubles were
       deleted with the scan layer; `NoopChecker` remains._ Gate them behind `cfg(test)` or a
       `test-support` feature so a production registration cannot compile.
-- [ ] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
+      Resolved by deletion instead: `NoopChecker`'s only caller was a test of
+      `NoopChecker` itself, so gating it would have kept a double that tests
+      nothing. The trait doc also named an `AlwaysFailingChecker` that never
+      existed; it now names neither.
+- [x] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d and its body is a
       comment describing a harness plus `unimplemented!()`. A test that can
-      never pass. Write the harness or delete the test.
+      never pass. Write the harness or delete the test. Deleted: the refusal
+      test in the same file and the unit ladder cover the security logic, and a
+      live attach-and-boot harness is a feature, not a cleanup.
 - [ ] **A3.4** Stub clusters that ship as production behaviour: attestation boot
       measurement is 64 zero hex chars; `mvm-contract/src/policy/policies.rs`
       ships five fields as the literal string `Stub.`; addon signature
@@ -203,7 +206,13 @@ rest being the secrets-substitution domain noun.
 - [ ] **A3.6** 63 `#[allow(dead_code)]` sites. Each is either a real unused path
       (delete it) or a cross-feature false positive (restructure the `cfg`).
       The project bans `#[allow]` on clippy lints; `dead_code` is rustc's, but
-      the same argument applies.
+      the same argument applies. **57 of 61 attributes removed** (#3310 sweep),
+      each one either gated to the configuration that uses it, deleted, or
+      replaced by a check that actually reads the value. The four left are each
+      blocked on a separate decision: `mod proxy` in `mvm-host-vm-init` (#3484,
+      the vsock egress proxy that should be live is the unused one),
+      `policy_resolver` (#3483, controls built and never run), and
+      `mvm-builderd`'s two `#[path]` modules (#3485, split `builderd.rs`).
 
 ### A4. Duplicate paths
 
@@ -281,14 +290,15 @@ family already in the lockfile covers the job.
 |---|---|---|
 | R1 | `FdtBuilder` — raw FDT token emission, string interning, 40-byte header (`crates/mvm-vmm/src/vmm/fdt.rs:9-151`) | `vm-fdt` |
 | R2 | `Arm64ImageHeader::parse` (`crates/mvm-vmm/src/vmm/kernel_image.rs:7-33`) | `linux-loader`'s PE loader |
-| R3 | `setup_boot` — GDT, 4-level page tables, e820, zero page, long-mode regs, 499 lines (`crates/mvm-runtime/src/kvm/x86_boot.rs:45-332`) | `linux-loader` `BzImage` + `LinuxBootConfigurator` |
-| R4 | `Serial16550` (`crates/mvm-runtime/src/kvm/serial.rs:14`) | `vm-superio::Serial` |
+| R3 | ~~`setup_boot` — GDT, 4-level page tables, e820, zero page, long-mode regs, 499 lines (`crates/mvm-runtime/src/kvm/x86_boot.rs:45-332`)~~ deleted with B1.1 | `linux-loader` `BzImage` + `LinuxBootConfigurator` |
+| R4 | ~~`Serial16550` (`crates/mvm-runtime/src/kvm/serial.rs:14`)~~ deleted with B1.1 | `vm-superio::Serial` |
 
-- [ ] **B1.1** Delete `crates/mvm-runtime/src/kvm/` — 1,125 lines of a second
+- [x] **B1.1** Delete `crates/mvm-runtime/src/kvm/` — 1,125 lines of a second
       in-house VMM with zero production callers, citing a `spikes/` directory
       that does not exist. #3306. **R3 and R4 live only in that tree, so this
       deletion removes two of the four reinventions for free.** Do it first,
-      then re-scope R1/R2 against what remains.
+      then re-scope R1/R2 against what remains. Done: the module, its two
+      examples and the `pub mod` are gone; R1/R2 remain as scoped.
 - [ ] **B1.2** Do **not** collapse the virtio-mmio transport, virtio-blk state
       machine or virtio-vsock. They already reuse `virtio-queue` and
       `virtio-vsock` for the hard parts; the state machines around them carry
@@ -330,7 +340,10 @@ next oversized file arrives unnoticed.
       The repair must scan `crates/`, root `src/`, `xtask/`, and `build.rs`,
       exempt modules gated at their declaration site, and pin every current
       oversized file to a shrinking-only allowance.
-- [ ] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
+- [x] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302. Now a
+      facade plus twelve responsibility modules under
+      `network_endpoint_proxy/`, the largest at about 500 production lines;
+      external paths are unchanged and its grandfathered size allowance is gone.
 - [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
       nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
       to exactly one crate each. The remaining five core modules have
@@ -375,7 +388,8 @@ So the remaining work is not where the brief pointed.
 - [ ] **D5** `#[allow(clippy::large_enum_variant)]` at
       `crates/mvm-cli/src/commands/mod.rs:128` names an `Up` variant ADR-027
       deleted. Box the offending variant and delete the attribute.
-- [ ] **D6** 63 `#[allow(dead_code)]` sites. Folded into #3310.
+- [ ] **D6** 63 `#[allow(dead_code)]` sites. Folded into #3310; see A3.6 for
+      what is left.
 
 **Measurement caveat for whoever re-runs this.** A line-local tokenizer gets
 this codebase wrong: multi-line `r#"…"#` JSON fixtures contain braces that close
@@ -403,16 +417,19 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
       exists, never that production calls the code the witness tests. Audit
       every claim witness for a production caller, with `graft callers` on the
       subject rather than on the test.
-- [ ] **F2** `crates/mvm-hostd/tests/prelaunch_live.rs:143`
+- [x] **F2** `crates/mvm-hostd/tests/prelaunch_live.rs:143`
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d with a body of
       comment plus `unimplemented!()` — a test that can never pass. Write the
-      harness or delete it.
+      harness or delete it. Deleted with A3.3.
 
 ## G. Dependencies
 
-- [ ] **G1** Deleting `crates/mvm-runtime/src/kvm/` (#3306) may free
+- [x] **G1** Deleting `crates/mvm-runtime/src/kvm/` (#3306) may free
       `kvm-ioctls` and `kvm-bindings` (`crates/mvm-runtime/Cargo.toml:102-103`)
-      — check for other consumers before removing them.
+      — check for other consumers before removing them. Done: they had none.
+      Dropping them also removed `vmm-sys-util` 0.12, so the `vmm-sys-util`
+      duplicate-major exception is gone from `deny.toml` and
+      `check-duplicate-majors`, and the Linux closure budget ratchets 238 → 235.
 - [ ] **G2** ADR-032 says hickory is not pulled; three manifests pull it
       (#3309). Decide whether the dependency stays and record the budget
       rationale either way — this is a decision that was made in code and never

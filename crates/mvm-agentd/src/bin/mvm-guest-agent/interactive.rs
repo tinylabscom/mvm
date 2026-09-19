@@ -136,6 +136,8 @@ fn do_run_detached_with(
         .stdout(Stdio::from(console_out))
         .stderr(Stdio::from(console_err));
 
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+
     // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` is
     // async-signal-safe and is the only work done here — it detaches the
     // workload into its own session so it outlives this request's
@@ -171,9 +173,10 @@ fn do_run_detached_with(
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         };
-        let _ = std::process::Command::new(&exit_report_bin)
-            .arg(code.to_string())
-            .status();
+        let mut command = std::process::Command::new(&exit_report_bin);
+        command.arg(code.to_string());
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        let _ = command.status();
     });
 
     GuestResponse::DetachedStarted { pid }
@@ -533,6 +536,60 @@ mod tests {
                 assert!(message.contains("empty argv"), "got: {message}")
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_detached_drops_inherited_agent_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let listener_path = dir.path().join("agent.sock");
+        let listener = UnixListener::bind(&listener_path).expect("agent listener");
+        let _client = UnixStream::connect(&listener_path).expect("agent connection");
+        let (connection, _) = listener.accept().expect("accept agent connection");
+        // SAFETY: fcntl duplicates the accepted connection and the owned
+        // descriptor below closes exactly that duplicate.
+        let raw = unsafe { libc::fcntl(connection.as_raw_fd(), libc::F_DUPFD, 20) };
+        assert!(raw >= 20, "duplicate descriptor above the child contract");
+        // SAFETY: fcntl returned a newly owned descriptor on success.
+        let _held = unsafe { OwnedFd::from_raw_fd(raw) };
+
+        let console = dir.path().join("console");
+        std::fs::File::create(&console).expect("console stand-in");
+        let reporter = dir.path().join("exit-report");
+        std::fs::write(&reporter, "#!/bin/sh\nexit 0\n").expect("reporter script");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&reporter, std::fs::Permissions::from_mode(0o755))
+            .expect("reporter executable");
+
+        let response = do_run_detached_with(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "if [ -e /proc/self/fd/20 ]; then echo present; else echo closed; fi".into(),
+            ],
+            Vec::new(),
+            &console,
+            &reporter,
+        );
+        assert!(matches!(response, GuestResponse::DetachedStarted { .. }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::fs::read_to_string(&console)
+                .unwrap_or_default()
+                .contains("closed")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached workload retained descriptor 20"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 }

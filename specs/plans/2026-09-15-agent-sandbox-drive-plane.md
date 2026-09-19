@@ -36,9 +36,9 @@ invariant. This plan closes both halves.
 | G12 | `guides/agent-tool-contract.mdx` presents an unshipped surface under a heading a skimming reader takes as shipped | `public/src/content/docs/guides/agent-tool-contract.mdx:93-160` | WS0 |
 | G13 | **An off-the-shelf HTTPS client cannot use substitution.** The substituting guest proxy refuses `CONNECT`; the TLS terminator and per-VM egress CA exist but the workload runner never enables them. No shipped agent CLI can reach its model API with the key substituted | `crates/mvm-agentd/src/forward_proxy.rs:62-66,135`; `crates/mvm-runtime/src/workload_runner/runner/spawner.rs:107-110` | WS-S |
 | G14 | Secrets reach a workload only through `machine run --entrypoint --from-workload-ir`; transient, persistent and session paths hardcode an empty list, and PID 1 never gets a placeholder | `crates/mvm-cli/src/exec.rs:724`, `commands/vm/up/oci_persist.rs:223`, `exec/session.rs:1036` | WS-S |
-| G15 | A kept-alive entrypoint machine ignores `--name` (`invoke-<nanos>`), so no named machine can carry secrets | `crates/mvm-cli/src/exec/session.rs:103`, `commands/vm/invoke.rs:512` | WS-S |
+| G15 | Resolved: a kept-alive entrypoint machine preserves the requested `--name`, and its completion notice identifies both the machine and session | `crates/mvm-cli/src/commands/machine/runtime.rs`, `commands/vm/invoke.rs`, `exec/session.rs` | WS-S |
 | G16 | `secret.substituted` is written only when the upstream response completes; a forward that fails after the credential was sent leaves no substitution entry | `crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs:1944-1963,2524-2540` | WS-S |
-| G17 | The `agent` network preset and the AI token budget cannot be turned on from any dispatched flag | `crates/mvm-cli/src/commands/shared/resolve.rs:192-202`; `network_policy.rs:376-420` (`ai: None`) | WS-S |
+| G17 | Resolved: `machine run` exposes the safe named network presets and a positive AI token budget, and both are represented in Workload IR and the language SDKs | `crates/mvm-cli/src/commands/vm/exec.rs`; `crates/mvm-contract/src/ir/workload.rs`; `crates/mvm-sdk/` | WS-S |
 | G18 | Two guest egress entry points with different capabilities: a `CONNECT`/SOCKS relay on 1080 that cannot substitute, and a forward proxy on 18080 that cannot `CONNECT` | `crates/mvm-agentd/src/forward_proxy.rs`; `commands/vm/invoke.rs:1339-1350` | WS-S |
 
 ## What already works and is not rebuilt here
@@ -46,8 +46,8 @@ invariant. This plan closes both halves.
 - `NetworkPreset::Agent` allow-lists the model API hosts
   (`crates/mvm-contract/src/policy/network_policy.rs`).
 - An AI token-budget policy type exists at the per-VM endpoint
-  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`), though no
-  user can configure it today (G17).
+  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`) and is now
+  configurable from `machine run` and Workload IR (G17).
 - Credential substitution for absolute-form HTTP requests: placeholder mint
   (`crates/mvm-core/src/keyholder/substitution.rs`), host bindings from
   `mvmctl secret set` enforced at admission
@@ -189,12 +189,14 @@ retires the second guest proxy (#3288).
       and repoint the CA-detection path that keys off a file nothing writes.
 - [ ] T7. Point the proxy environment at the one surviving guest proxy.
 - [ ] T8. Delete the absolute-form forward proxy and its guest binary (#3288).
-- [ ] T9. Audit the substitution when the credential is written, with the
-      outcome recorded separately (#3286).
+- [x] T9. Audit the substitution when the credential is written, with the
+      outcome recorded separately (#3286). "Written" is the hand-off to the
+      forward leg, which over-reports a connect failure and never
+      under-reports a send.
 - [ ] T10. One secret-resolution step shared by every admission path (#3284),
       and decide PID 1: wire the boot-time token or delete its guest parser.
-- [ ] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
-- [ ] T12. Expose the agent preset and the token budget, or delete them, and
+- [x] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
+- [x] T12. Expose the agent preset and the token budget, or delete them, and
       delete the unreachable network fields on the undispatched verb (#3287).
 - [ ] T13. Witnesses in `crates/mvm-hostd/tests/connect_substitution_witness.rs`,
       modelled on the wasm egress witness (real gate, registry and recorder;
@@ -211,6 +213,19 @@ retires the second guest proxy (#3288).
       the ADR-001 rows for claims 12, 13 and 16 in the same change.
 - [ ] T14. Correct ADR-001's claim-10 row, which still describes nftables, TAP
       and gateway enforcement plus an acknowledgement hatch that does not exist.
+- [x] T15. Make the claim-10 gate a required argument of `SubstitutionService`
+      and `FromPlanInputs`, so a service that forwards without deciding the
+      destination cannot be built (#3301, the last item of #3302). An endpoint
+      config with no network policy now projects default-deny in every egress
+      mode; `Wire` used to project no gate at all.
+- [x] T16. Record every claim-10 and peer refusal on the substitution path as a
+      chain-signed `secret.flow_refused { destination, reason }`, with a fixed
+      reason and no request content (#3300). This covers the terminated flow's
+      502 arm, which reaches the same check.
+- [x] T17. Refuse and record a request carrying a placeholder outside a header,
+      in its URL or body, including one split across streamed body chunks
+      (#3297). Placeholders are substituted only in headers; one anywhere else
+      used to go to the destination as the token itself.
 
 ### Residual risk to record, not to hide
 
@@ -222,26 +237,26 @@ the admitted addresses into the forward leg or record the gap explicitly.
 
 Issue: [#3260](https://github.com/tinylabscom/mvm/issues/3260).
 
-- [ ] Add `DriveGrant { workspace_roots, program_id, max_bytes_in, max_bytes_out, ttl }`
+- [x] Add `DriveGrant { workspace_roots, program_id, max_bytes_in, max_bytes_out, ttl }`
       to the signed plan's grants (`crates/mvm-contract/src/ir/`,
       `crates/mvm-core/src/plan/`). The program is named by the plan, never by
       the caller and never by the model — the same rule claim 17 already applies
       when it refuses a shell entrypoint.
-- [ ] Add `DriveOpen { program_id, cwd }` streaming `DriveEvent{stdout,stderr,exit}`
+- [x] Add `DriveOpen { program_id, cwd }` streaming `DriveEvent{stdout,stderr,exit}`
       and `DriveFile { Read | Write | List | Stat }` to
       `crates/mvm-agentd/src/vsock/request.rs`, classified ProdSafe in
       `request_policy.rs` **only** behind a present `DriveGrant`.
-- [ ] Implement `DriveFile` by moving the existing `FsRead`/`FsWrite`/`FsList`/
+- [x] Implement `DriveFile` by moving the existing `FsRead`/`FsWrite`/`FsList`/
       `FsStat` handler bodies behind a grant check. The DevOnly variants keep
       their classification untouched, so claim 4's witness set does not move.
-- [ ] Restrict every path to `workspace_roots` at the guest handler, and again
+- [x] Restrict every path to `workspace_roots` at the guest handler, and again
       at the host, before the request is sent.
-- [ ] Route `DriveOpen`'s process launch through the same env-synthesis seam
+- [x] Route `DriveOpen`'s process launch through the same env-synthesis seam
       `invoke.rs` uses, or the substitution placeholder never reaches the agent.
       This is the one non-obvious wiring constraint in the workstream.
-- [ ] Host side is `InputSession` + `StreamReader` + the grant. No new socket, no
+- [x] Host side is `InputSession` + `StreamReader` + the grant. No new socket, no
       new port, no new journal.
-- [ ] Witnesses: `drive_open_refused_without_grant`,
+- [x] Witnesses: `drive_open_refused_without_grant`,
       `drive_file_refused_outside_workspace_roots`,
       `drive_open_receives_substituted_placeholder_not_a_secret`,
       `drive_refusals_are_chain_signed`.
@@ -266,13 +281,59 @@ pending. The cycle is real today: `mvm-client` depends on `mvm-hostd`
 So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 `mvm-sdk` as the host-side driver at all.
 
+- [x] Make the runtime say what process it is running in before the crate
+      exists. Sibling-binary resolution and every self-re-exec used
+      `current_exe()` directly, which is `mvmctl` for the CLI and the host
+      interpreter for a loaded library. `HostProcess`
+      (`crates/mvm-vmm/src/host/aux_bin/host_process.rs`) carries the two facts
+      those paths need — a declared helper directory and whether the process is
+      a library embedder — and `refuse_cli_spawn` is the single refusal every
+      would-be CLI spawn goes through. Declarations are set-once process
+      globals rather than environment variables, because mutating the
+      environment of a multithreaded host is unsound.
 - [ ] Add `crates/mvm-hostlib` at the top of the dependency graph, beside
       `mvm-cli`: it links `mvm-client` and exposes one versioned C ABI over the
       `MvmClient` trait plus the drive verbs. Nothing depends on it, so no cycle
-      is possible by construction.
-- [ ] Carry an ABI major/minor and a `mvm_hostlib_abi_is_compatible` entry point
+      is possible by construction. The crate, its ABI and the read-only machine
+      methods (`machine.list`, `machine.inspect`, `machine.logs`,
+      `backend.capabilities`) have landed. Launch, guest and drive methods
+      follow.
+- [x] Carry an ABI major/minor and a `mvm_hostlib_abi_is_compatible` entry point
       the bindings must call before use, so a mismatched pair fails loudly
-      instead of reading a moved struct.
+      instead of reading a moved struct. Enforced rather than advisory:
+      `mvm_hostlib_call` refuses with `MVM_HOSTLIB_ABI_NOT_NEGOTIATED` until a
+      binding has negotiated.
+- [ ] One admission path for every launcher, so the library cannot admit an
+      SDK machine under a different plan than the CLI gives the same request.
+      The CLI's boot admission now lives in `mvm-client`
+      (`crates/mvm-client/src/admission/`), and so does the persistent start
+      path the SDK's invocations take (`crates/mvm-client/src/launch/`).
+      `mvm_client::launch` still admits through
+      `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
+  - [x] Extract the lifecycle half of the CLI's `machine::lifecycle::start_machine`
+        (spec reconcile, deployment/manifest/image to rootfs, network policy,
+        memory, volume config, start) into `mvm-client`, leaving dry-run
+        output, JSON and prompts in the CLI. Kernel resolution and volume
+        preparation sit behind one trait with two implementations: the CLI's
+        may build a kernel through the builder VM and uses the mount cache;
+        the library's resolves only cached or fetched kernels.
+        Landed as `mvm_client::launch::machine_start`. Image acquisition sits
+        behind the same trait for now, because the CLI's OCI pipeline and
+        `mvm-client`'s own OCI resolution still differ.
+  - [ ] Converge the two OCI pull paths (the CLI's `image::pull_core` and
+        `mvm_client::local::resolve_local_rootfs`), so an image reference
+        resolves to the same rootfs and provenance whoever starts the machine.
+  - [ ] Merge `mvm_client::launch`'s persistent lifecycle (its own spec,
+        secret-reference sidecar, attachments and leases) with the CLI's, so
+        there is one persistent machine lifecycle. Fold fleet-signed plans and
+        assurance campaigns into the one admission rather than keeping
+        `mvm_hostd::run::admit_and_boot_local` as a second path for them.
+  - [ ] Witness: one request yields the same signed plan whether it enters
+        through `mvmctl machine run` or through `mvm_client::launch`.
+- [x] Guest process and file operations have one implementation,
+      `mvm_client::guest`, which `mvmctl machine proc`/`fs`/`cp` and the
+      library both call, with the same audit entries. They stay off
+      `MvmClient`, which must remain answerable by a remote backend.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.
@@ -292,6 +353,18 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 
 Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
 
+- [x] Pin the existing tool surface before growing it. Each tool is one row in
+      `crates/mvm-mcp/src/lib.rs` carrying its name, description, input schema,
+      and the client operation that gates it, so a tool can no longer be
+      specified and silently never offered. The advertised surface is pinned in
+      `crates/mvm-mcp/tests/fixtures/tool-contract.json` (sorted by name, keys
+      sorted, with the gating operation per tool);
+      `tool_surface_matches_the_pinned_contract` fails on any difference, and
+      `every_specified_tool_is_offered_by_a_real_gate` and
+      `every_specified_tool_has_a_handler` hold the table's rows to a real gate
+      and a real dispatch arm. Re-bless an intended change with
+      `MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol tool_surface_matches_the_pinned_contract`
+      and review the fixture diff as a contract change.
 - [ ] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
       `mvm.drive.files.{read,write,list}` over the same ABI.
 - [ ] Gate advertisement on the grant: a tool the plan does not grant is not

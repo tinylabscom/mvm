@@ -75,6 +75,10 @@ pub enum StreamInputRefusal {
     /// The undelivered queue is at its budget. Retryable: offer the frame
     /// again once the workload has read some of what is already queued.
     QueueFull,
+    /// The opened call's total input-byte authority would be exceeded. This
+    /// is permanent for the call; retrying the same or a later frame cannot
+    /// make capacity return.
+    CapExceeded,
     /// The workload's stdin is gone — it exited or closed the fd. Retrying
     /// will not help.
     WorkloadGone,

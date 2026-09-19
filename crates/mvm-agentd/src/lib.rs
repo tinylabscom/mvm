@@ -28,6 +28,9 @@ pub mod child_wait;
 /// PTY-over-vsock console support. Access is enforced by the guest agent's
 /// runtime profile and signed verb grant before a request reaches this module.
 pub mod console;
+/// Immediate kernel CRNG reseed through a helper process that holds the one
+/// capability the agent does not.
+pub mod crng_reseed;
 /// Shared SOCKS5/HTTP parsing helpers for the FlowMux egress adapter.
 #[cfg(feature = "addons")]
 pub(crate) mod egress_client;
@@ -38,6 +41,8 @@ pub mod entrypoint;
 pub mod entrypoint_stream;
 /// Boot-validated optional extension executables.
 pub mod extension;
+/// Closing inherited descriptors in a child before it execs.
+pub mod fd_hygiene;
 /// Guest-wide filesystem flush shared by forced-shutdown paths.
 pub mod filesystem_sync;
 /// Guest-side FlowMux client for the converged single networking path.
@@ -53,10 +58,11 @@ pub mod flowmux_keys;
 /// Blocking one-shot FlowMux client for the guest's tokio-free callers.
 pub mod flowmux_sync;
 pub mod fs_rpc;
-/// Guest-side VMGenID reseed. On a snapshot resume the host
-/// delivers a fresh generation token; when it changes (a clone, not a
-/// normal wake) the guest reseeds its CSPRNG so two clones don't generate
-/// identical key material.
+/// Guest-side reseed on a generation-token change. On a snapshot resume the
+/// host delivers a fresh generation token; when it changes (a clone, not a
+/// normal wake) the guest reseeds its kernel generator so two clones don't
+/// generate identical key material, and reports a rotation only if the
+/// reseed happened.
 pub mod genid;
 /// Post-mount guest environment setup shared by the two guest inits, so the
 /// legacy per-rootfs initrd and the universal-initramfs agent cannot drift.
@@ -105,6 +111,8 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+/// Shared bounded pipe-reader and consumer handoff.
+mod stream_handoff;
 /// Delivery of admitted input bytes into a running workload's stdin, plus the
 /// explicit EOF a read-to-EOF workload needs to ever terminate.
 pub mod stream_input;

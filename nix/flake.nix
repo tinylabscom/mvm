@@ -152,6 +152,28 @@
           mvmSrc = workspaceSrc;
         };
 
+      # The workspace version, read from the unfiltered root rather than the
+      # filtered source store path, the same root `workspaceSrc` is cut from.
+      # Relative to this file it is the workspace root whether this flake is
+      # evaluated as a flake or its `outputs` are called by an image flake.
+      workspaceVersion =
+        let
+          envPath = builtins.getEnv "MVM_WORKSPACE_PATH";
+          manifest = if envPath != "" then /. + envPath + "/Cargo.toml" else ../Cargo.toml;
+        in
+        (nixpkgs.lib.importTOML manifest).workspace.package.version;
+
+      # The guest recipes, exported for the image flakes (and, later, an
+      # image repository that pins this flake). Called with the same package
+      # set the image flakes import, so a derivation is identical whichever
+      # side evaluates it.
+      guestPackagesFor = system:
+        import ./packages/guest.nix {
+          pkgs = import nixpkgs { inherit system; };
+          mvmSrc = workspaceSrc;
+          inherit workspaceVersion;
+        };
+
     in
     {
       # ── Host-installable package overlay ──────────────────────────
@@ -180,7 +202,14 @@
       # User flakes import this as `inputs.mvm.lib.<system>.mkGuest`
       # to declare a microVM image. The shape is intentionally stable
       # so user flakes don't churn when the implementation evolves.
-      lib = forAllSystems (system: libFor { inherit system; });
+      #
+      # `hostBinaries` is the manifest of the host-side binaries mvmctl
+      # embeds and a builder image installs; it is data, not a recipe.
+      lib = forAllSystems (system:
+        libFor { inherit system; }
+        // {
+          hostBinaries = import ./lib/mvm-host-binaries.nix;
+        });
 
       # ── Internal: nixosConfigurations.minimal ────────────────────
       #
@@ -217,7 +246,9 @@
         // nixpkgs.lib.optionalAttrs (builtins.elem system systems) {
           internal-minimal-runner =
             (mkProfile system "minimal").config.microvm.declaredRunner;
-        });
+        }
+        # Guest recipes: the interface image flakes build through.
+        // nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system));
 
       # ── CI-provable no-glibc closure gate ─────────────────────────
       #

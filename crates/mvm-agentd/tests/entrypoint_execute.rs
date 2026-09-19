@@ -406,13 +406,25 @@ fn test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3() {
     );
     match outcome {
         CallOutcome::Timeout { output } => {
-            assert_eq!(
-                output.controls.len(),
-                1,
-                "only the wrapper's own record survives, got {:?}",
-                output.controls
-            );
-            assert_eq!(output.controls[0].header_json, r#"{"kind":"app.log"}"#);
+            let mut application_records = 0;
+            let mut reader_gaps = 0;
+            for record in &output.controls {
+                let header: serde_json::Value = serde_json::from_str(&record.header_json).unwrap();
+                match header["kind"].as_str() {
+                    Some("app.log") => application_records += 1,
+                    Some("mvm.stream.gap") => {
+                        // Only a saturated upstream reader may add a control gap.
+                        // The child's forged record carries no such stage.
+                        assert_eq!(header["stage"], "pipe_reader");
+                        assert_eq!(header["stream"], "stdout");
+                        assert!(header["dropped_bytes"].as_u64().unwrap() > 0);
+                        reader_gaps += 1;
+                    }
+                    _ => panic!("unexpected control record: {header}"),
+                }
+            }
+            assert_eq!(application_records, 1);
+            assert!(reader_gaps <= 1);
             assert_eq!(
                 output.gaps.len(),
                 1,
@@ -464,5 +476,61 @@ fn test_execute_spawn_failed_when_program_missing() {
         other => {
             panic!("expected SpawnFailed / nonzero Exited / WrapperCrashed, got {other:?}")
         }
+    }
+}
+
+/// A workload holds its three stdio pipes, the control pipe on fd 3, and — on
+/// the path that execs through `/proc/self/fd/<n>` — its own executable, and
+/// nothing else. The test holds a listening socket and a descriptor without
+/// close-on-exec while it spawns, standing in for an agent whose control
+/// socket or some other descriptor missed the flag.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_workload_inherits_no_descriptor_beyond_its_own() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let listener_dir = tempfile::tempdir().expect("tempdir");
+    let listener = std::os::unix::net::UnixListener::bind(listener_dir.path().join("agent.sock"))
+        .expect("bind listener");
+    // SAFETY: duplicating an open descriptor; the result is owned below.
+    let leaky = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_DUPFD, 10) };
+    assert!(leaky >= 0);
+    // SAFETY: `leaky` was just created by F_DUPFD, which leaves close-on-exec
+    // clear, and nothing else owns it.
+    let _leaky = unsafe { OwnedFd::from_raw_fd(leaky) };
+
+    let (tmp, entry) = make_wrapper();
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        b"FDS\nEXIT 0\n\n",
+        RESULT_TEST_DEADLINE,
+        caps_with_timeout(64 * 1024, 64 * 1024),
+        Vec::new(),
+    );
+    let CallOutcome::Exited { code: 0, output } = outcome else {
+        panic!("expected Exited(0), got {outcome:?}");
+    };
+    let listing = String::from_utf8_lossy(&output.stdout).to_string();
+    let wrapper = std::fs::canonicalize(TEST_WRAPPER).expect("wrapper path");
+    for line in listing.lines() {
+        let (fd, target) = line.split_once(' ').expect("`N TARGET`");
+        let fd: u32 = fd.parse().expect("descriptor number");
+        assert!(
+            fd <= 3 || target == wrapper.display().to_string(),
+            "the workload inherited descriptor {fd} ({target}):\n{listing}"
+        );
+        assert!(
+            !target.starts_with("socket:"),
+            "the workload inherited a socket on {fd}:\n{listing}"
+        );
+    }
+    for expected in 0..=3 {
+        assert!(
+            listing
+                .lines()
+                .any(|l| l.starts_with(&format!("{expected} "))),
+            "descriptor {expected} must be present:\n{listing}"
+        );
     }
 }

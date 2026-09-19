@@ -950,6 +950,10 @@ mod tests {
         assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
         assert!(guest.contains("Boot the tree-built image"));
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
+        assert!(
+            guest.contains("nix build --rebuild"),
+            "the image job must rebuild the filesystem derivations and compare their bytes"
+        );
 
         let website = workflow("website.yml");
         assert!(
@@ -1030,10 +1034,9 @@ mod tests {
             "bounded bundle preparation must not boot a builder VM"
         );
         assert!(
-            build.contains(&format!(
-                "image boot update --tag {} --force",
-                mvm_core::config::DEFAULT_BOOT_IMAGE_TAG
-            )) && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+            build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
+                && build.contains(r#"image boot update --tag "$image_tag" --force"#)
+                && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
                 && bootstrap.contains("sudo chmod 0666 /dev/kvm")
                 && bootstrap.contains("sudo chmod a+r")
                 && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
@@ -1118,6 +1121,8 @@ mod tests {
         }
         assert!(source_build < source_copy);
         assert!(bootstrap.contains("needs: no-kvm-prepare"));
+        assert!(bootstrap.contains("timeout-minutes: 180"));
+        assert!(bootstrap.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"));
         assert!(build.contains("needs: no-kvm-bootstrap"));
         assert!(smoke.contains("needs: no-kvm-build"));
         assert!(workload > smoke.find(grant).expect("smoke must grant vhost-vsock"));

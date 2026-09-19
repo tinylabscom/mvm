@@ -24,6 +24,14 @@ use std::process::ExitCode;
 #[path = "stage0-init/build_config.rs"]
 mod build_config;
 
+#[cfg(any(target_os = "linux", test))]
+#[path = "stage0-init/store_gc.rs"]
+mod store_gc;
+
+#[cfg(any(target_os = "linux", test))]
+#[path = "stage0-init/seed.rs"]
+mod seed;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -49,6 +57,8 @@ mod linux {
     use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
     use std::time::{Duration, Instant};
 
+    use crate::seed::{find_seed_bin, find_seed_cacert, seed_store_has_required_runtime};
+
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
     const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
@@ -64,7 +74,7 @@ mod linux {
     ];
 
     /// Where nix runs from (its store paths are absolute `/nix/store/...`).
-    const NIX_TARGET: &str = "/nix";
+    pub(crate) const NIX_TARGET: &str = "/nix";
     /// Bind of the original seed `/nix` so we can still read the seed store
     /// after mounting a fresh tmpfs over `/nix`.
     const NIX_SEED_RO: &str = "/nix-seed-ro";
@@ -76,11 +86,11 @@ mod linux {
     const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vdf";
     /// Mount point for the persistent Stage 0 Nix store before binding it over
     /// `/nix`.
-    const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
+    pub(crate) const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
     /// Marker written next to `store/` and `var/` on the persistent Stage 0
     /// store. It binds reuse to the seed store fingerprint, not to mutable Nix
     /// build output added later.
-    const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
+    pub(crate) const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
     const STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
     const STAGE0_INPUT_STAGE: &str = "/nix-stage0-store/stage0-input";
     const STAGE0_OUTPUT_STAGE: &str = "/nix-stage0-store/stage0-output";
@@ -124,6 +134,9 @@ mod linux {
         }
         let build_result = build_and_copy();
         let output_result = collect_disk_transport_output_if_requested();
+        if build_result.is_ok() && output_result.is_ok() {
+            crate::store_gc::collect::collect_stage0_store_garbage();
+        }
         let store_result = finalize_persistent_nix_store();
         let result = build_result.and(output_result).and(store_result);
         match result {
@@ -170,7 +183,7 @@ mod linux {
     /// on the kernel cmdline; libkrun does not. This drives the remaining
     /// host-vs-VMM differences: ext4 trees versus raw-tar transport disks and
     /// the persistent Nix-store device position.
-    fn is_qemu() -> bool {
+    pub(crate) fn is_qemu() -> bool {
         std::fs::read_to_string("/proc/cmdline")
             .map(|c| c.contains("mvm.backend=qemu"))
             .unwrap_or(false)
@@ -466,6 +479,7 @@ mod linux {
             ])?;
         }
 
+        crate::store_gc::collect::stash_seed_reginfo();
         setup_nix_store(qemu)?;
         if !qemu {
             let transport = disk_transport_from_cmdline(&cmdline)
@@ -747,7 +761,10 @@ mod linux {
         Ok(())
     }
 
-    fn persistent_store_finalization_required(qemu: bool, persistent_mounted: bool) -> bool {
+    pub(crate) fn persistent_store_finalization_required(
+        qemu: bool,
+        persistent_mounted: bool,
+    ) -> bool {
         !qemu && persistent_mounted
     }
 
@@ -1113,6 +1130,7 @@ mod linux {
             return Err("nix build emitted no /nix/store path".into());
         }
         copy_artifacts(Path::new(&store_path), &mode)?;
+        crate::store_gc::collect::root_stage0_output(Path::new(&store_path), &mode);
 
         // Best-effort: also emit the resolved `.config` so the host can report
         // the `=y` symbol count without a CI round-trip. The configfile is a
@@ -1386,7 +1404,7 @@ mod linux {
         nix::mount::umount(target).map_err(|e| format!("unmount {target}: {e}"))
     }
 
-    fn is_mountpoint(target: &str) -> bool {
+    pub(crate) fn is_mountpoint(target: &str) -> bool {
         // A path is a mountpoint when its st_dev differs from its parent's.
         let (Ok(here), Some(parent)) = (std::fs::metadata(target), Path::new(target).parent())
         else {
@@ -1412,48 +1430,6 @@ mod linux {
 
     /// Glob the seed store for a `*-<pkg>-*/bin/<bin>` executable. Store
     /// paths are hash-prefixed, so we discover rather than hardcode.
-    fn find_seed_bin_in(store: &Path, bin: &str) -> Result<PathBuf, String> {
-        let entries =
-            std::fs::read_dir(store).map_err(|e| format!("read {}: {e}", store.display()))?;
-        for e in entries.flatten() {
-            let cand = e.path().join("bin").join(bin);
-            if cand.is_file() {
-                return Ok(cand);
-            }
-        }
-        Err(format!(
-            "seed store has no bin/{bin} (is the nix tarball seed intact?)"
-        ))
-    }
-
-    fn find_seed_bin(bin: &str) -> Result<PathBuf, String> {
-        find_seed_bin_in(Path::new("/nix/store"), bin)
-    }
-
-    /// Find the seed's CA bundle (`nss-cacert`) for `NIX_SSL_CERT_FILE`.
-    fn find_seed_cacert_in(store: &Path) -> Result<PathBuf, String> {
-        let entries =
-            std::fs::read_dir(store).map_err(|e| format!("read {}: {e}", store.display()))?;
-        for e in entries.flatten() {
-            let name = e.file_name();
-            if name.to_string_lossy().contains("nss-cacert") {
-                let bundle = e.path().join("etc/ssl/certs/ca-bundle.crt");
-                if bundle.is_file() {
-                    return Ok(bundle);
-                }
-            }
-        }
-        Err("seed store has no nss-cacert ca-bundle.crt".into())
-    }
-
-    fn find_seed_cacert() -> Result<PathBuf, String> {
-        find_seed_cacert_in(Path::new("/nix/store"))
-    }
-
-    fn seed_store_has_required_runtime(store: &Path) -> Result<bool, String> {
-        Ok(find_seed_bin_in(store, "nix").is_ok() && find_seed_cacert_in(store).is_ok())
-    }
-
     fn nul_terminated_c_chars(chars: &[libc::c_char]) -> Vec<u8> {
         chars
             .iter()
@@ -1481,8 +1457,16 @@ mod linux {
 
     fn power_off() -> ExitCode {
         use nix::sys::reboot::{RebootMode, reboot};
-        // SAFETY: sync() takes no args and cannot fail.
+        // Let the console finish sending what was written to it. The kernel
+        // halts from inside reboot(2) without draining the tty, so the last
+        // line — the result marker the host reads — was being cut off
+        // mid-word (`stage0-init: don`) and a finished build read as an
+        // unclean halt. tcdrain on a non-tty fails harmlessly.
+        // SAFETY: tcdrain and sync take no pointers; tcdrain only blocks until
+        // the descriptor's queued output is transmitted.
         unsafe {
+            libc::tcdrain(libc::STDERR_FILENO);
+            libc::tcdrain(libc::STDOUT_FILENO);
             libc::sync();
         }
         match reboot(RebootMode::RB_POWER_OFF) {
@@ -1819,31 +1803,6 @@ mod linux {
             assert!(copied.join("checksums-sha256.txt").is_file());
             assert!(!copied.join("vmlinux").exists());
             assert!(!copied.join("rootfs.ext4").exists());
-        }
-
-        #[test]
-        fn seed_store_runtime_check_requires_nix_and_cacert() {
-            let root = tempfile::tempdir().expect("tempdir");
-            let store = root.path().join("store");
-            std::fs::create_dir_all(store.join("abc-nix/bin")).expect("seed nix dir");
-            std::fs::write(store.join("abc-nix/bin/nix"), b"#!/bin/sh\n").expect("seed nix bin");
-            std::fs::create_dir_all(store.join("def-nss-cacert/etc/ssl/certs"))
-                .expect("seed cacert dir");
-            std::fs::write(
-                store.join("def-nss-cacert/etc/ssl/certs/ca-bundle.crt"),
-                b"dummy cert",
-            )
-            .expect("seed cacert bundle");
-            assert!(
-                super::seed_store_has_required_runtime(&store).expect("runtime check"),
-                "store with nix + cacert should be reusable"
-            );
-
-            std::fs::remove_file(store.join("abc-nix/bin/nix")).expect("remove nix");
-            assert!(
-                !super::seed_store_has_required_runtime(&store).expect("runtime check"),
-                "store missing nix must be re-seeded"
-            );
         }
     }
 }

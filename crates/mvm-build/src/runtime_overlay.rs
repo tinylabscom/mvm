@@ -289,12 +289,14 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
                 out.push(mvm_fs::ext4::Node::Symlink {
                     path: overlay_guest_path(root, &path),
                     target: target.to_string_lossy().into_owned(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
             } else if file_type.is_dir() {
                 out.push(mvm_fs::ext4::Node::Dir {
                     path: overlay_guest_path(root, &path),
                     mode: overlay_mode_of(&path, 0o755),
                     xattrs: Vec::new(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
                 stack.push(path);
             } else if file_type.is_file() {
@@ -303,6 +305,7 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
                     mode: overlay_mode_of(&path, 0o644),
                     data: std::fs::read(&path)?,
                     xattrs: Vec::new(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
             }
         }
@@ -522,12 +525,26 @@ impl OverlayBuildSpec {
     /// running inside the builder VM's sandbox where `..`
     /// resolution against the store copy doesn't reach the
     /// workspace — same mechanism the builder-vm flake uses.
+    ///
+    /// The path is handed over resolved. The workspace filter keeps a file by
+    /// stripping the root from its path as text, and Nix hands the filter
+    /// symlink-resolved paths, so a root reached through a symlink matches
+    /// nothing and the build sees an empty tree.
     pub fn env(&self) -> Vec<(String, String)> {
         vec![(
             "MVM_WORKSPACE_PATH".to_string(),
-            self.workspace_root.display().to_string(),
+            canonical_workspace_root(&self.workspace_root)
+                .display()
+                .to_string(),
         )]
     }
+}
+
+/// `root` with every symlink resolved, or `root` itself when it cannot be
+/// resolved (it does not exist yet). An unresolvable root is left for the
+/// flake's filter to refuse, which names the root and the likely cause.
+fn canonical_workspace_root(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Drive `nix build` from a spec. Linux-only at runtime — host
@@ -1234,7 +1251,7 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_fs::ext4::Node;
+    use mvm_fs::ext4::{Node, Owner};
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1276,6 +1293,7 @@ mod tests {
                 mode: 0o555,
                 data: path.as_bytes().to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         nodes.push(Node::File {
@@ -1283,6 +1301,7 @@ mod tests {
             mode: 0o444,
             data: b"0.14.0\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         });
         mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
@@ -1418,6 +1437,29 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "MVM_WORKSPACE_PATH");
         assert_eq!(env[0].1, "/workspace");
+    }
+
+    /// A root reached through a symlink is handed to the flake resolved: the
+    /// filter compares resolved paths against the root as text, so an
+    /// unresolved root would admit nothing.
+    #[test]
+    fn build_spec_env_resolves_a_symlinked_workspace_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).expect("mkdir real");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let spec = OverlayBuildSpec::new(link, GuestArch::Aarch64, PathBuf::from("/tmp/result"));
+        let env = spec.env();
+
+        assert_eq!(
+            env[0].1,
+            real.canonicalize()
+                .expect("canonical real")
+                .display()
+                .to_string()
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -94,6 +94,7 @@ fn unique_vm(prefix: &str) -> String {
 fn admitted_with_grant(vm: &str) -> AdmittedPlan {
     const FIXTURE_SHA: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let input = SynthesisInput {
+        outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,

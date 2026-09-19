@@ -1,0 +1,56 @@
+# Every published image pin `mvm` fetches, in one checked-in file.
+#
+# These pins used to be hand-copied across `crates/mvm-core/src/config.rs`,
+# `crates/mvm-build/src/stage0_kernel.rs`, four workflows, a shell script and
+# two integration tests, and kept in step by eye. A pin is spliced straight
+# into a release download URL, so a copy left behind is not a type error or a
+# failed test anywhere — it is a 404 on a fresh install's first boot.
+#
+# It lives inside `mvm-core` because `mvm-core` compiles it in, and a file
+# inside the crate is inside every tree that builds the crate: the Nix
+# workspace filter, the builder's source fingerprint and the SDK sidecar's all
+# admit `crates/` whole. At the workspace root it would be one more top-level
+# entry each of those lists had to be taught about, and a list that missed it
+# would fail the guest build or serve a stale one.
+#
+# Rust reads this file through `mvm_core::image_set::image_train_lock()`.
+# Shell and YAML read it through `scripts/locked-image-tag.sh`.
+# `xtask check-image-lock` fails the build when a workflow, script or test
+# names a boot-image tag that is not the one below, or selects an image asset
+# by asking for the newest published release instead of this pin.
+#
+# Bump a `release_tag` only against a release that exists, and a `sha256` only
+# against a checksum manifest whose signature has been verified: a pin inherits
+# exactly the trust of the manifest it was copied out of.
+
+schema_version = 1
+
+# Where every artifact below is published. Part of the pin, not configuration:
+# moving hosting is a trust-root change.
+repository = "tinylabscom/mvm"
+
+# The boot image release the CLI expects. The boot image ships on its own
+# counter so a rootfs or kernel fix does not have to wait for a CLI release.
+# The whole tag, not a bare version, because it is a path segment in
+# `https://github.com/<repository>/releases/download/<tag>/<asset>`.
+[boot_image]
+release_tag = "boot-image/v0.1.5"
+
+# The Stage 0 bootstrap kernel — the one kernel that can be neither built nor
+# resolved by the ordinary kernel policy, because Stage 0 is what makes local
+# kernel builds possible. It is a bootstrap seed: fetched and digest-verified
+# even in a source checkout.
+#
+# It does not have to track the boot image. Stage 0 needs virtio-blk, vsock and
+# ext4 from this kernel and nothing a newer release is likely to change, so the
+# two tags are pinned separately even when they currently name the same release.
+[stage0_kernel]
+release_tag = "boot-image/v0.1.5"
+
+[stage0_kernel.artifact.aarch64]
+name = "builder-vm-vmlinux-aarch64"
+sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
+
+[stage0_kernel.artifact.x86_64]
+name = "builder-vm-vmlinux-x86_64"
+sha256 = "d07fa3dcca7eac14cd17ffe5c4daeb091676322de9e377a008ba0ec45a382435"

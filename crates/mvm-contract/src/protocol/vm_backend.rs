@@ -429,9 +429,19 @@ pub struct VmCapabilities {
     /// Supports a virtio-balloon device with runtime inflate/deflate.
     /// When `true`, `VmBackend::balloon_set_target` is wired and the
     /// host-side reclaim controller can adjust guest commitment
-    /// without rebooting the VM.
-    /// is **not** a balloon and stays `false`.
+    /// without rebooting the VM, and a `mem_initial` opt-in boots
+    /// pre-inflated. A device that only accepts free page reports
+    /// (see [`free_page_reporting`](Self::free_page_reporting)) has no
+    /// target to set, so it is **not** a balloon in this sense and a
+    /// backend with only that keeps this `false`.
     pub balloon: bool,
+    /// The guest returns memory it has freed to the host on its own, through
+    /// virtio-balloon free page reporting. Nothing on the host drives it: the
+    /// guest kernel reports free blocks and the VMM gives their host pages
+    /// back. Independent of [`balloon`](Self::balloon), which is host-driven
+    /// inflate/deflate toward a target.
+    #[serde(default)]
+    pub free_page_reporting: bool,
     /// Can freeze a quiesced rootfs into an fs-quick checkpoint via filesystem
     /// copy-on-write (APFS `clonefile` on macOS). Independent of `snapshots`,
     /// which is the memory-state save/restore capability.
@@ -2000,6 +2010,19 @@ mod tests {
         assert!(!caps.vsock);
         assert!(!caps.tap_networking);
         assert!(!caps.balloon);
+        assert!(!caps.free_page_reporting);
+    }
+
+    #[test]
+    fn free_page_reporting_defaults_when_absent_from_serialized_capabilities() {
+        let mut value = serde_json::to_value(VmCapabilities::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("free_page_reporting")
+            .expect("the field is serialized");
+        let parsed: VmCapabilities = serde_json::from_value(value).unwrap();
+        assert!(!parsed.free_page_reporting);
     }
 
     #[test]

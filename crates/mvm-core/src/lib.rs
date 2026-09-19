@@ -25,12 +25,6 @@ pub mod runtime_catalog;
 pub mod client;
 pub mod config;
 pub mod conformance_badge;
-/// Per-VM CPU bounds through a transient systemd scope on the user's own
-/// manager — the one mechanism that both places an unprivileged process under a
-/// cgroup v2 `cpu.max` quota and reports back what is actually in effect. Lives
-/// here, beside the [`vm_backend::VmBackend`] trait it serves, so the backend
-/// crates that spawn per-VM processes can reach it.
-pub mod cpu_scope;
 pub mod dev_network;
 pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
@@ -60,6 +54,9 @@ pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
 pub mod image_lineage;
+/// The signed, atomic image set: a manifest indexing every member pack, the
+/// lock that pins one set, and the pure checks that gate a set before boot.
+pub mod image_set;
 /// Ingress secret redaction (mask known secret values before they reach the guest).
 pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
@@ -75,6 +72,12 @@ pub mod launch_trace;
 pub mod poll_backoff;
 /// Clearing one run's leftover sidecars before the next boot.
 pub mod run_sidecars;
+/// Per-VM host bounds on a VMM process through a transient systemd scope on
+/// the user's own manager — the one mechanism that both places an unprivileged
+/// process under cgroup v2 CPU, memory and task limits and reports back what is
+/// actually in effect. Lives here, beside the [`vm_backend::VmBackend`] trait
+/// it serves, so the backend crates that spawn per-VM processes can reach it.
+pub mod spawn_scope;
 /// Measured resource consumption for one workload run, and the sidecar
 /// convention that carries it off the process that owned the VM.
 pub mod usage_capture;
@@ -105,6 +108,10 @@ pub mod pii;
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
 pub mod release_trust;
+/// Semver parsing and precedence for released versions, shared by the
+/// updater and the image-set identities.
+pub mod release_version;
+pub use release_version::{ReleaseVersion, VersionSyntax};
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.
 pub mod workload_address;
@@ -146,6 +153,9 @@ pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the
 /// declaration boundary and the build side name.
 pub mod rootfs_source;
+/// Content identity of a durable agent-session transition, so a retry after a
+/// lost response can be told apart from a new request.
+pub mod session_transition;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;

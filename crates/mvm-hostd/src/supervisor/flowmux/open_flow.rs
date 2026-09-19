@@ -152,7 +152,7 @@ impl FlowMuxSession {
 
         if !self.check_connection_rate(registry::FlowClass::Tcp) {
             self.send_refused(stream_id, "rate limited")?;
-            self.deny_unrouted_flow(stream_id, &target, "rate_limited");
+            self.deny_unrouted_flow(stream_id, registry::FlowClass::Tcp, &target, "rate_limited");
             return Ok(None);
         }
 
@@ -368,15 +368,22 @@ impl FlowMuxSession {
         );
     }
 
-    /// Audit a refusal taken before the gate chose a route, so there is no
-    /// route to name.
-    fn deny_unrouted_flow(&self, stream_id: u32, target: &str, reason: &str) {
+    /// Audit a refusal of a flow to `target` that carries no route: taken
+    /// before the gate chose one, or decided for a datagram, which the gate
+    /// never routes.
+    pub(super) fn deny_unrouted_flow(
+        &self,
+        stream_id: u32,
+        class: registry::FlowClass,
+        target: &str,
+        reason: &str,
+    ) {
         self.emit_audit(
             EventCategory::Host,
             "host.flow.denied",
             BTreeMap::from([
                 ("stream_id".to_string(), stream_id.to_string()),
-                ("class".to_string(), "tcp".to_string()),
+                ("class".to_string(), class.to_string()),
                 ("target".to_string(), target.to_string()),
                 ("reason".to_string(), reason.to_string()),
             ]),
@@ -390,18 +397,17 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    use ed25519_dalek::{SigningKey, VerifyingKey};
     use mvm_contract::protocol::network_flow::Opcode;
     use mvm_contract::protocol::network_flow::hello::Handshake;
     use mvm_core::net::session::Session;
     use mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate;
 
     use super::*;
-    use crate::supervisor::audit_recorder::Recorder;
     use crate::supervisor::flowmux::registry::RegistryLimits;
     use crate::supervisor::flowmux::tests::{
-        fresh_keys, gate_allowing_addr, local_test_ip, read_flowmux_frame, run_session,
-        run_session_from, run_session_with, tcp_echo_server, write_frame,
+        fresh_keys, gate_allowing_addr, gate_pinning_name, local_test_ip, read_flowmux_frame,
+        recorder_at, run_session, run_session_from, run_session_on_runtime, run_session_with,
+        tcp_echo_server, write_frame,
     };
     use crate::supervisor::flowmux::{FlowMuxAccept, FlowMuxVmResources};
 
@@ -606,8 +612,16 @@ mod tests {
             allowed_hosts: vec![bound_host.to_string()],
             sigv4: None,
         });
-        let mut service =
-            SubstitutionService::new(Arc::new(registry), resolver, Arc::new(UnusedForwarder));
+        // Every flow in these tests is decided on the FlowMux connect path, by
+        // the session's own gate, before any request reaches the service. Its
+        // gate denies everything so a test that did reach it would fail rather
+        // than forward.
+        let mut service = SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            Arc::new(UnusedForwarder),
+            Arc::new(EgressGate::default_deny()),
+        );
         if with_intermediate {
             service = service.with_tls_intermediate(
                 mvm_core::crypto::egress_ca::VmEgressCa::mint(&[bound_host])
@@ -652,100 +666,6 @@ mod tests {
 
         drop(guest);
         host.join().unwrap().unwrap();
-    }
-
-    /// A gate that pins `name` to `ip` and admits it on `port`, so a test can
-    /// use a name without needing DNS.
-    fn gate_pinning_name(name: &str, ip: IpAddr, port: u16) -> EgressGate {
-        use chrono::{Duration as ChronoDuration, Utc};
-        use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
-        use mvm_contract::policy::network_policy::{HostPort, NetworkPolicy};
-
-        let now = Utc::now();
-        let later = now + ChronoDuration::hours(1);
-        let mut pins = DnsPinRegistry::new();
-        pins.add(DnsPin::at(
-            name,
-            vec![ip],
-            now.to_rfc3339(),
-            later.to_rfc3339(),
-        ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort::new(name, port)]);
-        EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
-    }
-
-    /// A chain-signed recorder writing to `path`, plus the key that verifies it.
-    fn recorder_at(path: &std::path::Path) -> (Arc<Recorder>, ed25519_dalek::VerifyingKey) {
-        use crate::supervisor::audit_file::FileAuditSigner;
-        use mvm_core::plan::TenantId;
-
-        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
-        let verifying_key = signing_key.verifying_key();
-        let signer = FileAuditSigner::open_file(signing_key, path).expect("open audit signer");
-        (
-            Arc::new(Recorder::new(
-                Arc::new(signer),
-                TenantId("flowmux-tenant".to_string()),
-            )),
-            verifying_key,
-        )
-    }
-
-    /// Run a session the way the endpoint does — inside a Tokio runtime, with
-    /// `serve` on a blocking task — so `Handle::try_current` finds a runtime
-    /// and a terminated flow can be driven.
-    ///
-    /// The plain `run_session_*` helpers run on a bare thread, where there is
-    /// no runtime and termination correctly refuses.
-    fn run_session_on_runtime(
-        build: impl FnOnce(&str, SigningKey, VerifyingKey, RegistryLimits) -> FlowMuxAccept
-        + Send
-        + 'static,
-    ) -> (
-        UnixStream,
-        Session,
-        thread::JoinHandle<Result<(), FlowMuxError>>,
-    ) {
-        let (host_key, host_verify) = fresh_keys();
-        let (guest_key, guest_verify) = fresh_keys();
-        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
-        let host_handle = thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("build session runtime");
-            runtime.block_on(async move {
-                tokio::task::spawn_blocking(move || {
-                    let mut session = FlowMuxSession::accept_with(
-                        host_stream,
-                        build(
-                            "test-session",
-                            host_key,
-                            guest_verify,
-                            RegistryLimits::default(),
-                        ),
-                    )
-                    .unwrap();
-                    session.serve()
-                })
-                .await
-                .expect("session task")
-            })
-        });
-        let (mut guest_session, _session_id) =
-            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
-
-        write_frame(
-            &mut guest_stream,
-            &mut guest_session,
-            Opcode::Hello,
-            0,
-            &Handshake::local("test-guest").encode(),
-        );
-        let (opcode, _stream_id, _payload) =
-            read_flowmux_frame(&mut guest_stream, &mut guest_session);
-        assert_eq!(opcode, Opcode::HelloAck);
-        (guest_stream, guest_session, host_handle)
     }
 
     /// Real ClientHello bytes for `name`, produced by rustls rather than

@@ -254,10 +254,6 @@ pub(crate) trait GuestEndpointRelay {
     /// missing endpoints or connect failures.
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction;
 
-    /// Drain host→guest endpoint bytes once from every active connection.
-    #[allow(dead_code)]
-    fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain;
-
     /// Drain endpoint bytes with a per-connection read limit.
     ///
     /// `limit(conn_id)` returns the maximum bytes to read for that connection.
@@ -423,10 +419,6 @@ impl GuestEndpointRelay for SubstitutionBridge {
         write_nonblocking(&mut conn.stream, payload);
         conn.last_activity = Instant::now();
         EndpointRelayAction::Relayed
-    }
-
-    fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain {
-        self.drain_endpoint_bytes_limited(&mut |_| READ_CHUNK)
     }
 
     fn drain_endpoint_bytes_limited(
@@ -638,7 +630,7 @@ mod tests {
 
         let mut reply = None;
         for _ in 0..200 {
-            let d = b.drain_endpoint_bytes();
+            let d = b.drain_endpoint_bytes_limited(&mut |_| READ_CHUNK);
             if let Some((cid, bytes)) = d.ready.into_iter().next() {
                 assert_eq!(cid, 3);
                 reply = Some(bytes);
@@ -669,7 +661,7 @@ mod tests {
             state.last_refill = Instant::now() + Duration::from_secs(1);
         }
 
-        let drained = bridge.drain_endpoint_bytes();
+        let drained = bridge.drain_endpoint_bytes_limited(&mut |_| READ_CHUNK);
 
         assert!(drained.closed.is_empty());
         assert!(bridge.is_active());

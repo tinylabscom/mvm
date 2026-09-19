@@ -27,6 +27,10 @@ use super::HvfError;
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
+use super::mmio_layout::{
+    BALLOON_IRQ, BALLOON_MMIO_BASE, MAX_DISKS, RNG_IRQ, RNG_MMIO_BASE, VSOCK_IRQ, VSOCK_MMIO_BASE,
+    disk_mmio,
+};
 use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::sys::*;
@@ -37,6 +41,7 @@ use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::{DiskImage, VirtioBlk};
+use crate::vmm::virtio_balloon::VirtioBalloon;
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
@@ -49,7 +54,7 @@ use mvm_vmm::quota::{
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
 /// PL011 sit below RAM so their accesses fault out as MMIO.
-const RAM_BASE: u64 = 0x8000_0000;
+pub(super) const RAM_BASE: u64 = 0x8000_0000;
 /// Default guest RAM (512 MiB) when the caller specifies none — enough for a
 /// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
 const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
@@ -105,52 +110,6 @@ const FDT_MAX_SIZE: u64 = 0x20_0000;
 const PREFERRED_INITRD_OFFSET: u64 = 0x1000_0000;
 const INITRD_ALIGNMENT: usize = 0x20_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
-/// virtio-mmio device windows (above the GIC, below RAM) + their SPIs.
-const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
-const VIRTIO_IRQ: u32 = 48;
-const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
-const VSOCK_IRQ: u32 = 49;
-/// A **reserved hole** where the virtio-fs windows used to live, above the disk
-/// band (MAX_DISKS=6 → up to base+6*stride) and vsock.
-///
-/// No device is placed here any more — the HVF virtio-fs device is deleted. The
-/// constants stay because `RNG_MMIO_BASE` and `RNG_IRQ` are computed *from*
-/// them: collapsing the hole would silently move the entropy device to a
-/// different address and SPI, which changes the device tree a guest boots
-/// against and the layout a saved snapshot was captured under. Reclaiming this
-/// range is a deliberate, separately-validated change, not a tidy-up.
-const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
-const FS_IRQ: u32 = 55;
-/// Width of the reserved hole above, in MMIO slots and SPIs.
-const MAX_VIRTIOFS_SHARES: usize = 8;
-/// The entropy device follows every optional disk/vsock/virtio-fs window, so its
-/// stable address cannot collide with a device combination selected at runtime.
-/// Derived from the reserved hole above rather than restated, so the fact that
-/// the entropy device sits *past* it is expressed once. Same address as before:
-/// `VIRTIO_MMIO_BASE + 7*stride` + `8*stride` + one slot = `base + 16*stride`.
-const RNG_MMIO_BASE: u64 = FS_MMIO_BASE + (MAX_VIRTIOFS_SHARES as u64 + 1) * MMIO_STRIDE;
-const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
-/// virtio-mmio window stride; each device occupies one 0x200 slot.
-const MMIO_STRIDE: u64 = 0x200;
-/// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
-/// needs six: rootfs, nix-store, input, output, the read-only runtime overlay,
-/// and the per-boot FlowMux identity drive.
-const MAX_DISKS: usize = 6;
-
-/// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
-/// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
-/// address/IRQ stay fixed and the live-verified agent/egress path is untouched.
-fn disk_mmio(i: usize) -> (u64, u32) {
-    if i == 0 {
-        (VIRTIO_MMIO_BASE, VIRTIO_IRQ)
-    } else {
-        (
-            VIRTIO_MMIO_BASE + (i as u64 + 1) * MMIO_STRIDE,
-            VIRTIO_IRQ + i as u32 + 1,
-        )
-    }
-}
-
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
@@ -361,9 +320,8 @@ pub struct HostChannels {
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
     pub broker_socket: Option<PathBuf>,
-    /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
-    /// data port the interactive PTY may reach. Populated only for a `dev_console`
-    /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
+    /// Additional host-dial listeners, including telemetry and admitted console
+    /// data channels. Telemetry is present independently of console grants.
     pub console_data_sockets: Vec<(u32, PathBuf)>,
     /// Builder-tier control listeners: job dispatch and the resident daemon's
     /// typed channel, for a persistent builder VM. Empty for every workload.
@@ -765,6 +723,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
     }
     virtio_nodes.push((RNG_MMIO_BASE, RNG_IRQ));
+    virtio_nodes.push((BALLOON_MMIO_BASE, BALLOON_IRQ));
     // Fresh host entropy per boot covers the window before the virtio-rng driver
     // probes. The device below then replenishes entropy for the VM's lifetime.
     let rng_seed = fdt::fresh_rng_seed();
@@ -880,8 +839,7 @@ struct RunInputs {
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
-    /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
-    /// data port). Empty for a sealed prod config — nothing bound (claim 15).
+    /// Additional host-dial listeners, including telemetry and console channels.
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
@@ -1722,6 +1680,23 @@ unsafe fn run(
         // retains no generated bytes, so restored guests continue from fresh OS
         // entropy rather than replaying device-owned state.
         let mut rng_dev = VirtioRng::new(RNG_MMIO_BASE, RNG_IRQ, ram, RAM_BASE, ram_size);
+        // SAFETY: `ram` is mapped RWX at RAM_BASE for the whole run (above),
+        // and the backing layout is fixed: every file mapping into guest RAM
+        // happened before the VM was created.
+        let page_release = super::page_release::HvfPageRelease::new(
+            ram,
+            RAM_BASE,
+            ram_size,
+            guest_ram.backing_regions(RAM_BASE),
+        );
+        let mut balloon_dev = VirtioBalloon::new(
+            BALLOON_MMIO_BASE,
+            BALLOON_IRQ,
+            ram,
+            RAM_BASE,
+            ram_size,
+            Box::new(page_release),
+        );
         if restore_frame.is_none()
             && let Some(v) = vsock_dev.as_mut()
         {
@@ -1772,16 +1747,10 @@ unsafe fn run(
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
             }
-            // Dev-only interactive console (`machine run -it`): bind one host
-            // listener per guest console data port so the console driver can reach
-            // the agent-allocated PTY channel. The list is populated only for a
-            // `dev_console` machine; a sealed prod config carries none, so nothing
-            // is bound (claim 15). Shares the heartbeat counter so an open console
-            // stream keeps the loop waking an idle guest.
-            // Builder control ports ride the same bridge, and a persistent
-            // builder has no console, so bind whichever list is populated.
-            // They cannot both be: one is dev-console policy, the other
-            // builder-tier policy.
+            // Bind the explicitly supplied telemetry, console and builder
+            // listeners through the shared host-dial bridge. Telemetry does not
+            // enable a console or grant network access. The activity counter
+            // keeps the guest responsive while a host stream is active.
             let host_dial_sockets: Vec<(u32, PathBuf)> = console_data_sockets
                 .iter()
                 .chain(builder_control_sockets.iter())
@@ -1862,6 +1831,7 @@ unsafe fn run(
                 restore_devices.push(device);
             }
             restore_devices.push(&mut rng_dev);
+            restore_devices.push(&mut balloon_dev);
             let mut snapshot_targets = restore_devices
                 .iter_mut()
                 .filter_map(|device| device.snapshot_device_mut())
@@ -1921,6 +1891,7 @@ unsafe fn run(
                 devices.push(v);
             }
             devices.push(&mut rng_dev);
+            devices.push(&mut balloon_dev);
 
             // One bus whether this machine has one CPU or eight. A single-CPU
             // run pays an uncontended lock per MMIO exit, which is nothing next
@@ -2548,21 +2519,6 @@ mod tests {
         let meta = KernelImageSource::File(&kernel).metadata().unwrap();
         assert_eq!(meta.file_len, 128);
         assert_eq!(meta.reserved_len, HVF_PAGE_SIZE);
-    }
-
-    #[test]
-    fn sixth_disk_slot_stays_below_virtiofs_window() {
-        let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
-        assert!(
-            last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
-            "sixth disk must fit below the virtiofs MMIO window"
-        );
-
-        let (next_mmio, _) = disk_mmio(MAX_DISKS);
-        assert_eq!(
-            next_mmio, FS_MMIO_BASE,
-            "a seventh disk would collide with the virtiofs root window"
-        );
     }
 
     #[test]

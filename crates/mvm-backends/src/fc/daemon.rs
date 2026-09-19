@@ -30,30 +30,29 @@ pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     start_vm_firecracker_inner(abs_dir, abs_socket, true, "")
 }
 
-/// Start a Firecracker daemon bounded by the CPU share this launch was admitted
-/// under.
+/// Start a Firecracker daemon inside a scope carrying its guest's memory and
+/// task ceilings and the CPU share this launch was admitted under.
 ///
 /// Separate from [`start_vm_firecracker`] rather than a wider signature on it:
-/// the unbounded entry point exists for harnesses that admit no plan at all, and
-/// keeping the grant off its signature is what stops one of them from inventing
-/// a bound no run was admitted under. A restore has an admitted grant — the one
-/// its child plan carries — and calls this or
-/// [`start_vm_firecracker_for_snapshot`] with it.
+/// the unbounded entry point exists for harnesses that boot no admitted guest
+/// at all, and keeping the bounds off its signature is what stops one of them
+/// from inventing a bound no run was admitted under. A snapshot load reaches the
+/// same scope through [`start_vm_firecracker_scoped`].
 #[instrument(skip_all)]
 pub fn start_vm_firecracker_bounded(
     abs_dir: &str,
     abs_socket: &str,
     machine_id: &str,
-    grant: Option<&mvm_contract::grants::CpuGrant>,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
 ) -> Result<()> {
-    let prefix = cpu_scope_prefix(machine_id, std::path::Path::new(abs_dir), grant);
+    let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds);
     start_vm_firecracker_inner(abs_dir, abs_socket, true, &prefix)
 }
 
 /// Start Firecracker for a snapshot load, inside a scope prefix the caller has
 /// already built.
 ///
-/// The restore paths take the prefix rather than the grant because the value
+/// The restore paths take the prefix rather than the bounds because the value
 /// that ends up on the launch line has to be the one a test can read back: an
 /// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
 /// as well, and is simply unbounded. `clean_vsock` is false for a fork, whose
@@ -62,9 +61,9 @@ pub(crate) fn start_vm_firecracker_scoped(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
-    cpu_scope: &str,
+    scope: &str,
 ) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, clean_vsock, cpu_scope)
+    start_vm_firecracker_inner(abs_dir, abs_socket, clean_vsock, scope)
 }
 
 /// The `systemd-run` scope prefix for the launch line, shell-quoted, or empty
@@ -75,12 +74,12 @@ pub(crate) fn start_vm_firecracker_scoped(
 /// `nohup setsid` — so it needs the prefix as text. The tokens come from the
 /// same builder the `Command` path uses, so the two cannot drift into bounding
 /// different things.
-pub(crate) fn cpu_scope_prefix(
+pub(crate) fn spawn_scope_prefix(
     machine_id: &str,
     state_dir: &std::path::Path,
-    grant: Option<&mvm_contract::grants::CpuGrant>,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
 ) -> String {
-    match mvm_core::cpu_scope::scope_prefix_for_grant(machine_id, state_dir, grant) {
+    match mvm_core::spawn_scope::scope_prefix_for_spawn(machine_id, state_dir, bounds) {
         Some(tokens) => {
             let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
             format!("{} ", quoted.join(" "))
@@ -89,19 +88,33 @@ pub(crate) fn cpu_scope_prefix(
     }
 }
 
+/// The file the launch script records a scoped launcher's pid in, so the
+/// launch can fail if the service manager never creates the scope.
+const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
+
 fn start_vm_firecracker_inner(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
-    cpu_scope: &str,
+    scope: &str,
 ) -> Result<()> {
     ui::info("Starting Firecracker...");
     run_in_vm_visible(&firecracker_launch_script(
         abs_dir,
         abs_socket,
         clean_vsock,
-        cpu_scope,
+        scope,
     ))?;
+    if !scope.is_empty() {
+        let dir = std::path::Path::new(abs_dir);
+        let machine = dir
+            .file_name()
+            .map_or_else(|| abs_dir.to_string(), |n| n.to_string_lossy().into_owned());
+        mvm_core::spawn_scope::await_detached_launcher(
+            &dir.join(SCOPE_LAUNCHER_PID_FILE),
+            &machine,
+        )?;
+    }
 
     // The socket wait used to live in the launch script as
     // `for i in $(seq 1 30); do [ -S sock ] && break; sleep 0.1; done`, which
@@ -158,22 +171,16 @@ fn firecracker_launch_script(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
-    cpu_scope: &str,
+    scope: &str,
 ) -> String {
-    firecracker_launch_script_as(
-        abs_dir,
-        abs_socket,
-        clean_vsock,
-        cpu_scope,
-        effective_user_id(),
-    )
+    firecracker_launch_script_as(abs_dir, abs_socket, clean_vsock, scope, effective_user_id())
 }
 
 fn firecracker_launch_script_as(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
-    cpu_scope: &str,
+    scope: &str,
     euid: u32,
 ) -> String {
     let sudo = sudo_prefix_for_euid(euid);
@@ -190,21 +197,34 @@ fn firecracker_launch_script_as(
     let q_dir = shell_quote(abs_dir);
     let q_socket = shell_quote(abs_socket);
     let q_pid = shell_quote(&format!("{abs_dir}/fc.pid"));
+    // `$!` is the scope launcher itself, recorded so the caller can tell a
+    // scope that was created from a service manager that never answered. It is
+    // never used as Firecracker's pid; that marker is written from inside.
+    let record_launcher = if scope.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "echo $! > {}",
+            shell_quote(&format!("{abs_dir}/{SCOPE_LAUNCHER_PID_FILE}"))
+        )
+    };
     format!(
         r#"
         mkdir -p {q_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
-        {cpu_scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1" --enable-pci' {q_pid} {q_socket} \
+        {scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1" --enable-pci' {q_pid} {q_socket} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
+        {record_launcher}
         "#,
         q_dir = q_dir,
         q_pid = q_pid,
         q_socket = q_socket,
         vsock_cleanup = vsock_cleanup,
-        cpu_scope = cpu_scope,
+        scope = scope,
         sudo = sudo,
+        record_launcher = record_launcher,
     )
 }
 
@@ -460,39 +480,65 @@ mod tests {
     fn a_granted_share_prefixes_the_firecracker_launch_line() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
 
-        let prefix = cpu_scope_prefix(
+        let prefix = spawn_scope_prefix(
             "vm-bounded",
             scratch.path(),
-            Some(&mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512).with_cpu_grant(Some(
+                mvm_contract::grants::CpuGrant::Share { millicores: 1500 },
+            )),
         );
         let script =
             firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix, 1000);
 
         assert!(script.contains("CPUQuota=150%"), "{script}");
+        assert!(script.contains("'MemoryMax=768M'"), "{script}");
+        assert!(script.contains("'MemorySwapMax=0'"), "{script}");
+        assert!(script.contains("'TasksMax=1024'"), "{script}");
         // The unit carries a per-boot suffix, so match the stem rather than a
         // name that can no longer be reconstructed from the machine id.
         assert!(script.contains("vm-bounded-"), "{script}");
         assert!(script.contains(".scope"), "{script}");
         // Ahead of the launch, not merely somewhere in the script: Firecracker
         // has to be born inside the scope.
-        assert!(
-            script.contains("systemd-run"),
-            "the scope must precede the launch: {script}"
-        );
         let scope_at = script.find("systemd-run").expect("prefix present");
         let launch_at = script
             .find("sudo setsid nohup sh -c")
             .expect("launch present");
         assert!(scope_at < launch_at, "{script}");
+        // And the launcher is recorded after it is backgrounded, so a manager
+        // that never creates the scope fails the launch.
+        let recorded_at = script
+            .find("echo $! > '/tmp/vm/scope-launcher.pid'")
+            .expect("launcher pid recorded");
+        assert!(launch_at < recorded_at, "{script}");
+    }
+
+    /// Memory and task ceilings are not grants, so a launch admitted with no
+    /// CPU share still carries them.
+    #[test]
+    fn an_ungranted_launch_line_still_carries_the_ceilings() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let prefix = spawn_scope_prefix(
+            "vm-ceilinged",
+            scratch.path(),
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(2048),
+        );
+        assert!(prefix.contains("'MemoryMax=2304M'"), "{prefix}");
+        assert!(prefix.contains("'TasksMax=1024'"), "{prefix}");
+        assert!(!prefix.contains("CPUQuota"), "{prefix}");
     }
 
     #[test]
-    fn an_ungranted_launch_line_carries_no_scope() {
+    fn an_unscoped_launch_line_carries_no_scope() {
         let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
         assert!(!script.contains("systemd-run"), "{script}");
+        assert!(!script.contains("scope-launcher.pid"), "{script}");
         assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
         assert!(
             script.contains("exec firecracker"),
@@ -529,11 +575,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unbindable_grant_leaves_the_launch_line_untouched() {
-        // No mechanism on this host, or a share too small to express: either
-        // way the boot proceeds unbounded rather than failing.
+    fn a_host_without_the_mechanism_leaves_the_launch_line_untouched() {
+        // No mechanism on this host: the boot proceeds unbounded rather than
+        // failing, and the read-back reports it as declared.
         let scratch = tempfile::tempdir().expect("scratch");
-        assert_eq!(cpu_scope_prefix("vm-x", scratch.path(), None), "");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty = scratch.path().join("empty-path");
+        std::fs::create_dir_all(&empty).expect("empty PATH");
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        assert_eq!(
+            spawn_scope_prefix(
+                "vm-x",
+                scratch.path(),
+                &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512)
+            ),
+            ""
+        );
     }
 }
 
@@ -585,9 +644,9 @@ mod sudo_elision_tests {
         }
     }
 
-    /// A CPU grant's scope must still precede the launch in both shapes.
+    /// The spawn scope must precede the launch in both shapes.
     #[test]
-    fn the_cpu_scope_precedes_the_launch_with_and_without_sudo() {
+    fn the_spawn_scope_precedes_the_launch_with_and_without_sudo() {
         for euid in [0, 1000] {
             let script = firecracker_launch_script_as(
                 "/tmp/vm",

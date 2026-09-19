@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, dev_console_data_ports,
-    send_request_stream,
+    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -30,7 +29,7 @@ use mvm_core::vm_backend::{
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
-    FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
+    FcCapabilities, FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
     read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
@@ -40,7 +39,7 @@ use mvm_vmm::driver::traits::{
     StandbyParentSpawn, VmmDriver,
 };
 use mvm_vmm::host::boot_config::{
-    balloon_body, boot_source_body, drive_body, logger_body, machine_config_body, vsock_body,
+    FcDrive, balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
 };
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
@@ -188,7 +187,12 @@ pub struct FcApiPut {
 /// device nodes line up with the verity slot model the cmdline names
 /// (`mvm.data=/dev/vda mvm.hash=/dev/vdb …`). The lowest-slot block is the root
 /// device; every block carries its own read-only policy verbatim.
-fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
+///
+/// Every writable block offers the guest discard when the running Firecracker
+/// supports it, so a guest trim releases host blocks. That grants a guest
+/// nothing it lacked: a drive it can write is one it could already zero, and a
+/// punched hole is zeroes that cost no disk.
+fn fc_drive_puts(blocks: &[BlockDev], caps: FcCapabilities) -> Vec<FcApiPut> {
     let mut ordered: Vec<&BlockDev> = blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     ordered
@@ -198,12 +202,14 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
             let drive_id = format!("blk{}", block.slot);
             // The lowest-slot block (first PUT) is the root device; each block
             // keeps its own read-only policy. Body shape shared with the raw path.
-            let body = drive_body(
-                &drive_id,
-                &block.source.to_string_lossy(),
-                index == 0,
-                block.read_only,
-            );
+            let body = FcDrive {
+                drive_id: &drive_id,
+                path_on_host: &block.source.to_string_lossy(),
+                is_root_device: index == 0,
+                is_read_only: block.read_only,
+                discard: caps.block_discard,
+            }
+            .body();
             FcApiPut {
                 path: format!("/drives/{drive_id}"),
                 body,
@@ -223,6 +229,7 @@ pub fn fc_config_api_puts(
     kernel_for_boot: &str,
     vsock_uds: &str,
     log_dir: &str,
+    caps: FcCapabilities,
 ) -> Vec<FcApiPut> {
     let mut puts = Vec::new();
 
@@ -270,7 +277,7 @@ pub fn fc_config_api_puts(
         body: "{}".to_string(),
     });
 
-    puts.extend(fc_drive_puts(&spec.blocks));
+    puts.extend(fc_drive_puts(&spec.blocks, caps));
 
     puts.push(FcApiPut {
         path: "/vsock".to_string(),
@@ -289,6 +296,27 @@ pub fn fc_config_api_puts(
     }
 
     puts
+}
+
+/// What the Firecracker serving `socket` supports. A failed probe boots
+/// without the optional features rather than failing: each is an optimisation
+/// the guest reports missing, and sending one an older Firecracker rejects
+/// would fail the boot outright.
+fn running_fc_capabilities(socket: &str) -> FcCapabilities {
+    match FcCapabilities::probe(Path::new(socket)) {
+        Ok(caps) => {
+            if !caps.block_discard {
+                tracing::debug!(
+                    "this Firecracker predates block discard; guest trims will not return host disk"
+                );
+            }
+            caps
+        }
+        Err(e) => {
+            tracing::warn!("could not read the Firecracker version ({e:#}); offering no discard");
+            FcCapabilities::default()
+        }
+    }
 }
 
 /// The host UDS Firecracker connects *out* to when the guest dials
@@ -936,7 +964,13 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker_bounded(&abs_dir, &socket, &spec.name, spec.cpu_grant.as_ref())?;
+        start_vm_firecracker_bounded(
+            &abs_dir,
+            &socket,
+            &spec.name,
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                .with_cpu_grant(spec.cpu_grant),
+        )?;
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
@@ -951,13 +985,16 @@ impl VmmDriver for FcDriver {
         crate::fc::adopt_api_socket(&socket)
             .context("adopting the Firecracker API socket for the invoking user")?;
 
-        // Drive the NIC-less API config sequence.
+        // Drive the NIC-less API config sequence, asking only for what the
+        // Firecracker behind this socket supports.
+        let caps = running_fc_capabilities(&socket);
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
         let puts = fc_config_api_puts(
             spec,
             &kernel_for_boot.to_string_lossy(),
             &vsock_uds,
             &abs_dir,
+            caps,
         );
         for put in &puts {
             api_put_socket(&socket, &put.path, &put.body)
@@ -1243,13 +1280,13 @@ impl RunningVm for FcRunningVm {
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
         // Firecracker multiplexes every host→guest connection over the single
         // vsock UDS, selecting the destination port via the `CONNECT <port>\n`
-        // handshake. Restricted to the agent port and the dev-only console data
+        // handshake. Restricted to agent, telemetry and dev-only console data
         // ports (a sealed prod boot registers no console listeners), mirroring
         // the other drivers' allow-list.
-        if guest_port != GUEST_AGENT_PORT && !dev_console_data_ports().any(|p| p == guest_port) {
+        if !super::host_dialable_port(guest_port) {
             bail!(
                 "Firecracker driver vsock_connect supports only the agent port \
-                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                 ({GUEST_AGENT_PORT}), telemetry and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
@@ -1348,7 +1385,13 @@ mod tests {
     }
 
     fn config_puts(spec: &VmmSpec) -> Vec<FcApiPut> {
-        fc_config_api_puts(spec, "/img/vmlinux", "/state/w/runtime/v.sock", "/state/w")
+        fc_config_api_puts(
+            spec,
+            "/img/vmlinux",
+            "/state/w/runtime/v.sock",
+            "/state/w",
+            FcCapabilities::default(),
+        )
     }
 
     fn body_for<'a>(puts: &'a [FcApiPut], path: &str) -> &'a str {
@@ -1518,6 +1561,39 @@ mod tests {
     }
 
     #[test]
+    fn a_firecracker_with_discard_offers_it_on_writable_drives_only() {
+        let mut store = ro_block("/cache/nix-store-stage0-x86_64.img", 1);
+        store.read_only = false;
+        let blocks = vec![ro_block("/img/rootfs.ext4", 0), store];
+        let caps = FcCapabilities {
+            block_discard: true,
+        };
+
+        let puts = fc_drive_puts(&blocks, caps);
+
+        assert!(!puts[0].body.contains("discard"), "{}", puts[0].body);
+        assert!(
+            puts[1]
+                .body
+                .ends_with(r#""is_read_only": false, "discard": true}"#),
+            "{}",
+            puts[1].body
+        );
+    }
+
+    #[test]
+    fn a_firecracker_without_discard_is_sent_no_discard_field() {
+        // Firecracker before 1.17 rejects unknown drive fields, so the body a
+        // writable store gets there must not mention discard at all.
+        let mut store = ro_block("/cache/nix-store-x86_64.img", 0);
+        store.read_only = false;
+
+        let puts = fc_drive_puts(&[store], FcCapabilities::default());
+
+        assert!(!puts[0].body.contains("discard"), "{}", puts[0].body);
+    }
+
+    #[test]
     fn drives_map_slot_ordered_blocks_to_vda_vdb_vdc_in_order() {
         // Out of slot order to prove sorting: the PUT order (== FC device-letter
         // order) must follow slot order, so slot 0 → first PUT (/dev/vda).
@@ -1526,7 +1602,7 @@ mod tests {
             ro_block("/img/rootfs.verity", 1),
             ro_block("/img/rootfs.ext4", 0),
         ];
-        let puts = fc_drive_puts(&blocks);
+        let puts = fc_drive_puts(&blocks, FcCapabilities::default());
         let paths: Vec<&str> = puts.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(paths, vec!["/drives/blk0", "/drives/blk1", "/drives/blk2"]);
         // The device-letter order the guest sees lines up with BlockDev::device_node.
@@ -2350,56 +2426,58 @@ mod tests {
         );
     }
     #[test]
-    fn vsock_connect_reaches_the_agent_over_the_connect_handshake_and_rejects_other_ports() {
+    fn vsock_connect_reaches_agent_and_telemetry_over_the_connect_handshake() {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{BufRead, BufReader, Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = dir.path().join("runtime");
-        std::fs::create_dir_all(&runtime).unwrap();
-        let vsock = runtime.join("v.sock");
-        let Some(listener) = bind_unix_listener(&vsock) else {
-            return;
-        };
-        // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
-        let server = std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
-                    let mut w = stream;
-                    let port = line.trim().trim_start_matches("CONNECT ").trim();
-                    let _ = writeln!(w, "OK {port}");
-                    let _ = w.flush();
-                    let mut b = [0u8; 1];
-                    if reader.read_exact(&mut b).is_ok() {
-                        let _ = w.write_all(&b);
+        for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = dir.path().join("runtime");
+            std::fs::create_dir_all(&runtime).unwrap();
+            let vsock = runtime.join("v.sock");
+            let Some(listener) = bind_unix_listener(&vsock) else {
+                return;
+            };
+            // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
+            let server = std::thread::spawn(move || {
+                if let Ok((stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() {
+                        assert_eq!(line, format!("CONNECT {port}\n"));
+                        let mut w = stream;
+                        let port = line.trim().trim_start_matches("CONNECT ").trim();
+                        let _ = writeln!(w, "OK {port}");
+                        let _ = w.flush();
+                        let mut b = [0u8; 1];
+                        if reader.read_exact(&mut b).is_ok() {
+                            let _ = w.write_all(&b);
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        let vm = FcRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join("fc.pid"),
-            pid: None,
-            vsock_uds: vsock.to_string_lossy().into_owned(),
-            flush_via_agent: true,
-        };
+            let vm = FcRunningVm {
+                id: VmId("agent-vm".into()),
+                state_dir: dir.path().to_path_buf(),
+                pid_file: dir.path().join("fc.pid"),
+                pid: None,
+                vsock_uds: vsock.to_string_lossy().into_owned(),
+                flush_via_agent: true,
+            };
 
-        // The agent port connects through the CONNECT handshake + round-trips.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
+            let mut s = vm.vsock_connect(port).unwrap();
+            s.write_all(b"x").unwrap();
+            let mut got = [0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"x");
+            server.join().unwrap();
 
-        // Ports outside the agent + console data range are not host-dialable
-        // (rejected before any connect attempt).
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
-        assert!(vm.vsock_connect(9999).is_err());
+            // Ports outside the agent + console data range are not host-dialable
+            // (rejected before any connect attempt).
+            assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+            assert!(vm.vsock_connect(9999).is_err());
+        }
     }
 }
 

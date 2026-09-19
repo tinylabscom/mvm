@@ -711,7 +711,7 @@ fn validate_roothash(s: &str) -> Result<(), OverlayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext4::Node;
+    use crate::ext4::{Node, Owner};
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -789,6 +789,7 @@ mod tests {
                     path.trim_start_matches('/').as_bytes().to_vec()
                 },
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         crate::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")

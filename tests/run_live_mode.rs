@@ -150,7 +150,6 @@ fn read_fixture_log(dir: &std::path::Path) -> Vec<String> {
 /// and `MVM_CLI_BIN=<fixture>` — bypassing `mvmctl run --mode
 /// live`. A separate test below asserts that the verb itself
 /// dispatches; this one asserts the SDK transport.
-#[allow(dead_code)]
 fn _phantom_doc() {}
 
 #[test]

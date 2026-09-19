@@ -161,18 +161,48 @@ pub fn boot_source_body(
     }
 }
 
-/// Firecracker `/drives/<id>` PUT body. Firecracker assigns guest device letters
-/// in API-call order, so the caller owns the ordering; this only shapes one
-/// drive's JSON.
-pub fn drive_body(
-    drive_id: &str,
-    path_on_host: &str,
-    is_root_device: bool,
-    is_read_only: bool,
-) -> String {
-    format!(
-        r#"{{"drive_id": "{drive_id}", "path_on_host": "{path_on_host}", "is_root_device": {is_root_device}, "is_read_only": {is_read_only}}}"#,
-    )
+/// One Firecracker drive, shaped into its `/drives/<id>` PUT body by
+/// [`FcDrive::body`]. Firecracker assigns guest device letters in API-call
+/// order, so the caller owns the ordering; this only shapes one drive's JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FcDrive<'a> {
+    pub drive_id: &'a str,
+    pub path_on_host: &'a str,
+    pub is_root_device: bool,
+    pub is_read_only: bool,
+    /// Offer the guest discard, so a trim punches holes in the host file.
+    /// Honoured only on a writable drive: Firecracker refuses discard on a
+    /// read-only one, and a guest that cannot write has nothing to release.
+    pub discard: bool,
+}
+
+impl FcDrive<'_> {
+    /// The `/drives/<id>` PUT body.
+    ///
+    /// `discard` is written only when it is on. Firecracker before 1.17 rejects
+    /// any drive field it does not know, so a drive that does not ask for
+    /// discard must stay byte-identical to the body those versions accept.
+    pub fn body(&self) -> String {
+        let Self {
+            drive_id,
+            path_on_host,
+            is_root_device,
+            is_read_only,
+            ..
+        } = self;
+        let discard = if self.offers_discard() {
+            r#", "discard": true"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"drive_id": "{drive_id}", "path_on_host": "{path_on_host}", "is_root_device": {is_root_device}, "is_read_only": {is_read_only}{discard}}}"#,
+        )
+    }
+
+    fn offers_discard(&self) -> bool {
+        self.discard && !self.is_read_only
+    }
 }
 
 /// Firecracker `/vsock` PUT body: the single vsock device (`vsock0`) with the
@@ -264,31 +294,62 @@ mod tests {
         );
     }
 
+    fn drive<'a>(id: &'a str, path: &'a str, root: bool, read_only: bool) -> FcDrive<'a> {
+        FcDrive {
+            drive_id: id,
+            path_on_host: path,
+            is_root_device: root,
+            is_read_only: read_only,
+            discard: false,
+        }
+    }
+
     #[test]
     fn drive_body_pins_root_and_non_root_shapes() {
         // Root device, read-write (the plain-rootfs unverified boot).
-        let legacy_root = format!(
-            r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": {ro}}}"#,
-            rootfs = "/k/rootfs.ext4",
-            ro = false,
-        );
         assert_eq!(
-            drive_body("rootfs", "/k/rootfs.ext4", true, false),
-            legacy_root,
-        );
-        assert_eq!(
-            drive_body("rootfs", "/k/rootfs.ext4", true, false),
+            drive("rootfs", "/k/rootfs.ext4", true, false).body(),
             r#"{"drive_id": "rootfs", "path_on_host": "/k/rootfs.ext4", "is_root_device": true, "is_read_only": false}"#,
         );
 
         // Non-root read-only sidecar (verity/overlay/config/secrets shape).
-        let legacy_sidecar = format!(
-            r#"{{"drive_id": "verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-            path = "/k/rootfs.verity",
-        );
         assert_eq!(
-            drive_body("verity", "/k/rootfs.verity", false, true),
-            legacy_sidecar,
+            drive("verity", "/k/rootfs.verity", false, true).body(),
+            r#"{"drive_id": "verity", "path_on_host": "/k/rootfs.verity", "is_root_device": false, "is_read_only": true}"#,
+        );
+    }
+
+    #[test]
+    fn a_writable_drive_that_asks_for_discard_carries_it() {
+        let store = FcDrive {
+            discard: true,
+            ..drive("blk1", "/c/nix-store.img", false, false)
+        };
+        assert_eq!(
+            store.body(),
+            r#"{"drive_id": "blk1", "path_on_host": "/c/nix-store.img", "is_root_device": false, "is_read_only": false, "discard": true}"#,
+        );
+    }
+
+    #[test]
+    fn a_read_only_drive_never_offers_discard() {
+        // Firecracker refuses discard on a read-only drive, so asking for it
+        // must not turn a valid verity sidecar into a failed PUT.
+        let sidecar = FcDrive {
+            discard: true,
+            ..drive("verity", "/k/rootfs.verity", false, true)
+        };
+        assert!(!sidecar.body().contains("discard"), "{}", sidecar.body());
+    }
+
+    #[test]
+    fn a_drive_without_discard_is_what_firecracker_before_1_17_accepts() {
+        // Older Firecracker rejects unknown drive fields outright; the key must
+        // be absent, not `false`.
+        assert!(
+            !drive("rootfs", "/k/rootfs.ext4", true, false)
+                .body()
+                .contains("discard")
         );
     }
 

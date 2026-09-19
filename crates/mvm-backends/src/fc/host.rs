@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::ContentBlob;
 
-use mvm_core::config::{ARCH, fc_version, fc_version_short};
+use mvm_core::config::{ARCH, FC_CI_ASSETS_VERSION, fc_version};
 use mvm_vmm::host::config::*;
 use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
 use mvm_vmm::host::ui;
@@ -118,7 +118,7 @@ fn install_jailer_from_tarball(version: &str) -> Result<()> {
 ///
 /// Downloads run in parallel when both are needed.
 pub fn download_assets() -> Result<()> {
-    let fc_short = fc_version_short();
+    let fc_short = FC_CI_ASSETS_VERSION;
     ui::info("Downloading kernel and rootfs...");
     run_in_vm_visible(&format!(
         r#"
@@ -556,24 +556,22 @@ impl FcForkRestorer {
     }
 }
 
-/// The API handle a forked child's snapshot load runs through, carrying the CPU
-/// bound its admitted plan grants so the Firecracker the load starts is born
-/// inside the scope.
+/// The API handle a forked child's snapshot load runs through, carrying the
+/// child's name and the CPU bound its admitted plan grants so the Firecracker
+/// the load starts is born inside the child's own scope.
 ///
 /// A free function so the composition under test is the same one the restore
 /// performs: drop the grant here, or drop the bound from the launch, and
-/// `a_restored_child_is_cpu_bounded_by_its_admitted_grant` goes red.
+/// `a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant` goes red.
 fn child_io(
     child_vm_name: &str,
     child_dir: &std::path::Path,
     cpu_grant: Option<mvm_contract::grants::CpuGrant>,
 ) -> super::io::FirecrackerIO {
-    super::io::FirecrackerIO::new(child_dir.join("fc.socket")).bounded_by(cpu_grant.map(|grant| {
-        super::io::RestoreCpuBound {
-            machine_id: child_vm_name.to_string(),
-            grant,
-        }
-    }))
+    super::io::FirecrackerIO::new(child_dir.join("fc.socket")).bounded_by(super::io::RestoreBound {
+        machine_id: child_vm_name.to_string(),
+        cpu_grant,
+    })
 }
 
 impl FcForkRestorer {
@@ -602,10 +600,10 @@ mod tests {
     /// prefix the snapshot load will actually use — the same value
     /// `load_snapshot_inner` passes to the launcher — carries the quota.
     #[test]
-    fn a_restored_child_is_cpu_bounded_by_its_admitted_grant() {
+    fn a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
         let child_dir = scratch.path().join("child-state");
         std::fs::create_dir_all(&child_dir).unwrap();
@@ -618,31 +616,54 @@ mod tests {
 
         // Shell-quoted, because Firecracker's launch is a script: the prefix is
         // spliced ahead of the launch line rather than exec'd as argv.
-        let prefix = io.restore_scope_prefix(&child_dir);
-        assert!(prefix.starts_with("'systemd-run'"), "{prefix}");
+        let prefix = io.restore_scope_prefix(&child_dir, 512);
+        let launcher = scratch
+            .path()
+            .join("bin/systemd-run")
+            .canonicalize()
+            .expect("fake launcher has an absolute path");
+        assert!(
+            prefix.starts_with(&format!("'{}'", launcher.display())),
+            "{prefix}"
+        );
         assert!(prefix.contains("'CPUQuota=150%'"), "{prefix}");
+        assert!(prefix.contains("'MemoryMax=768M'"), "{prefix}");
+        assert!(prefix.contains("'TasksMax=1024'"), "{prefix}");
         assert!(prefix.trim_end().ends_with("'--'"), "{prefix}");
     }
 
-    /// A plan granting no share leaves the launch line exactly as it was, and
-    /// records no unit — so the read-back reports `Declared` rather than
-    /// claiming a bound.
+    /// A plan granting no share adds no CPU quota, but the fresh VMM is still
+    /// born inside its memory and task ceilings.
     #[test]
-    fn a_restored_child_without_a_grant_runs_unbounded_and_says_so() {
+    fn a_restored_child_without_a_grant_is_still_memory_and_task_bounded() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
         let child_dir = scratch.path().join("child-state");
         std::fs::create_dir_all(&child_dir).unwrap();
 
         let io = child_io("restored-child", &child_dir, None);
 
-        assert_eq!(io.restore_scope_prefix(&child_dir), "");
-        assert_eq!(
-            mvm_core::cpu_scope::enforced_grants_for_vm(&child_dir).cpu,
-            mvm_contract::protocol::resource_controls::EnforcedTier::Declared
-        );
+        let prefix = io.restore_scope_prefix(&child_dir, 1024);
+        assert!(!prefix.contains("CPUQuota"), "{prefix}");
+        assert!(prefix.contains("'MemoryMax=1280M'"), "{prefix}");
+        assert!(prefix.contains("restored-child-"), "{prefix}");
+    }
+
+    /// The snapshot's memory file is the guest's RAM, so its length sizes the
+    /// restored VMM's ceiling — rounded up, never down.
+    #[test]
+    fn a_snapshot_sizes_its_guest_from_the_memory_file() {
+        let dir = tempfile::tempdir().expect("snapshot dir");
+        assert_eq!(crate::fc::io::snapshot_guest_memory_mib(dir.path()), 0);
+        let mem = std::fs::File::create(
+            dir.path()
+                .join(mvm_core::crypto::snapshot_hmac::MEM_FILENAME),
+        )
+        .expect("memory file");
+        mem.set_len(512 * 1024 * 1024 + 1).expect("sparse length");
+        assert_eq!(crate::fc::io::snapshot_guest_memory_mib(dir.path()), 513);
     }
 
     #[cfg(target_os = "linux")]

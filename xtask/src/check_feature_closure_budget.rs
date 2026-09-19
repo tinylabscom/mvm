@@ -65,7 +65,13 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// out of `mvm-sdk` so the in-guest cdylib stops being compiled from a crate
 /// carrying the decorator parser. It vendors nothing — its dependencies were
 /// already present — so the single new closure node is the crate itself.
-const FEATURE_CLOSURE_BUDGET: usize = 484;
+///
+/// 485 (was 484): the first-party `mvm-hostlib` workspace crate, the host
+/// library the language SDKs load in place of running `mvmctl`. Its
+/// dependencies (`mvm-client`, `mvm-core`, `mvm-vmm`, `base64`, `libc`, `serde`,
+/// `serde_json`, `tokio`) were already present, so the single new closure node
+/// is the crate itself.
+const FEATURE_CLOSURE_BUDGET: usize = 485;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

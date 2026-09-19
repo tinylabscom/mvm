@@ -14,7 +14,10 @@ mod builder_vm_bootstrap_tests;
 pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
+#[cfg(test)]
+mod published_fetch_tests;
 mod sdk_sidecar;
+mod setpriv_source;
 mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
@@ -24,7 +27,7 @@ mod vm_helpers;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "release-artifact-bootstrap")]
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
 use super::artifact_verify::bump_verify_outcome;
 use super::artifact_verify::{
     ChecksumManifest, download_file, fetch_expected_hashes, verify_artifact_hash,

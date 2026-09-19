@@ -265,6 +265,7 @@ fn wasm_grants_from_config(config: &VmStartConfig) -> Result<Grants> {
             cpu: config.cpu_grant,
             wall_clock: None,
             egress: None,
+            drive: None,
         }),
     }
 }
@@ -1388,7 +1389,7 @@ mod engine {
             engine,
             linker,
             store,
-            enforced: EnforcedGrants { cpu, wall_clock },
+            enforced: EnforcedGrants::without_spawn_ceilings(cpu, wall_clock),
             _ticker: ticker,
         })
     }

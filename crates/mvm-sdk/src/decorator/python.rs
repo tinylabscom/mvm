@@ -322,8 +322,7 @@ fn eval_value(node: Node, source: &[u8], path: &Path, kwarg: &str) -> Result<Val
                 .map_err(|e| non_literal(node, path, kwarg, &format!("float parse: {e}")))?;
             Ok(Value::Float(parsed))
         }
-        "true" => Ok(Value::Bool(true)),
-        "false" => Ok(Value::Bool(false)),
+        "true" | "false" => Ok(Value::Bool),
         "none" => Ok(Value::None),
         "list" => {
             let mut items = Vec::new();

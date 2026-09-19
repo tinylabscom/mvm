@@ -141,17 +141,11 @@ skip = [
     # unify once the direct syscall call sites migrate together.
     "nix",
 
-    # vmm-sys-util 0.12.1 (Linux KVM: kvm-bindings 0.11 / kvm-ioctls 0.21)
-    # vs 0.15.0 (the rust-vmm virtio primitives vm-memory / virtio-queue on the
-    # in-house VMM path). The two rust-vmm families track different vmm-sys-util
-    # majors; this pair can only collapse once kvm-bindings / kvm-ioctls bump to
-    # vmm-sys-util 0.15. Shrink when they do.
-    "vmm-sys-util",
-
     # bitflags 1.3.2 vs 2.x. mvm depends on neither major directly — both are
     # wholly transitive, so there is no local pin to change. The 1.x side comes
-    # from both vmm-sys-util majors above; their latest releases still declare
-    # bitflags ^1.0 with no feature selecting 2.x. It costs exactly one crate.
+    # from vmm-sys-util 0.15 (via virtio-queue), whose latest release still
+    # declares bitflags ^1.0 with no feature selecting 2.x. It costs exactly one
+    # crate.
     "bitflags",
 ]
 skip-tree = []

@@ -52,9 +52,17 @@ pub(in crate::commands) enum CacheAction {
         /// (`stage0/`), the prebuilt default microVM image (`default-microvm/`),
         /// pulled OCI layers (`oci/`), and content-addressed mount images
         /// (`mount-images/`). These cost a re-fetch or rebuild the next time
-        /// they're needed, so they're opt-in. Implies `--orphan-dirs`.
+        /// they're needed, so they're opt-in. Implies `--orphan-dirs` and
+        /// `--stage0-store`.
         #[arg(long)]
         deep: bool,
+        /// Remove the Stage 0 Nix store image (`nix-store-stage0-<arch>.img`),
+        /// keeping the builder image it produced and the steady-state store.
+        /// Stage 0 keeps that store only to warm the next bootstrap, so this
+        /// trades a slower next `mvmctl bootstrap` for its disk. Refuses while
+        /// a Stage 0 bootstrap is running.
+        #[arg(long)]
+        stage0_store: bool,
     },
     /// Show cache directory path and disk usage
     Info {
@@ -361,10 +369,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             no_reap_orphans,
             orphan_dirs,
             deep,
+            stage0_store,
         } => {
             // `--deep` is the "reclaim everything regenerable" sledgehammer; it
             // subsumes the orphan-dir sweep.
             let orphan_dirs = orphan_dirs || deep;
+            // Decided before anything is removed, so an explicit request that
+            // has to refuse leaves the cache untouched.
+            let stage0_store_action = stage0_store_reclaim_action(
+                stage0_store,
+                deep,
+                super::super::env::builder_vm::stage0_bootstrap_in_flight(),
+            );
+            if stage0_store_action == Stage0StoreReclaim::Refuse {
+                anyhow::bail!(
+                    "a Stage 0 bootstrap appears to be in progress (lock held at \
+                     {}/builder-vm/stage0.lock). Refusing to remove the Stage 0 store from \
+                     under it; run this again once the bootstrap finishes.",
+                    cache_dir,
+                );
+            }
             // Reap orphaned per-VM helpers by default (liveness-aware: live VMs
             // are spared). Done first so subsequent steps see a clean process
             // list and so the sweeper can drop the per-VM cache dirs along with
@@ -511,8 +535,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
             // Untagged-checkpoint GC: tagged checkpoints are user-pinned; untagged
             // ones follow cache retention, unless a still-resumable session names
-            // one as its resume point. One corrupt meta.json makes list() fail,
-            // which logs a warning and skips the sweep — acceptable for a prune pass.
+            // one as its resume point or a retained checkpoint restores through
+            // it. One corrupt meta.json makes list() fail, which logs a warning
+            // and skips the sweep — acceptable for a prune pass.
             const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
             let ckpt_store = mvm_runtime::checkpoint::CheckpointStore::open();
             if dry_run {
@@ -662,6 +687,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            match stage0_store_action {
+                Stage0StoreReclaim::Clear => {
+                    let repair = mvm_build::builder_vm::clear_stage0_store_image(dry_run)
+                        .map_err(|e| anyhow::anyhow!("removing the Stage 0 store image: {e}"))?;
+                    if repair.existed {
+                        ui::info(&format!(
+                            "  Stage 0 Nix store {} ({}; the next bootstrap starts cold)",
+                            repair.path,
+                            human_bytes(repair.bytes_freed)
+                        ));
+                        removed += 1;
+                        freed += repair.bytes_freed;
+                    }
+                }
+                Stage0StoreReclaim::SkipInFlight => {
+                    ui::warn("Skipping the Stage 0 store: a Stage 0 bootstrap is in progress.")
+                }
+                Stage0StoreReclaim::Keep | Stage0StoreReclaim::Refuse => {}
+            }
+
             if removed == 0 {
                 ui::notice("Nothing to prune.");
             } else if dry_run {
@@ -694,6 +739,34 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
             Ok(())
         }
+    }
+}
+
+/// What `prune` does with the Stage 0 Nix store image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage0StoreReclaim {
+    /// Not asked for.
+    Keep,
+    /// Asked for and safe to remove.
+    Clear,
+    /// Named explicitly while a bootstrap holds it: fail the whole prune, so
+    /// the operator knows the one thing they asked for did not happen.
+    Refuse,
+    /// Swept up by `--deep` while a bootstrap holds it: leave it and say so,
+    /// rather than failing everything else `--deep` would reclaim.
+    SkipInFlight,
+}
+
+fn stage0_store_reclaim_action(
+    requested: bool,
+    deep: bool,
+    bootstrap_in_flight: bool,
+) -> Stage0StoreReclaim {
+    match (requested, deep, bootstrap_in_flight) {
+        (false, false, _) => Stage0StoreReclaim::Keep,
+        (_, _, false) => Stage0StoreReclaim::Clear,
+        (true, _, true) => Stage0StoreReclaim::Refuse,
+        (false, true, true) => Stage0StoreReclaim::SkipInFlight,
     }
 }
 
@@ -839,38 +912,56 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
     (removed, freed)
 }
 
-/// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
-/// are user-pinned and never swept; neither is a checkpoint in `pinned` — the
-/// resume point of a session that is still `Active` or `Hibernated`. Without
-/// that guard, a session parked longer than `max_age_secs` would lose the
-/// checkpoint it resumes from and become permanently unresumable: the session
-/// record survives, pointing at nothing. Returns the count removed.
+/// Remove every checkpoint nothing retains. A checkpoint is retained for its
+/// own sake when it is tagged, younger than `max_age_secs`, or in `pinned` —
+/// the resume point of a session that is still `Active` or `Hibernated`, which
+/// would otherwise become permanently unresumable, its record pointing at
+/// nothing. Restoring walks the whole parent chain, so every ancestor of a
+/// retained checkpoint is retained too; only what lies outside that closure is
+/// removed. Returns the count removed.
 pub(super) fn sweep_untagged_checkpoints(
     store: &mvm_runtime::checkpoint::CheckpointStore,
     now_unix: u64,
     max_age_secs: u64,
     pinned: &std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>,
 ) -> anyhow::Result<usize> {
+    let cut = mvm_runtime::checkpoint::RetentionCut {
+        now_unix,
+        max_age_secs,
+        session_pinned: pinned,
+    };
     let mut removed = 0;
-    for m in store.list()? {
-        if m.tag.is_some() {
-            continue;
+    for verdict in mvm_runtime::checkpoint::retention_verdicts(store.list()?, &cut)? {
+        let id = &verdict.meta.id;
+        match verdict.kept {
+            Some(reason) => {
+                if let Some(note) = kept_checkpoint_note(&reason) {
+                    println!("Kept checkpoint: {id} ({note})");
+                }
+            }
+            None => {
+                store.remove(id)?;
+                println!("Removed checkpoint: {id} (untagged, aged out)");
+                removed += 1;
+            }
         }
-        if now_unix.saturating_sub(m.created_unix) <= max_age_secs {
-            continue;
-        }
-        if pinned.contains(&m.meta_digest) {
-            println!(
-                "Kept checkpoint: {} (pinned by a parked session's resume point)",
-                m.id
-            );
-            continue;
-        }
-        store.remove(&m.id)?;
-        println!("Removed checkpoint: {} (untagged, aged out)", m.id);
-        removed += 1;
     }
     Ok(removed)
+}
+
+/// The note `cache prune` prints for a checkpoint it kept, or `None` for the
+/// reasons that need no explanation: a tag, or an age inside the cut.
+fn kept_checkpoint_note(reason: &mvm_runtime::checkpoint::Retention) -> Option<String> {
+    use mvm_runtime::checkpoint::Retention;
+    match reason {
+        Retention::Tagged | Retention::Young => None,
+        Retention::SessionResumePoint => {
+            Some("pinned by a parked session's resume point".to_string())
+        }
+        Retention::AncestorOf(descendant) => Some(format!(
+            "ancestor of retained checkpoint {descendant}, which restores through it"
+        )),
+    }
 }
 
 /// Number of non-active pack versions `mvmctl cache prune` keeps around per
@@ -1137,107 +1228,332 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prune_removes_untagged_keeps_tagged() {
-        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
-        use mvm_runtime::checkpoint::CheckpointStore;
+    fn the_stage0_store_is_kept_unless_asked_for() {
+        assert_eq!(
+            stage0_store_reclaim_action(false, false, false),
+            Stage0StoreReclaim::Keep
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, false, true),
+            Stage0StoreReclaim::Keep
+        );
+    }
 
-        let tmp = tempfile::tempdir().unwrap();
-        let store = CheckpointStore::at(tmp.path());
-        let mk = |id: &str, tag: Option<&str>, age: u64| {
+    #[test]
+    fn the_stage0_store_is_cleared_when_named_or_swept_by_deep() {
+        assert_eq!(
+            stage0_store_reclaim_action(true, false, false),
+            Stage0StoreReclaim::Clear
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, true, false),
+            Stage0StoreReclaim::Clear
+        );
+    }
+
+    #[test]
+    fn a_running_bootstrap_refuses_an_explicit_request_and_is_skipped_by_deep() {
+        assert_eq!(
+            stage0_store_reclaim_action(true, false, true),
+            Stage0StoreReclaim::Refuse
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(true, true, true),
+            Stage0StoreReclaim::Refuse,
+            "naming it explicitly still refuses under --deep"
+        );
+        assert_eq!(
+            stage0_store_reclaim_action(false, true, true),
+            Stage0StoreReclaim::SkipInFlight
+        );
+    }
+
+    /// Checkpoint fixtures for the sweep tests. `created_unix` of 0 is aged out
+    /// under every cut the tests use; [`SWEEP_NOW`] is young under a one-second
+    /// cut.
+    mod ckpt_fixture {
+        use mvm_core::checkpoint::{
+            CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
+        };
+        pub use mvm_runtime::checkpoint::CheckpointStore;
+
+        pub const SWEEP_NOW: u64 = 10_000_000;
+        pub const AGED: u64 = 0;
+
+        pub fn ckpt(
+            id: &str,
+            tag: Option<&str>,
+            parent: Option<&CheckpointMeta>,
+            created_unix: u64,
+        ) -> CheckpointMeta {
+            ckpt_with_parent_digest(id, tag, parent.map(|p| p.meta_digest.clone()), created_unix)
+        }
+
+        pub fn ckpt_with_parent_digest(
+            id: &str,
+            tag: Option<&str>,
+            parent: Option<CheckpointDigest>,
+            created_unix: u64,
+        ) -> CheckpointMeta {
             CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
                 .tag(tag.map(String::from))
-                .content(vec![mvm_core::checkpoint::ContentBlob {
+                .parent(parent)
+                .content(vec![ContentBlob {
                     name: "rootfs.ext4".into(),
                     sha256: "h".into(),
                 }])
                 .supervisor_config_digest("d")
-                .created_unix(age)
+                .created_unix(created_unix)
                 .build()
-        };
-        store.write_meta(&mk("old-untagged", None, 0)).unwrap();
+        }
+
+        pub fn present(store: &CheckpointStore, id: &str) -> bool {
+            store.read_meta(&CheckpointId::new(id)).is_ok()
+        }
+
+        pub fn digest_of_nothing() -> CheckpointDigest {
+            CheckpointDigest::parse(format!("sha256:{}", "e".repeat(64))).unwrap()
+        }
+    }
+
+    #[test]
+    fn prune_removes_untagged_keeps_tagged() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
         store
-            .write_meta(&mk("old-tagged", Some("gold"), 0))
+            .write_meta(&ckpt("old-untagged", None, None, AGED))
+            .unwrap();
+        store
+            .write_meta(&ckpt("old-tagged", Some("gold"), None, AGED))
             .unwrap();
 
-        let now = 10_000_000u64;
         let removed =
-            super::sweep_untagged_checkpoints(&store, now, 1, &Default::default()).unwrap();
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
         assert_eq!(removed, 1);
-        assert!(store.read_meta(&CheckpointId::new("old-tagged")).is_ok());
-        assert!(store.read_meta(&CheckpointId::new("old-untagged")).is_err());
+        assert!(present(&store, "old-tagged"));
+        assert!(!present(&store, "old-untagged"));
     }
 
     #[test]
     fn prune_skips_a_checkpoint_pinned_by_a_parked_session() {
-        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
-        use mvm_runtime::checkpoint::CheckpointStore;
+        use ckpt_fixture::*;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path());
-        let mk = |id: &str, age: u64| {
-            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
-                .content(vec![mvm_core::checkpoint::ContentBlob {
-                    name: "rootfs.ext4".into(),
-                    sha256: "h".into(),
-                }])
-                .supervisor_config_digest("d")
-                .created_unix(age)
-                .build()
-        };
-        let pinned_meta = mk("pinned-untagged", 0);
-        let unpinned_meta = mk("unpinned-untagged", 0);
+        let pinned_meta = ckpt("pinned-untagged", None, None, AGED);
         store.write_meta(&pinned_meta).unwrap();
-        store.write_meta(&unpinned_meta).unwrap();
+        store
+            .write_meta(&ckpt("unpinned-untagged", None, None, AGED))
+            .unwrap();
 
-        let mut pinned = std::collections::BTreeSet::new();
-        pinned.insert(pinned_meta.meta_digest.clone());
-
-        let now = 10_000_000u64;
-        let removed = super::sweep_untagged_checkpoints(&store, now, 1, &pinned).unwrap();
+        let pinned = std::collections::BTreeSet::from([pinned_meta.meta_digest.clone()]);
+        let removed = super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &pinned).unwrap();
         assert_eq!(removed, 1, "only the unpinned checkpoint should be reaped");
         assert!(
-            store
-                .read_meta(&CheckpointId::new("pinned-untagged"))
-                .is_ok(),
+            present(&store, "pinned-untagged"),
             "a checkpoint pinned by a parked session must survive the sweep"
         );
+        assert!(!present(&store, "unpinned-untagged"));
+    }
+
+    /// Restoring a checkpoint walks its whole parent chain and refuses when any
+    /// ancestor's record is gone, so a tagged checkpoint is only as durable as
+    /// the untagged parent it was forked from.
+    #[test]
+    fn prune_keeps_the_aged_untagged_parent_of_a_tagged_checkpoint() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let parent = ckpt("parent", None, None, AGED);
+        let child = ckpt("tagged-child", Some("gold"), Some(&parent), AGED);
+        store.write_meta(&parent).unwrap();
+        store.write_meta(&child).unwrap();
+
+        let removed =
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
+        assert_eq!(removed, 0);
         assert!(
-            store
-                .read_meta(&CheckpointId::new("unpinned-untagged"))
-                .is_err()
+            present(&store, "parent"),
+            "the tagged child restores through its parent; reaping it breaks the child"
+        );
+        assert!(present(&store, "tagged-child"));
+    }
+
+    #[test]
+    fn prune_keeps_the_whole_ancestry_of_a_session_resume_point() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let grandparent = ckpt("grandparent", None, None, AGED);
+        let parent = ckpt("parent", None, Some(&grandparent), AGED);
+        let resume_point = ckpt("resume-point", None, Some(&parent), AGED);
+        for m in [&grandparent, &parent, &resume_point] {
+            store.write_meta(m).unwrap();
+        }
+
+        let pinned = std::collections::BTreeSet::from([resume_point.meta_digest.clone()]);
+        let removed = super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &pinned).unwrap();
+        assert_eq!(removed, 0);
+        for id in ["resume-point", "parent", "grandparent"] {
+            assert!(
+                present(&store, id),
+                "{id} is on the parked session's restore path and must survive"
+            );
+        }
+    }
+
+    /// A young checkpoint is kept by age, but its old parent is due in the same
+    /// sweep. Reaping the parent would leave the survivor unrestorable.
+    #[test]
+    fn prune_keeps_the_aged_parent_of_a_young_checkpoint() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let parent = ckpt("old-parent", None, None, AGED);
+        let child = ckpt("young-child", None, Some(&parent), SWEEP_NOW);
+        store.write_meta(&parent).unwrap();
+        store.write_meta(&child).unwrap();
+
+        let removed =
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
+        assert_eq!(removed, 0);
+        assert!(present(&store, "old-parent"));
+        assert!(present(&store, "young-child"));
+    }
+
+    #[test]
+    fn prune_still_removes_an_aged_checkpoint_nothing_retained_descends_from() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let kept_parent = ckpt("kept-parent", None, None, AGED);
+        let kept_child = ckpt("kept-child", Some("gold"), Some(&kept_parent), AGED);
+        let unrelated_root = ckpt("unrelated-root", None, None, AGED);
+        let unrelated_leaf = ckpt("unrelated-leaf", None, Some(&unrelated_root), AGED);
+        for m in [&kept_parent, &kept_child, &unrelated_root, &unrelated_leaf] {
+            store.write_meta(m).unwrap();
+        }
+
+        let removed =
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
+        assert_eq!(
+            removed, 2,
+            "the unrelated chain is reachable from nothing kept"
+        );
+        assert!(present(&store, "kept-parent"));
+        assert!(present(&store, "kept-child"));
+        assert!(!present(&store, "unrelated-root"));
+        assert!(!present(&store, "unrelated-leaf"));
+    }
+
+    /// A parent link that already resolves to nothing ends that branch of the
+    /// walk; it is not a reason to abandon the prune.
+    #[test]
+    fn prune_tolerates_a_dangling_parent_link() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        store
+            .write_meta(&ckpt_with_parent_digest(
+                "young-orphan",
+                None,
+                Some(digest_of_nothing()),
+                SWEEP_NOW,
+            ))
+            .unwrap();
+        store
+            .write_meta(&ckpt_with_parent_digest(
+                "aged-orphan",
+                None,
+                Some(digest_of_nothing()),
+                AGED,
+            ))
+            .unwrap();
+
+        let removed =
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
+        assert_eq!(removed, 1);
+        assert!(present(&store, "young-orphan"));
+        assert!(!present(&store, "aged-orphan"));
+    }
+
+    /// Genuine content-addresses cannot form a cycle, but edited records on
+    /// disk can. The walk must terminate and still keep what is reachable.
+    #[test]
+    fn prune_terminates_on_a_parent_cycle_and_keeps_what_is_reachable() {
+        use ckpt_fixture::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let mut a = ckpt("cycle-a", None, None, AGED);
+        let mut b = ckpt("cycle-b", None, None, AGED);
+        a.parent = Some(b.meta_digest.clone());
+        b.parent = Some(a.meta_digest.clone());
+        let young = ckpt("young-into-cycle", None, Some(&a), SWEEP_NOW);
+        for m in [&a, &b, &young] {
+            store.write_meta(m).unwrap();
+        }
+
+        let removed =
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap();
+        assert_eq!(removed, 0);
+        for id in ["cycle-a", "cycle-b", "young-into-cycle"] {
+            assert!(
+                present(&store, id),
+                "{id} is reachable from a young checkpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn kept_checkpoint_note_explains_only_the_non_obvious_reasons() {
+        use mvm_core::checkpoint::CheckpointId;
+        use mvm_runtime::checkpoint::Retention;
+
+        assert_eq!(super::kept_checkpoint_note(&Retention::Tagged), None);
+        assert_eq!(super::kept_checkpoint_note(&Retention::Young), None);
+        assert!(
+            super::kept_checkpoint_note(&Retention::SessionResumePoint)
+                .unwrap()
+                .contains("resume point")
+        );
+        let note =
+            super::kept_checkpoint_note(&Retention::AncestorOf(CheckpointId::new("tagged-child")))
+                .unwrap();
+        assert!(
+            note.contains("ancestor of retained checkpoint tagged-child"),
+            "{note}"
         );
     }
 
     #[test]
     fn pinned_checkpoints_derived_from_a_real_session_protects_its_checkpoint() {
-        // Task 1's other test builds the pinned set by hand, which proves the
+        // The other pin tests build the pinned set by hand, which proves the
         // sweep honours whatever set it's handed but not that the set the CLI
         // actually derives from disk is the right one. This test closes that
         // gap: a real `AgentSessionRecord` naming a real checkpoint's
         // `meta_digest` as its `parent_checkpoint`, run through the same
         // `pinned_checkpoints` the prune path calls, must protect that exact
-        // checkpoint — and only that one.
+        // checkpoint and its ancestry — and nothing else.
+        use ckpt_fixture::*;
         use mvm_contract::protocol::agent_session::AgentSessionId;
-        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
         use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
-        use mvm_runtime::checkpoint::CheckpointStore;
 
         let ckpt_tmp = tempfile::tempdir().unwrap();
         let ckpt_store = CheckpointStore::at(ckpt_tmp.path());
-        let mk = |id: &str, age: u64| {
-            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
-                .content(vec![mvm_core::checkpoint::ContentBlob {
-                    name: "rootfs.ext4".into(),
-                    sha256: "h".into(),
-                }])
-                .supervisor_config_digest("d")
-                .created_unix(age)
-                .build()
-        };
-        let resumed_from = mk("resumed-from", 0);
-        let orphaned = mk("orphaned", 0);
-        ckpt_store.write_meta(&resumed_from).unwrap();
-        ckpt_store.write_meta(&orphaned).unwrap();
+        let ancestor = ckpt("ancestor", None, None, AGED);
+        let resumed_from = ckpt("resumed-from", None, Some(&ancestor), AGED);
+        let orphaned = ckpt("orphaned", None, None, AGED);
+        for m in [&ancestor, &resumed_from, &orphaned] {
+            ckpt_store.write_meta(m).unwrap();
+        }
 
         let session_tmp = tempfile::tempdir().unwrap();
         let session_store = AgentSessionStore::at(session_tmp.path());
@@ -1253,28 +1569,29 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            retain_until_unix: None,
+            last_transition: None,
         };
         session_store.write(&record).unwrap();
 
         let pinned = mvm_runtime::agent_session::pinned_checkpoints(&session_store).unwrap();
 
-        let now = 10_000_000u64;
-        let removed = super::sweep_untagged_checkpoints(&ckpt_store, now, 1, &pinned).unwrap();
+        let removed =
+            super::sweep_untagged_checkpoints(&ckpt_store, SWEEP_NOW, 1, &pinned).unwrap();
         assert_eq!(removed, 1, "only the orphaned checkpoint should be reaped");
         assert!(
-            ckpt_store
-                .read_meta(&CheckpointId::new("resumed-from"))
-                .is_ok(),
+            present(&ckpt_store, "resumed-from"),
             "the checkpoint the parked session actually resumes from must survive"
         );
         assert!(
-            ckpt_store
-                .read_meta(&CheckpointId::new("orphaned"))
-                .is_err(),
+            present(&ckpt_store, "ancestor"),
+            "resuming walks through the ancestor, so it must survive too"
+        );
+        assert!(
+            !present(&ckpt_store, "orphaned"),
             "a checkpoint no session names must still be reaped"
         );
     }
-
     #[test]
     fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {
         // The cache-prune wiring sweeps `<audit>/flow-bytes/`; assert that

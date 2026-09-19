@@ -60,15 +60,9 @@ use std::process::ExitCode;
 // pipeline runner live here so `cargo test` on macOS exercises the
 // dispatch logic via shell stubs without paying for a Linux cross-
 // compile. The Linux-only `linux` module composes them with the
-// real PID-1 mount / power-off dance.
-//
-// `allow(dead_code)` because the modules are consumed from
-// `linux::run_install_job` on Linux and from `#[cfg(test)]` blocks
-// on every host. On non-Linux non-test builds (workspace ergonomics
-// + reproducible builds) every public item looks "unused" — clippy
-// would flag them otherwise. Real dead code would still surface as
-// red because the tests would lose coverage.
-#[allow(dead_code)]
+// real PID-1 mount / power-off dance, so outside Linux they compile
+// only for tests: a non-Linux, non-test build has no caller for them.
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/boot_timings.rs"]
 mod boot_timings;
 /// Hand-rolled parser for the `HostVmRequest` wire shape the
@@ -76,7 +70,7 @@ mod boot_timings;
 /// Cross-platform; the Linux dispatch loop calls into it after
 /// reading the framed body. Tested against the host's
 /// serde-derived encoding so schema drift on either side is loud.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/builder_request.rs"]
 mod builder_request;
 /// Hand-rolled `HostVmResponse::Result` JSON. Cross-platform
@@ -84,18 +78,19 @@ mod builder_request;
 /// `mvm_build::builder_protocol`'s typed serde via a dev-dep test,
 /// without dragging serde_json into the production builder-init
 /// binary.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/dispatch_response.rs"]
 mod dispatch_response;
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/install.rs"]
 mod install;
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/install_spec.rs"]
 mod install_spec;
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/network.rs"]
 mod network;
+#[cfg(any(target_os = "linux", test))]
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/proxy.rs"]
 mod proxy;
@@ -103,15 +98,14 @@ mod proxy;
 /// backend (Firecracker today). Cross-platform trait +
 /// state-dir/lifecycle logic (tested on macOS); the signal-based
 /// stop/status helpers are Linux-only.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/workload.rs"]
 mod workload;
 /// In-host-VM vsock forwarder (the nesting hop). The cross-platform
 /// CONNECT+splice core is unit-tested on every host; the AF_VSOCK
-/// listener wiring is Linux-only. `unix`-gated because it uses
+/// listener wiring is Linux-only. Tests need `unix` because it uses
 /// `UnixStream` (the crate is inert on Windows).
-#[cfg(unix)]
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", all(unix, test)))]
 #[path = "mvm-host-vm-init/workload_proxy.rs"]
 mod workload_proxy;
 
@@ -119,7 +113,6 @@ mod workload_proxy;
 /// `/etc/mvm/hooks/before_build.sh` inside a chroot. Linux-only; the
 /// module is compiled on other hosts only for workspace ergonomics.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 #[path = "mvm-host-vm-init/builder_hooks.rs"]
 mod builder_hooks;
 

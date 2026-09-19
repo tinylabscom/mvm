@@ -56,22 +56,25 @@
         })
         { inherit workspaceRoot; };
 
-      # mvmctl semver pinned to match `[workspace.package].version` in
-      # the root Cargo.toml.  Kept in lock-step with the runtime overlay
-      # VERSION pin.
-      initramfsVersion = "0.18.0";
+      # mvmctl semver, the same pin the runtime overlay carries.
+      # `InitramfsResolver` refuses an initramfs whose VERSION differs from
+      # the running mvmctl's; `../version.nix` says how the pin is kept
+      # equal to the workspace version.
+      initramfsVersion = import ../version.nix;
 
-      # Static guest agent — the only binary in the initramfs.
-      mvmGuestStaticFor = system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-guest-agent-static.nix") {
-          inherit pkgs;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-          # The universal initramfs always ships the production agent.
-        };
+      # The `mvm` flake, evaluated against this flake's pinned nixpkgs and the
+      # filtered workspace. The recipes never touch microvm.nix, which this
+      # flake does not pin.
+      mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs {
+        self = { };
+        inherit nixpkgs;
+        microvm = throw "the mvm guest recipes do not evaluate microvm.nix";
+        mvm-workspace = workspace;
+      };
+
+      # Static guest agent — the only binary in the initramfs. The universal
+      # initramfs always ships the production agent.
+      mvmGuestStaticFor = system: mvm.packages.${system}.mvm-guest-agent-static;
 
       # Kernel version is part of the content-addressing tuple.  Until the
       # kernel flake is wired to feed its version here, default to the
@@ -118,9 +121,12 @@
 
             mkdir -p "$out"
 
-            # Deterministic newc cpio: sorted paths, root owner, no timestamps.
+            # Deterministic newc cpio: sorted paths, root owner, epoch
+            # timestamps, and `--reproducible` so the headers carry renumbered
+            # inodes and a zero device instead of the build host's.
             ( cd "$staging" \
-              && find . -print0 | sort -z | cpio --null -o -H newc --owner=0:0 \
+              && find . -print0 | LC_ALL=C sort -z \
+                | cpio --null -o -H newc --owner=0:0 --reproducible \
             ) > "$TMPDIR/initramfs.cpio"
 
             # Gzip without filename/timestamp in the header.

@@ -369,6 +369,207 @@
         }
       ]
     },
+    "DriveFileOperation": {
+      "description": "Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "Read"
+          ],
+          "properties": {
+            "Read": {
+              "type": "object",
+              "required": [
+                "length",
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "length": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "offset": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Write"
+          ],
+          "properties": {
+            "Write": {
+              "type": "object",
+              "required": [
+                "content",
+                "mode",
+                "path"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "create_parents": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "follow_symlinks": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "mode": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "offset": {
+                  "default": null,
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "path": {
+                  "type": "string"
+                },
+                "truncate": {
+                  "default": true,
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Stat"
+          ],
+          "properties": {
+            "Stat": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DriveGrant": {
+      "description": "The bounded authority to drive one plan-selected program and its workspace.",
+      "type": "object",
+      "required": [
+        "max_bytes_in",
+        "max_bytes_out",
+        "program_id",
+        "ttl",
+        "workspace_roots"
+      ],
+      "properties": {
+        "max_bytes_in": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "max_bytes_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "program_id": {
+          "type": "string"
+        },
+        "ttl": {
+          "description": "Lifetime of one opened drive session, in seconds.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1.0
+        },
+        "workspace_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "DriveRefusal": {
+      "description": "Stable reason a drive request was refused. No request content or secret material is carried back or written to the host audit chain.",
+      "type": "string",
+      "enum": [
+        "not_granted",
+        "program_mismatch",
+        "outside_workspace_roots",
+        "input_limit_exceeded",
+        "output_limit_exceeded"
+      ]
+    },
     "EntrypointEvent": {
       "description": "One event in the streaming response of a `RunEntrypoint` call.\n\n`Stdout` / `Stderr` carry bytes from the wrapper's respective streams. `Exit` and `Error` are terminal — they end the response stream for one call. The agent emits exactly one terminal event per call.\n\nBuffered output is split into bounded `Stdout` and `Stderr` events without changing the protocol shape: the host reads frames until terminal.",
       "oneOf": [
@@ -1314,6 +1515,7 @@
             "integration_status",
             "entrypoint_status",
             "run_entrypoint",
+            "drive",
             "run_extension",
             "filesystem_rpc",
             "process_rpc",
@@ -1623,6 +1825,72 @@
                   "type": "integer",
                   "format": "uint64",
                   "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Start the one plan-selected program under its drive grant. The host echoes the opaque program identity from the admitted plan; the guest compares it with the independently verified pinned grant before it resolves the boot-validated executable.",
+          "type": "object",
+          "required": [
+            "DriveOpen"
+          ],
+          "properties": {
+            "DriveOpen": {
+              "type": "object",
+              "required": [
+                "cwd",
+                "program_id"
+              ],
+              "properties": {
+                "cwd": {
+                  "type": "string"
+                },
+                "env": {
+                  "description": "Host-synthesized egress and secret-placeholder environment. This is not an arbitrary caller surface: the host drive API builds it through the same synthesis seam used by `RunEntrypoint`.",
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "maxItems": 2,
+                    "minItems": 2
+                  }
+                },
+                "program_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Perform one bounded filesystem operation inside the drive grant's workspace roots. The existing filesystem RPC handlers execute the operation after the drive-specific host and guest checks pass.",
+          "type": "object",
+          "required": [
+            "DriveFile"
+          ],
+          "properties": {
+            "DriveFile": {
+              "type": "object",
+              "required": [
+                "operation"
+              ],
+              "properties": {
+                "operation": {
+                  "$ref": "#/definitions/DriveFileOperation"
                 }
               },
               "additionalProperties": false
@@ -2978,6 +3246,41 @@
           "additionalProperties": false
         },
         {
+          "description": "One event from the grant-gated drive program. The payload deliberately reuses the established bounded entrypoint stream shape; the distinct envelope keeps the request/response contract unambiguous.",
+          "type": "object",
+          "required": [
+            "DriveEvent"
+          ],
+          "properties": {
+            "DriveEvent": {
+              "$ref": "#/definitions/EntrypointEvent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Drive authorization failed before any filesystem access or process spawn. The host records this typed reason in its signed audit chain.",
+          "type": "object",
+          "required": [
+            "DriveRefused"
+          ],
+          "properties": {
+            "DriveRefused": {
+              "type": "object",
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "$ref": "#/definitions/DriveRefusal"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "The exact active extension invocation accepted cancellation.",
           "type": "string",
           "enum": [
@@ -3068,8 +3371,19 @@
                     "null"
                   ]
                 },
+                "reseed_shortfall": {
+                  "description": "Why a requested rotation did not happen, so the host can tell an image that cannot reseed from a reseed that failed. `None` when the guest reseeded or no rotation was requested.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ReseedShortfall"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "reseeded": {
-                  "description": "`true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.",
+                  "description": "`true` iff the delivered generation token changed and the guest rekeyed its kernel generator from it (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore) and for a reseed that failed. Defaults to `false` on the wire for forward-compat with a pre-rotation ack.",
                   "default": false,
                   "type": "boolean"
                 },
@@ -4045,6 +4359,25 @@
       },
       "additionalProperties": false
     },
+    "ReseedShortfall": {
+      "description": "Why a restored guest did not reseed its kernel generator when asked to.",
+      "oneOf": [
+        {
+          "description": "The guest has no reseed helper: its init predates restore reseeding, or the helper could not be started at boot. Rebuilding the image is the fix; retrying is not.",
+          "type": "string",
+          "enum": [
+            "helper_missing"
+          ]
+        },
+        {
+          "description": "A helper exists but the reseed did not complete.",
+          "type": "string",
+          "enum": [
+            "failed"
+          ]
+        }
+      ]
+    },
     "RootfsConfig": {
       "description": "Root device the guest mounts as `/`.  Three mount shapes, selected by which optional fields are set, plus one mount-free shape:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot. - **in place** (`in_place`): the runtime already owns `/` — a shared-kernel container whose root is the image itself. Nothing is mounted and no pivot happens; activation is the privilege drop and the gate flip only.",
       "type": "object",
@@ -4241,6 +4574,13 @@
           ]
         },
         {
+          "description": "The opened call's total input-byte authority would be exceeded. This is permanent for the call; retrying the same or a later frame cannot make capacity return.",
+          "type": "string",
+          "enum": [
+            "cap_exceeded"
+          ]
+        },
+        {
           "description": "The workload's stdin is gone — it exited or closed the fd. Retrying will not help.",
           "type": "string",
           "enum": [
@@ -4322,6 +4662,17 @@
         "verbs"
       ],
       "properties": {
+        "drive": {
+          "description": "Drive authority copied from the admitted signed plan. It rides inside this host-signed envelope so the guest can enforce the same roots, program identity, byte bounds, and lifetime without trusting request fields.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DriveGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "not_after": {
           "type": "string",
           "format": "date-time"

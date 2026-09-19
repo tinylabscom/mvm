@@ -8,7 +8,7 @@
 //! The tree here MUST match what `.github/workflows/ci.yml::ext4-real-mount`
 //! asserts after mounting.
 
-use mvm_fs::ext4::{Node, build_image};
+use mvm_fs::ext4::{Node, Owner, build_image};
 
 fn main() {
     let out = std::env::args()
@@ -24,18 +24,21 @@ fn main() {
             path: "/etc".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/etc/marker".into(),
             mode: 0o644,
             data: b"extent-tree marker\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/huge".into(),
             mode: 0o644,
             data: big,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
 

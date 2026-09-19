@@ -189,13 +189,7 @@ impl MachineAction {
     }
 }
 
-/// Settle and validate the networking configuration before anything boots.
-///
-/// The public raw-packet mode is retired. Every newly admitted networked
-/// workload uses the authenticated, host-mediated FlowMux endpoint.
-pub(in crate::commands) fn preflight_network() -> mvm_contract::plan::NetworkMode {
-    mvm_contract::plan::NetworkMode::HostVsockProxy
-}
+pub(in crate::commands) use mvm_client::launch::persistent::preflight_network;
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
 /// flags and translates into the same admitted execution path.
@@ -435,38 +429,7 @@ impl MachineRunArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LocalDeployment {
-    pub directory: PathBuf,
-    pub rootfs: PathBuf,
-    pub boot_artifact_sha256: String,
-}
-
-/// Validate and resolve a local deployment before it can influence boot.
-/// Both the record schema and the exact selected rootfs bytes are checked.
-pub(super) fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
-    let directory = fs::canonicalize(path)
-        .with_context(|| format!("resolving deployment directory {}", path.display()))?;
-    if !directory.is_dir() {
-        bail!(
-            "deployment path is not a directory: {}",
-            directory.display()
-        );
-    }
-    let record_path = directory.join("deploy.json");
-    let rootfs = directory.join("rootfs.ext4");
-    let record = mvm_sdk::deploy::read_deploy_record(&record_path)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("reading deployment record {}", record_path.display()))?;
-    mvm_sdk::deploy::verify_boot_artifact(&rootfs, &record.boot_artifact)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("verifying deployment boot artifact {}", rootfs.display()))?;
-    Ok(LocalDeployment {
-        directory,
-        rootfs,
-        boot_artifact_sha256: record.boot_artifact.sha256,
-    })
-}
+pub(super) use mvm_client::launch::machine_start::{LocalDeployment, resolve_local_deployment};
 
 /// Turn a validated deployment into the common transient-run image source.
 pub(super) fn local_deployment_image_source(
@@ -622,20 +585,27 @@ fn machine_run_spec(
         );
     };
     let config = mvm_core::user_config::load(None);
+    let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.run.cpu_limit,
         timeout_secs: args.run.timeout,
         allow_host: &args.run.allow_host,
         peer: &args.run.peer,
         net: args.run.net,
+        network_preset: args.run.network_preset,
         grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
         // reads no project manifest; `machine create` is the verb that sources
         // a `[grants]` table.
         manifest: None,
         config: &config,
-        ai: None,
+        ai: ai.as_ref(),
     })?;
+    let (net, allow_host) = super::shared::persisted_run_network(
+        args.run.net,
+        args.run.network_preset,
+        &args.run.allow_host,
+    );
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
     Ok(MachineSpec {
@@ -646,10 +616,10 @@ fn machine_run_spec(
         deployment,
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
-        net: args.run.net,
-        allow_host: args.run.allow_host.clone(),
+        net,
+        allow_host,
         peer: Vec::new(),
-        ai: None,
+        ai,
         ports: args.port.clone(),
         cpus: args.run.cpus,
         memory: args.run.memory.clone(),
@@ -1138,6 +1108,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         allow_host: &allow_host,
         peer: inputs.peer,
         net,
+        network_preset: None,
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
         config: &config,
@@ -1472,10 +1443,7 @@ fn rm_running_refusal(running: &[String]) -> Option<String> {
     ))
 }
 
-fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
-    spec.resolved_digest = Some(resolved_digest);
-    spec.last_started_at = Some(mvm_core::time::utc_now());
-}
+use mvm_client::launch::machine_start::record_machine_started as mark_machine_started;
 
 /// Human/JSON notice printed when `machine start` targets a machine that is
 /// already running. Pure so the wording is unit-testable; the liveness probe

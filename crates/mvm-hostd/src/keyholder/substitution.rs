@@ -47,10 +47,10 @@ impl SubstitutionRegistry {
     /// Each call returns a distinct high-entropy token, so two requests for
     /// the same secret are not linkable by their placeholders.
     ///
-    /// The 24 bytes come from the OS RNG. This is the reason the registry is
+    /// The random bytes come from the OS RNG. This is the reason the registry is
     /// split rather than moved whole.
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
-        let mut bytes = [0u8; 24];
+        let mut bytes = [0u8; mvm_contract::substitution::SECRET_PLACEHOLDER_HEX_LEN / 2];
         rand::rng().fill_bytes(&mut bytes);
         let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
         self.map.insert(ph.clone(), secret);
@@ -136,7 +136,7 @@ impl<'a> NetworkEndpoint<'a> {
     /// carries the raw credential). Refuses — without decrypting — when the
     /// placeholder is unknown, the destination is unbound (claim 12), or the
     /// auth type is a signing scheme (those take the signer path).
-    pub fn substitute(
+    pub fn substitute_bound_credential(
         &self,
         placeholder: &str,
         destination: &str,
@@ -429,6 +429,21 @@ mod tests {
         assert!(a.as_str().starts_with("mvm-secret-"));
     }
 
+    /// What `mint` produces is exactly what the out-of-header check looks
+    /// for, so the two cannot drift apart.
+    #[test]
+    fn a_minted_placeholder_has_the_shape_the_leak_check_matches() {
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
+        assert_eq!(
+            ph.as_str().len(),
+            mvm_contract::substitution::SECRET_PLACEHOLDER_LEN
+        );
+        assert!(mvm_contract::substitution::contains_minted_placeholder(
+            ph.as_str().as_bytes()
+        ));
+    }
+
     #[test]
     fn substitutes_real_credential_for_a_bound_destination() {
         let (_dir, spy) = spy_with("openai", "sk-live-zzz");
@@ -441,7 +456,7 @@ mod tests {
             ph.as_str()
         );
         let out = endpoint
-            .substitute(ph.as_str(), "api.openai.com", &req)
+            .substitute_bound_credential(ph.as_str(), "api.openai.com", &req)
             .unwrap();
         assert!(out.contains("Authorization: Bearer sk-live-zzz"));
         assert!(!out.contains(ph.as_str()), "placeholder must be gone");
@@ -453,7 +468,7 @@ mod tests {
         let reg = SubstitutionRegistry::new();
         let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
-            .substitute(
+            .substitute_bound_credential(
                 "mvm-secret-deadbeef",
                 "api.openai.com",
                 "Bearer mvm-secret-deadbeef",
@@ -470,7 +485,7 @@ mod tests {
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
         let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
-            .substitute(
+            .substitute_bound_credential(
                 ph.as_str(),
                 "evil.example.com",
                 &format!("Bearer {}", ph.as_str()),

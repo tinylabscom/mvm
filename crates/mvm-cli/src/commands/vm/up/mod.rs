@@ -8,22 +8,9 @@ use clap::Args as ClapArgs;
 
 use super::shared::{clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec};
 
-mod admission;
-mod audit;
-mod grants_report;
 mod kernel;
-// `pub(crate)` so the crate-root boot-policy facade can re-export the
-// effective-initrd decision; nothing else in the module is `pub`.
-pub(crate) mod oci_persist;
-// `pub(crate)` so the transient and session boot paths can name
-// `policy::admitted_shares_for_boot` directly. Deliberately not re-exported
-// from here: a `use` line counts as a caller to `check-dormant-controls`, so
-// re-exporting would let the real call site be deleted with the gate still
-// green.
-pub(crate) mod policy;
-mod runtime_source;
 
-pub(super) use admission::{
+pub(super) use mvm_client::admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
     attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
     record_transient_outcome,
@@ -32,18 +19,17 @@ pub(super) use admission::{
 // security-policy config-drive file name) — cfg-gated so a non-test build
 // doesn't carry an unused re-export.
 #[cfg(test)]
-pub(super) use admission::SECURITY_POLICY_FILENAME;
+pub(super) use mvm_client::admission::SECURITY_POLICY_FILENAME;
 
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
-pub(in crate::commands) use oci_persist::load_workload_ir;
-pub(in crate::commands) use oci_persist::{
-    PersistentImageStartParams, start_persistent_oci_machine,
+pub(in crate::commands) use mvm_client::launch::persistent::load_workload_ir;
+pub(crate) use mvm_client::launch::persistent::{
+    persistent_oci_effective_initrd, persists_plan_before_start,
 };
-pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_before_start};
 
-pub(crate) use runtime_source::{
+pub(crate) use mvm_client::launch::runtime_source::{
     SdkSidecarAttachment, attach_runtime_overlay_if_cached,
     attach_runtime_overlay_if_cached_version, attach_universal_initramfs_if_cached,
     emit_runtime_source_status, resolve_sdk_sidecar_attachment_for_host,
@@ -127,18 +113,12 @@ pub(in crate::commands) struct Args {
     /// The VM keeps running after the shell exits; `down` stops it.
     #[arg(long, conflicts_with_all = ["detach", "up_json", "wait", "forward"])]
     pub console: bool,
-    /// Network preset (unrestricted, none, registries, dev)
-    #[arg(long)]
-    pub network_preset: Option<String>,
-    /// Network allowlist entry (format: HOST:PORT). Repeatable
-    #[arg(long)]
-    pub network_allow: Vec<String>,
     /// Named security profile selecting the per-seam capability matrix
     /// (seccomp tier + egress posture). Defaults to `production`: the
     /// highest-security, deployable posture (seccomp floor + deny-all egress).
     /// The only alternative is `dev` — looser for development and never
-    /// deployable (refused under `--prod`). Explicit `--seccomp` /
-    /// `--network-preset` override the profile.
+    /// deployable (refused under `--prod`). Explicit `--seccomp` overrides
+    /// the profile.
     #[arg(long = "security-profile")]
     pub security_profile: Option<String>,
     /// Seccomp profile tier (essential, minimal, standard, network, unrestricted).
@@ -147,9 +127,6 @@ pub(in crate::commands) struct Args {
     /// opt-in only; the project's posture is "defaults must be safe."
     #[arg(long)]
     pub seccomp: Option<String>,
-    /// Named dev network to attach VM to (default: "default")
-    #[arg(long, default_value = "default")]
-    pub network: String,
     /// Sandbox tag in `KEY=VALUE` form. Repeatable. Validated against
     /// `mvm_core::crypto::policy::InputValidator` charset/length rules.
     #[arg(long = "tag", value_name = "KEY=VALUE")]

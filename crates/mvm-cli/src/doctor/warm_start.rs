@@ -55,6 +55,8 @@ pub(super) struct BackendCapabilityRow {
     vsock: bool,
     /// virtio-balloon runtime memory reclaim.
     balloon: bool,
+    /// The guest hands freed memory back on its own (free page reporting).
+    free_page_reporting: bool,
     /// Copy-on-write fs checkpoint (APFS `clonefile`), independent of memory snapshots.
     fs_quick_checkpoint: bool,
     /// Pre-warmed standby pool that pre-pays spawn/codesign latency — the boot-latency axis.
@@ -81,6 +83,7 @@ pub(super) fn collect_capability_table() -> Vec<BackendCapabilityRow> {
                 tap_networking: caps.tap_networking,
                 vsock: caps.vsock,
                 balloon: caps.balloon,
+                free_page_reporting: caps.free_page_reporting,
                 fs_quick_checkpoint: caps.fs_quick_checkpoint,
                 standby_pool: caps.standby_pool,
             }
@@ -101,11 +104,12 @@ pub(super) fn render_capability_table(rows: &[BackendCapabilityRow]) {
         ui::status_line(
             &format!("  {}:", r.backend),
             &format!(
-                "snapshot {} · tap-net {} · vsock {} · balloon {} · fs-checkpoint {} · standby-pool {}",
+                "snapshot {} · tap-net {} · vsock {} · balloon {} · page-reporting {} · fs-checkpoint {} · standby-pool {}",
                 r.snapshot_tier,
                 yn(r.tap_networking),
                 yn(r.vsock),
                 yn(r.balloon),
+                yn(r.free_page_reporting),
                 yn(r.fs_quick_checkpoint),
                 yn(r.standby_pool),
             ),
@@ -152,14 +156,14 @@ pub(super) fn collect_warm_start_support() -> WarmStartReport {
 /// `<sys_module>/nbd` exists ⇒ the NBD kernel module is loaded. Pure so it's
 /// testable without `/sys`. Only `collect_warm_start_substrate` (Linux) and
 /// the unit tests call it; off Linux the non-test build has no caller.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn nbd_module_loaded_at(sys_module: &std::path::Path) -> bool {
     sys_module.join("nbd").exists()
 }
 
 /// Parse `/proc/sys/vm/nr_hugepages`; > 0 ⇒ hugepages reserved. Pure so it's
 /// testable cross-platform; a non-numeric/empty read is "none reserved".
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn hugetlb_reserved_from(nr_hugepages: &str) -> bool {
     nr_hugepages
         .trim()
@@ -331,6 +335,16 @@ mod tests {
         // after fresh channels and identity gates are armed.
         let firecracker = by("firecracker").unwrap();
         assert!(firecracker.standby_pool);
+
+        // HVF gives freed guest memory back by free page reporting, which is
+        // not the host-driven balloon; the two columns must not be conflated.
+        let hvf = by("hvf").unwrap();
+        assert!(hvf.free_page_reporting);
+        assert!(!hvf.balloon);
+        assert!(
+            !by("apple-container").unwrap().free_page_reporting,
+            "unproven on Apple's prebuilt kernel"
+        );
     }
 
     #[test]

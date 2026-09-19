@@ -156,6 +156,9 @@ fn verify_against_release_identities(
 ///
 /// The identity set is a list because the release trust root allows more than
 /// one template; a rotation that adds one must not require a code change here.
+/// The try-each loop, including refusing an empty set and reporting the last
+/// failure, is [`mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity`]'s;
+/// this only attributes its refusal to the asset.
 pub fn verify_release_archive_bytes(
     archive: &[u8],
     bundle: &[u8],
@@ -163,30 +166,19 @@ pub fn verify_release_archive_bytes(
     identities: &[String],
     issuer: &str,
 ) -> Result<(), RuntimeOverlayError> {
-    let mut last_failure: Option<String> = None;
-
-    for identity in identities {
-        match mvm_core::crypto::image_verify::verify_signed_payload(
-            archive, bundle, identity, issuer,
-        ) {
-            Ok(()) => {
-                tracing::debug!(
-                    asset,
-                    identity = identity.as_str(),
-                    "release archive signature verified"
-                );
-                return Ok(());
-            }
-            Err(error) => last_failure = Some(error.to_string()),
-        }
-    }
-
-    Err(RuntimeOverlayError::SignatureInvalid {
+    let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
+    mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity(
+        archive,
+        bundle,
+        &identities,
+        issuer,
+    )
+    .map_err(|error| RuntimeOverlayError::SignatureInvalid {
         asset: asset.to_string(),
-        reason: last_failure.unwrap_or_else(|| {
-            "no release signing identity is configured for this version".to_string()
-        }),
-    })
+        reason: error.to_string(),
+    })?;
+    tracing::debug!(asset, "release archive signature verified");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -311,6 +303,80 @@ mod tests {
         assert!(
             !err.contains("SHOULD-NOT-APPEAR-IN-AN-ERROR"),
             "an error must not echo bundle contents: {err}"
+        );
+    }
+
+    /// A real bundle, as `release.yml` published it for `v0.18.0-rc.1`, over the
+    /// builder-VM checksum manifest the boot image fetch asks for by name. The
+    /// asset name cannot tell the two trains apart; only the signing identity can.
+    #[cfg(feature = "manifest-verify")]
+    mod cli_signed_fixture {
+        use super::*;
+
+        const VERSION: &str = "0.18.0-rc.1";
+        const ASSET: &str = "builder-vm-aarch64-checksums-sha256.txt";
+
+        fn verify(train: ReleaseTrain, version: &str) -> Result<(), RuntimeOverlayError> {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/release-signature")
+                .join(format!("v{VERSION}"));
+            verify_release_archive_signature(&ReleaseSignatureRequest {
+                base_url: &format!("file://{}", dir.display()),
+                asset: ASSET,
+                archive_path: &dir.join(ASSET),
+                version,
+                train,
+            })
+        }
+
+        /// Verification runs offline against the embedded trust root, so a
+        /// committed bundle stays verifiable. This is the control for the
+        /// refusal below: without it, that refusal could mean only that the
+        /// fixture is unreadable.
+        #[test]
+        fn a_cli_release_bundle_verifies_under_the_cli_train() {
+            let mut env = TestEnv::new();
+            env.remove(SKIP_COSIGN_VERIFY_ENV);
+
+            verify(ReleaseTrain::Cli, VERSION)
+                .expect("the CLI release workflow's own signature must verify");
+        }
+
+        /// A manifest signed by the CLI release workflow is not a boot image
+        /// manifest, whichever boot image version the train is asked to accept.
+        #[test]
+        fn the_boot_image_train_refuses_a_manifest_signed_by_the_cli_workflow() {
+            let mut env = TestEnv::new();
+            env.remove(SKIP_COSIGN_VERIFY_ENV);
+
+            for version in [VERSION, "0.1.5"] {
+                let err = verify(ReleaseTrain::BootImage, version)
+                    .expect_err("a CLI-workflow signature must not satisfy the boot image train");
+                assert!(
+                    matches!(&err, RuntimeOverlayError::SignatureInvalid { asset, .. } if asset == ASSET),
+                    "the bundle is present and well-formed, so the refusal must be an \
+                     identity failure naming the asset: {err}"
+                );
+            }
+        }
+    }
+
+    /// An empty identity set must refuse, naming the asset, rather than read as
+    /// "no identity to check against, so nothing to fail".
+    #[test]
+    fn an_empty_identity_set_refuses_and_names_the_asset() {
+        let err = verify_release_archive_bytes(
+            b"archive-bytes",
+            b"{\"not\":\"a sigstore bundle\"}",
+            ASSET,
+            &[],
+            mvm_core::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect_err("no accepted identity must never admit an archive");
+
+        assert!(
+            matches!(&err, RuntimeOverlayError::SignatureInvalid { asset, .. } if asset == ASSET),
+            "an empty identity set is a signature refusal for this asset: {err}"
         );
     }
 

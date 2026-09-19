@@ -455,6 +455,52 @@ fn run_net_flags_default_off() {
 }
 
 #[test]
+fn run_parses_agent_preset_and_ai_token_budget() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--network-preset",
+        "agent",
+        "--ai-token-budget",
+        "12000",
+        "--",
+        "true",
+    ])
+    .expect("agent policy flags parse");
+    assert_eq!(
+        args.run.network_preset,
+        Some(mvm_core::network_policy::NetworkPreset::Agent)
+    );
+    assert_eq!(args.run.ai_token_budget, Some(12_000));
+}
+
+#[test]
+fn run_rejects_conflicting_or_unsafe_network_presets_and_zero_budget() {
+    for argv in [
+        vec![
+            "run",
+            "--image",
+            "alpine",
+            "--network-preset",
+            "agent",
+            "--allow-host",
+            "example.com",
+        ],
+        vec![
+            "run",
+            "--image",
+            "alpine",
+            "--network-preset",
+            "unrestricted",
+        ],
+        vec!["run", "--image", "alpine", "--ai-token-budget", "0"],
+    ] {
+        assert!(parse_run(&argv).is_err(), "must reject {argv:?}");
+    }
+}
+
+#[test]
 fn fresh_boot_without_image_is_rejected_at_dispatch() {
     // `--image` is no longer clap-required (a persistent run can reconnect
     // by name), so a fresh transient boot with no image parses and is
@@ -881,6 +927,42 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert_eq!(
         spec.caller_commitment.as_ref().map(ToString::to_string),
         Some("ab".repeat(32))
+    );
+}
+
+#[test]
+fn run_spec_persists_agent_rules_and_ai_budget() {
+    let _state = IsolatedMachineState::new();
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:3.20",
+        "--name",
+        "agent-box",
+        "--network-preset",
+        "agent",
+        "--ai-token-budget",
+        "12000",
+        "--",
+        "true",
+    ])
+    .expect("parse");
+    let spec = machine_run_spec(&args, "agent-box".to_string(), None).expect("spec");
+    assert!(!spec.net);
+    assert_eq!(
+        spec.allow_host,
+        mvm_core::network_policy::NetworkPreset::Agent
+            .rules()
+            .into_iter()
+            .map(|rule| rule.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        spec.ai
+            .as_ref()
+            .and_then(|ai| ai.budget.as_ref())
+            .and_then(|budget| budget.max_total_tokens),
+        Some(12_000)
     );
 }
 
@@ -2061,6 +2143,7 @@ fn machine_start_receipt_is_signed_and_verifiable() {
         memory: "512M".to_string(),
         mem_initial: None,
         profile: "standard".to_string(),
+        ai_token_budget: None,
         network_posture: "deny-all".to_string(),
         egress_enforcement: "flow-drop".to_string(),
         volumes: Vec::new(),
@@ -3304,6 +3387,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             allow_host: &args.run.allow_host,
             peer: &[],
             net: args.run.net,
+            network_preset: args.run.network_preset,
             grants_file: args.run.grants_file.as_deref(),
             manifest: None,
             config: &config,
@@ -3324,6 +3408,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
                     mvm_core::network_policy::HostPort::new("db.internal", 5432),
                 ],
             }),
+            drive: None,
         })
     );
 }
@@ -3349,6 +3434,7 @@ fn machine_inspect_shows_the_enforced_tier_not_only_the_request() {
         &mvm_contract::protocol::resource_controls::EnforcedGrants {
             cpu: mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2CpuMax,
             wall_clock: mvm_contract::protocol::resource_controls::EnforcedTier::Declared,
+            ..mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared()
         },
     );
 

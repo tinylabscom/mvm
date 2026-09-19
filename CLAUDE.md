@@ -164,7 +164,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-19-crate Cargo workspace under `crates/` (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, and `mvm-host-services` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 22 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
+20-crate Cargo workspace under `crates/` (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, and `mvm-hostlib` was added at the top of the graph), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 23 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
 
 **Libraries, low → high:**
 
@@ -189,6 +189,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
 - `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
+- `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`. A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
 
 `xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
@@ -455,19 +456,22 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
-11. **Every application-dep volume is hash-locked, attestation-checked,
-    CVE-scanned, SBOM-enumerated, and bound to the workload's audit
-    chain.** ADR-014 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
-    this end-to-end: the builder VM (`mvm-host-vm-init` +
+11. **Every application-dep volume is CVE-scanned and SBOM-enumerated
+    when sealed, then hash-locked, attestation-checked, and bound to the
+    workload's audit chain.** ADR-014 / Plan 73 Followups A +
+    B.1/B.2/B.3 + C + D wire the sealed-volume lifecycle: the builder VM
+    (`mvm-host-vm-init` +
     `LibkrunBuilderVm::run_build` Install arm) installs deps into a
     sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
     hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
     calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
-    launch and refuses tampered volumes; `mvmctl machine run --prod` fails
-    closed on high/critical CVE findings or stub SBOM/CVE
-    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
-   inspect` / `mvmctl deps audit` surface the sealed sidecars without
+    launch and refuses tampered volumes. The seal-time security lane applies
+    `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
+    high/critical CVE findings or stub SBOM/CVE; production launch does not
+    currently call that severity gate, and the dormant-control manifest pins
+    that limitation. `mvmctl deps inspect` / `mvmctl deps audit` surface the
+    sealed sidecars without
     a VM spawn. The `app-deps-audit` job lives in
     `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
     on the nightly cron and on release tags, so this lane does **not**
@@ -553,9 +557,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     via the memory-safe pure-Rust writer (`mvm_build::rootfs::
 materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
     `mkfs` mechanism while preserving its roothash guarantee, and
-    auto-falls-back to the builder VM for trees the writer can't
-    faithfully emit, e.g. ones carrying `security.capability`
-    xattrs) — and persists provenance metadata (registry host, repo, supplied
+    auto-falls-back to the builder VM for trees too large or fragmented
+    for it; the builder VM carries no extended attributes, so a tree
+    carrying `security.capability` or ACL xattrs that falls back is
+    refused rather than emitted without them) — and persists provenance metadata (registry host, repo, supplied
     reference, resolved manifest digest, layer digest list, trust
     policy, cosign verdict). `mvmctl run --image` admits an
     `ExecutionPlan` (claim 8 path) and then emits a
@@ -650,7 +655,18 @@ primitive, so the run loop enforces the share in-process using the summed Mach
 CPU time of every vCPU thread — the sum, so the bound stays a bound on the
 machine rather than on one CPU of an SMP guest; the achieved tier is read back
 from the scheduler's measured record and audited. libkrun has no in-process vCPU control, so a CPU
-grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
+grant there stays `declared` and `--prod` refuses it. Memory and tasks are
+bounded at spawn on that same scope, for every VMM spawn and not only a granted
+one, but only on a Linux host with a systemd user session: the scope carries
+`MemoryMax=` of guest RAM plus a fixed 256 MiB overhead margin (swap excluded)
+and `TasksMax=1024`, `memory.max` and `pids.max` are read back with their values
+into the same `plan.grants_enforced` entry, and a scope the OOM killer ended is
+recorded as `plan.memory_limit_exceeded` when a waited run's exit is reported. A
+service manager that never creates the scope fails the launch after 10 s instead
+of hanging it. macOS, and a Linux host without the mechanism, record both as
+`declared`, and that is not a `--prod` refusal: nobody asked for these ceilings,
+so their absence refuses nothing. The admission budget still charges guest RAM
+only, not the margin. Wall clock is enforced
 by the per-VM supervisor on libkrun and HVF: the process that owns the guest
 for its whole life arms a timer from the admitted plan, and a workload that
 outruns its bound is killed with exit `124` and a chain-signed entry. A bound
@@ -682,8 +698,8 @@ this row as enforced without it.
 
 20. **Every published release artifact is authenticated under the release
     workflow's identity, directly or through a signed checksum manifest, and
-    the build and fetch paths refuse an artifact whose required signature is
-    missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
+    the build, fetch, and self-update paths refuse an artifact whose required
+    signature is missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
     checksum manifests keyless through GitHub OIDC and publishes bundles
     carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
     root filesystems, and metadata are covered by the signed manifests rather
@@ -699,12 +715,16 @@ this row as enforced without it.
     the hash-skip hatch does not waive the signature
     (`skip_hash_verify_does_not_waive_the_manifest_signature`).
 
-    The three consuming paths do **not** share a posture, which is why the
-    statement names only two of them. `verify_signature` on the self-update
-    path returns `Ok` with a warning when cosign is absent, so there the
-    signature is best-effort and the SHA-256 pin is what holds. ADR-001 carries
-    the "Claim 20 limits" note; do not paraphrase this row as "every path
-    refuses an unsigned release".
+    The self-update path used to be the exception: `verify_signature` shelled
+    out to `cosign` and returned `Ok` with a warning when it was absent. It now
+    calls the same in-process verifier with the CLI release train, so it
+    refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
+    verifies a real one only under its own tag
+    (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
+    `manifest-verify` therefore cannot self-update, and `install.sh`, which runs
+    before any `mvmctl` exists, is still best-effort. ADR-001's "Claim 20
+    limits" note records both; do not paraphrase this row as covering the
+    installer.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation

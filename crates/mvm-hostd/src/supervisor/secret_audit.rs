@@ -1,6 +1,6 @@
 //! Chain-signed audit for egress secrets (claim 13).
 //!
-//! Two events, both in the `Secret` category, both carrying **metadata only** —
+//! Every event here is in the `Secret` category and carries **metadata only** —
 //! the secret name, the destination, the auth-type — and **never the value**.
 //! This is claim 13's "no raw secret value crosses the audit chain": the label
 //! set is fixed and value-free, so a chain reader (or a leaked chain file)
@@ -41,6 +41,65 @@ pub async fn emit_secret_substituted(
                     "auth_type".to_string(),
                     auth_type_label(auth_type).to_string(),
                 ),
+            ],
+        )
+        .await
+}
+
+/// How a forward that carried a substituted credential ended.
+///
+/// Recorded separately from `secret.substituted`, which is written when the
+/// request is handed to the forward leg: from that point the destination may
+/// have the credential whether or not a response ever arrives, so the two
+/// facts are two entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardOutcome {
+    /// The upstream response was delivered to the workload in full.
+    Completed,
+    /// The forward leg failed before a response head arrived: connect, TLS,
+    /// timeout, or an upstream that closed early.
+    UpstreamFailed,
+    /// The request body could not be streamed to the forward leg.
+    RequestFailed,
+    /// The upstream response body failed partway.
+    ResponseFailed,
+    /// The response was refused by a fail-closed transform before it reached
+    /// the workload.
+    ResponseRefused,
+    /// The workload stopped reading the response.
+    Canceled,
+}
+
+impl ForwardOutcome {
+    /// The fixed label recorded in the chain.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::UpstreamFailed => "upstream_failed",
+            Self::RequestFailed => "request_failed",
+            Self::ResponseFailed => "response_failed",
+            Self::ResponseRefused => "response_refused",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+/// Emit `secret.forward_outcome { destination, outcome }` — how a forward that
+/// carried a substituted credential ended. `outcome` is a fixed label; no error
+/// text is recorded, because an upstream error can quote the request URL.
+pub async fn emit_secret_forward_outcome(
+    recorder: &Recorder,
+    destination: &str,
+    outcome: ForwardOutcome,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.forward_outcome",
+            [
+                ("destination".to_string(), destination.to_string()),
+                ("outcome".to_string(), outcome.label().to_string()),
             ],
         )
         .await
@@ -166,6 +225,23 @@ pub async fn emit_rewrite_proof(
 
 #[cfg(test)]
 mod tests {
+    /// Each outcome has its own label, so the chain can tell a completed
+    /// forward from any failure and the failures from each other.
+    #[test]
+    fn every_forward_outcome_has_a_distinct_label() {
+        let outcomes = [
+            ForwardOutcome::Completed,
+            ForwardOutcome::UpstreamFailed,
+            ForwardOutcome::RequestFailed,
+            ForwardOutcome::ResponseFailed,
+            ForwardOutcome::ResponseRefused,
+            ForwardOutcome::Canceled,
+        ];
+        let labels: std::collections::BTreeSet<&str> =
+            outcomes.iter().map(|outcome| outcome.label()).collect();
+        assert_eq!(labels.len(), outcomes.len());
+    }
+
     use super::*;
     use crate::supervisor::audit_file::{FileAuditSigner, verify_audit_chain};
     use ed25519_dalek::SigningKey;

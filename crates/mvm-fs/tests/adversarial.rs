@@ -11,7 +11,7 @@
 //!   * an impossible tree returns `Err`;
 //!   * nothing ever panics.
 
-use mvm_fs::ext4::{Node, build_image};
+use mvm_fs::ext4::{Node, Owner, build_image};
 
 /// A regular file cannot be a directory: a node whose parent path resolves to a
 /// file (not a dir) must be rejected, not silently emitted as an orphaned,
@@ -25,12 +25,14 @@ fn parent_that_is_a_file_is_rejected() {
             mode: 0o644,
             data: b"x".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/a/b".into(),
             mode: 0o644,
             data: b"y".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
     build_image(nodes).expect_err("a file cannot be a parent directory");
@@ -48,12 +50,14 @@ fn duplicate_paths_are_rejected() {
             mode: 0o644,
             data: b"first".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/dup".into(),
             mode: 0o644,
             data: b"second".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
     build_image(nodes).expect_err("duplicate path must be rejected");
@@ -71,6 +75,7 @@ fn malformed_path_components_are_rejected() {
             mode: 0o644,
             data: b"x".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         }];
         assert!(
             build_image(nodes).is_err(),
@@ -92,6 +97,7 @@ fn deep_nesting_round_trips() {
             path: path.clone(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         });
     }
     let leaf = format!("{path}/leaf");
@@ -101,6 +107,7 @@ fn deep_nesting_round_trips() {
         mode: 0o644,
         data: content.clone(),
         xattrs: Vec::new(),
+        owner: Owner::ROOT,
     });
 
     let fs = mount(build_image(nodes).expect("deep valid tree builds"));
@@ -129,14 +136,17 @@ fn symlink_cycles_are_stored_verbatim() {
         Node::Symlink {
             path: "/a".into(),
             target: "/b".into(),
+            owner: Owner::ROOT,
         },
         Node::Symlink {
             path: "/b".into(),
             target: "/a".into(),
+            owner: Owner::ROOT,
         },
         Node::Symlink {
             path: "/s".into(),
             target: "/s".into(),
+            owner: Owner::ROOT,
         },
     ];
     let fs = mount(build_image(nodes).expect("symlink cycle builds"));
@@ -165,6 +175,7 @@ fn directory_over_one_block_spans_multiple_blocks() {
         path: "/big".into(),
         mode: 0o755,
         xattrs: Vec::new(),
+        owner: Owner::ROOT,
     }];
     for i in 0..N {
         nodes.push(Node::File {
@@ -172,6 +183,7 @@ fn directory_over_one_block_spans_multiple_blocks() {
             mode: 0o644,
             data: Vec::new(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         });
     }
 

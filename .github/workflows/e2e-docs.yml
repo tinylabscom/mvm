@@ -72,7 +72,7 @@ jobs:
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API
       # socket, which otherwise surfaces as an unhelpful socket timeout.
-      FC_VERSION: v1.14.1
+      FC_VERSION: v1.17.0
       # The published builder/default-image paths fail closed unless the
       # source-built binary can verify their signed checksum manifests.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
@@ -80,6 +80,20 @@ jobs:
       # published, hash-verified workload kernel rather than a Stage 0 source
       # build that attempts to boot that unreadable host file.
       MVM_KERNEL_SOURCE: download
+      # Fetch the pinned, signed builder image, as the macOS lane does. Building
+      # it from source here put 37 minutes of Stage 0 ahead of every scenario on
+      # a good run, and a two-hour hang ahead of none on a bad one; no scenario
+      # examines the image itself. The cold source path has its own nightly
+      # witness in Extended CI (`source-bootstrap-linux`).
+      #
+      # There are deliberately no Stage 0 grants below: no readable /boot
+      # kernel, no vhost-vsock, no QEMU. A regression that drifts this lane back
+      # into a source bootstrap fails in seconds instead of spending the budget.
+      MVM_BOOT_IMAGE: fetch
+      # Firecracker is already the Linux/KVM default. Named, because the helper
+      # the unembedded binary re-executes chooses QEMU when the variable is
+      # unset, and QEMU can only reach a builder through Stage 0.
+      MVM_BUILDER_BACKEND: firecracker
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/free-disk
@@ -89,7 +103,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -131,22 +145,6 @@ jobs:
             exit 1
           fi
           sudo chmod 666 /dev/kvm
-
-      - name: Grant QEMU Stage 0 access to vhost-vsock
-        run: |
-          set -euo pipefail
-          test -c /dev/vhost-vsock
-          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
-          sudo chmod 0600 /dev/vhost-vsock
-          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
-
-      - name: Grant QEMU Stage 0 read access to the hosted kernel
-        run: |
-          set -euo pipefail
-          KERNEL_RELEASE="$(uname -r)"
-          sudo chmod a+r \
-            "/boot/vmlinuz-${KERNEL_RELEASE}" \
-            "/boot/initrd.img-${KERNEL_RELEASE}"
 
       - name: Run the documented surface end to end
         run: just e2e-docs

@@ -4,7 +4,7 @@ name: Release boot image
 # kernel fix does not need a CLI release and a CLI release does not need to
 # rebuild an unchanged image. The two trains cannot fire each other by
 # accident: GitHub tag globs anchor at the start and do not cross `/`, so
-# `boot-image/v0.1.0` misses release.yml's `v*` and `v0.18.0` misses the
+# `boot-image/vX.Y.Z` misses release.yml's `v*` and `v0.18.0` misses the
 # pattern below. `tests/release_assets.rs` asserts both patterns rather than
 # trusting that sentence.
 #
@@ -499,7 +499,7 @@ jobs:
           # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
           # launch path passes `--enable-pci`, which older Firecracker rejects
           # before it creates its API socket.
-          FC_VERSION: v1.14.1
+          FC_VERSION: v1.17.0
         run: |
           set -euo pipefail
           curl -fL -o firecracker.tgz \

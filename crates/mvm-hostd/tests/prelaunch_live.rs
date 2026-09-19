@@ -1,15 +1,12 @@
 //! Process-level integration for the prelaunched supervisor.
 //!
 //! Gated behind `libkrun-live` because spawning `mvm-libkrun-supervisor`
-//! requires the `libkrun-sys` feature (FFI link to libkrun). Two scenarios:
+//! requires the `libkrun-sys` feature (FFI link to libkrun).
 //!
-//! 1. `wrong_nonce_attach_is_refused_without_boot` — runnable anywhere libkrun
-//!    links: the attach is refused at `verify_and_merge_attach` *before* any
-//!    `start_enter`, so it exercises the full stdin-dispatch → control-UDS bind
-//!    → accept → frame-read → refuse → exit(6) path with no VM.
-//! 2. `valid_attach_boots_and_agent_reachable` — `#[ignore]`: needs a real
-//!    kernel + rootfs + in-guest agent. Run manually on a libkrun-capable host;
-//!    model the boot/agent-ping on `examples/agent_ping` + the core-demo e2e.
+//! `wrong_nonce_attach_is_refused_without_boot` runs anywhere libkrun links:
+//! the attach is refused at `verify_and_merge_attach` *before* any
+//! `start_enter`, so it exercises the full stdin-dispatch → control-UDS bind →
+//! accept → frame-read → refuse → exit(6) path with no VM.
 #![cfg(feature = "libkrun-live")]
 
 use std::io::Write;
@@ -128,16 +125,4 @@ fn wrong_nonce_attach_is_refused_without_boot() {
         !workload_exit_sock.exists(),
         "refused attach must not have reached the boot path"
     );
-}
-
-#[test]
-#[ignore = "needs a real kernel+rootfs+agent; run manually on a libkrun-capable host (model on examples/agent_ping)"]
-fn valid_attach_boots_and_agent_reachable() {
-    // Build a BaseConfig with a real kernel + the agent port in host_listen_ports,
-    // spawn the supervisor, connect to the control UDS, and write_json_frame_sync
-    // a SupervisorAttachConfig whose `plan` is a freshly-signed admitted envelope
-    // (sign with the same on-disk host key the base points at) + a real rootfs.
-    // Assert the agent answers a ping. Left as an explicit manual harness — the
-    // refusal path above + the unit ladder cover the security logic.
-    unimplemented!("manual live-boot harness — see module docs");
 }

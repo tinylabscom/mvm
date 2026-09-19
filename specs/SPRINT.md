@@ -10,6 +10,113 @@
 
 ## In progress
 
+- [ ] **Agent sandbox drive plane.**
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`; epic #3275.
+      WS1 (#3260) is complete in PR #3505: signed plans carry a validated,
+      monotonic `DriveGrant`; `DriveOpen` and `DriveFile` reuse the existing
+      stream and file planes; host and guest both enforce workspace roots,
+      byte ceilings and TTL; and process launch uses the shared substituted
+      workload environment without exposing secret values. The four named
+      refusal/substitution/audit witnesses pass alongside the affected agent,
+      host, backend and build suites, workspace check and zero-warning clippy.
+      The PR carries the implementation through queued delivery; the other epic
+      workstreams remain in progress.
+
+- [ ] **Every-VM host-mediated tracing.**
+      `specs/plans/2026-09-17-host-mediated-telemetry.md`.
+      Epic #3419; workstreams #3420–#3426.
+      W1a Rust binary inventory and CI drift gate tested; 17 focused tests,
+      repository gates and clippy pass. The inventory
+      records 28 runtime gaps and 17 non-runtime exclusions, not capture coverage.
+      Remaining W1 sources/harness/measurements and runtime certification are open.
+      Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W3a preparatory runtime capture: bounded reader handoffs, owned completion
+      tails, stage-specific losses and explicit unknown reader tails. Focused
+      tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:
+      `specs/sprint/delivery/3422-bounded-capture-handoff.md`.
+      W2a transport foundation is tested: bounded typed records,
+      encrypted worker sessions with peer pinning and a dedicated semantic port.
+      Twenty-one focused tests, host workspace tests, clippy, Linux cross-check,
+      seeded fuzz smoke and all 69 repository gates pass. PR #3449 landed through
+      the merge queue as `a126a8299679b3c0a0b1022dc3bedca1504ce14f`.
+      Evidence: `specs/sprint/delivery/3421-telemetry-transport.md`.
+      Runtime endpoint provisioning and the VM-lifetime collector remain open.
+      W2b backend channel and identity wiring passes 1,857 affected-crate tests (six ignored),
+      workspace clippy and Linux all-target cross-check. Both restore BDD scenarios
+      pass (ten steps, no skips). The host workspace passes 13,998 tests with zero failures,
+      31 existing ignores and three builder-only exclusions. Post-rebase clippy, gated checks,
+      3,886 affected-library tests, seven signer tests and all 69 repository gates pass.
+      PR #3472 is published; CI and queued delivery remain open.
+      Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
+      Wiring includes HVF cold boot, live handoff and child-local saved restore. Guest listener activation,
+      authoritative generation registration and real-VM witnesses remain open.
+      No-egress identity provisioning is implemented locally without granting
+      network access or loading the host private key. Identity/refusal and disk-isolation
+      regressions and the full host workspace pass.
+      Standby capture also provisions its own identity. Identity-stage policy
+      gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W3b prepared-record handoff is tested: fixed queue storage, non-waiting
+      admission/close and independent loss evidence pass nine new component tests.
+      Two allocation regressions also pass natively and under Miri; native mutex
+      initialization happens during setup, before cold admission.
+      Workspace/core tests, clippy, Linux cross-check and repository gates pass.
+      PR #3464 merged through the queue as `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9`
+      after successful merge-group checks. Runtime adapter/worker integration remains open;
+      `specs/sprint/delivery/3422-telemetry-outbox.md` records the exact boundary.
+      W4 receive-only authentication now integrates with the resident signer via
+      a typed, domain-restricted operation and deadline-bounded async client.
+      Seven integration tests, workspace clippy and Linux all-target cross-check
+      pass. VM-lifetime collection and generation registration remain unimplemented.
+      Typed encrypted guest telemetry, VM-lifetime host collection, bounded
+      non-waiting emission, explicit loss/coverage, and host-only export.
+
+- [ ] **Prevent agent child processes from inheriting control-plane descriptors — issue #3404.**
+      The entrypoint path is already protected. The remaining RPC, streaming
+      exec, and warm-worker spawn paths now close inherited descriptors above
+      their explicit child contracts; Linux regression coverage holds an extra
+      descriptor open while spawning. Host and Linux validation, including a
+      real Firecracker/KVM boot smoke, pass; promotion is pending.
+
+- [x] **Preserve names for kept-alive entrypoint machines — issue #3285.**
+      Persistent entrypoint runs now use the requested `--name` as the machine
+      identity instead of replacing it with an internal invocation name. The
+      kept-alive notice reports the machine name alongside the session ID, and
+      still identifies the live machine if session-record persistence fails.
+      Focused regressions, the serialized workspace suite excluding the known
+      macOS-only `mvm-build` environment probes, zero-warning clippy, workspace
+      check, and Linux plus feature-gated checks pass.
+
+- [x] **Published installer and distro compatibility lanes — issue #3273.**
+      Exercise the current installer against published releases on Linux and
+      macOS, walk atomic upgrades and rollback, run release binaries across
+      four Linux distributions on both architectures, and execute the install
+      page's own commands. The PR-gated synthetic suite distinguishes legacy
+      entitlement profiles under `resources/` from profiles absent entirely,
+      so the fixed default macOS release must install while only explicitly
+      non-strict missing-profile releases may be tolerated. Immutable
+      pre-static v0.17.0/v0.18.0-rc.1 loader failures remain visible without
+      keeping Rocky 9 red; the workflow forwards that exact-tag baseline into
+      the distro container, and a static regression check pins the boundary.
+      Every later release still fails closed. Hosted
+      macOS provisions the trusted historical libkrun runtime before exercising
+      v0.16.1. The focused suite, shellcheck, and actionlint pass on the rebased
+      head. The merge-queue live BDD witness now has a 45-minute bound so a
+      cold hosted runner cannot consume the entire budget installing the
+      pinned cross toolchain before the guest lifecycle runs.
+
+- [x] **Preserve builder backend selection across bootstrap helpers — issue #3390.**
+      Remove the stale Linux-only QEMU override so helper subprocesses inherit
+      the caller's explicit backend or leave selection to the shared detector.
+      Regression coverage exercises both unset and explicit Firecracker
+      environments. Workspace check, zero-warning clippy, Linux cross-target
+      and feature-gated checks, and all 68 repository gates pass.
+
+- [x] **Make claim-control gaps mechanically honest — issue #3316.**
+      Claim 11 now states the shipped seal-time CVE/SBOM and admission-integrity
+      contract, while the unused severity gate is pinned as dormant. Function
+      witnesses must resolve to exactly one definition; claims 13 and 18 use
+      unique production-control or backend-specific witnesses.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
@@ -19,7 +126,19 @@
       free-page memory return, copy-on-write HVF restore, spawn-time memory and
       task limits, chunked durable checkpoints, measured guest flush cost,
       signed bundles through image registries, and structured agent-facing
-      errors.
+      errors. W1 is complete: a live Firecracker/KVM witness restores two
+      siblings from one snapshot and proves their immediate `getrandom(2)`
+      outputs differ after authenticated reseed acknowledgements. The
+      highest-priority follow-up, issue #3404, is implemented and
+      locally validated: shared agent sockets are close-on-exec and one
+      descriptor-closing hook covers every guest-agent child-process path.
+      Cold-entrypoint and process-RPC Linux witnesses prove children receive
+      only their declared descriptors. The W10 review follow-ups (issue
+      #3432) are implemented: detection can no longer outrun the misplaced
+      image-reference refusal, and every agent-facing failure carries a code.
+      W3.7 (issue #3430) keeps every file mvm
+      injects into a container-layer rootfs root-owned whatever a layer
+      declares, on both the in-process and the builder-VM writer.
 
 - [x] **Static Linux release payloads for older distributions — issue #3371.**
       Keep the established `*-unknown-linux-gnu` archive names so installed
@@ -54,6 +173,58 @@
       whether a separately approved, archived history rewrite is worthwhile.
       Production must never auto-discover or accept unsigned local sibling
       artifacts.
+      W1 (#3363) implementation: the Linux release lane fetches the pinned
+      signed builder image, Firecracker builds the source-matched SDK sidecar
+      inside it, the cold source bootstrap runs as the nightly
+      `source-bootstrap-linux` witness, both harnesses emit phase timings, and
+      the fetch is staged atomically with architecture and manifest-pin
+      refusals. Measured: 118 minutes to 92 and 106, all 313 scenarios passing;
+      the 25-minute hypothesis is rejected as stated, and the source-matched SDK
+      sidecar build is the cost that remains.
+      W3 (#3365) slice W3a: `mvm_core::image_set` defines the signed image-set
+      manifest and lock with pure completeness, architecture, boot-protocol,
+      capability, protocol-range, supersession and lock checks; the updater and
+      the image set share one semver model in `mvm_core::release_version`.
+      Slice W3b verifies a published set offline: the manifest digest is checked
+      against the lock before the bytes are parsed, the detached signature under
+      the locked identity next, then structure, lock fields, on-disk artifact
+      size and digest, and revocation keyed on the locked signer.
+      Slice W3c checks in `crates/mvm-core/images.lock` (repository, boot-image
+      tag, Stage 0 kernel tag and per-arch digests); config, Stage 0, three
+      workflows and the smoke-pack script read it, both `latest` selections are
+      gone, and `xtask check-image-lock` refuses a copied or enumerated tag.
+      Slice W3d puts that verifier behind `mvmctl image boot verify`, which
+      reads the manifest, bundle, lock and artifact directory, names the stage
+      that refused and exits nonzero on refusal. The older
+      `image_verify::SignedManifest` / `RevocationList` model and its example
+      are removed; the pack-signing smoke now signs a real image set and runs
+      the command — the full round-trip on a release tag, a signature-stage
+      refusal of the branch-minted bundle nightly.
+      W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
+      pack move; the guest binary recipes stay in `mvm` and are consumed from a
+      pinned `mvm` flake input, so nothing is copied between the repositories.
+      W4 (#3362) slice W4a: the guest recipes that compile `mvm` source are
+      exported from `nix/flake.nix` and the in-tree image flakes build through
+      them, so the interface `mvm-images` will pin is already the one in use;
+      no image or check derivation changed.
+      W4 (#3362) slice W4b: `tinylabscom/mvm-images` builds every image from
+      `mvm` pinned at `6717e2451e`, on both architectures, without publishing.
+      W4 (#3362) slice W4c, in progress: every byte difference between that
+      build and `boot-image/v0.1.5` traces to a named `mvm` commit or to the
+      `generatorRev` rewrite. The in-tree and `mvm-images` builds have the same
+      derivations. Independent builds differ only in filesystem and verity
+      metadata (#3499). The images boot on x86_64 Firecracker and on HVF from an
+      isolated `MVM_HOME`, at the development tier, and the `mvm-images`
+      builder built and booted a workload on Firecracker. Outstanding: aarch64
+      Firecracker, and a build through the builder on HVF, which did not finish
+      on the loaded host.
+      W5 (#3364) slice W5a: `MVM_IMAGES_DIR` names a local `mvm-images`
+      checkout explicitly (canonical root, commit and dirty fingerprint
+      recorded, re-verified before use); `local-dev` and `verified-release` are
+      distinct tiers; a release build and a sealed-production admission refuse
+      the variable; `mvmctl doctor` reports the source, both repositories'
+      identities and the tier. No image consumer reads it yet — W5b–W5m in the
+      plan move them one by one.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
@@ -265,7 +436,11 @@
       the architecture-specific and unaccelerated-build evidence. The same
       broad run exposed and fixed two process-global `MVM_HOME` races in the
       wasm endpoint-plan and broker-path witnesses; all 886 runtime library
-      tests now pass concurrently. The live hosted no-KVM run, documented-
+      tests now pass concurrently. The first endpoint-complete hosted
+      bootstrap passed Stage 0 launch but its source-kernel compilation was
+      cancelled by the 90-minute job wrapper before the builder's existing
+      120-minute deadline; the wrapper is now 180 minutes and structural tests
+      pin the two-budget relationship. The live hosted no-KVM run, documented-
       surface release gate, and merge delivery remain.
 - [x] **Alternative CLI help coverage performance.**
       `2026-09-03-bdd-help-coverage`.
@@ -295,8 +470,11 @@
       image locks remain held through teardown, and directory snapshots remain
       read-only. A no-explicit-sync write survived into a second fresh Alpine
       VM on macOS HVF. Gated compilation, the full workspace nextest suite, doc
-      tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
-      the plan's broader output-surface design and merge delivery remain.
+      tests, all-targets zero-warning Clippy, policy checks, and BDD are green.
+      The `--output` surface, signed grant, bounded collection, and
+      `plan.outputs` record have landed (see
+      `specs/sprint/delivery/workload-output-manifest.md`); hard-link refusal
+      remains open.
 
 - [ ] **Retire runtime directory-share volume variants.**
       `2026-09-02-retire-dirshare`.
@@ -4026,3 +4204,30 @@ writes the plan:
 - [x] Complete the required focused, workspace, gated-target, generated-stub,
       and hermetic BDD validation matrix.
 - [ ] Merge through the queue and close #3263 from landed evidence.
+
+## 2026-09-17 agent network and AI budget surfaces
+
+- [x] Expose maintained network presets and a positive AI token budget on
+      `machine run`, rejecting the unrestricted preset and conflicting explicit
+      network flags.
+- [x] Carry the preset and AI policy through admission, dry-run receipts,
+      entrypoint dispatch, persistent machine restart, and Workload IR.
+- [x] Add matching Rust, Python, and TypeScript SDK construction and validation,
+      regenerate the schema-derived bindings, and remove the undispatched
+      legacy `up` network fields.
+- [x] Complete focused SDK/CLI/IR coverage, the full workspace suite, Clippy,
+      explicit HVF/Firecracker receipt coverage, Linux builder-VM Clippy,
+      gated-target checks, generated-artifact checks, and all repository gates.
+- [ ] Merge through the queue and close #3287 from landed evidence.
+
+## 2026-09-19 spawn-scope launcher fixture
+
+- [x] Resolve the probed `systemd-run` executable to an absolute path before
+      constructing either spawn shape.
+- [x] Replace the unresponsive-manager test's racy shell-script launcher with
+      a real executable named `systemd-run`, and verify the exact launcher path
+      before spawning.
+- [x] Pass all 47 focused `spawn_scope` host tests, formatting, and all-target
+      `mvm-core` Clippy with warnings denied.
+- [ ] Pass the Linux process-table witness in CI, merge through the queue, and
+      close #3477 from landed evidence.

@@ -20,7 +20,7 @@
 //! keeps the probe loop unit-testable without a live signer helper.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use mvm_agentd::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
@@ -29,6 +29,7 @@ use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
 use mvm_runtime::machine::persist::load_machine_spec;
 use mvm_runtime::vm::name_registry::record_readiness;
+use mvm_vmm::host::aux_bin::{CLI_BIN, CliSpawn, CliSpawnRefused, HostProcess};
 
 /// Base of the exponential restart-backoff schedule, in seconds.
 const BACKOFF_BASE_SECS: u64 = 1;
@@ -164,9 +165,14 @@ pub struct MachineRestarter;
 
 impl Restarter for MachineRestarter {
     fn restart(&self, vm_name: &str) {
-        let mvmctl = mvmctl_path();
-        let spawned = Command::new(&mvmctl)
-            .args(["machine", "restart", vm_name])
+        let mut command = match restart_command_for(&HostProcess::current(), vm_name) {
+            Ok(command) => command,
+            Err(refused) => {
+                tracing::warn!(vm = %vm_name, %refused, "not restarting");
+                return;
+            }
+        };
+        let spawned = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -174,7 +180,7 @@ impl Restarter for MachineRestarter {
         if let Err(err) = spawned {
             tracing::warn!(
                 vm = %vm_name,
-                mvmctl = %mvmctl.display(),
+                mvmctl = %Path::new(command.get_program()).display(),
                 %err,
                 "failed to spawn mvmctl machine restart"
             );
@@ -182,17 +188,22 @@ impl Restarter for MachineRestarter {
     }
 }
 
-/// Resolve the `mvmctl` binary to run for a restart: prefer the sibling of
-/// this daemon binary's own executable path (both binaries ship side by side
-/// in the same target/install directory), falling back to a bare `mvmctl`
-/// resolved via `PATH` when that sibling doesn't exist or the current
-/// executable's path can't be determined.
-fn mvmctl_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("mvmctl")))
-        .filter(|candidate| candidate.exists())
-        .unwrap_or_else(|| PathBuf::from("mvmctl"))
+/// The `mvmctl machine restart <vm_name>` command for `host`, refused for a
+/// library embedder, which never runs `mvmctl`.
+fn restart_command_for(host: &HostProcess, vm_name: &str) -> Result<Command, CliSpawnRefused> {
+    let mut command = Command::new(mvmctl_path_for(host)?);
+    command.args(["machine", "restart", vm_name]);
+    Ok(command)
+}
+
+/// Resolve the `mvmctl` binary to run for a restart: prefer the one in the
+/// host binary directory (this daemon and `mvmctl` ship side by side), falling
+/// back to a bare `mvmctl` resolved via `PATH` when it is not there.
+fn mvmctl_path_for(host: &HostProcess) -> Result<PathBuf, CliSpawnRefused> {
+    host.refuse_cli_spawn(CliSpawn::HealthRestart)?;
+    Ok(host
+        .binary_named(CLI_BIN)
+        .unwrap_or_else(|| PathBuf::from(CLI_BIN)))
 }
 
 /// Current wall clock in unix seconds, saturating to 0 before the epoch.
@@ -430,6 +441,56 @@ impl HealthProber {
                 tracker.next_restart_after_unix = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod restart_command_tests {
+    use super::*;
+
+    #[test]
+    fn the_restart_runs_the_mvmctl_in_a_declared_host_binary_dir() {
+        let declared = tempfile::tempdir().expect("tempdir");
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+        let absent = restart_command_for(&host, "vm-a").expect("mvmctl may restart");
+        assert_eq!(absent.get_program(), CLI_BIN);
+
+        std::fs::write(declared.path().join(CLI_BIN), b"bin").expect("write mvmctl");
+        let command = restart_command_for(&host, "vm-a").expect("mvmctl may restart");
+
+        assert_eq!(
+            command.get_program(),
+            declared.path().join(CLI_BIN).as_os_str()
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["machine", "restart", "vm-a"]
+        );
+    }
+
+    #[test]
+    fn an_undeclared_process_restarts_through_the_mvmctl_beside_it_or_on_path() {
+        let beside_exe = std::env::current_exe()
+            .expect("test binary path")
+            .with_file_name(CLI_BIN);
+        let expected = if beside_exe.is_file() {
+            beside_exe
+        } else {
+            PathBuf::from(CLI_BIN)
+        };
+
+        let command =
+            restart_command_for(&HostProcess::undeclared(), "vm-a").expect("mvmctl may restart");
+
+        assert_eq!(command.get_program(), expected.as_os_str());
+    }
+
+    #[test]
+    fn a_library_embedder_constructs_no_restart_command() {
+        let err = restart_command_for(&HostProcess::undeclared().as_library_embedder(), "vm-a")
+            .expect_err("an embedder never runs mvmctl");
+
+        assert_eq!(err.spawn(), &CliSpawn::HealthRestart);
     }
 }
 

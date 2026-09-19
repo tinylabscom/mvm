@@ -35,11 +35,15 @@
         })
         { inherit workspaceRoot; };
 
-      libFor = system:
-        (import (workspace + "/nix/lib") {
-          inherit nixpkgs microvm;
-          mvmSrc = workspace;
-        }) { inherit system; };
+      # The `mvm` flake, evaluated against this flake's pinned inputs and the
+      # filtered workspace; mkGuest is its user-facing `lib.<system>` output.
+      mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs {
+        self = { };
+        inherit nixpkgs microvm;
+        mvm-workspace = workspace;
+      };
+
+      libFor = system: mvm.lib.${system};
 
       # Workload kernel — the single shared definition in
       # `nix/images/kernel/`, identical to the one builder-vm builds. Both
@@ -62,6 +66,9 @@
       verityHashBlockSize = 4096;
       veritySalt = "0000000000000000000000000000000000000000000000000000000000000000";
       verityHashAlgorithm = "sha256";
+      # Mirrors `mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID`, so the
+      # hash device's superblock carries no random UUID.
+      verityUuid = "00000000-0000-0000-0000-000000000003";
       pinnedCryptsetupVersion = "2.8.6";
       pinnedCryptsetupSrcHash = "sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=";
       pinnedCryptsetupFor = pkgs:
@@ -246,6 +253,7 @@
                 --hash-block-size=${toString verityHashBlockSize} \
                 --salt=${veritySalt} \
                 --hash=${verityHashAlgorithm} \
+                --uuid=${verityUuid} \
                 $out/rootfs.ext4 \
                 $out/rootfs.verity
             )

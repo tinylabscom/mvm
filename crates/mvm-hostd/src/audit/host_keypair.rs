@@ -139,7 +139,6 @@ impl HostSigner {
     /// Verbatim copy of the public key for trusted-keys-list use.
     /// Consumed by the audit chain (`FileAuditSigner` is built around
     /// the host signer's keypair).
-    #[allow(dead_code)]
     pub fn verifying_key(&self) -> VerifyingKey {
         self.verifying
     }

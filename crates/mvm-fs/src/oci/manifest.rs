@@ -278,7 +278,10 @@ fn declared_length_within_cap(declared: Option<u64>, cap: u64) -> Result<(), Oci
 }
 
 /// Read a response body, refusing to buffer more than `cap` bytes.
-async fn read_body_capped(mut response: mvm_http::Response, cap: u64) -> Result<Vec<u8>, OciError> {
+pub(crate) async fn read_body_capped(
+    mut response: mvm_http::Response,
+    cap: u64,
+) -> Result<Vec<u8>, OciError> {
     declared_length_within_cap(response.content_length(), cap)?;
     let mut body = CappedBody::new(cap);
     while let Some(chunk) = response
@@ -291,6 +294,26 @@ async fn read_body_capped(mut response: mvm_http::Response, cap: u64) -> Result<
     Ok(body.into_inner())
 }
 
+/// Hash manifest bytes and hold them to every digest anyone claimed for them:
+/// the one the caller pinned and the one the registry advertised. Returns the
+/// computed digest, which is the only one a caller should record.
+pub(crate) fn verify_manifest_digest(
+    bytes: &[u8],
+    pinned: Option<&str>,
+    advertised: Option<&str>,
+) -> Result<String, OciError> {
+    let computed = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+    for expected in [advertised, pinned].into_iter().flatten() {
+        if expected != computed {
+            return Err(OciError::DigestMismatch {
+                expected: expected.to_string(),
+                computed,
+            });
+        }
+    }
+    Ok(computed)
+}
+
 #[async_trait]
 impl ManifestFetcher for OciManifestFetcher {
     async fn fetch(&self, reference: &ImageReference) -> Result<FetchedManifest, OciError> {
@@ -299,23 +322,11 @@ impl ManifestFetcher for OciManifestFetcher {
             .get_manifest(reference, ACCEPTED_MANIFEST_MEDIA)
             .await?;
         let bytes = read_body_capped(response.response, MAX_MANIFEST_BYTES).await?;
-        let computed = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-        if let Some(advertised_digest) = response.docker_content_digest {
-            if computed != advertised_digest {
-                return Err(OciError::DigestMismatch {
-                    expected: advertised_digest,
-                    computed,
-                });
-            }
-        }
-        if let Some(pinned) = &reference.digest {
-            if pinned != &computed {
-                return Err(OciError::DigestMismatch {
-                    expected: pinned.clone(),
-                    computed,
-                });
-            }
-        }
+        let computed = verify_manifest_digest(
+            &bytes,
+            reference.digest.as_deref(),
+            response.docker_content_digest.as_deref(),
+        )?;
 
         // Parse the bytes once more to classify the media type
         // for the caller's downstream branching (image vs index).

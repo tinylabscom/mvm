@@ -21,8 +21,9 @@
 //! pinned in source, fetched on a contributor checkout because it is a means of
 //! building rather than the artifact under construction, and held to that pin
 //! fail-closed. The bootstrap kernel is the same kind of thing, so it carries
-//! the same kind of pin — [`BOOTSTRAP_KERNEL_AARCH64`] and
-//! [`BOOTSTRAP_KERNEL_X86_64`].
+//! the same kind of pin — read from `crates/mvm-core/images.lock` through
+//! [`bootstrap_kernel_pin`] rather than written out a second time here, because
+//! a hand-copied pin beside the boot image's is one that drifts.
 //!
 //! The pin is what makes this work on every build. An earlier shape fetched
 //! through the release checksum manifest instead, which needs the
@@ -37,9 +38,11 @@
 //! local-build invariant unchanged, so a contributor editing
 //! `nix/images/builder-vm/flake.nix` still sees their change on the next boot.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
+use mvm_core::arch::GuestArch;
 use mvm_fs::overlay::compute_file_sha256;
 use thiserror::Error;
 
@@ -55,46 +58,54 @@ use crate::kernel_fetch::{
 /// and a cache entry should say what it is.
 pub const BOOTSTRAP_VARIANT: &str = "stage0-bootstrap";
 
-/// The boot-image release the bootstrap kernel pins are taken from.
+/// The boot-image release the bootstrap kernel pins are taken from, as recorded
+/// in `crates/mvm-core/images.lock`.
 ///
-/// Bump in lockstep with the two digests below, and only against a manifest
-/// whose signature has been verified — the pin inherits exactly the trust of
-/// the manifest it was copied out of. It does not have to track the default
-/// boot image: Stage 0 needs virtio-blk, vsock and ext4 from this kernel and
-/// nothing a newer release is likely to change.
-pub const BOOTSTRAP_KERNEL_RELEASE: &str = "boot-image/v0.1.5";
+/// It does not have to track the default boot image: Stage 0 needs virtio-blk,
+/// vsock and ext4 from this kernel and nothing a newer release is likely to
+/// change, which is why the lock pins the two trains separately.
+pub fn bootstrap_kernel_release() -> &'static str {
+    mvm_core::image_set::image_train_lock()
+        .stage0_kernel
+        .release_tag
+        .as_str()
+}
 
 /// Where a bootstrap kernel comes from and what its bytes must hash to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapKernelPin {
     /// Download URL. A GitHub release asset, which redirects — see
     /// [`BootstrapKernelFetcher`] for why that decides which transport fetches it.
-    pub url: &'static str,
+    pub url: String,
     /// Lowercase-hex SHA-256 of the kernel bytes. The binding integrity check.
-    pub sha256_hex: &'static str,
+    pub sha256_hex: String,
 }
 
-/// The aarch64 bootstrap kernel: `builder-vm-vmlinux-aarch64` from
-/// [`BOOTSTRAP_KERNEL_RELEASE`].
-pub const BOOTSTRAP_KERNEL_AARCH64: BootstrapKernelPin = BootstrapKernelPin {
-    url: "https://github.com/tinylabscom/mvm/releases/download/boot-image/v0.1.5/builder-vm-vmlinux-aarch64",
-    sha256_hex: "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1",
-};
-
-/// The x86_64 bootstrap kernel: `builder-vm-vmlinux-x86_64` from
-/// [`BOOTSTRAP_KERNEL_RELEASE`].
-pub const BOOTSTRAP_KERNEL_X86_64: BootstrapKernelPin = BootstrapKernelPin {
-    url: "https://github.com/tinylabscom/mvm/releases/download/boot-image/v0.1.5/builder-vm-vmlinux-x86_64",
-    sha256_hex: "d07fa3dcca7eac14cd17ffe5c4daeb091676322de9e377a008ba0ec45a382435",
-};
+/// Every architecture the lock pins a bootstrap kernel for, resolved once.
+///
+/// The URL is composed from the locked repository, release tag and asset name
+/// rather than stored whole, so a pin cannot name a host the lock does not
+/// trust.
+static PINS: LazyLock<BTreeMap<GuestArch, BootstrapKernelPin>> = LazyLock::new(|| {
+    let lock = mvm_core::image_set::image_train_lock();
+    lock.stage0_kernel
+        .artifact
+        .iter()
+        .map(|(arch, artifact)| {
+            (
+                *arch,
+                BootstrapKernelPin {
+                    url: lock.asset_url(&lock.stage0_kernel.release_tag, &artifact.name),
+                    sha256_hex: artifact.sha256.as_str().to_string(),
+                },
+            )
+        })
+        .collect()
+});
 
 /// The pin for a guest architecture, or `None` for one Stage 0 does not support.
 pub fn bootstrap_kernel_pin(arch: &str) -> Option<&'static BootstrapKernelPin> {
-    match arch {
-        "aarch64" => Some(&BOOTSTRAP_KERNEL_AARCH64),
-        "x86_64" => Some(&BOOTSTRAP_KERNEL_X86_64),
-        _ => None,
-    }
+    PINS.get(&arch.parse::<GuestArch>().ok()?)
 }
 
 /// Why a bootstrap kernel could not be produced.
@@ -220,8 +231,8 @@ pub fn resolve_bootstrap_kernel_with(
         .map_err(|e| io(format!("creating {}: {e}", parent.display())))?;
 
     let staging = dest.with_file_name(format!("vmlinux.staging.{}", std::process::id()));
-    tracing::info!(arch, url = pin.url, "fetching the Stage 0 bootstrap kernel");
-    if let Err(detail) = fetcher.fetch(pin.url, &staging) {
+    tracing::info!(arch, url = %pin.url, "fetching the Stage 0 bootstrap kernel");
+    if let Err(detail) = fetcher.fetch(&pin.url, &staging) {
         let _ = std::fs::remove_file(&staging);
         return Err(Stage0KernelError::FetchFailed {
             arch: arch.to_string(),
@@ -233,11 +244,11 @@ pub fn resolve_bootstrap_kernel_with(
         let _ = std::fs::remove_file(&staging);
         io(format!("hashing {}: {e}", staging.display()))
     })?;
-    if !actual.eq_ignore_ascii_case(pin.sha256_hex) {
+    if !actual.eq_ignore_ascii_case(&pin.sha256_hex) {
         let _ = std::fs::remove_file(&staging);
         return Err(Stage0KernelError::PinMismatch {
             arch: arch.to_string(),
-            expected: pin.sha256_hex.to_string(),
+            expected: pin.sha256_hex.clone(),
             actual,
         });
     }
@@ -274,7 +285,7 @@ fn cached_pinned_kernel(
         return None;
     };
     match sha256_hex_of(verified.path()) {
-        Ok(actual) if actual.eq_ignore_ascii_case(pin.sha256_hex) => Some(verified),
+        Ok(actual) if actual.eq_ignore_ascii_case(&pin.sha256_hex) => Some(verified),
         _ => {
             for stale in kernel_entry_files(verified.path()) {
                 let _ = std::fs::remove_file(stale);
@@ -299,10 +310,9 @@ mod tests {
     /// A pin over bytes a test controls, so the policy is exercised without the
     /// real release assets.
     fn pin_for(bytes: &[u8]) -> BootstrapKernelPin {
-        let digest = hex::encode(Sha256::digest(bytes));
         BootstrapKernelPin {
-            url: "https://example.invalid/vmlinux",
-            sha256_hex: Box::leak(digest.into_boxed_str()),
+            url: "https://example.invalid/vmlinux".to_string(),
+            sha256_hex: hex::encode(Sha256::digest(bytes)),
         }
     }
 
@@ -503,15 +513,30 @@ mod tests {
 
     #[test]
     fn both_supported_arches_have_a_pin_and_nothing_else_does() {
-        assert_eq!(
-            bootstrap_kernel_pin("aarch64"),
-            Some(&BOOTSTRAP_KERNEL_AARCH64)
-        );
-        assert_eq!(
-            bootstrap_kernel_pin("x86_64"),
-            Some(&BOOTSTRAP_KERNEL_X86_64)
-        );
+        assert!(bootstrap_kernel_pin("aarch64").is_some());
+        assert!(bootstrap_kernel_pin("x86_64").is_some());
         assert_eq!(bootstrap_kernel_pin("riscv64"), None);
+    }
+
+    /// The pins are derived from the lock, so nothing else may decide the
+    /// release they come from: a Stage 0 kernel fetched from one release and a
+    /// digest copied from another is a fetch that can never succeed.
+    #[test]
+    fn the_shipped_pins_come_from_the_locked_stage0_release() {
+        let locked = mvm_core::image_set::image_train_lock();
+        assert_eq!(
+            bootstrap_kernel_release(),
+            locked.stage0_kernel.release_tag.as_str()
+        );
+        for arch in ["aarch64", "x86_64"] {
+            let pin = bootstrap_kernel_pin(arch).expect("a pin per supported arch");
+            let parsed: GuestArch = arch.parse().expect("a supported arch parses");
+            assert_eq!(
+                pin.url,
+                locked.stage0_kernel_url(parsed).expect("a locked URL"),
+                "{arch}: the pin URL must be the one the lock composes"
+            );
+        }
     }
 
     /// A pin that is not a full lowercase SHA-256 could never match, and one
@@ -519,10 +544,8 @@ mod tests {
     /// copy-paste slip.
     #[test]
     fn the_shipped_pins_are_well_formed_and_name_their_own_arch() {
-        for (arch, pin) in [
-            ("aarch64", &BOOTSTRAP_KERNEL_AARCH64),
-            ("x86_64", &BOOTSTRAP_KERNEL_X86_64),
-        ] {
+        for arch in ["aarch64", "x86_64"] {
+            let pin = bootstrap_kernel_pin(arch).expect("a pin per supported arch");
             assert_eq!(
                 pin.sha256_hex.len(),
                 64,
@@ -536,8 +559,9 @@ mod tests {
             );
             assert!(pin.url.starts_with("https://"), "{arch}: {}", pin.url);
             assert!(
-                pin.url.contains(BOOTSTRAP_KERNEL_RELEASE),
-                "{arch}: pin must come from {BOOTSTRAP_KERNEL_RELEASE}: {}",
+                pin.url.contains(bootstrap_kernel_release()),
+                "{arch}: pin must come from {}: {}",
+                bootstrap_kernel_release(),
                 pin.url
             );
             assert!(
@@ -547,7 +571,12 @@ mod tests {
             );
         }
         assert_ne!(
-            BOOTSTRAP_KERNEL_AARCH64.sha256_hex, BOOTSTRAP_KERNEL_X86_64.sha256_hex,
+            bootstrap_kernel_pin("aarch64")
+                .expect("aarch64 pin")
+                .sha256_hex,
+            bootstrap_kernel_pin("x86_64")
+                .expect("x86_64 pin")
+                .sha256_hex,
             "the two arches cannot share one kernel"
         );
     }

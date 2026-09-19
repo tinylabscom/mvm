@@ -25,6 +25,7 @@ use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource, TenantId};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
+use mvm_runtime::vmm::egress_gate::EgressGate;
 
 use mvm_hostd::framing::{read_json_frame, write_json_frame};
 use mvm_hostd::keyholder::{
@@ -61,6 +62,12 @@ impl Forwarder for RecordingForwarder {
         })
     }
 }
+
+/// The endpoint suites' claim-10 test gate, included by path so both use one
+/// definition.
+#[path = "../src/supervisor/network_endpoint_proxy/test_support/gate.rs"]
+mod gate;
+use gate::gate_admitting;
 
 fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
     SecretRef {
@@ -127,6 +134,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         tls_intermediate: None,
         recorder: None,
+        egress_gate: Arc::new(EgressGate::default_deny()),
     })
     .unwrap();
 
@@ -193,6 +201,7 @@ async fn network_endpoint_refuses_unbound_destination() {
         Arc::new(reg),
         resolver,
         Arc::clone(&forwarder) as _,
+        gate_admitting(&[("api.openai.com", 443), ("evil.example.com", 443)]),
     ));
 
     let sock = dir.path().join("subst.sock");
@@ -211,8 +220,9 @@ async fn network_endpoint_refuses_unbound_destination() {
     let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
 
     assert!(
-        matches!(resp, WireResponse::Refused { .. }),
-        "unbound destination must be refused: {resp:?}"
+        matches!(&resp, WireResponse::Refused { message }
+            if message.contains("not in the secret's allowed_hosts")),
+        "unbound destination must be refused by the binding check: {resp:?}"
     );
     // claim 12: the unbound destination never reached the forward leg, so the
     // real credential was never substituted toward it.
@@ -253,8 +263,13 @@ async fn audit_chain_carries_no_secret_value() {
     let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
 
     let service = Arc::new(
-        SubstitutionService::new(Arc::new(reg), resolver, Arc::clone(&forwarder) as _)
-            .with_recorder(recorder),
+        SubstitutionService::new(
+            Arc::new(reg),
+            resolver,
+            Arc::clone(&forwarder) as _,
+            gate_admitting(&[("api.openai.com", 443)]),
+        )
+        .with_recorder(recorder),
     );
     let sock = dir.path().join("subst.sock");
     let listener = UnixListener::bind(&sock).unwrap();

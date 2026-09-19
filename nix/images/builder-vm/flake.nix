@@ -22,8 +22,9 @@
   # - `MVM_WORKSPACE_PATH` env var override for the sandbox case
   #   (avoids resolving `../../..` against the flake's own store copy,
   #   which does not contain the workspace).
-  # - Import the parent flake's `nix/lib/` directly (skip flake-
-  #   input chain → no path-input lock validation issue).
+  # - Call the `mvm` flake's `outputs` directly (`nix/flake.nix`) for
+  #   mkGuest, the guest recipes and the host-binaries manifest — no
+  #   flake-input chain, so no path-input lock validation issue.
   #
   # ── Builder VM package set ────────────────────────────────────────
   #
@@ -97,14 +98,13 @@
              and pass MVM_HOST_BIN_DIR=<DIR> --impure.
            '';
 
-      hostBinaries = import (workspaceRoot + "/nix/lib/mvm-host-binaries.nix");
-
-      hostBinExtraFiles = nixpkgs.lib.mapAttrs' (name: spec:
-        nixpkgs.lib.nameValuePair spec.install_path {
-          source = hostBinDir + "/${name}";
-          mode = spec.mode;
-        }
-      ) hostBinaries;
+      hostBinExtraFilesFor = system:
+        nixpkgs.lib.mapAttrs' (name: spec:
+          nixpkgs.lib.nameValuePair spec.install_path {
+            source = hostBinDir + "/${name}";
+            mode = spec.mode;
+          }
+        ) mvm.lib.${system}.hostBinaries;
 
       # Filter list lives at nix/lib/workspace-filter.nix so the three
       # flakes that ingest the host workspace (this one, builder/,
@@ -115,9 +115,14 @@
         })
         { inherit workspaceRoot; };
 
-      libFor = import (workspace + "/nix/lib") {
+      # The `mvm` flake, evaluated against this flake's pinned inputs and the
+      # filtered workspace. mkGuest, the guest recipes and the host-binaries
+      # manifest all come from its outputs: the interface an image repository
+      # pins is the one this flake already builds through.
+      mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs {
+        self = { };
         inherit nixpkgs microvm;
-        mvmSrc = workspace;
+        mvm-workspace = workspace;
       };
 
       # Shared kernel-config base. Imported from `nix/images/kernel/base.nix`
@@ -126,8 +131,8 @@
       # `nix flake check --no-build` (the "Nix flake check (Linux eval)"
       # lane) refuses — so the builder/workload kernel + their configfile
       # outputs must not route base through it.
-      # Import the shared kernel via `workspaceRoot` (the same mechanism
-      # this flake uses for `nix/lib`), NOT a bare `../kernel` relative
+      # Import the shared kernel via `workspaceRoot` (the same root this
+      # flake reads `nix/flake.nix` from), NOT a bare `../kernel` relative
       # path. Under the `path:` URL fetch the libkrun builder VM uses, a
       # relative `..` resolves against the flake's *store copy* and
       # escapes it; `workspaceRoot` points at the live workspace
@@ -157,13 +162,7 @@
       # Use the same static privilege-drop helper as workload init. Including
       # it in the package list gives the builder rootfs a stable
       # `/sbin/mvm-setpriv` symlink through mkGuest's package population loop.
-      builderSetprivFor = pkgs:
-        import (workspace + "/nix/packages/mvm-setpriv.nix") {
-          inherit pkgs;
-          rustPlatform = pkgs.pkgsStatic.rustPlatform;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+      builderSetprivFor = system: mvm.packages.${system}.mvm-setpriv;
 
       # Narrower than the interactive image. See module-level docs
       # above for the rationale on each.
@@ -186,7 +185,7 @@
       # `registry.npmjs.org`, `objects.githubusercontent.com`.
       # The persistent dispatch loop resets the chain per job kind so
       # jobs cannot leak posture from one dispatch to the next.
-      builderPackages = pkgs: with pkgs; [
+      builderPackages = system: pkgs: with pkgs; [
         bashInteractive
         coreutils
         # `pkgsStatic.busybox` for the lightweight utilities that
@@ -228,7 +227,7 @@
         iptables-legacy
         e2fsprogs
         util-linux
-        (builderSetprivFor pkgs)
+        (builderSetprivFor system)
         # The host VM spawns one Firecracker workload microVM per
         # `WorkloadStart` dispatch inside itself. Sourced from the pinned
         # nixpkgs above — an upstream Nix package, never an
@@ -307,7 +306,7 @@
           pkgs = import nixpkgs { inherit system; };
           extraPkgs = if interactive then devPackages pkgs else [ ];
         in
-        (libFor { inherit system; }).mkGuest {
+        mvm.lib.${system}.mkGuest {
           name = "mvm-builder-vm";
           # The builder VM chains from mkGuest's `/init` into
           # `mvm-host-vm-init` and sources the guest agent + egress-client
@@ -324,7 +323,7 @@
           # Persistent build jobs run as this unprivileged numeric uid. Keep
           # a passwd/group entry so Nix can resolve its home directory.
           builderUid = 902;
-          packages = (builderPackages pkgs) ++ extraPkgs;
+          packages = (builderPackages system pkgs) ++ extraPkgs;
           # Host binaries (mvm-host-vm-init, mvm-egress-proxy) come
           # from MVM_HOST_BIN_DIR via hostBinExtraFiles — embedded
           # in mvmctl, no rustPlatform.buildRustPackage calls
@@ -335,7 +334,7 @@
           # the /sbin + /usr/local/bin symlinks mkGuest adds);
           # this entry guarantees the canonical /usr/bin path
           # regardless of mkGuest's symlink targets.
-          extraFiles = hostBinExtraFiles // {
+          extraFiles = hostBinExtraFilesFor system // {
             "/usr/bin/firecracker" =
               "${pkgs.firecracker}/bin/firecracker";
           };

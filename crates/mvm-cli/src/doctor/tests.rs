@@ -262,3 +262,26 @@ fn doctor_report_serializes_workflow_when_set() {
         "workflow-scoped report must serialize the field; got: {json}"
     );
 }
+
+#[test]
+fn a_firecracker_with_discard_is_reported_as_reclaiming() {
+    let check = super::fc_block_discard_check("Firecracker v1.17.0\n");
+    assert!(check.ok);
+    assert!(check.info.starts_with("yes"), "{}", check.info);
+}
+
+#[test]
+fn an_older_firecracker_says_why_the_stores_do_not_shrink() {
+    let check = super::fc_block_discard_check("Firecracker v1.14.1\n");
+    assert!(check.ok, "informational, not a failure");
+    assert!(check.info.starts_with("no"), "{}", check.info);
+    assert!(check.info.contains("v1.14.1"), "{}", check.info);
+}
+
+#[test]
+fn an_unreadable_firecracker_version_is_not_reported_as_reclaiming() {
+    for output in ["", "firecracker: command not found", "Firecracker"] {
+        let check = super::fc_block_discard_check(output);
+        assert!(check.info.starts_with("no"), "{output:?}: {}", check.info);
+    }
+}

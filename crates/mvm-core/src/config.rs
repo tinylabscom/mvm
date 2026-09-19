@@ -1,27 +1,50 @@
 use sha2::Digest as _;
 
 /// Default Firecracker version, overridable at build time via `MVM_FC_VERSION` env var.
+///
+/// This is what a host with no Firecracker is given. A host that already has
+/// one keeps it, so a feature this version adds is gated on the running binary
+/// (`FcCapabilities`), never on this constant.
 pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
     Some(v) => v,
-    None => "v1.14.1",
+    None => "v1.17.0",
 };
 
-/// The boot image release the CLI expects, overridable at build time via
-/// `MVM_BOOT_IMAGE_TAG`.
+/// The `firecracker-ci/<version>/` prefix whose generic kernel and Ubuntu rootfs
+/// the fleet builder and `download_assets` fetch.
+///
+/// Pinned apart from [`FC_VERSION_DEFAULT`] because the public bucket stopped
+/// publishing per-release prefixes after v1.15: deriving it from the binary
+/// version sent every lookup to an empty listing once the binary moved past
+/// that. These are stock guest images, not tied to the VMM's version.
+pub const FC_CI_ASSETS_VERSION: &str = "v1.15";
+
+/// The boot image release the CLI expects: the tag pinned by
+/// `crates/mvm-core/images.lock`, overridable at build time via `MVM_BOOT_IMAGE_TAG`.
 ///
 /// The boot image ships on its own counter (`boot-image/vN`) so a rootfs or
 /// kernel fix does not have to wait for a CLI release. This is the whole tag
 /// rather than a bare version, because it is spliced straight into a release
 /// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
 ///
-/// Downloaders and the merge-queue boot witnesses must stay on this same
-/// published tag. Advancing the constant before the release exists turns every
-/// fresh install's first boot into a 404; advancing only one consumer makes CI
-/// validate a different image from the one users receive.
-pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
-    Some(t) => t,
-    None => "boot-image/v0.1.5",
-};
+/// Every downloader, workflow and boot witness reads this one pin — directly,
+/// or through `scripts/locked-image-tag.sh` where no Rust is available.
+/// Advancing it before the release exists turns every fresh install's first
+/// boot into a 404; a copy left behind makes CI validate a different image from
+/// the one users receive, which is what `xtask check-image-lock` refuses.
+///
+/// The build-time override stays because `nix/images/default-tenant/flake.nix`
+/// reads `MVM_BOOT_IMAGE_TAG`: a build can point at an unpublished tag without
+/// editing the lock, and the lock is what every unset build gets.
+pub fn default_boot_image_tag() -> &'static str {
+    match option_env!("MVM_BOOT_IMAGE_TAG") {
+        Some(tag) => tag,
+        None => crate::image_set::image_train_lock()
+            .boot_image
+            .release_tag
+            .as_str(),
+    }
+}
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
@@ -59,19 +82,6 @@ pub fn normalize_fc_version(raw: &str) -> String {
 pub fn fc_version() -> String {
     let raw = std::env::var("MVM_FC_VERSION").unwrap_or_else(|_| FC_VERSION_DEFAULT.to_string());
     normalize_fc_version(&raw)
-}
-
-/// Short Firecracker version for S3 asset paths (e.g., "v1.13").
-/// Strips the patch component from the effective version.
-pub fn fc_version_short() -> String {
-    let full = fc_version();
-    let trimmed = full.trim_start_matches('v');
-    let parts = trimmed.split('.').collect::<Vec<_>>();
-    if parts.len() >= 2 {
-        format!("v{}.{}", parts[0], parts[1])
-    } else {
-        full
-    }
 }
 
 /// Basename used by the default host-state root.
@@ -1442,16 +1452,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fc_version_short() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_FC_VERSION");
-        let short = fc_version_short();
-        assert!(short.starts_with('v'));
-        // Should have exactly one dot (major.minor)
-        assert_eq!(short.matches('.').count(), 1);
-    }
-
-    #[test]
     fn normalize_firecracker_banner() {
         let raw = "Firecracker v1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
@@ -1471,11 +1471,8 @@ mod tests {
 
     #[test]
     fn normalize_minor_only() {
-        let mut env = TestEnv::new();
         let raw = "Firecracker v1.14";
         assert_eq!(normalize_fc_version(raw), "v1.14");
-        // short should remain the same when no patch component
-        assert_eq!(fc_version_short_from(&mut env, raw), "v1.14");
     }
 
     #[test]
@@ -1485,14 +1482,6 @@ mod tests {
             normalize_fc_version(raw),
             normalize_fc_version(FC_VERSION_DEFAULT)
         );
-    }
-
-    // Helper to test short derivation with a temp env override.
-    fn fc_version_short_from(env: &mut TestEnv, raw: &str) -> String {
-        env.set("MVM_FC_VERSION", raw);
-        let short = fc_version_short();
-        env.remove("MVM_FC_VERSION");
-        short
     }
 
     // --- Single-root layout tests ---

@@ -105,10 +105,7 @@ fn stale_supervisor_hint(stderr_tail: &str) -> String {
     if !stderr_tail.contains("unknown field") {
         return String::new();
     }
-    let profile = std::env::current_exe()
-        .ok()
-        .as_deref()
-        .and_then(crate::host::aux_bin::build_profile_of);
+    let profile = crate::host::aux_bin::HostProcess::current().build_profile();
     format!(
         "\n\nThat supervisor binary is older than this mvmctl: it refused a config field \
          this build sends. Rebuild it with `{}`. It signs itself on first launch, so no \

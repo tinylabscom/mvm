@@ -14,6 +14,10 @@ license.workspace = true
 
 [features]
 default = []
+# Build as the release channel: the runtime overlay defaults to the published
+# artifact instead of a source-checkout build. Forwarded from mvm-cli's
+# feature of the same name.
+release-channel = ["mvm-build/release-channel"]
 # The remote REST `GatewayBackend` + `connect(Target::Gateway)`. Off by default
 # so a pure-local consumer stays light; a fleet/studio build turns it on.
 remote = ["mvm-core/client-remote"]
@@ -41,6 +45,17 @@ mvm-runtime = { workspace = true, default-features = false }
 # to the default build; it does not form a cycle because mvm-sdk — which
 # mvm-hostd pulls in — carries no dependency back on this crate.
 mvm-hostd = { workspace = true }
+# Boot admission reads the deploy record a build left beside the rootfs and
+# verifies the booting artifact against it. Already in this crate's closure
+# through mvm-hostd, so the direct edge adds no crates.
+mvm-sdk.workspace = true
+# The guest-agent request type agent-verb grants are keyed on, and the wire
+# protocol the guest process and filesystem operations speak. Already in this
+# crate's closure through mvm-hostd.
+mvm-agentd.workspace = true
+# The per-boot drive files the start config carries. Already in this crate's
+# closure through mvm-runtime.
+mvm-vmm.workspace = true
 # Shared run-path orchestration (`run_image::inject_and_materialize`) — the same
 # pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-fs's
 # ext4 writer, already in the mvmctl closure via the CLI, so this adds no default crates.
@@ -93,6 +108,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# The runtime-source tests build a shared-object fixture to check which guest
+# runtime a rootfs needs.
+mvm-fs = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 # The tracing bridge's tests install a capturing subscriber to assert the
 # emitted event carries the payload bytes back out unaltered.

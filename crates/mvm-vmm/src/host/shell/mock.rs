@@ -2,8 +2,6 @@
 //!
 //! Provides a thread-local mock handler that intercepts shell commands
 //! during tests, backed by an in-memory filesystem simulation.
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;

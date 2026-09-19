@@ -124,6 +124,7 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
 
     let mut prior_layer_paths = std::collections::HashSet::<PathBuf>::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     let metadata = stream_oci_archive(reader, &platform, |descriptor, raw| {
         let report = if is_gzip_layer(&descriptor.media_type) {
             unpack_layer_with_prior_paths(
@@ -147,6 +148,7 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
                 descriptor.digest, report.refused
             )));
         }
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
         Ok(())
@@ -155,32 +157,43 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
 
     let manifest_hex = sha256_hex(&metadata.manifest_digest)?;
     let unpacked_root = unpacked_parent.join(&manifest_hex);
-    if unpacked_root.exists() {
-        fs::remove_dir_all(&unpacked_root)
-            .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
+    {
+        // Another run of this image may be injecting into or copying from the
+        // tree being replaced.
+        let _tree = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
+        if unpacked_root.exists() {
+            fs::remove_dir_all(&unpacked_root).with_context(|| {
+                format!("remove stale unpacked root {}", unpacked_root.display())
+            })?;
+        }
+        fs::rename(&tmp_path, &unpacked_root).with_context(|| {
+            format!(
+                "rename unpack directory {} to {}",
+                tmp_path.display(),
+                unpacked_root.display()
+            )
+        })?;
     }
-    fs::rename(&tmp_path, &unpacked_root).with_context(|| {
-        format!(
-            "rename unpack directory {} to {}",
-            tmp_path.display(),
-            unpacked_root.display()
-        )
-    })?;
 
-    let rootfs_rel = format!(
-        "rootfs/{manifest_hex}-{}/rootfs.ext4",
-        oci_runtime_tag(cache_root)
-    );
+    // A local archive is dev-only (`--prod` is refused above), so this is the
+    // dev variant's path.
+    let rootfs_rel = super::materialize::oci_rootfs_rel(
+        &metadata.manifest_digest,
+        &oci_runtime_tag(cache_root),
+        false,
+    )?;
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &metadata.manifest_digest)?;
     super::cache::write_deferred_nodes(cache_root, &metadata.manifest_digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &metadata.manifest_digest, &owners)?;
     materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &metadata.manifest_digest,
         deferred_nodes,
+        owners,
     )?;
 
     let provenance = OciProvenance {
@@ -228,6 +241,9 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
 
     let manifest_hex = sha256_hex(&image.manifest_digest)?;
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
+    // Another run of this image may be injecting into or copying from the
+    // tree this is about to remove and refill.
+    let tree_lock = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
     if unpacked_root.exists() {
         fs::remove_dir_all(&unpacked_root)
             .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
@@ -236,6 +252,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
         .with_context(|| format!("create {}", unpacked_root.display()))?;
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     for layer in &image.layers {
         let report = unpack_layer_bytes(
             &layer.descriptor,
@@ -244,24 +261,31 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
             &prior_layer_paths,
         )
         .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
     }
+    drop(tree_lock);
 
-    let rootfs_rel = format!(
-        "rootfs/{manifest_hex}-{}/rootfs.ext4",
-        oci_runtime_tag(cache_root)
-    );
+    // A local archive is dev-only (`--prod` is refused above), so this is the
+    // dev variant's path.
+    let rootfs_rel = super::materialize::oci_rootfs_rel(
+        &image.manifest_digest,
+        &oci_runtime_tag(cache_root),
+        false,
+    )?;
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;
     super::cache::write_deferred_nodes(cache_root, &image.manifest_digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &image.manifest_digest, &owners)?;
     materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &image.manifest_digest,
         deferred_nodes,
+        owners,
     )?;
 
     let provenance = OciProvenance {

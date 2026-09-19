@@ -98,7 +98,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args) -> Result<()> {
 /// Takes the raw signal number rather than `nix`'s `Signal` so it stays
 /// testable on hosts where `nix` is not linked; `nix` is a Linux-only
 /// dependency here but this decision is worth a witness anywhere.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn is_new_tracee_birth_stop(first_sighting: bool, signal: i32) -> bool {
     first_sighting && signal == libc::SIGSTOP
 }

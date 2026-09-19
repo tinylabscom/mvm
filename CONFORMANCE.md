@@ -23,7 +23,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-18` | `build` | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | `fn:a_boot_past_the_headroom_is_refused`, `fn:budget_ignores_dead_machines`, `fn:budget_counts_the_configured_maximum_not_current_usage`, `fn:an_empty_host_admits_a_boot_within_headroom`, `fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`, `fn:a_fuel_grant_contributes_no_cpu_share`, `fn:a_live_machine_with_no_charge_record_is_not_counted`, `fn:admission_refuses_a_grant_over_the_ceiling`, `fn:the_ceiling_bounds_memory_even_though_no_one_granted_it`, `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`, `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`, `fn:host_cpu_mechanism_gap_honors_hvf_quota_range`, `fn:relay_config_threads_cpu_share_to_quota_scheduler`, `fn:apply_grants_reads_quota_record_from_state_dir`, `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present`, `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`, `fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain`, `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`, `fn:a_signed_plan_from_the_launch_path_arms_the_timer`, `fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota`, `fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:a_claimed_child_over_the_host_ceiling_is_refused`, `fn:a_claimed_child_within_the_ceiling_is_admitted`, `fn:the_refusal_names_the_ceiling_and_the_request`, `fn:pool_matching_is_unchanged_by_the_bound` |
+| `MVM-SEC-18` | `build` | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | `fn:a_boot_past_the_headroom_is_refused`, `fn:budget_ignores_dead_machines`, `fn:budget_counts_the_configured_maximum_not_current_usage`, `fn:an_empty_host_admits_a_boot_within_headroom`, `fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`, `fn:a_fuel_grant_contributes_no_cpu_share`, `fn:a_live_machine_with_no_charge_record_is_not_counted`, `fn:admission_refuses_a_grant_over_the_ceiling`, `fn:the_ceiling_bounds_memory_even_though_no_one_granted_it`, `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`, `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`, `fn:host_cpu_mechanism_gap_honors_hvf_quota_range`, `fn:relay_config_threads_cpu_share_to_quota_scheduler`, `fn:apply_grants_reads_quota_record_from_state_dir`, `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present`, `fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings`, `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`, `fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement`, `fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it`, `fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain`, `fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism`, `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`, `fn:a_signed_plan_from_the_launch_path_arms_the_timer`, `fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota`, `fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded`, `fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited`, `fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:a_claimed_child_over_the_host_ceiling_is_refused`, `fn:a_claimed_child_within_the_ceiling_is_admitted`, `fn:the_refusal_names_the_ceiling_and_the_request`, `fn:pool_matching_is_unchanged_by_the_bound` |
 
 ## agent_surface
 
@@ -35,7 +35,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-11` | `build` | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | `fn:verify_sealed_volume`, `fn:apply_install_gate`, `ci:app-deps-audit` |
+| `MVM-SEC-11` | `build` | App-dep volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked and reverified at admission | `fn:verify_sealed_volume`, `fn:apply_install_gate`, `ci:app-deps-audit` |
 
 ## asset_identity
 
@@ -53,7 +53,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-16` | `build` | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:network_endpoint_refuses_unbound_destination`, `fn:audit_chain_carries_no_secret_value` |
+| `MVM-SEC-16` | `build` | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:network_endpoint_refuses_unbound_destination`, `fn:audit_chain_carries_no_secret_value`, `fn:substitution_is_audited_when_upstream_fails_after_send` |
 
 ## egress_vsock
 
@@ -107,14 +107,14 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-13` | `build` | The managed substitution path hands the guest placeholders, never raw secret values | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination`, `fn:substitute` |
+| `MVM-SEC-13` | `build` | The managed substitution path hands the guest placeholders, never raw secret values | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination`, `fn:substitute_bound_credential` |
 
 ## supply_chain
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-07` | `some-true` | Cargo deps are audited on every PR | `ci:cargo-deny`, `ci:cargo-audit`, `ci:reproducibility` |
-| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `ci:release-provenance`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`, `fn:skip_hash_verify_does_not_waive_the_manifest_signature` |
+| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, and self-update paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `ci:release-provenance`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`, `fn:skip_hash_verify_does_not_waive_the_manifest_signature`, `fn:an_archive_without_a_bundle_is_refused`, `fn:a_real_release_bundle_verifies_under_its_tag` |
 
 ## verified_boot
 

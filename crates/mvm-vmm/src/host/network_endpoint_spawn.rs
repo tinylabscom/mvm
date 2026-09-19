@@ -958,9 +958,9 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         });
     }
     if let Some(policy) = params.network_policy {
-        // `EndpointConfig.network_policy`: present ⇒ the endpoint gates every
-        // destination itself. Omitted when `None` so legacy configs are
-        // byte-identical to before (the in-loop gate stays the enforcer).
+        // `EndpointConfig.network_policy`: the policy the endpoint gates every
+        // destination against. Omitted when `None`, and an endpoint whose
+        // config carries no policy denies every destination.
         cfg["network_policy"] =
             serde_json::to_value(policy).expect("NetworkPolicy serializes to JSON");
     }
@@ -1480,10 +1480,13 @@ mod tests {
         }
         endpoint.join().unwrap();
         let err = result.unwrap_err();
+        // A peer that closes immediately may be observed while installing the
+        // socket timeout (macOS) or while reading. Either path must fail closed.
+        let message = err.to_string();
         assert!(
-            err.to_string()
-                .contains("waiting for the network endpoint's authenticated session"),
-            "unexpected: {err}"
+            message.contains("waiting for the network endpoint's authenticated session")
+                || message.contains("set network endpoint readiness timeout"),
+            "unexpected: {err:#}"
         );
     }
 

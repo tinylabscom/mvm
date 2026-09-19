@@ -21,8 +21,8 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
 use crate::socket::{
-    AF_VSOCK, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept, bind, close, listen,
-    peer_cid_is_authorized, socket,
+    AF_VSOCK, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept_cloexec, bind, close, listen,
+    peer_cid_is_authorized, socket_cloexec,
 };
 use std::mem::size_of;
 
@@ -64,8 +64,7 @@ pub(crate) fn bind_listener(vsock_port: u32) -> std::io::Result<AgentListener> {
     if unix_transport_selected() {
         return bind_unix_listener(&unix_socket_path()).map(AgentListener::Unix);
     }
-    // SAFETY: libc call, arguments are constant values.
-    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
+    let fd = socket_cloexec(AF_VSOCK, SOCK_STREAM);
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -146,16 +145,13 @@ fn accept_control_vsock(fd: RawFd) -> Option<RawFd> {
         svm_zero: [0; 3],
     };
     let mut peer_len = size_of::<SockAddrVm>() as u32;
-    // SAFETY: `peer` is a fully-owned, correctly-sized `sockaddr_vm`; the
-    // kernel writes at most `peer_len` bytes and updates it to the actual
-    // length.
-    let cfd = unsafe {
-        accept(
-            fd,
-            &mut peer as *mut SockAddrVm as *mut core::ffi::c_void,
-            &mut peer_len,
-        )
-    };
+    // `peer` is a fully-owned, correctly-sized `sockaddr_vm`; the kernel
+    // writes at most `peer_len` bytes and updates it to the actual length.
+    let cfd = accept_cloexec(
+        fd,
+        &mut peer as *mut SockAddrVm as *mut core::ffi::c_void,
+        &mut peer_len,
+    );
     if cfd < 0 {
         // Most common reason: EINTR from a signal. The caller re-checks its
         // shutdown flag immediately.
@@ -220,6 +216,54 @@ mod tests {
         conn.read_exact(&mut b).unwrap();
         conn.write_all(&b).unwrap();
         client.join().unwrap();
+    }
+
+    fn is_cloexec(fd: i32) -> bool {
+        // SAFETY: reading descriptor flags touches no memory.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        flags >= 0 && flags & libc::FD_CLOEXEC != 0
+    }
+
+    /// The control sockets must not survive exec: a workload or the reseed
+    /// helper spawned while one is open would otherwise hold the agent's
+    /// listener or a live host connection.
+    #[test]
+    fn control_sockets_are_close_on_exec() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let listener = bind_unix_listener(&sock).expect("bind unix listener");
+        assert!(is_cloexec(listener.as_raw_fd()), "unix listener");
+
+        let client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        let mut addr = [0u8; 128];
+        let mut len = addr.len() as u32;
+        let cfd = accept_cloexec(listener.as_raw_fd(), addr.as_mut_ptr().cast(), &mut len);
+        assert!(cfd >= 0, "accept: {}", std::io::Error::last_os_error());
+        assert!(is_cloexec(cfd), "accepted connection");
+        // SAFETY: `cfd` was just accepted and is owned here.
+        drop(unsafe { std::fs::File::from_raw_fd(cfd) });
+        drop(client);
+
+        let unix_accepted = std::thread::spawn({
+            let sock = sock.clone();
+            move || std::os::unix::net::UnixStream::connect(&sock).unwrap()
+        });
+        let cfd = accept_control(&AgentListener::Unix(listener)).expect("accept");
+        assert!(is_cloexec(cfd), "unix control connection");
+        // SAFETY: as above.
+        drop(unsafe { std::fs::File::from_raw_fd(cfd) });
+        drop(unix_accepted.join().unwrap());
+
+        // A host without vsock support cannot create the socket at all; where it
+        // can, the socket is close-on-exec from creation.
+        let fd = socket_cloexec(AF_VSOCK, SOCK_STREAM);
+        if fd >= 0 {
+            assert!(is_cloexec(fd), "vsock socket");
+            // SAFETY: `fd` was just created and is owned here.
+            unsafe { close(fd) };
+        }
     }
 
     #[test]

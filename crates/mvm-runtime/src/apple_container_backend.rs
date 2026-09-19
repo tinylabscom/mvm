@@ -127,6 +127,10 @@ impl VmBackend for AppleContainerBackend {
         // context-aware standby claim seam, so it must not inherit HVF's live
         // handoff capability accidentally.
         capabilities.standby_pool = false;
+        // The balloon device is there, but it only returns memory when the
+        // guest kernel reports free pages, and nothing here establishes that
+        // Apple's prebuilt kernel does. Claim only what a boot has shown.
+        capabilities.free_page_reporting = false;
         capabilities
     }
 

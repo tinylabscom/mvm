@@ -49,9 +49,10 @@ pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
 
 fn oci_runtime_tag_from_identity(identity: &str) -> String {
     format!(
-        "{}-inject-{}-guest-{}",
+        "{}-inject-{}-unpack-{}-guest-{}",
         env!("CARGO_PKG_VERSION"),
         mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+        mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION,
         runtime_tag_prefix(identity)
     )
 }
@@ -116,14 +117,71 @@ pub(super) fn oci_entrypoint_from_cache_path(
     oci_entrypoint_from_config_bytes(&bytes)
 }
 
-/// Whether a cached image's materialized rootfs can be booted as-is: it must
-/// exist and carry the current runtime tag. A `None` tag (pre-tag entry) or a
-/// mismatch means the baked agent may be outdated, so the rootfs is stale.
+/// The variant of an image's rootfs a run needs. A `--prod` run needs the
+/// dm-verity-sealed image with the production agent profile; every other run
+/// the dev one. They are different bytes — `/etc/mvm/variant`, the trust
+/// policy, the provenance mark — so they never share a file.
+fn rootfs_variant(prod: bool) -> &'static str {
+    if prod { "sealed" } else { "dev" }
+}
+
+/// Cache-relative path of an image's rootfs for one guest runtime and one
+/// variant. Every materializer and every reuse check derives the path here,
+/// so a dev image can never be found where a sealed one is looked for.
+pub(super) fn oci_rootfs_rel(
+    resolved_digest: &str,
+    runtime_tag: &str,
+    prod: bool,
+) -> Result<String> {
+    Ok(format!(
+        "rootfs/{}-{runtime_tag}-{}/rootfs.ext4",
+        super::cache::sha256_hex(resolved_digest)?,
+        rootfs_variant(prod)
+    ))
+}
+
+/// Whether the rootfs at `rootfs_abs` can be reused by this run as it is: a
+/// finished build (its guest sidecar, published last, is present), with its
+/// verity sidecars, of this run's variant.
+///
+/// Checked under the image's output lock, so a rebuild that is publishing is
+/// never read half-way. The lock is released on return; a caller that goes on
+/// to rebuild takes it again through the materializer.
+pub(super) fn reusable_rootfs(rootfs_abs: &Path, prod: bool) -> Result<bool> {
+    let _output = mvm_build::run_image::lock_rootfs_output(rootfs_abs)?;
+    Ok(mvm_build::run_image::published_build_matches(
+        rootfs_abs, prod,
+    ))
+}
+
+/// Refuse to hand a `--prod` run an image that is not sealed. The boot path
+/// picks the guest profile from the image's sidecar, and an unsealed one
+/// would quietly boot the dev agent profile for a production run.
+pub(super) fn refuse_unsealed_prod_rootfs(rootfs_path: &Path, prod: bool) -> Result<()> {
+    if prod && !crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path) {
+        bail!(
+            "--prod resolved {} but its sidecar does not record a sealed image; refusing to \
+             boot a production run with the dev agent profile",
+            rootfs_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether a cached image's index entry points at this run's rootfs: the
+/// current runtime tag, and the path derived for this variant. A `None` tag
+/// (pre-tag entry), a stale tag, or the other variant's path all mean the
+/// rootfs this run needs has to be (re)materialized.
 pub(super) fn cached_rootfs_is_current(
     cached: &super::oci_types::CachedOciImage,
     runtime_tag: &str,
+    prod: bool,
 ) -> bool {
-    cached.rootfs_path.is_some() && cached.runtime_tag.as_deref() == Some(runtime_tag)
+    cached.runtime_tag.as_deref() == Some(runtime_tag)
+        && cached.rootfs_path.as_deref().is_some_and(|path| {
+            oci_rootfs_rel(&cached.resolved_digest, runtime_tag, prod)
+                .is_ok_and(|want| want == path)
+        })
 }
 
 pub(super) fn rootfs_verity_sidecars_present(rootfs_path: &Path) -> bool {
@@ -163,6 +221,7 @@ pub(super) struct MaterializeCall<'a> {
     pub(super) entrypoint: Option<&'a ImageRuntimeConfig>,
     pub(super) sealed: bool,
     pub(super) deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    pub(super) owners: mvm_fs::ownership::OwnerTable,
     pub(super) evidence: Option<mvm_build::provenance_mark::SealEvidence<'a>>,
 }
 
@@ -178,23 +237,18 @@ pub(super) fn rematerialize_cached_image(
     materialize: RuntimeMaterializer,
     prod: bool,
 ) -> Result<Option<super::oci_types::CachedOciImage>> {
-    let Some(unpacked_root) =
-        super::cache::unpacked_dir_if_present(cache_root, &image.resolved_digest)
-    else {
+    // A tree whose owners were never recorded, or can no longer be read, would
+    // rebuild an image with every file owned by root. Unpack it again instead.
+    let Some(cached) = super::cache::read_cached_unpack(cache_root, &image.resolved_digest)? else {
         return Ok(None);
     };
-    let rootfs_path = match (
-        image.rootfs_path.as_deref(),
-        image.runtime_tag.as_deref() == Some(runtime_tag),
-    ) {
-        (Some(path), true) => path.to_string(),
-        _ => format!(
-            "rootfs/{}-{runtime_tag}/rootfs.ext4",
-            super::cache::sha256_hex(&image.resolved_digest)?
-        ),
-    };
+    let unpacked_root = cached.root;
+    let rootfs_path = oci_rootfs_rel(&image.resolved_digest, runtime_tag, prod)?;
     let rootfs_abs = safe_cache_path(cache_root, &rootfs_path)?;
-    if !rootfs_abs.is_file() {
+    // Reused only when it is this variant's image, complete. A file left by an
+    // interrupted run, or one whose sidecar disagrees with the path it sits
+    // at, is built again rather than trusted.
+    if !reusable_rootfs(&rootfs_abs, prod)? {
         let signer;
         let evidence = if prod {
             signer = crate::commands::vm::host_signer::load_or_init()
@@ -216,7 +270,8 @@ pub(super) fn rematerialize_cached_image(
             entrypoint: oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
                 .as_ref(),
             sealed: prod,
-            deferred_nodes: super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
+            deferred_nodes: cached.deferred_nodes,
+            owners: cached.owners,
             evidence,
         })
         .with_context(|| {
@@ -264,6 +319,7 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
         entrypoint,
         sealed,
         deferred_nodes,
+        owners,
         evidence,
     } = call;
     mvm_build::run_image::inject_and_materialize(
@@ -276,7 +332,11 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
         .entrypoint(entrypoint)
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
+        .owners(owners)
         .evidence(evidence)
+        // Every OCI rootfs path names its digest, guest runtime and variant,
+        // so a complete matching set found under the lock is this image.
+        .reuse_published(true)
         .build(),
     )
 }
@@ -287,29 +347,69 @@ pub(super) fn prepare_rootfs_only_tree(
     identity: &str,
 ) -> Result<PathBuf> {
     let prepared_root = prepared_virtiofs_root(cache_root, identity, &oci_runtime_tag(cache_root));
+    // Shared by every run of this image: without the lock a second run sees a
+    // half-copied tree exist and boots it. Taken before the raw tree's lock,
+    // and no path takes them the other way round.
+    let _prepared = mvm_build::run_image::lock_unpacked_tree(&prepared_root)?;
     if prepared_root.exists() {
         return Ok(prepared_root);
     }
-    if let Some(parent) = prepared_root.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let parent = prepared_root
+        .parent()
+        .with_context(|| format!("{} has no parent", prepared_root.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    remove_stale_prepare_staging(parent)?;
+    // Built beside its final name and renamed into place once complete, so a
+    // run that dies part-way leaves a scratch directory, never a partial tree
+    // that `exists()` would serve to every later run.
+    let staging = tempfile::Builder::new()
+        .prefix(PREPARE_STAGING_PREFIX)
+        .tempdir_in(parent)
+        .with_context(|| format!("create a staging dir in {}", parent.display()))?;
+    let staged_root = staging.path().join("rootfs-only");
+    {
+        let _raw = mvm_build::run_image::lock_unpacked_tree(raw_unpacked_root)?;
+        copy_tree(raw_unpacked_root, &staged_root).with_context(|| {
+            format!(
+                "copy raw OCI tree {} -> {}",
+                raw_unpacked_root.display(),
+                staged_root.display()
+            )
+        })?;
     }
-    copy_tree(raw_unpacked_root, &prepared_root).with_context(|| {
+    let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
+        .context("resolve guest binaries for rootfs-only OCI tree")?;
+    mvm_build::oci_runtime_inject::inject_mvm_runtime(&staged_root, &bins, None, false)
+        .with_context(|| format!("inject rootfs-only runtime into {}", staged_root.display()))?;
+    fs::rename(&staged_root, &prepared_root).with_context(|| {
         format!(
-            "copy raw OCI tree {} -> {}",
-            raw_unpacked_root.display(),
+            "move the prepared tree {} into place at {}",
+            staged_root.display(),
             prepared_root.display()
         )
     })?;
-    let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
-        .context("resolve guest binaries for rootfs-only OCI tree")?;
-    mvm_build::oci_runtime_inject::inject_mvm_runtime(&prepared_root, &bins, None, false)
-        .with_context(|| {
-            format!(
-                "inject rootfs-only runtime into {}",
-                prepared_root.display()
-            )
-        })?;
     Ok(prepared_root)
+}
+
+/// Prefix of the scratch directory a prepared tree is built in.
+const PREPARE_STAGING_PREFIX: &str = ".rootfs-only-";
+
+/// Remove scratch directories a prepare that died left beside the prepared
+/// tree. Called under the prepared tree's lock, so none belongs to a live run.
+fn remove_stale_prepare_staging(parent: &Path) -> Result<()> {
+    for entry in fs::read_dir(parent).with_context(|| format!("list {}", parent.display()))? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PREPARE_STAGING_PREFIX)
+            && entry.file_type()?.is_dir()
+        {
+            fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove stale staging {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn materialize_overlay_lean_rootfs(
@@ -318,19 +418,31 @@ pub(super) fn materialize_overlay_lean_rootfs(
     rootfs_abs: &Path,
     image_label: &str,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
 ) -> Result<()> {
-    let staging_root = rootfs_abs.with_extension("staging");
-    if staging_root.exists() {
-        fs::remove_dir_all(&staging_root)
-            .with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
+    // A staging tree of this run's own: a fixed name was shared by every
+    // concurrent run of the image, each removing and refilling it under the
+    // others.
+    let staging_parent = rootfs_abs
+        .parent()
+        .with_context(|| format!("rootfs path has no parent dir: {}", rootfs_abs.display()))?;
+    fs::create_dir_all(staging_parent)
+        .with_context(|| format!("create {}", staging_parent.display()))?;
+    let staging_dir = tempfile::Builder::new()
+        .prefix("staging-")
+        .tempdir_in(staging_parent)
+        .with_context(|| format!("create a staging dir in {}", staging_parent.display()))?;
+    let staging_root = staging_dir.path().join("rootfs");
+    {
+        let _raw = mvm_build::run_image::lock_unpacked_tree(raw_unpacked_root)?;
+        copy_tree(raw_unpacked_root, &staging_root).with_context(|| {
+            format!(
+                "copy raw OCI tree {} -> {}",
+                raw_unpacked_root.display(),
+                staging_root.display()
+            )
+        })?;
     }
-    copy_tree(raw_unpacked_root, &staging_root).with_context(|| {
-        format!(
-            "copy raw OCI tree {} -> {}",
-            raw_unpacked_root.display(),
-            staging_root.display()
-        )
-    })?;
     let result = inject_runtime_and_materialize(MaterializeCall {
         cache_root,
         unpacked_root: &staging_root,
@@ -339,15 +451,14 @@ pub(super) fn materialize_overlay_lean_rootfs(
         entrypoint: None,
         sealed: false,
         deferred_nodes,
+        owners,
         evidence: None,
     });
-    let cleanup = fs::remove_dir_all(&staging_root);
-    if let Err(err) = cleanup
-        && staging_root.exists()
-    {
+    let staging_path = staging_dir.path().to_path_buf();
+    if let Err(err) = staging_dir.close() {
         tracing::warn!(
             error = %err,
-            staging = %staging_root.display(),
+            staging = %staging_path.display(),
             "failed to remove OCI runtime-lean staging tree"
         );
     }
@@ -365,14 +476,16 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
             let from = entry.path();
             let to = to_dir.join(entry.file_name());
             if ft.is_symlink() {
-                let target = fs::read_link(&from)?;
-                let _ = fs::remove_file(&to);
-                std::os::unix::fs::symlink(&target, &to)?;
+                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
             } else if ft.is_dir() {
                 stack.push((from, to));
-            } else {
+            } else if ft.is_file() {
                 fs::copy(&from, &to)?;
             }
+            // Anything else — a device, a FIFO, a socket — is never read: an
+            // unpack as root creates `dev/zero` and `dev/console`, and copying
+            // those reads forever or opens the host's console. The guest's
+            // devtmpfs supplies `/dev`, and the image writers omit them too.
         }
     }
     Ok(())
@@ -428,10 +541,20 @@ mod tests {
         assert_eq!(
             tag,
             format!(
+                "{}-inject-{}-unpack-{}-guest-0123456789abcdef",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+                mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION
+            )
+        );
+        assert_ne!(
+            tag,
+            format!(
                 "{}-inject-{}-guest-0123456789abcdef",
                 env!("CARGO_PKG_VERSION"),
                 mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
-            )
+            ),
+            "an image cached before layer owners were recorded must become stale"
         );
         assert_ne!(
             tag,
@@ -512,6 +635,75 @@ mod tests {
         layout.dir.clone()
     }
 
+    /// A device or FIFO in the tree is skipped, never read: reading a FIFO
+    /// blocks forever, and an unpack as root leaves `dev/zero` and
+    /// `dev/console` behind.
+    #[test]
+    fn copy_tree_skips_a_fifo_instead_of_reading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("dev")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(src.join("dev/pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(src.join("regular"), b"x").unwrap();
+        std::os::unix::fs::symlink("regular", src.join("link")).unwrap();
+        let dst = tmp.path().join("dst");
+
+        copy_tree(&src, &dst).expect("a FIFO does not stop the copy");
+
+        assert!(fs::symlink_metadata(dst.join("dev/pipe")).is_err());
+        assert!(dst.join("dev").is_dir());
+        assert_eq!(fs::read(dst.join("regular")).unwrap(), b"x");
+        assert_eq!(
+            fs::read_link(dst.join("link")).unwrap(),
+            Path::new("regular")
+        );
+    }
+
+    /// The prepared tree appears whole or not at all: a failure part-way
+    /// (here the injection refusing a symlinked `/etc`) leaves nothing at the
+    /// prepared path for a later run to serve.
+    #[test]
+    fn a_failed_prepare_leaves_no_prepared_tree_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_guest_artifacts(tmp.path(), b"v1");
+        let raw = tmp.path().join("raw");
+        fs::create_dir_all(&raw).unwrap();
+        std::os::unix::fs::symlink("/", raw.join("etc")).unwrap();
+        let identity = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+        prepare_rootfs_only_tree(tmp.path(), &raw, identity)
+            .expect_err("a symlinked /etc must be refused");
+
+        let prepared = prepared_virtiofs_root(tmp.path(), identity, &oci_runtime_tag(tmp.path()));
+        assert!(!prepared.exists(), "no partial prepared tree");
+
+        // What a run killed mid-copy leaves: its scratch directory, which a
+        // dropped guard never got to remove.
+        let crashed = prepared
+            .parent()
+            .unwrap()
+            .join(format!("{PREPARE_STAGING_PREFIX}crashed/rootfs-only"));
+        fs::create_dir_all(&crashed).unwrap();
+        fs::write(crashed.join("half-copied"), b"x").unwrap();
+        fs::remove_file(raw.join("etc")).unwrap();
+        fs::create_dir_all(raw.join("etc")).unwrap();
+        let built = prepare_rootfs_only_tree(tmp.path(), &raw, identity).expect("prepares");
+        assert_eq!(built, prepared);
+        assert!(built.join("etc/mvm/variant").is_file());
+        let leftovers = fs::read_dir(built.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(PREPARE_STAGING_PREFIX))
+            .count();
+        assert_eq!(leftovers, 0, "the crashed run's scratch directory is gone");
+    }
+
     #[test]
     fn runtime_tag_is_well_formed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -519,9 +711,10 @@ mod tests {
         let tag = oci_runtime_tag(tmp.path());
         assert!(
             tag.starts_with(&format!(
-                "{}-inject-{}-guest-",
+                "{}-inject-{}-unpack-{}-guest-",
                 env!("CARGO_PKG_VERSION"),
-                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+                mvm_fs::oci::unpack::UNPACK_SEMANTICS_VERSION
             )),
             "unexpected runtime tag: {tag}"
         );
@@ -550,11 +743,22 @@ mod tests {
             "a rebuilt guest artifact must invalidate the cached rootfs"
         );
 
-        let mut cached = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
-        cached.rootfs_path = Some(format!("rootfs/{before}/rootfs.ext4"));
+        let mut cached = sample_image(
+            "docker.io/library/alpine:3.20",
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "blobs/a",
+        );
+        cached.rootfs_path = Some(
+            oci_rootfs_rel(
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                &before,
+                false,
+            )
+            .unwrap(),
+        );
         cached.runtime_tag = Some(before);
         assert!(
-            !cached_rootfs_is_current(&cached, &after),
+            !cached_rootfs_is_current(&cached, &after, false),
             "a rootfs carrying the old runtime tag must be re-materialized"
         );
     }
@@ -647,24 +851,113 @@ mod tests {
 
     #[test]
     fn stale_runtime_tag_marks_rootfs_not_current() {
-        let mut image = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        let mut image = sample_image(
+            "docker.io/library/alpine:3.20",
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "blobs/a",
+        );
         let current = oci_runtime_tag(tempfile::tempdir().unwrap().path());
+        image.rootfs_path = Some(
+            oci_rootfs_rel(
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                &current,
+                false,
+            )
+            .unwrap(),
+        );
 
         // Pre-tag entry (None): the baked agent predates the tag, so stale.
-        assert!(!cached_rootfs_is_current(&image, &current));
+        assert!(!cached_rootfs_is_current(&image, &current, false));
 
         // A different epoch/version means a different injected runtime — stale.
         image.runtime_tag = Some("0.0.0.0".to_string());
-        assert!(!cached_rootfs_is_current(&image, &current));
+        assert!(!cached_rootfs_is_current(&image, &current, false));
 
-        // Matching tag is the only current case.
+        // Matching tag at this variant's path is the only current case.
         image.runtime_tag = Some(current.clone());
-        assert!(cached_rootfs_is_current(&image, &current));
+        assert!(cached_rootfs_is_current(&image, &current, false));
+
+        // The other variant's run needs its own image.
+        assert!(!cached_rootfs_is_current(&image, &current, true));
+
+        // A path that is not the derived one is not current either.
+        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        assert!(!cached_rootfs_is_current(&image, &current, false));
 
         // A current tag with no materialized rootfs is still not bootable.
         image.rootfs_path = None;
-        assert!(!cached_rootfs_is_current(&image, &current));
+        assert!(!cached_rootfs_is_current(&image, &current, false));
+    }
+
+    #[test]
+    fn the_sealed_and_dev_variants_never_share_a_path() {
+        let tag = "t";
+        let sealed = oci_rootfs_rel(
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            tag,
+            true,
+        )
+        .unwrap();
+        let dev = oci_rootfs_rel(
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            tag,
+            false,
+        )
+        .unwrap();
+        assert_ne!(sealed, dev);
+        assert_ne!(
+            Path::new(&sealed).parent(),
+            Path::new(&dev).parent(),
+            "their sidecars and locks sit in different directories too"
+        );
+    }
+
+    /// A crashed rebuild leaves the image and its verity files without the
+    /// guest sidecar that is published last. That set is not reused, whatever
+    /// else is there.
+    #[test]
+    fn a_rootfs_without_its_published_sidecar_is_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs/abc-tag-dev/rootfs.ext4");
+        fs::create_dir_all(rootfs.parent().unwrap()).unwrap();
+        let dir = rootfs.parent().unwrap();
+        for (file, body) in [
+            ("rootfs.ext4", "partial"),
+            ("rootfs.verity", "v"),
+            ("rootfs.roothash", "h\n"),
+        ] {
+            fs::write(dir.join(file), body).unwrap();
+        }
+        assert!(!reusable_rootfs(&rootfs, false).unwrap());
+
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("t", false, true)
+            .write_to_dir(dir)
+            .unwrap();
+        assert!(reusable_rootfs(&rootfs, false).unwrap());
+        assert!(
+            !reusable_rootfs(&rootfs, true).unwrap(),
+            "a dev set is not a sealed one"
+        );
+    }
+
+    #[test]
+    fn an_unsealed_image_is_refused_only_to_a_prod_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        fs::write(&rootfs, b"x").unwrap();
+        assert!(
+            refuse_unsealed_prod_rootfs(&rootfs, true).is_err(),
+            "no sidecar at all"
+        );
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("t", false, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(refuse_unsealed_prod_rootfs(&rootfs, true).is_err());
+        assert!(refuse_unsealed_prod_rootfs(&rootfs, false).is_ok());
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("t", true, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(refuse_unsealed_prod_rootfs(&rootfs, true).is_ok());
     }
 
     /// A fn-pointer materializer cannot capture, so the evidence the
@@ -709,6 +1002,12 @@ mod tests {
             .join("unpacked")
             .join(super::super::cache::sha256_hex(&image.resolved_digest).expect("digest hex"));
         fs::create_dir_all(&unpacked).expect("create unpacked tree");
+        super::super::cache::write_layer_owners(
+            cache_root,
+            &image.resolved_digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
     }
 
     #[test]
@@ -757,6 +1056,36 @@ mod tests {
             "mark names the canonical image reference"
         );
         assert_eq!(seen["evidence"]["image_digest"], digest);
+    }
+
+    #[test]
+    fn a_tree_unpacked_before_owners_were_recorded_is_not_rematerialized() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.config_path = None;
+        seed_index_and_unpacked(tmp.path(), &image);
+        let hex = super::super::cache::sha256_hex(digest).expect("digest hex");
+        fs::remove_file(
+            tmp.path()
+                .join("unpacked")
+                .join(format!("{hex}.owners.json")),
+        )
+        .expect("drop the owner sidecar");
+        let runtime_tag = oci_runtime_tag(tmp.path());
+
+        let repaired = rematerialize_cached_image(
+            tmp.path(),
+            image,
+            &runtime_tag,
+            evidence_recording_materialize,
+            false,
+        )
+        .expect("no error");
+        assert!(
+            repaired.is_none(),
+            "the caller must unpack again rather than rebuild a root-owned image"
+        );
     }
 
     #[test]

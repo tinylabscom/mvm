@@ -12,8 +12,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use mvm_agentd::vsock::{GuestRequest, ProcResult, ProcWaitEvent};
-use mvm_core::naming::validate_vm_name;
+use mvm_agentd::vsock::ProcWaitEvent;
+use mvm_client::guest;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -123,60 +123,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Send a non-streaming proc-control RPC to `name`'s guest agent over the
-/// backend-aware transport. Like `fs::fs_request`, the
-/// `--hypervisor mock` fast path (a mock agent at the VM dir's
-/// `runtime/v.sock`) stays ahead of the `vsock_transport::for_vm` probe,
-/// which resolves the right socket per VMM (Firecracker's `v.sock`, or the
-/// per-port UNIX socket libkrun/QEMU expose) but is unaware of the in-memory
-/// mock backend.
-fn proc_request(name: &str, req: GuestRequest) -> Result<ProcResult> {
-    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    #[cfg(feature = "test-support")]
-    {
-        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-        if mock_dir.join("runtime").join("v.sock").exists() {
-            return mvm_agentd::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
-        }
-    }
-    let mut stream =
-        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    mvm_agentd::vsock::send_proc_request_on(&mut stream, req)
-}
-
-/// Stream a `ProcWait` for `name`'s guest agent over the backend-aware
-/// transport, same mock-vs-`for_vm` resolution as [`proc_request`].
-fn proc_wait<F: FnMut(&ProcWaitEvent)>(
-    name: &str,
-    token: &str,
-    timeout: Option<u64>,
-    on_event: F,
-) -> Result<ProcWaitEvent> {
-    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    #[cfg(feature = "test-support")]
-    {
-        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-        if mock_dir.join("runtime").join("v.sock").exists() {
-            return mvm_agentd::vsock::send_proc_wait(
-                &mock_dir.to_string_lossy(),
-                token,
-                timeout,
-                on_event,
-            );
-        }
-    }
-    let mut stream =
-        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    mvm_agentd::vsock::send_proc_wait_on(&mut stream, token, timeout, on_event)
-}
-
-fn unwrap_proc(result: ProcResult) -> Result<ProcResult> {
-    if let ProcResult::Error { kind, message } = &result {
-        bail!("Guest proc error ({:?}): {}", kind, message);
-    }
-    Ok(result)
-}
-
 fn parse_envs(raw: &[String]) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for s in raw {
@@ -192,94 +138,50 @@ fn parse_envs(raw: &[String]) -> Result<BTreeMap<String, String>> {
 }
 
 fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) -> Result<()> {
-    if argv.is_empty() {
-        bail!("argv cannot be empty");
-    }
-    let env = parse_envs(envs)?;
-    let req = GuestRequest::ProcStart {
-        argv: argv.to_vec(),
-        env,
-        cwd: cwd.map(str::to_string),
-        stdin: vec![],
-        timeout_secs: None,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(proc_request(name, req)?)?;
-    match result {
-        ProcResult::Started { pid_token } => {
-            println!("{pid_token}");
-            mvm_core::audit_emit!(VmProcStart, vm: name, "argv0={} token={pid_token}" , argv[0]);
-            Ok(())
-        }
-        other => bail!("Unexpected ProcResult variant for Start: {:?}", other),
-    }
+    let token = guest::start_process(
+        name,
+        guest::ProcStart {
+            argv: argv.to_vec(),
+            env: parse_envs(envs)?,
+            cwd: cwd.map(str::to_string),
+        },
+    )?;
+    println!("{token}");
+    Ok(())
 }
 
 fn cmd_ls(name: &str, json: bool) -> Result<()> {
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &GuestRequest::ProcList);
-    let result = unwrap_proc(proc_request(name, GuestRequest::ProcList)?)?;
-    match result {
-        ProcResult::List { processes } => {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&processes)?);
-                return Ok(());
-            }
-            if processes.is_empty() {
-                println!("(no tracked processes)");
-                return Ok(());
-            }
-            println!("{:<28} {:<22} {:<10} ARGV0", "TOKEN", "STARTED", "STATE");
-            for p in &processes {
-                let state = match &p.state {
-                    mvm_agentd::vsock::ProcState::Running => "running".to_string(),
-                    mvm_agentd::vsock::ProcState::Exited(c) => format!("exited({c})"),
-                    mvm_agentd::vsock::ProcState::Killed(s) => format!("killed({s})"),
-                    mvm_agentd::vsock::ProcState::TimedOut => "timed_out".to_string(),
-                };
-                println!(
-                    "{:<28} {:<22} {:<10} {}",
-                    p.pid_token, p.started_at, state, p.argv0
-                );
-            }
-            Ok(())
-        }
-        other => bail!("Unexpected ProcResult variant for List: {:?}", other),
+    let processes = guest::list_processes(name)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&processes)?);
+        return Ok(());
     }
+    if processes.is_empty() {
+        println!("(no tracked processes)");
+        return Ok(());
+    }
+    println!("{:<28} {:<22} {:<10} ARGV0", "TOKEN", "STARTED", "STATE");
+    for p in &processes {
+        let state = match &p.state {
+            mvm_agentd::vsock::ProcState::Running => "running".to_string(),
+            mvm_agentd::vsock::ProcState::Exited(c) => format!("exited({c})"),
+            mvm_agentd::vsock::ProcState::Killed(s) => format!("killed({s})"),
+            mvm_agentd::vsock::ProcState::TimedOut => "timed_out".to_string(),
+        };
+        println!(
+            "{:<28} {:<22} {:<10} {}",
+            p.pid_token, p.started_at, state, p.argv0
+        );
+    }
+    Ok(())
 }
 
 fn cmd_signal(name: &str, token: &str, signum: i32) -> Result<()> {
-    let req = GuestRequest::ProcSignal {
-        pid_token: token.to_string(),
-        signum,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(proc_request(name, req)?)?;
-    match result {
-        ProcResult::Signaled => {
-            mvm_core::audit_emit!(VmProcSignal, vm: name, "token={token} signum={signum}");
-            Ok(())
-        }
-        other => bail!("Unexpected ProcResult variant for Signal: {:?}", other),
-    }
+    guest::signal_process(name, token, signum)
 }
 
 fn cmd_kill(name: &str, token: &str) -> Result<()> {
-    let req = GuestRequest::ProcKill {
-        pid_token: token.to_string(),
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(proc_request(name, req)?)?;
-    match result {
-        ProcResult::Killed => {
-            mvm_core::audit_emit!(Kill, vm: name, "scope=guest_proc token={token}");
-            Ok(())
-        }
-        other => bail!("Unexpected ProcResult variant for Kill: {:?}", other),
-    }
+    guest::kill_process(name, token)
 }
 
 fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
@@ -292,49 +194,15 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
             buf
         }
     };
-    let mut total_accepted = 0_u64;
-    for chunk in bytes
-        .chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE)
-        .chain(bytes.is_empty().then_some(bytes.as_slice()))
-    {
-        let req = GuestRequest::ProcSendInput {
-            pid_token: token.to_string(),
-            bytes: chunk.to_vec(),
-        };
-        super::shared::emit_vsock_rpc_audit(name, &req);
-        match unwrap_proc(proc_request(name, req)?)? {
-            ProcResult::InputAccepted { bytes_accepted } => {
-                let expected = u64::try_from(chunk.len()).expect("chunk length fits u64");
-                if bytes_accepted != expected {
-                    bail!("Guest accepted {bytes_accepted} stdin bytes, expected {expected}");
-                }
-                total_accepted = total_accepted
-                    .checked_add(bytes_accepted)
-                    .ok_or_else(|| anyhow::anyhow!("Accepted stdin byte count overflow"))?;
-            }
-            other => bail!("Unexpected ProcResult variant for SendInput: {other:?}"),
-        }
-    }
-    eprintln!("accepted {total_accepted} bytes");
-    mvm_core::audit_emit!(VmProcStdin, vm: name, "token={token} bytes={total_accepted}");
+    let accepted = guest::send_process_input(name, token, &bytes)?;
+    eprintln!("accepted {accepted} bytes");
     Ok(())
 }
 
 fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
-    // Inbound vsock RPC audit. The `proc_wait` helper constructs
-    // the wire-format ProcWait internally; we synthesize an
-    // equivalent request here purely so the audit kind_name lines
-    // up with what the guest receives.
-    super::shared::emit_vsock_rpc_audit(
-        name,
-        &GuestRequest::ProcWait {
-            pid_token: token.to_string(),
-            timeout_secs: timeout,
-        },
-    );
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
-    let terminal = proc_wait(name, token, timeout, |ev| match ev {
+    let terminal = guest::wait_process(name, token, timeout, |ev| match ev {
         ProcWaitEvent::Stdout { chunk } => {
             let _ = stdout.write_all(chunk);
             let _ = stdout.flush();

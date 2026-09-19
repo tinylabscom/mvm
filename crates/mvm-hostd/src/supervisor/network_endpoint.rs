@@ -316,35 +316,32 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
 /// configuration from drifting between surfaces.
 #[derive(Clone)]
 pub struct EndpointNetworkProjection {
-    gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
     recorder: Option<Arc<crate::supervisor::audit_recorder::Recorder>>,
 }
 
 impl EndpointNetworkProjection {
     /// Project the endpoint's admitted policy and audit sink exactly once.
+    ///
+    /// A config with no `network_policy` projects a default-deny gate whatever
+    /// its egress mode. Absence of a policy means nothing was admitted, so the
+    /// endpoint denies every destination rather than forwarding undecided.
     #[must_use]
     pub fn from_config(cfg: &EndpointConfig) -> Self {
-        let gate = cfg
-            .network_policy
-            .as_ref()
-            .map(build_egress_gate)
-            .map(Arc::new)
-            .or_else(|| {
-                (cfg.egress_mode == EgressMode::FlowMux)
-                    .then(|| Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()))
-            });
+        let gate = match &cfg.network_policy {
+            Some(policy) => build_egress_gate(policy),
+            None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
+        };
         Self {
-            gate,
+            gate: Arc::new(gate),
             recorder: build_audit_recorder(&cfg.tenant_id).map(Arc::new),
         }
     }
 
-    /// The one claim-10 policy object used by all FlowMux surfaces.
-    pub fn flowmux_gate(&self) -> anyhow::Result<Arc<mvm_runtime::vmm::egress_gate::EgressGate>> {
-        self.gate
-            .as_ref()
-            .map(Arc::clone)
-            .context("FlowMux endpoint projection has no egress gate")
+    /// The one claim-10 policy object every network surface decides against.
+    #[must_use]
+    pub fn gate(&self) -> Arc<mvm_runtime::vmm::egress_gate::EgressGate> {
+        Arc::clone(&self.gate)
     }
 
     /// The endpoint's one optional chain-signed audit sink.
@@ -440,17 +437,15 @@ pub fn assemble_with_projection(
             tls_intermediate,
             recorder: None,
             ai_policy,
+            egress_gate: projection.gate(),
         },
     )?;
 
-    // `from_plan` just minted this Arc with no other holders. Attach both
-    // endpoint-wide objects before exposing the service to connector, typed
+    // `from_plan` just minted this Arc with no other holders. Attach the
+    // endpoint-wide audit sink before exposing the service to connector, typed
     // HTTP, terminator, or ingress tasks.
     let mut service = Arc::try_unwrap(service)
         .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?;
-    if let Some(gate) = projection.gate.as_ref() {
-        service = service.with_shared_egress_gate(Arc::clone(gate));
-    }
     if let Some(recorder) = projection.recorder.as_ref() {
         service = service.with_shared_recorder(Arc::clone(recorder));
     }
@@ -606,7 +601,7 @@ mod tests {
             mvm_core::plan::TenantId("local".into()),
         ));
         let projection = EndpointNetworkProjection {
-            gate: Some(Arc::clone(&gate)),
+            gate: Arc::clone(&gate),
             recorder: Some(Arc::clone(&recorder)),
         };
 
@@ -614,10 +609,34 @@ mod tests {
         assert_eq!(
             service.shared_projection_ids(),
             (
-                Some(Arc::as_ptr(&gate).cast::<()>() as usize),
+                Arc::as_ptr(&gate).cast::<()>() as usize,
                 Some(Arc::as_ptr(&recorder).cast::<()>() as usize),
             )
         );
+    }
+
+    /// No admitted policy means nothing is admitted, in either egress mode.
+    /// Wire mode is the serde default, and a Wire config without a policy used
+    /// to project no gate at all, leaving its substitution service to forward
+    /// a placeholder-free request anywhere.
+    #[test]
+    fn an_endpoint_config_without_a_policy_denies_every_destination_in_every_mode() {
+        use mvm_runtime::vmm::egress_gate::EgressVerdict;
+
+        let dir = tempdir().unwrap();
+        for mode in [EgressMode::Wire, EgressMode::FlowMux] {
+            let mut cfg = vsock_cfg(vec![], dir.path());
+            cfg.egress_mode = mode;
+            assert!(cfg.network_policy.is_none());
+
+            let gate = EndpointNetworkProjection::from_config(&cfg).gate();
+            for target in ["93.184.216.34:443", "93.184.216.34:80", "1.1.1.1:53"] {
+                assert!(
+                    matches!(gate.decide_request(target), EgressVerdict::Deny(_)),
+                    "{mode:?} endpoint without a policy admitted {target}"
+                );
+            }
+        }
     }
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {

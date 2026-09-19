@@ -50,14 +50,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     resolve_fn_needles(workspace, &mut needles)?;
     resolve_ci_needles(workspace, &mut needles)?;
 
-    for n in &needles {
-        if !n.found {
-            errors.push(format!(
-                "claim {}: witness `{}` not found in the tree",
-                n.claim, n.token
-            ));
-        }
-    }
+    resolved_witnesses_are_unique(&needles, &mut errors);
 
     if !errors.is_empty() {
         for e in &errors {
@@ -83,7 +76,7 @@ struct Needle {
     /// The literal substring that must be present in the relevant files.
     search: String,
     kind: Kind,
-    found: bool,
+    matches: usize,
 }
 
 enum Kind {
@@ -102,7 +95,23 @@ impl Needle {
             token: w.token(),
             search,
             kind,
-            found: false,
+            matches: 0,
+        }
+    }
+}
+
+fn resolved_witnesses_are_unique(needles: &[Needle], errors: &mut Vec<String>) {
+    for needle in needles {
+        if needle.matches == 0 {
+            errors.push(format!(
+                "claim {}: witness `{}` not found in the tree",
+                needle.claim, needle.token
+            ));
+        } else if matches!(needle.kind, Kind::Fn) && needle.matches > 1 {
+            errors.push(format!(
+                "claim {}: witness `{}` matches {} definitions; name one unique control or behavior witness",
+                needle.claim, needle.token, needle.matches
+            ));
         }
     }
 }
@@ -344,8 +353,8 @@ fn resolve_ci_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
     claims_ledger::for_each_file(&workflows, None, &mut |_, content| {
         let anchors = claims_ledger::ci_anchors(content);
         for n in needles.iter_mut() {
-            if matches!(n.kind, Kind::Ci) && !n.found {
-                n.found = anchors.iter().any(|a| a == &n.search);
+            if matches!(n.kind, Kind::Ci) && n.matches == 0 {
+                n.matches = usize::from(anchors.iter().any(|a| a == &n.search));
             }
         }
     })?;
@@ -355,8 +364,8 @@ fn resolve_ci_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
 fn mark(needles: &mut [Needle], kind: Kind, content: &str) {
     let want = matches!(kind, Kind::Fn);
     for n in needles.iter_mut() {
-        if matches!(n.kind, Kind::Fn) == want && !n.found && content.contains(&n.search) {
-            n.found = true;
+        if matches!(n.kind, Kind::Fn) == want {
+            n.matches += content.matches(&n.search).count();
         }
     }
 }
@@ -366,8 +375,6 @@ mod model_sync_tests {
     use super::*;
 
     const MODEL: &str = r#"
-spec = "mvm/1"
-
 [[claim]]
 id = "MVM-SEC-01"
 level = "build"
@@ -566,8 +573,28 @@ witnesses = [\"fn:other\"]
             Needle::new(1, &Witness::Fn("missing_fn".into())),
         ];
         resolve_fn_needles(tmp.path(), &mut needles).unwrap();
-        assert!(needles[0].found, "foo_one should resolve");
-        assert!(!needles[1].found, "missing_fn should not resolve");
+        assert_eq!(needles[0].matches, 1, "foo_one should resolve once");
+        assert_eq!(needles[1].matches, 0, "missing_fn should not resolve");
+    }
+
+    #[test]
+    fn duplicate_fn_witness_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("crates").join("demo").join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "fn repeated_witness() {}\nmod nested { fn repeated_witness() {} }\n",
+        )
+        .unwrap();
+
+        let mut needles = vec![Needle::new(13, &Witness::Fn("repeated_witness".into()))];
+        resolve_fn_needles(tmp.path(), &mut needles).unwrap();
+        let mut errors = Vec::new();
+        resolved_witnesses_are_unique(&needles, &mut errors);
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("matches 2 definitions"), "{errors:?}");
     }
 
     #[test]
@@ -582,8 +609,8 @@ witnesses = [\"fn:other\"]
             Needle::new(1, &Witness::Ci("ghost-lane".into())),
         ];
         resolve_ci_needles(tmp.path(), &mut needles).unwrap();
-        assert!(needles[0].found);
-        assert!(!needles[1].found);
+        assert_eq!(needles[0].matches, 1);
+        assert_eq!(needles[1].matches, 0);
     }
 
     #[test]

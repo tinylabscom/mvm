@@ -163,9 +163,11 @@ def _resolve_network_with_depends_on(
     return _ir.Network(
         mode=network.mode,
         ports=list(network.ports),
+        preset=network.preset,
         egress=network.egress,
         peers=merged,
         dns=network.dns,
+        ai=network.ai,
     )
 
 
@@ -772,6 +774,7 @@ def network(
     *,
     mode: str = "none",
     ports: list[_ir.PortForward] | None = None,
+    preset: str | None = None,
     egress: _ir.NetworkEgress | None = None,
     peers: list[str] | None = None,
     dns: _ir.NetworkDns | None = None,
@@ -781,7 +784,9 @@ def network(
 
     `mode` is the high-level toggle: `"none"`, `"bridge"`, or
     `"host"` (host is rejected for function-entrypoint workloads).
-    `egress` / `peers` / `dns` layer granular grants on top. Applications
+    `preset` selects a maintained egress policy; `egress` declares an explicit
+    allowlist. They are mutually exclusive. `peers` / `dns` layer granular
+    grants on top. Applications
     use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated
     ping, or typed connectors; direct raw networking is unsupported.
 
@@ -800,9 +805,25 @@ def network(
         raise ValueError(
             f"network mode must be 'none' / 'bridge' / 'host', got {mode!r}"
         ) from exc
+    if preset is not None and egress is not None:
+        raise ValueError("network preset and explicit egress are mutually exclusive")
+    preset_arms = {
+        "unrestricted": _ir.NetworkPreset1.unrestricted,
+        "none": _ir.NetworkPreset2.none,
+        "registries": _ir.NetworkPreset3.registries,
+        "dev": _ir.NetworkPreset4.dev,
+        "agent": _ir.NetworkPreset5.agent,
+    }
+    try:
+        preset_value = preset_arms[preset] if preset is not None else None
+    except KeyError as exc:
+        raise ValueError(
+            "network preset must be unrestricted / none / registries / dev / agent"
+        ) from exc
     return _ir.Network(
         mode=mode_enum,
         ports=ports if ports is not None else [],
+        preset=preset_value,
         egress=egress,
         peers=list(peers) if peers else [],
         dns=dns,

@@ -187,12 +187,15 @@ fn relay_supervisor_config_with_handoff(
         (!c.is_empty()).then(|| c.to_string())
     };
 
-    // Collect explicitly host-dialable dev console channels.
+    // Additional workload host-dial channels share one bridge. Telemetry is
+    // independent of console grants and never widens egress or broker access.
     let console_data_sockets = spec
         .vsock
         .iter()
         .filter(|p| {
-            matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
+            p.direction == mvm_vmm::driver::spec::VsockDirection::HostDials
+                && (p.service == GuestService::Telemetry
+                    || matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port)))
         })
         .map(|p| HostDialSocket {
             guest_port: p.port(),
@@ -286,20 +289,25 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
     })
 }
 
-/// The supervisor launch, bounded by whatever CPU share this VM was admitted
-/// under.
+/// The supervisor launch, bounded by its guest's memory and task ceilings and
+/// by whatever CPU share this VM was admitted under.
 ///
 /// The HVF VMM runs inside this supervisor process, so the supervisor is the
 /// process to bound. Wired uniformly with the other drivers rather than skipped
 /// for the host it happens to run on today: the bind degrades to an unwrapped
 /// spawn wherever the mechanism is absent, which is the honest answer on macOS
 /// and needs no second code path to express.
-fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Path) -> Command {
-    mvm_core::cpu_scope::bind_cpu_grant(
+fn bounded_supervisor_command(
+    supervisor: &Path,
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> mvm_core::spawn_scope::BoundCommand {
+    mvm_core::spawn_scope::bind_spawn(
         Command::new(supervisor),
         &spec.name,
         state_dir,
-        spec.cpu_grant.as_ref(),
+        &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant),
     )
 }
 
@@ -337,7 +345,7 @@ fn boot_with_handoff(
             &paths.state_dir,
         ))
         .spawn()
-        .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
+        .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
     child
         .stdin
         .take()
@@ -439,6 +447,13 @@ impl VmmDriver for HvfDriver {
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
             resource_controls: ResourceControls::for_backend(BackendKind::Hvf),
+            // The in-house device model carries a balloon that only accepts
+            // free page reports: the guest gives freed memory back on its own.
+            // It never inflates toward a target, so `balloon_set_target` has
+            // nothing to act on and `balloon` stays false; the reclaim
+            // controller correctly skips this backend.
+            free_page_reporting: true,
+            balloon: false,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
         }
@@ -583,6 +598,8 @@ impl VmmDriver for HvfDriver {
                 mask | 2
             } else if channel.service == GuestService::Broker {
                 mask | 4
+            } else if channel.service == GuestService::Telemetry {
+                mask | mvm_vmm::hvf_handoff::HANDOFF_TELEMETRY
             } else if matches!(
                 channel.service,
                 GuestService::ConsoleData { port }
@@ -1021,6 +1038,8 @@ impl RunningVm for HvfRunningVm {
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
         let socket_path = if guest_port == GUEST_AGENT_PORT {
             self.agent_socket.clone()
+        } else if guest_port == GuestService::Telemetry.port() {
+            mvm_core::config::vm_hvf_vsock_port_socket_at(&self.state_dir, guest_port)
         } else if let Some(path) = console_socket_for_port(&self.state_dir, guest_port) {
             // Dev-only: pre-opened console data port in the CONSOLE_PORT_BASE+1..=+128
             // range. Claim 15: sealed prod specs carry no console sockets, so this
@@ -1029,7 +1048,7 @@ impl RunningVm for HvfRunningVm {
         } else {
             bail!(
                 "hvf driver vsock_connect supports only the agent port \
-                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                 ({GUEST_AGENT_PORT}), telemetry and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
@@ -1219,6 +1238,11 @@ mod tests {
         assert_eq!(d.name(), "hvf");
         assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
+        assert!(d.capabilities().free_page_reporting);
+        assert!(
+            !d.capabilities().balloon,
+            "a reporting-only device has no inflate target to drive"
+        );
         assert_eq!(d.snapshot_capability(), SnapshotCapability::SaveRestore);
         assert_eq!(d.security_profile().tier, "Tier 2");
     }
@@ -1411,6 +1435,59 @@ mod tests {
         assert!(!cfg.disks[1].ephemeral);
     }
 
+    /// A control over a state dir holding a launch config with these disks.
+    fn control_with_disks(state: &Path, read_only: &[bool]) -> HvfVmFullControl {
+        let blocks = read_only
+            .iter()
+            .enumerate()
+            .map(|(slot, &read_only)| BlockDev {
+                source: format!("/img/disk{slot}.img").into(),
+                read_only,
+                ephemeral: false,
+                slot: slot as u8,
+            })
+            .collect();
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            blocks,
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        std::fs::write(
+            state.join("supervisor.json"),
+            serde_json::to_vec(&cfg).unwrap(),
+        )
+        .unwrap();
+        HvfVmFullControl {
+            vm_name: "w".into(),
+            state_dir: state.to_path_buf(),
+        }
+    }
+
+    /// Guest writes on a writable disk live in the image file, which a
+    /// snapshot does not carry, so a checkpoint taken right after them could
+    /// not restore to a guest that agrees with its disk. Capture refuses
+    /// before asking the supervisor for anything.
+    #[test]
+    fn full_checkpoint_capture_refuses_a_vm_with_a_writable_disk() {
+        let state = tempfile::tempdir().unwrap();
+        let control = control_with_disks(state.path(), &[true, false]);
+        let err = control
+            .save_memory(&state.path().join("out/memory"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/img/disk1.img"), "{err}");
+        assert!(err.contains("writable"), "{err}");
+        assert!(!state.path().join("snapshot.request").exists());
+    }
+
+    #[test]
+    fn full_checkpoint_capture_admits_a_vm_whose_disks_are_all_read_only() {
+        let state = tempfile::tempdir().unwrap();
+        let control = control_with_disks(state.path(), &[true, true]);
+        control.ensure_every_disk_is_restorable().unwrap();
+    }
+
     #[test]
     fn relay_config_trusted_builder_uses_the_same_egress_relay() {
         let mut spec = spec_with(
@@ -1549,42 +1626,49 @@ mod tests {
     }
 
     #[test]
-    fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
+    fn vsock_connect_reaches_agent_and_telemetry_sockets_and_rejects_other_ports() {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("hvf-agent.sock");
-        // Stand-in for the supervisor's agent bridge: echo one byte back.
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
-        let server = std::thread::spawn(move || {
-            if let Ok((mut c, _)) = listener.accept() {
-                let mut b = [0u8; 1];
-                if c.read_exact(&mut b).is_ok() {
-                    let _ = c.write_all(&b);
+        for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
+            let dir = tempfile::tempdir().unwrap();
+            let agent_socket = dir.path().join("hvf-agent.sock");
+            let sock = if port == GUEST_AGENT_PORT {
+                agent_socket.clone()
+            } else {
+                mvm_core::config::vm_hvf_vsock_port_socket_at(dir.path(), port)
+            };
+            std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+            // Stand-in for the supervisor's agent bridge: echo one byte back.
+            let Some(listener) = bind_unix_listener(&sock) else {
+                return;
+            };
+            let server = std::thread::spawn(move || {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut b = [0u8; 1];
+                    if c.read_exact(&mut b).is_ok() {
+                        let _ = c.write_all(&b);
+                    }
                 }
-            }
-        });
+            });
 
-        let vm = HvfRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join(PID_FILE_NAME),
-            agent_socket: sock,
-        };
+            let vm = HvfRunningVm {
+                id: VmId("agent-vm".into()),
+                state_dir: dir.path().to_path_buf(),
+                pid_file: dir.path().join(PID_FILE_NAME),
+                agent_socket,
+            };
 
-        // The agent port connects + round-trips through the socket.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
+            let mut s = vm.vsock_connect(port).unwrap();
+            s.write_all(b"x").unwrap();
+            let mut got = [0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"x");
+            server.join().unwrap();
 
-        // Ports outside the agent port and the console data range are not host-dialable.
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+            // Ports outside the agent port and the console data range are not host-dialable.
+            assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+        }
     }
 
     #[test]
@@ -1676,6 +1760,41 @@ mod tests {
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
+    }
+
+    #[test]
+    fn relay_config_wires_telemetry_without_console_or_broker_grants() {
+        let paths = sample_paths();
+        let socket = vm_hvf_vsock_port_socket_at(&paths.state_dir, GuestService::Telemetry.port());
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                VsockPort {
+                    service: GuestService::Telemetry,
+                    direction: mvm_vmm::driver::spec::VsockDirection::HostDials,
+                    host_uds: socket.clone(),
+                },
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &paths).unwrap();
+        assert_eq!(
+            cfg.console_data_sockets,
+            vec![HostDialSocket {
+                guest_port: GuestService::Telemetry.port(),
+                host_socket: socket,
+            }]
+        );
+        assert!(cfg.broker_socket.is_none());
+        assert!(cfg.builder_control_sockets.is_empty());
+        spec.vsock[1].direction = mvm_vmm::driver::spec::VsockDirection::GuestDials;
+        assert!(
+            relay_supervisor_config(&spec, &paths)
+                .unwrap()
+                .console_data_sockets
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1772,7 +1891,7 @@ mod tests {
     fn a_granted_share_wraps_the_supervisor_spawn() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
@@ -1782,10 +1901,22 @@ mod tests {
             &spec,
             scratch.path(),
         );
-        let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
 
-        assert_eq!(argv[0], "systemd-run");
+        assert_eq!(
+            Path::new(&argv[0])
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("systemd-run")
+        );
         assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
+        assert!(
+            argv.contains(&format!(
+                "MemoryMax={}M",
+                u64::from(spec.memory_mib) + mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB
+            )),
+            "{argv:?}"
+        );
         assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
     }
 

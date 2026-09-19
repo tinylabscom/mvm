@@ -13,7 +13,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use mvm_fs::ext4::{BLOCK_SIZE, Node, build_image};
+use mvm_fs::ext4::{BLOCK_SIZE, Node, Owner, build_image};
 
 // Caps keep the fuzzer from OOMing on adversarial sizes while still exercising
 // multi-node, multi-block trees.
@@ -52,6 +52,7 @@ fn gen_nodes(u: &mut Unstructured) -> arbitrary::Result<Vec<Node>> {
                 path,
                 mode: u16::arbitrary(u)?,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             }),
             1 => {
                 let want = u.int_in_range(0..=MAX_FILE_BYTES)?;
@@ -62,11 +63,12 @@ fn gen_nodes(u: &mut Unstructured) -> arbitrary::Result<Vec<Node>> {
                     mode: u16::arbitrary(u)?,
                     data,
                     xattrs: Vec::new(),
+                    owner: Owner::ROOT,
                 });
             }
             _ => {
                 let target = gen_segment(u)?;
-                nodes.push(Node::Symlink { path, target });
+                nodes.push(Node::Symlink { path, target, owner: Owner::ROOT });
             }
         }
     }
@@ -127,6 +129,7 @@ fn with_ancestor_dirs(nodes: Vec<Node>) -> Vec<Node> {
             path,
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         });
     }
     out

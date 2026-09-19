@@ -101,12 +101,6 @@
         in
         if envPath != "" then /. + envPath else ../../..;
 
-      # Read evaluation-time metadata from the stable workspace root before
-      # filtering it into a source store path. The filtered path is for build
-      # inputs; it may be collected between parallel flake evaluations.
-      workspaceVersion =
-        (nixpkgs.lib.importTOML (workspaceRoot + "/Cargo.toml")).workspace.package.version;
-
       # Filter list lives at nix/lib/workspace-filter.nix so the three
       # flakes that ingest the host workspace (this one, builder/,
       # builder-vm/) stay aligned with .gitignore in one place.
@@ -116,123 +110,45 @@
         })
           { inherit workspaceRoot; };
 
-      # mvmctl semver pinned to match
-      # `[workspace.package].version` in the root Cargo.toml. The
-      # `RuntimeOverlayResolver` rejects an overlay whose VERSION
-      # file disagrees with the running mvmctl. Bumping the
-      # workspace version requires bumping this string too — keep
-      # the two in lock-step or `mvmctl up` admission fails.
-      # `xtask check-runtime-overlay-version` (a CI gate)
-      # asserts this match so the pin can't silently go stale.
-      overlayVersion = "0.18.0-rc.2";
+      # The `mvm` flake, evaluated against this flake's pinned nixpkgs and the
+      # filtered workspace. Every binary and shared object below comes from its
+      # `packages` output — the guest recipes stay in `mvm` beside Cargo.lock,
+      # and an image repository builds through the same interface. The recipes
+      # never touch microvm.nix, which this flake does not pin.
+      mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs {
+        self = { };
+        inherit nixpkgs;
+        microvm = throw "the mvm guest recipes do not evaluate microvm.nix";
+        mvm-workspace = workspace;
+      };
 
-      # mvm-agentd binaries — agent + seccomp shim + verity-init.
-      # the universal initramfs agent is PID 1; it lives in the
-      # initramfs cpio.gz, *not* in this overlay. We still build
-      # it here because the rustPlatform derivation produces all
-      # three binaries from one `--package mvm-agentd` build (per
-      # `nix/packages/mvm-guest-agent.nix`'s
-      # `--bin mvm-guest-agent --bin mvm-seccomp-apply`
-      # flags); we just don't copy the verity-init binary into the
-      # overlay's staging dir.
-      mvmGuestFor =
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-guest-agent.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+      # mvmctl semver, shared with the universal initramfs. The
+      # `RuntimeOverlayResolver` rejects an overlay whose VERSION file
+      # disagrees with the running mvmctl; `../version.nix` says how the
+      # pin is kept equal to the workspace version.
+      overlayVersion = import ../version.nix;
+
+      # mvm-agentd binaries — agent + seccomp shim + netinit + OCI entrypoint.
+      # The universal initramfs agent is PID 1 and lives in the initramfs, not
+      # in this overlay.
+      mvmGuestFor = system: mvm.packages.${system}.mvm-guest-agent;
 
       # mvm-runner — the function-workload entrypoint runner.
-      # Folded into mvm-agentd as a [[bin]], so we select just that
-      # binary out of the mvm-agentd package; workspace Cargo.lock
-      # drives the closure.
-      mvmRunnerFor =
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-          staticPkgs = pkgs.pkgsStatic;
-        in
-        staticPkgs.rustPlatform.buildRustPackage {
-          pname = "mvm-runner";
-          version = overlayVersion;
-          src = workspace;
-          cargoDeps = import (workspace + "/nix/lib/static-crates-cargo-deps.nix") {
-            inherit pkgs;
-            lockFile = workspace + "/Cargo.lock";
-          };
-          cargoBuildFlags = [
-            "--package"
-            "mvm-agentd"
-            "--bin"
-            "mvm-runner"
-          ];
-          doCheck = false;
-          meta = {
-            description = "mvm function-workload entrypoint runner (plan 60 Phase 5 Slice C)";
-            mainProgram = "mvm-runner";
-          };
-        };
+      mvmRunnerFor = system: mvm.packages.${system}.mvm-runner;
 
-      mvmEgressClientFor =
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-egress-client.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+      mvmEgressClientFor = system: mvm.packages.${system}.mvm-egress-client;
 
-      mvmAddonDnsFor =
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-addon-dns.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+      mvmAddonDnsFor = system: mvm.packages.${system}.mvm-addon-dns;
 
-      mvmExitReportFor =
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-exit-report.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+      mvmExitReportFor = system: mvm.packages.${system}.mvm-exit-report;
 
-      # libmvm_host_services.so — the in-guest host-services FFI shared
-      # object the language SDKs dlopen via ctypes/koffi. Built from the
-      # `mvm-sdk` crate's `cdylib` output and renamed to the stable FFI
-      # filename; built for the glibc workload rootfs (same platform as the
-      # agent), not the static-musl builder target — a cdylib needs the
-      # dynamic loader the rootfs provides.
-      mvmSdkCdylibFor =
-        system:
-        mvmSdkCdylibForLibc system "glibc";
-
-      # The same derivation, parameterized by the libc the object is built
+      # libmvm_host_services.so — the in-guest host-services FFI shared object
+      # the language SDKs dlopen, parameterized by the libc it is built
       # against. A guest can only dlopen the variant matching its own, and the
       # host selects from the libc recorded in the image's `mvm-meta.json`.
       mvmSdkCdylibForLibc =
         system: libc:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspaceRoot + "/nix/packages/mvm-sdk-cdylib.nix") {
-          inherit pkgs libc workspaceVersion;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
+        mvm.packages.${system}."mvm-sdk-cdylib-${libc}";
 
       # The SDK FFI remains a glibc cdylib because Python and Node load it from
       # the workload process. It is packaged separately from the static-musl
@@ -261,6 +177,11 @@
       overlayVeritySalt = "0000000000000000000000000000000000000000000000000000000000000000";
       overlayVerityHashAlgorithm = "sha256";
       overlayVerityHashBlockSize = 4096;
+      # Mirrors `mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID`.
+      # Without it `veritysetup format` writes a random UUID into the hash
+      # device's superblock, so the sidecar bytes differ on every build even
+      # though the root hash does not.
+      overlayVerityUuid = "00000000-0000-0000-0000-000000000003";
 
       # Keep the Nix-built verity baseline on
       # the exact same cryptsetup release as the builder VM's OCI-pull
@@ -396,8 +317,7 @@
                 -t ext4 \
                 -L mvm-sdk-sidecar \
                 -U ${overlayUuid} \
-                -E hash_seed=${overlayHashSeed} \
-                -E no_copy_xattrs \
+                -E hash_seed=${overlayHashSeed},no_copy_xattrs \
                 -b ${toString overlayBlockSize} \
                 -d "$staging" \
                 $out/sdk.ext4
@@ -523,8 +443,7 @@
                 -t ext4 \
                 -L mvm-runtime-overlay \
                 -U ${overlayUuid} \
-                -E hash_seed=${overlayHashSeed} \
-                -E no_copy_xattrs \
+                -E hash_seed=${overlayHashSeed},no_copy_xattrs \
                 -b ${toString overlayBlockSize} \
                 -d "$staging" \
                 $out/overlay.ext4
@@ -541,6 +460,7 @@
                 --hash-block-size=${toString overlayVerityHashBlockSize} \
                 --salt=${overlayVeritySalt} \
                 --hash=${overlayVerityHashAlgorithm} \
+                --uuid=${overlayVerityUuid} \
                 $out/overlay.ext4 \
                 $out/overlay.verity
             )

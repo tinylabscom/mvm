@@ -22,19 +22,37 @@ use mvm_core::user_config::MvmConfig;
 use mvm_hostd::plan_admission::AdmittedPlan;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::session_resume::{
-    BootedSession, ResumePlanMaterial, ResumeRequest, ResumedSession, resume_session,
+    BootedSession, ResumeOutcome, ResumePlanMaterial, ResumeRequest, resume_session,
 };
 use mvm_runtime::agent_session::{
-    AgentSessionRecord, AgentSessionStore, ParkInput, ParkReason, SandboxResidency, StorageTier,
+    AgentSessionRecord, AgentSessionStore, GenerationFence, ParkInput, ParkReason, RenewRequest,
+    RetentionStatus, SandboxResidency, StorageTier, TransitionResult,
 };
 use mvm_runtime::checkpoint::CheckpointStore;
+use serde::Serialize;
 
 use super::Cli;
+use super::shared::human_age_secs;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     #[command(subcommand)]
     pub action: AgentSessionAction,
+}
+
+impl Args {
+    /// Whether this invocation prints a JSON payload on stdout, so host chrome
+    /// has to go to stderr instead.
+    pub(in crate::commands) fn emits_machine_readable_stdout(&self) -> bool {
+        match &self.action {
+            AgentSessionAction::Open(_) => false,
+            AgentSessionAction::Ls(a) => a.json,
+            AgentSessionAction::Show(a) => a.json,
+            AgentSessionAction::Park(a) => a.retry.json,
+            AgentSessionAction::Resume(a) => a.retry.json,
+            AgentSessionAction::Renew(a) => a.retry.json,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -50,6 +68,8 @@ pub(in crate::commands) enum AgentSessionAction {
     Park(ParkArgs),
     /// Re-admit a parked session under a freshly signed plan
     Resume(ResumeArgs),
+    /// Extend a parked session's retention deadline; never shortens it
+    Renew(RenewArgs),
 }
 
 /// What it takes to bring a session into existence.
@@ -106,6 +126,58 @@ pub(in crate::commands) struct ParkArgs {
     /// `sha256:<64-hex>`. A session parked without one resumes unfenced.
     #[arg(long)]
     pub approval_head: Option<String>,
+    /// How long the host promises to keep the parked session resumable:
+    /// `30m`, `48h`, `7d` (at most 30d). Defaults by reason — approval-wait
+    /// 24h (the longest an approval can live), idle 30m (the standby TTL),
+    /// host-shutdown and operator 48h, retention-demotion 30d.
+    #[arg(long, value_name = "DURATION")]
+    pub retain_for: Option<String>,
+    #[command(flatten)]
+    pub retry: RetryArgs,
+}
+
+/// Extending a parked session's retention deadline.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct RenewArgs {
+    /// Session id, as `agent-session ls` prints it
+    pub session_id: String,
+    /// New retention, measured from now: `30m`, `48h`, `7d` (at most 30d).
+    /// Refused if it would end before the current deadline, if the deadline
+    /// has already passed, or if the session is not parked.
+    #[arg(long = "for", value_name = "DURATION")]
+    pub extend_for: String,
+    /// The deadline you read, in unix seconds, as `show` prints it. Successive
+    /// renewals share a generation, so an exact replay needs this as well as
+    /// --expected-generation; without both, a retry is applied as a new
+    /// renewal.
+    #[arg(long, value_name = "UNIX_SECS")]
+    pub expected_deadline: Option<u64>,
+    #[command(flatten)]
+    pub retry: RetryArgs,
+}
+
+/// The generation fence every transition takes, and what makes a retry exact.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct RetryArgs {
+    /// Generation you read the session at, as `show` prints it. The transition
+    /// refuses if the session has since moved on, and a retry of one that
+    /// already applied is answered with its original result, marked as a
+    /// replay, writing nothing and adding no audit entry. Without it the
+    /// generation is read at call time: nothing is fenced, and a retry after a
+    /// lost response cannot be told apart from a new request — it is refused
+    /// or applied again, never recognised as a replay.
+    #[arg(long, value_name = "N")]
+    pub expected_generation: Option<u64>,
+    /// Emit the result as JSON, including whether it was a replay
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl RetryArgs {
+    fn fence(&self) -> GenerationFence {
+        self.expected_generation
+            .map_or(GenerationFence::ReadCurrent, GenerationFence::Observed)
+    }
 }
 
 /// The workload half of a resume, taken as flags.
@@ -158,6 +230,11 @@ pub(in crate::commands) struct ResumeArgs {
     /// the boot hashes this file against it.
     #[arg(long)]
     pub kernel: Option<std::path::PathBuf>,
+    /// A retried `--boot` resume that already applied is refused rather than
+    /// replayed: it never boots a second sandbox, and the record cannot say
+    /// whether the first boot succeeded.
+    #[command(flatten)]
+    pub retry: RetryArgs,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -169,6 +246,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         AgentSessionAction::Resume(a) => {
             resume(&AgentSessionStore::open(), &CheckpointStore::open(), &a)
         }
+        AgentSessionAction::Renew(a) => renew(&AgentSessionStore::open(), &a),
     }
 }
 
@@ -181,7 +259,7 @@ fn parse_session_id(raw: &str) -> Result<AgentSessionId> {
 /// Create a session record and report the state it starts in.
 fn open(store: &AgentSessionStore, args: &OpenArgs) -> Result<()> {
     let record = open_record(store, args)?;
-    println!("{}", summary_line(&record));
+    println!("{}", summary_line(&record, now_unix()));
     if record.members.is_empty() {
         // Said at open time rather than discovered at park time: the park is
         // what fails to chain, and by then the operator has already moved on.
@@ -232,6 +310,8 @@ fn open_record(store: &AgentSessionStore, args: &OpenArgs) -> Result<AgentSessio
         approval_head: None,
         storage_tier: None,
         park_reason: None,
+        retain_until_unix: None,
+        last_transition: None,
     };
     store.write(&record)?;
     Ok(record)
@@ -239,8 +319,10 @@ fn open_record(store: &AgentSessionStore, args: &OpenArgs) -> Result<AgentSessio
 
 fn ls(store: &AgentSessionStore, json: bool) -> Result<()> {
     let records = store.list()?;
+    let now = now_unix();
     if json {
-        return crate::json_out::emit_json(&records);
+        let views: Vec<SessionView<'_>> = records.iter().map(|r| SessionView::at(r, now)).collect();
+        return crate::json_out::emit_json(&views);
     }
     if records.is_empty() {
         println!("(no agent sessions)");
@@ -248,7 +330,7 @@ fn ls(store: &AgentSessionStore, json: bool) -> Result<()> {
     }
     println!("{:<32} {:<5} RESIDENCY", "SESSION", "GEN");
     for record in &records {
-        println!("{}", summary_line(record));
+        println!("{}", summary_line(record, now));
     }
     Ok(())
 }
@@ -261,10 +343,11 @@ fn show(store: &AgentSessionStore, raw_id: &str, json: bool) -> Result<()> {
     let record = store
         .load(&id)
         .with_context(|| format!("no agent session '{raw_id}' on this host"))?;
+    let now = now_unix();
     if json {
-        return crate::json_out::emit_json(&record);
+        return crate::json_out::emit_json(&SessionView::at(&record, now));
     }
-    for line in detail_lines(&record) {
+    for line in detail_lines(&record, now) {
         println!("{line}");
     }
     Ok(())
@@ -272,26 +355,153 @@ fn show(store: &AgentSessionStore, raw_id: &str, json: bool) -> Result<()> {
 
 /// Park a session, then bind the park into the chain-signed audit log.
 fn park(store: &AgentSessionStore, args: &ParkArgs) -> Result<()> {
-    let record = park_record(store, args)?;
-    println!("{}", summary_line(&record));
+    let result = park_and_chain(store, args, |record| {
+        record_park_in_chain(record, &host_audit_emitter()?)
+    })?;
+    report_transition(
+        &TransitionReport::of(TransitionVerb::Park, &result, now_unix()),
+        args.retry.json,
+    )
+}
+
+/// The host clock, read once per command so everything one command prints
+/// agrees on whether a deadline has passed.
+fn now_unix() -> u64 {
+    mvm_core::util::time::now_unix_secs()
+}
+
+/// Parse a retention duration with the host's shared bounded duration parser.
+fn parse_retention(flag: &str, raw: &str) -> Result<u64> {
+    mvm_core::crypto::policy::parse_ttl(raw)
+        .map(|d| d.as_secs())
+        .map_err(|e| anyhow::anyhow!("invalid {flag}: {e}"))
+}
+
+/// Extend a parked session's deadline, then bind the renewal into the chain.
+fn renew(store: &AgentSessionStore, args: &RenewArgs) -> Result<()> {
+    let result = renew_and_chain(store, args, now_unix(), |record| {
+        record_renew_in_chain(record, &host_audit_emitter()?)
+    })?;
+    report_transition(
+        &TransitionReport::of(TransitionVerb::Renew, &result, now_unix()),
+        args.retry.json,
+    )
+}
+
+/// Apply the renewal and, unless it was a replay, chain it — the same shape and
+/// the same best-effort chain posture as a park.
+fn renew_and_chain(
+    store: &AgentSessionStore,
+    args: &RenewArgs,
+    now: u64,
+    chain: impl FnOnce(&AgentSessionRecord) -> Result<()>,
+) -> Result<TransitionResult> {
+    let result = renew_record(store, args, now)?;
+    if result.is_replay() {
+        return Ok(result);
+    }
+    if let Err(error) = chain(result.record()) {
+        crate::ui::warn(&format!(
+            "session {} renewed, but the renewal was not recorded in the audit chain: {error:#}",
+            result.record().session_id.as_str()
+        ));
+    }
+    Ok(result)
+}
+
+/// Apply the renewal to the store.
+fn renew_record(store: &AgentSessionStore, args: &RenewArgs, now: u64) -> Result<TransitionResult> {
+    let id = parse_session_id(&args.session_id)?;
+    let extend_for_secs = parse_retention("--for", &args.extend_for)?;
+    anyhow::ensure!(
+        store.exists(&id),
+        "no agent session '{}' on this host",
+        args.session_id
+    );
+    store.renew(
+        &id,
+        RenewRequest {
+            generation: args.retry.fence(),
+            expected_deadline_unix: args.expected_deadline,
+            extend_for_secs,
+        },
+        now,
+    )
+}
+
+/// The extra labels a `session.renewed` entry carries. Prefixed like the park
+/// entry's, so none can overwrite a signed plan label.
+fn renew_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
+    let mut extras = vec![
+        (
+            "renewed_session".to_string(),
+            record.session_id.as_str().to_string(),
+        ),
+        (
+            "renewed_at_generation".to_string(),
+            record.generation.to_string(),
+        ),
+    ];
+    if let Some(until) = record.retain_until_unix {
+        extras.push(("renewed_until_unix".to_string(), until.to_string()));
+    }
+    // The deadline this renewal extended, read off the identity it recorded,
+    // so the entry shows the move and not only where it landed.
+    if let Some(from) = record.last_transition.as_ref().and_then(|t| {
+        t.identity
+            .observed
+            .get("retain_until_unix")
+            .cloned()
+            .flatten()
+    }) {
+        extras.push(("renewed_from_unix".to_string(), from));
+    }
+    extras
+}
+
+/// Bind a completed renewal into the chain, under the member sandbox's plan
+/// exactly as a park is.
+fn record_renew_in_chain(
+    record: &AgentSessionRecord,
+    emitter: &super::vm::audit_chain::AuditEmitter,
+) -> Result<()> {
+    let plan = member_plan(record)?;
+    emitter.emit_session_renewed(&plan, renew_audit_extras(record))
+}
+
+/// Apply the park and, unless it was a replay, chain it.
+///
+/// The chain half is a parameter so a test can hand it a real emitter over a
+/// scratch directory. A replay chains nothing: the entry the original park
+/// wrote is the record of that transition, and a second one would claim the
+/// session parked twice.
+fn park_and_chain(
+    store: &AgentSessionStore,
+    args: &ParkArgs,
+    chain: impl FnOnce(&AgentSessionRecord) -> Result<()>,
+) -> Result<TransitionResult> {
+    let result = park_record(store, args)?;
+    if result.is_replay() {
+        return Ok(result);
+    }
     // The record is already durable at this point. A chain entry that cannot
     // be written is reported rather than raised: failing here would tell an
     // operator the park did not happen when it did, and a park with no entry
     // is the lesser of those two wrongs.
-    if let Err(error) = record_park_in_chain(&record) {
+    if let Err(error) = chain(result.record()) {
         crate::ui::warn(&format!(
             "session {} parked, but the park was not recorded in the audit chain: {error:#}",
-            record.session_id.as_str()
+            result.record().session_id.as_str()
         ));
     }
-    Ok(())
+    Ok(result)
 }
 
 /// Apply the park to the store and return the record it wrote.
 ///
 /// Split from the audit half so the transition is testable without a signer
 /// or an audit directory.
-fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<AgentSessionRecord> {
+fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<TransitionResult> {
     let id = parse_session_id(&args.session_id)?;
     let reason = parse_park_reason(&args.reason)?;
     let approval_head = args
@@ -300,22 +510,28 @@ fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<AgentSessio
         .map(ApprovalHead::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
-    let current = store
-        .load(&id)
-        .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
-    // The store's fence refuses a caller working from a record some other
-    // transition has superseded. This command loaded the record a moment ago
-    // and is the caller, so it passes what it just read; the fence is doing
-    // nothing for it. What the fence cannot do either way is serialize two
-    // concurrent parks of one session — that needs file locking the store
-    // does not have.
+    let retain_for_secs = args
+        .retain_for
+        .as_deref()
+        .map(|raw| parse_retention("--retain-for", raw))
+        .transpose()?;
+    anyhow::ensure!(
+        store.exists(&id),
+        "no agent session '{}' on this host",
+        args.session_id
+    );
+    // With --expected-generation the fence is the caller's, and an exact retry
+    // replays; without it the store reads the generation itself, which fences
+    // nothing. Neither serializes two concurrent parks of one session — that
+    // needs file locking the store does not have.
     store.park(
         &id,
-        current.generation,
+        args.retry.fence(),
         ParkInput {
             reason,
             journal_cursor: args.journal_cursor,
             approval_head,
+            retain_for_secs,
         },
         mvm_core::util::time::now_unix_secs(),
     )
@@ -375,6 +591,9 @@ fn park_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
             storage_tier_name(tier).to_string(),
         ));
     }
+    if let Some(until) = record.retain_until_unix {
+        extras.push(("park_retain_until_unix".to_string(), until.to_string()));
+    }
     extras
 }
 
@@ -385,20 +604,32 @@ fn park_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
 /// plan is the authority the residency actually ran with. A session with no
 /// member, or a member with no persisted plan, has nothing to bind to and is
 /// reported rather than recorded under a plan it never ran.
-fn record_park_in_chain(record: &AgentSessionRecord) -> Result<()> {
+fn record_park_in_chain(
+    record: &AgentSessionRecord,
+    emitter: &super::vm::audit_chain::AuditEmitter,
+) -> Result<()> {
+    let plan = member_plan(record)?;
+    emitter.emit_session_parked(&plan, park_audit_extras(record))
+}
+
+/// The admitted plan of the session's first member sandbox.
+fn member_plan(record: &AgentSessionRecord) -> Result<mvm_core::plan::ExecutionPlan> {
     let member = record.members.first().ok_or_else(|| {
         anyhow::anyhow!(
             "session {} records no member sandbox, so there is no admitted plan to bind to",
             record.session_id.as_str()
         )
     })?;
-    let plan = mvm_hostd::audit::plan_persist::read_plan(member)
-        .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))?;
+    mvm_hostd::audit::plan_persist::read_plan(member)
+        .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))
+}
+
+/// The host's chain-signed audit emitter, under the host signer.
+fn host_audit_emitter() -> Result<super::vm::audit_chain::AuditEmitter> {
     let signer = super::vm::host_signer::load_or_init()
-        .context("loading the host signer to sign the park entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the park")?;
-    emitter.emit_session_parked(&plan, park_audit_extras(record))
+        .context("loading the host signer to sign the session entry")?;
+    super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the session transition")
 }
 
 /// Re-admit a parked session, then bind the resume into the audit chain.
@@ -410,20 +641,49 @@ fn resume(
     if args.boot {
         return resume_booting(sessions, checkpoints, args);
     }
-    let resumed = resume_record(sessions, checkpoints, args)?;
-    println!("{}", summary_line(&resumed.record));
-    println!("admitted plan:  {}", resumed.admitted.plan_id().0);
-    // Said plainly rather than implied by silence: a resume re-admits the
-    // session under a fresh signed plan and stops there. Restoring the memory
-    // image and starting a sandbox from it is not wired.
-    println!("(no sandbox was booted — a resume re-admits the session, nothing more)");
-    if let Err(error) = record_resume_in_chain(&resumed.record, &resumed.admitted) {
-        crate::ui::warn(&format!(
-            "session {} resumed, but the resume was not recorded in the audit chain: {error:#}",
-            resumed.record.session_id.as_str()
-        ));
+    let report = match resume_record(sessions, checkpoints, args)? {
+        ResumeOutcome::Resumed(resumed) => {
+            if let Err(error) = record_resume_in_chain(&resumed.record, &resumed.admitted) {
+                crate::ui::warn(&format!(
+                    "session {} resumed, but the resume was not recorded in the audit chain: \
+                     {error:#}",
+                    resumed.record.session_id.as_str()
+                ));
+            }
+            OwnedResumeReport {
+                replayed: false,
+                record: resumed.record,
+                admitted_plan_id: resumed.admitted.plan_id().0.clone(),
+            }
+        }
+        // Nothing was admitted and nothing is chained: the entry the original
+        // resume wrote is the record of it.
+        ResumeOutcome::Replayed(replayed) => OwnedResumeReport {
+            replayed: true,
+            record: replayed.record,
+            admitted_plan_id: replayed.admitted_plan_id,
+        },
+    };
+    report_transition(&report.borrowed(now_unix()), args.retry.json)
+}
+
+/// A resume's reportable result, owned across the two outcomes it comes from.
+struct OwnedResumeReport {
+    replayed: bool,
+    record: AgentSessionRecord,
+    admitted_plan_id: String,
+}
+
+impl OwnedResumeReport {
+    fn borrowed(&self, now: u64) -> TransitionReport<'_> {
+        TransitionReport {
+            verb: TransitionVerb::Resume,
+            replayed: self.replayed,
+            session: SessionView::at(&self.record, now),
+            admitted_plan_id: Some(&self.admitted_plan_id),
+            booted_sandbox: None,
+        }
     }
-    Ok(())
 }
 
 /// The owned values a [`ResumeRequest`] borrows from.
@@ -436,10 +696,8 @@ struct ResumeInputs {
     id: AgentSessionId,
     approval_head: Option<ApprovalHead>,
     material: ResumePlanMaterial,
-    /// The generation this command just read, for the same reason the park path
-    /// passes what it read: the store's fence refuses a caller working from a
-    /// superseded record, and this caller cannot be holding one.
-    expected_generation: u64,
+    /// The operator's `--expected-generation`, or a read at call time.
+    generation: GenerationFence,
 }
 
 impl ResumeInputs {
@@ -451,9 +709,11 @@ impl ResumeInputs {
             .map(ApprovalHead::parse)
             .transpose()
             .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
-        let current = sessions
-            .load(&id)
-            .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
+        anyhow::ensure!(
+            sessions.exists(&id),
+            "no agent session '{}' on this host",
+            args.session_id
+        );
         Ok(Self {
             id,
             approval_head,
@@ -465,14 +725,14 @@ impl ResumeInputs {
                 cpus: args.cpus,
                 mem_mib: args.mem_mib,
             },
-            expected_generation: current.generation,
+            generation: args.retry.fence(),
         })
     }
 
     fn request(&self) -> ResumeRequest<'_> {
         ResumeRequest {
             session_id: &self.id,
-            expected_generation: self.expected_generation,
+            generation: self.generation,
             // The operator's assertion of where the ledger is now, not the head
             // the record was parked under. Passing the record's own head back
             // would compare it against itself and check nothing.
@@ -492,7 +752,7 @@ fn resume_record(
     sessions: &AgentSessionStore,
     checkpoints: &CheckpointStore,
     args: &ResumeArgs,
-) -> Result<ResumedSession> {
+) -> Result<ResumeOutcome> {
     let inputs = ResumeInputs::parse(sessions, args)?;
     // The nonce ledger is per-invocation, so it refuses a replay within one
     // command and not across two. That is the same posture every other CLI
@@ -516,11 +776,16 @@ fn resume_booting(
     args: &ResumeArgs,
 ) -> Result<()> {
     let booted = resume_boot_record(sessions, checkpoints, args)?;
-
-    println!("{}", summary_line(&booted.record));
-    println!("admitted plan:  {}", booted.started.admitted.plan_id().0);
-    println!("booted sandbox: {}", booted.started.vm_id.0);
-    Ok(())
+    report_transition(
+        &TransitionReport {
+            verb: TransitionVerb::Resume,
+            replayed: false,
+            session: SessionView::at(&booted.record, now_unix()),
+            admitted_plan_id: Some(&booted.started.admitted.plan_id().0),
+            booted_sandbox: Some(&booted.started.vm_id.0),
+        },
+        args.retry.json,
+    )
 }
 
 /// Drive a booting resume through the client-owned backend boundary.
@@ -589,22 +854,141 @@ fn resume_audit_extras(record: &AgentSessionRecord, plan_id: &PlanId) -> Vec<(St
 /// Unlike the park entry, this one needs no plan lookup: the resume produced
 /// the plan it is recorded under.
 fn record_resume_in_chain(record: &AgentSessionRecord, admitted: &AdmittedPlan) -> Result<()> {
-    let signer = super::vm::host_signer::load_or_init()
-        .context("loading the host signer to sign the resume entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the resume")?;
-    emitter.emit_session_resumed(
+    host_audit_emitter()?.emit_session_resumed(
         admitted.plan(),
         resume_audit_extras(record, admitted.plan_id()),
     )
 }
 
+/// Which transition a report describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransitionVerb {
+    Park,
+    Resume,
+    Renew,
+}
+
+impl TransitionVerb {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Resume => "resume",
+            Self::Renew => "renew",
+        }
+    }
+}
+
+/// What a transition command reports, in text or JSON.
+///
+/// `replayed` is the one field a retrying caller needs: it separates "this
+/// call applied the transition" from "an earlier call had already applied it
+/// and this is what that call produced".
+#[derive(Debug, Serialize)]
+struct TransitionReport<'a> {
+    #[serde(rename = "transition")]
+    verb: TransitionVerb,
+    replayed: bool,
+    session: SessionView<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admitted_plan_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    booted_sandbox: Option<&'a str>,
+}
+
+impl<'a> TransitionReport<'a> {
+    fn of(verb: TransitionVerb, result: &'a TransitionResult, now: u64) -> Self {
+        Self {
+            verb,
+            replayed: result.is_replay(),
+            session: SessionView::at(result.record(), now),
+            admitted_plan_id: None,
+            booted_sandbox: None,
+        }
+    }
+}
+
+fn report_transition(report: &TransitionReport<'_>, json: bool) -> Result<()> {
+    if json {
+        return crate::json_out::emit_json(report);
+    }
+    for line in transition_lines(report) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The text form of a transition report.
+fn transition_lines(report: &TransitionReport<'_>) -> Vec<String> {
+    let mut lines = vec![summary_line(report.session.record, report.session.now)];
+    if let Some(plan) = report.admitted_plan_id {
+        lines.push(format!("admitted plan:  {plan}"));
+    }
+    match report.booted_sandbox {
+        Some(sandbox) => lines.push(format!("booted sandbox: {sandbox}")),
+        // Said plainly rather than implied by silence: a resume re-admits the
+        // session under a fresh signed plan and stops there. Restoring the
+        // memory image and starting a sandbox from it is not wired.
+        None if report.verb == TransitionVerb::Resume => lines.push(
+            "(no sandbox was booted — a resume re-admits the session, nothing more)".to_string(),
+        ),
+        None => {}
+    }
+    if report.replayed {
+        lines.push(format!(
+            "replay: this {} had already applied; nothing was written and no audit entry was \
+             added",
+            report.verb.as_str()
+        ));
+    }
+    lines
+}
+
+/// A session record as `--json` reports it: the record, plus whether its
+/// retention deadline is alive at the moment the command ran.
+///
+/// Derived rather than stored, because expiry is a fact about the clock and
+/// not about the record; storing it would make it stale the second it was
+/// written.
+#[derive(Debug, Serialize)]
+struct SessionView<'a> {
+    #[serde(flatten)]
+    record: &'a AgentSessionRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention: Option<RetentionStatus>,
+    #[serde(skip)]
+    now: u64,
+}
+
+impl<'a> SessionView<'a> {
+    fn at(record: &'a AgentSessionRecord, now: u64) -> Self {
+        Self {
+            record,
+            retention: record.retention_status(now),
+            now,
+        }
+    }
+}
+
+/// The retention column: `alive(2h left)` or `expired(3h ago)`.
+fn retention_phrase(status: RetentionStatus) -> String {
+    match status {
+        RetentionStatus::Alive { remaining_secs, .. } => {
+            format!("alive({} left)", human_age_secs(remaining_secs))
+        }
+        RetentionStatus::Expired {
+            expired_for_secs, ..
+        } => format!("expired({} ago)", human_age_secs(expired_for_secs)),
+    }
+}
+
 /// The `ls` row for one session.
 ///
-/// A parked session's reason and tier ride on the same line because they are
-/// what an operator triages on: the reason says why it is waiting, and the
-/// tier says what the wait costs.
-fn summary_line(record: &AgentSessionRecord) -> String {
+/// A parked session's reason, tier and retention ride on the same line because
+/// they are what an operator triages on: the reason says why it is waiting, the
+/// tier says what the wait costs, and the retention says how long the host has
+/// promised to keep paying it.
+fn summary_line(record: &AgentSessionRecord, now: u64) -> String {
     let mut line = format!(
         "{:<32} {:<5} {}",
         record.session_id.as_str(),
@@ -619,11 +1003,15 @@ fn summary_line(record: &AgentSessionRecord) -> String {
         line.push_str("  tier=");
         line.push_str(storage_tier_name(tier));
     }
+    if let Some(status) = record.retention_status(now) {
+        line.push_str("  retention=");
+        line.push_str(&retention_phrase(status));
+    }
     line
 }
 
 /// Every recorded field of one session, one per line.
-fn detail_lines(record: &AgentSessionRecord) -> Vec<String> {
+fn detail_lines(record: &AgentSessionRecord, now: u64) -> Vec<String> {
     let mut lines = vec![
         format!("session:        {}", record.session_id.as_str()),
         format!("residency:      {}", residency_name(record.state)),
@@ -639,6 +1027,19 @@ fn detail_lines(record: &AgentSessionRecord) -> Vec<String> {
             record.storage_tier.map_or("-", storage_tier_name)
         ),
         format!("journal cursor: {}", record.journal_cursor),
+        format!(
+            "retain until:   {}",
+            match (record.retain_until_unix, record.retention_status(now)) {
+                (Some(until), Some(status @ RetentionStatus::Alive { .. })) => {
+                    format!("{until} (unix) — {}", retention_phrase(status))
+                }
+                (Some(until), Some(status)) => format!(
+                    "{until} (unix) — {}; past its promise, so renew refuses",
+                    retention_phrase(status)
+                ),
+                _ => "-".to_string(),
+            }
+        ),
         format!(
             "resume point:   {}",
             record
@@ -703,6 +1104,9 @@ mod tests {
     use mvm_core::checkpoint::{ApprovalHead, CheckpointDigest};
     use mvm_runtime::agent_session::ParkInput;
 
+    /// A clock shortly after the fixtures park, so their deadlines are alive.
+    const TEST_NOW: u64 = 1_755_000_200;
+
     fn active(id: &str) -> AgentSessionRecord {
         AgentSessionRecord {
             session_id: AgentSessionId::parse(id).unwrap(),
@@ -718,6 +1122,8 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            retain_until_unix: None,
+            last_transition: None,
         }
     }
 
@@ -733,6 +1139,7 @@ mod tests {
                     approval_head: Some(
                         ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32))).unwrap(),
                     ),
+                    retain_for_secs: None,
                 },
                 1_755_000_100,
             )
@@ -741,7 +1148,7 @@ mod tests {
 
     #[test]
     fn an_active_session_renders_its_residency_and_nothing_about_a_park() {
-        let line = summary_line(&active("sess-alpha"));
+        let line = summary_line(&active("sess-alpha"), TEST_NOW);
         assert!(line.contains("sess-alpha"), "{line}");
         assert!(line.contains("active"), "{line}");
         assert!(!line.contains("reason="), "{line}");
@@ -752,7 +1159,7 @@ mod tests {
     fn a_parked_session_renders_its_reason_and_tier() {
         // The tier is not decoration: approval-wait selects `parked`, so the
         // rendered row is also how an operator sees what the wait costs.
-        let line = summary_line(&parked("sess-beta", ParkReason::ApprovalWait));
+        let line = summary_line(&parked("sess-beta", ParkReason::ApprovalWait), TEST_NOW);
         assert!(line.contains("hibernated"), "{line}");
         assert!(line.contains("reason=approval-wait"), "{line}");
         assert!(line.contains("tier=parked"), "{line}");
@@ -760,7 +1167,7 @@ mod tests {
 
     #[test]
     fn an_idle_park_renders_the_resident_tier_it_actually_selects() {
-        let line = summary_line(&parked("sess-gamma", ParkReason::Idle));
+        let line = summary_line(&parked("sess-gamma", ParkReason::Idle), TEST_NOW);
         assert!(line.contains("reason=idle"), "{line}");
         assert!(line.contains("tier=resident"), "{line}");
     }
@@ -769,12 +1176,12 @@ mod tests {
     fn a_closed_session_renders_as_closed() {
         let mut record = active("sess-delta");
         record.state = SandboxResidency::Closed;
-        assert!(summary_line(&record).contains("closed"));
+        assert!(summary_line(&record, TEST_NOW).contains("closed"));
     }
 
     #[test]
     fn detail_says_when_no_approval_head_was_recorded() {
-        let lines = detail_lines(&active("sess-alpha")).join("\n");
+        let lines = detail_lines(&active("sess-alpha"), TEST_NOW).join("\n");
         assert!(
             lines.contains("approval head:  (none recorded"),
             "an unfenced session must say so: {lines}"
@@ -784,7 +1191,7 @@ mod tests {
     #[test]
     fn detail_prints_a_recorded_approval_head_as_the_digest_it_is() {
         let record = parked("sess-alpha", ParkReason::Operator);
-        let lines = detail_lines(&record).join("\n");
+        let lines = detail_lines(&record, TEST_NOW).join("\n");
         assert!(
             lines.contains(&format!("sha256:{}", "ab".repeat(32))),
             "the head is a digest, not a secret: {lines}"
@@ -794,7 +1201,7 @@ mod tests {
     #[test]
     fn detail_carries_every_recorded_field() {
         let record = parked("sess-alpha", ParkReason::ApprovalWait);
-        let lines = detail_lines(&record).join("\n");
+        let lines = detail_lines(&record, TEST_NOW).join("\n");
         for expected in [
             "session:        sess-alpha",
             "residency:      hibernated",
@@ -942,6 +1349,8 @@ mod tests {
                 reason: "operator".to_string(),
                 journal_cursor: 0,
                 approval_head: None,
+                retain_for: None,
+                retry: RetryArgs::default(),
             },
         )
         .expect_err("a hibernated session is not active, so it cannot be parked");
@@ -960,9 +1369,12 @@ mod tests {
                 reason: "approval-wait".to_string(),
                 journal_cursor: 11,
                 approval_head: None,
+                retain_for: None,
+                retry: RetryArgs::default(),
             },
         )
-        .expect("an active session parks");
+        .expect("an active session parks")
+        .into_record();
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
         assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
@@ -983,6 +1395,8 @@ mod tests {
                 reason: "operator".to_string(),
                 journal_cursor: 0,
                 approval_head: Some("not-a-digest".to_string()),
+                retain_for: None,
+                retry: RetryArgs::default(),
             },
         )
         .expect_err("a malformed head must be refused at the boundary");
@@ -1005,6 +1419,7 @@ mod tests {
             approval_head: None,
             boot: false,
             kernel: None,
+            retry: RetryArgs::default(),
         }
     }
 
@@ -1035,7 +1450,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     fn install_runtime_overlay(home: &std::path::Path) {
         use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
-        use mvm_fs::ext4::Node;
+        use mvm_fs::ext4::{Node, Owner};
         use mvm_fs::overlay::{REQUIRED_OVERLAY_GUEST_PATHS, read_overlay_artifact_from_dir};
 
         let source = home.join("runtime-overlay-source");
@@ -1047,6 +1462,7 @@ mod tests {
                 mode: 0o755,
                 data: b"session-resume-runtime-stub".to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         let ext4 = mvm_fs::ext4::build_image(nodes).unwrap();
@@ -1444,12 +1860,15 @@ mod tests {
                 reason: "approval-wait".to_string(),
                 journal_cursor: 9,
                 approval_head: None,
+                retain_for: None,
+                retry: RetryArgs::default(),
             },
         )
-        .expect("the session opened active, so it parks");
+        .expect("the session opened active, so it parks")
+        .into_record();
 
         // What `show` renders, read off the same record `show` would load.
-        let rendered = detail_lines(&store.load(&parked.session_id).unwrap()).join("\n");
+        let rendered = detail_lines(&store.load(&parked.session_id).unwrap(), TEST_NOW).join("\n");
         assert!(
             rendered.contains("residency:      hibernated"),
             "{rendered}"
@@ -1471,5 +1890,489 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path().join("not-created-yet"));
         ls(&store, false).expect("an empty host has no sessions, which is not an error");
+    }
+
+    // ── exact retry at the CLI boundary ─────────────────────────────────
+
+    fn park_args(reason: &str, expected_generation: Option<u64>) -> ParkArgs {
+        ParkArgs {
+            session_id: "sess-alpha".to_string(),
+            reason: reason.to_string(),
+            journal_cursor: 3,
+            approval_head: None,
+            retain_for: None,
+            retry: RetryArgs {
+                expected_generation,
+                json: false,
+            },
+        }
+    }
+
+    /// A host whose member sandbox has a persisted plan, and an emitter over a
+    /// scratch chain, so a park reaches the real chain-writing path.
+    struct ChainedHost {
+        _env: mvm_core::util::test_env::TestEnv,
+        home: tempfile::TempDir,
+        emitter: super::super::vm::audit_chain::AuditEmitter,
+    }
+
+    impl ChainedHost {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            mvm_hostd::audit::plan_persist::write_plan(
+                "vm-alpha",
+                &mvm_core::plan::signing::test_support::sample_plan(),
+            )
+            .unwrap();
+            let emitter = super::super::vm::audit_chain::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+                &home.path().join("audit"),
+            )
+            .unwrap();
+            Self {
+                _env: env,
+                home,
+                emitter,
+            }
+        }
+
+        fn park(&self, store: &AgentSessionStore, args: &ParkArgs) -> Result<TransitionResult> {
+            park_and_chain(store, args, |record| {
+                record_park_in_chain(record, &self.emitter)
+            })
+        }
+
+        fn entries(&self, event: &str) -> usize {
+            std::fs::read_to_string(self.home.path().join("audit").join("tenant-a.jsonl"))
+                .unwrap_or_default()
+                .matches(&format!("\"{event}\""))
+                .count()
+        }
+    }
+
+    #[test]
+    fn an_exact_park_retry_is_reported_as_a_replay_and_adds_no_chain_entry() {
+        let host = ChainedHost::new();
+        let store = AgentSessionStore::at(host.home.path().join("sessions"));
+        store.write(&active("sess-alpha")).unwrap();
+        let args = park_args("approval-wait", Some(1));
+
+        let first = host.park(&store, &args).expect("the first park applies");
+        assert!(!first.is_replay());
+        assert_eq!(host.entries("session.parked"), 1, "the park is chained");
+
+        let retry = host
+            .park(&store, &args)
+            .expect("an exact retry is answered");
+        assert!(retry.is_replay());
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(
+            host.entries("session.parked"),
+            1,
+            "a replay must not chain a second park"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&TransitionReport::of(
+                TransitionVerb::Park,
+                &retry,
+                TEST_NOW,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["replayed"], true);
+        assert_eq!(json["transition"], "park");
+        assert_eq!(json["session"]["state"], "hibernated");
+        let text = transition_lines(&TransitionReport::of(
+            TransitionVerb::Park,
+            &retry,
+            TEST_NOW,
+        ))
+        .join("\n");
+        assert!(
+            text.contains("replay: this park had already applied"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_park_retry_with_another_reason_is_a_conflict_naming_it() {
+        let host = ChainedHost::new();
+        let store = AgentSessionStore::at(host.home.path().join("sessions"));
+        store.write(&active("sess-alpha")).unwrap();
+        host.park(&store, &park_args("approval-wait", Some(1)))
+            .unwrap();
+        let before = store
+            .load(&AgentSessionId::parse("sess-alpha").unwrap())
+            .unwrap();
+
+        let err = host
+            .park(&store, &park_args("operator", Some(1)))
+            .expect_err("a changed park must not apply");
+        assert!(
+            format!("{err:#}").contains("reason: recorded approval_wait, retried operator"),
+            "{err:#}"
+        );
+        assert_eq!(
+            store.load(&before.session_id).unwrap(),
+            before,
+            "a conflict must not touch the record"
+        );
+        assert_eq!(host.entries("session.parked"), 1);
+    }
+
+    #[test]
+    fn a_park_with_a_stale_expected_generation_is_refused_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = active("sess-alpha");
+        store.write(&record).unwrap();
+        let err = park_record(&store, &park_args("operator", Some(4)))
+            .expect_err("a caller holding another generation must be refused");
+        assert!(
+            format!("{err:#}").contains("at generation 1, not the expected 4"),
+            "{err:#}"
+        );
+        assert_eq!(store.load(&record.session_id).unwrap(), record);
+    }
+
+    #[test]
+    fn a_fresh_park_report_is_not_marked_as_a_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&active("sess-alpha")).unwrap();
+        let result = park_record(&store, &park_args("idle", None)).unwrap();
+        let report = TransitionReport::of(TransitionVerb::Park, &result, TEST_NOW);
+        assert!(!report.replayed);
+        assert!(
+            !transition_lines(&report).join("\n").contains("replay"),
+            "an applied park must not read as a replay"
+        );
+    }
+
+    #[test]
+    fn a_resume_report_says_nothing_booted_and_carries_the_plan() {
+        let record = parked("sess-alpha", ParkReason::Operator);
+        let report = OwnedResumeReport {
+            replayed: true,
+            record,
+            admitted_plan_id: "plan-abc".to_string(),
+        };
+        let text = transition_lines(&report.borrowed(TEST_NOW)).join("\n");
+        assert!(text.contains("admitted plan:  plan-abc"), "{text}");
+        assert!(text.contains("no sandbox was booted"), "{text}");
+        assert!(
+            text.contains("replay: this resume had already applied"),
+            "{text}"
+        );
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&report.borrowed(TEST_NOW)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["replayed"], true);
+        assert_eq!(json["admitted_plan_id"], "plan-abc");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn an_exact_resume_retry_replays_the_admitted_plan_at_the_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let sessions = AgentSessionStore::at(home.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(home.path().join("checkpoints"));
+        let parent = seed_resume_checkpoint(&checkpoints, home.path());
+        let mut record = parked("sess-alpha", ParkReason::Operator);
+        record.parent_checkpoint = Some(parent.meta_digest);
+        sessions.write(&record).unwrap();
+        let mut args = resume_args("sess-alpha");
+        args.approval_head = record.approval_head.as_ref().map(ToString::to_string);
+        args.retry.expected_generation = Some(record.generation);
+
+        let plan_id = match resume_record(&sessions, &checkpoints, &args).unwrap() {
+            ResumeOutcome::Resumed(resumed) => resumed.admitted.plan_id().0.clone(),
+            ResumeOutcome::Replayed(_) => panic!("the first resume must apply"),
+        };
+        match resume_record(&sessions, &checkpoints, &args).unwrap() {
+            ResumeOutcome::Replayed(replayed) => {
+                assert_eq!(replayed.admitted_plan_id, plan_id);
+                assert_eq!(replayed.record.generation, record.generation + 1);
+            }
+            ResumeOutcome::Resumed(_) => panic!("an exact retry must not resume again"),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_retried_boot_resume_is_refused_at_the_cli_and_boots_nothing_more() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        install_runtime_overlay(home.path());
+        let sessions = AgentSessionStore::at(home.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(home.path().join("checkpoints"));
+        let parent = seed_resume_checkpoint(&checkpoints, home.path());
+        let mut record = parked("sess-boot", ParkReason::RetentionDemotion);
+        record.parent_checkpoint = Some(parent.meta_digest);
+        sessions.write(&record).unwrap();
+        let kernel = stub_kernel(home.path());
+        let mut args = boot_args("sess-boot", &kernel);
+        args.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
+        args.approval_head = record.approval_head.as_ref().map(ToString::to_string);
+        args.retry.expected_generation = Some(record.generation);
+
+        let booted = resume_boot_record(&sessions, &checkpoints, &args).unwrap();
+        let after_boot = sessions.load(&record.session_id).unwrap();
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
+            .expect_err("a retried boot resume must refuse rather than boot again");
+        let text = format!("{err:#}");
+        assert!(text.contains("already applied"), "{text}");
+        assert!(
+            text.contains(&booted.started.admitted.plan_id().0),
+            "{text}"
+        );
+        assert_eq!(sessions.load(&record.session_id).unwrap(), after_boot);
+    }
+
+    // ── retention deadline ──────────────────────────────────────────────
+
+    const HOUR: u64 = 60 * 60;
+
+    fn renew_args(extend_for: &str, deadline: Option<u64>, generation: Option<u64>) -> RenewArgs {
+        RenewArgs {
+            session_id: "sess-alpha".to_string(),
+            extend_for: extend_for.to_string(),
+            expected_deadline: deadline,
+            retry: RetryArgs {
+                expected_generation: generation,
+                json: false,
+            },
+        }
+    }
+
+    /// Park `sess-alpha` for an hour through the CLI path and return its deadline.
+    fn parked_for_an_hour(store: &AgentSessionStore) -> u64 {
+        store.write(&active("sess-alpha")).unwrap();
+        let args = ParkArgs {
+            retain_for: Some("1h".to_string()),
+            ..park_args("operator", Some(1))
+        };
+        park_record(store, &args)
+            .unwrap()
+            .record()
+            .retain_until_unix
+            .expect("a park sets a deadline")
+    }
+
+    #[test]
+    fn park_retain_for_sets_the_deadline_from_the_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let before = now_unix();
+        let deadline = parked_for_an_hour(&store);
+        assert!(
+            (before + HOUR..=now_unix() + HOUR).contains(&deadline),
+            "{deadline}"
+        );
+    }
+
+    #[test]
+    fn park_without_retain_for_takes_the_reasons_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&active("sess-alpha")).unwrap();
+        let before = now_unix();
+        let record = park_record(&store, &park_args("approval-wait", None))
+            .unwrap()
+            .into_record();
+        let default = mvm_runtime::agent_session::APPROVAL_WAIT_RETENTION.as_secs();
+        assert!(record.retain_until_unix.unwrap() >= before + default);
+    }
+
+    #[test]
+    fn a_malformed_retain_for_is_refused_before_the_record_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = active("sess-alpha");
+        store.write(&record).unwrap();
+        let err = park_record(
+            &store,
+            &ParkArgs {
+                retain_for: Some("forever".to_string()),
+                ..park_args("operator", None)
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid --retain-for"),
+            "{err:#}"
+        );
+        assert_eq!(store.load(&record.session_id).unwrap(), record);
+    }
+
+    #[test]
+    fn a_park_retry_with_another_retention_is_a_conflict_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        parked_for_an_hour(&store);
+        let err = park_record(
+            &store,
+            &ParkArgs {
+                retain_for: Some("2h".to_string()),
+                ..park_args("operator", Some(1))
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("retain_for_secs: recorded 3600, retried 7200"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn renew_extends_and_an_exact_retry_replays_without_a_chain_entry() {
+        let host = ChainedHost::new();
+        let store = AgentSessionStore::at(host.home.path().join("sessions"));
+        let deadline = parked_for_an_hour(&store);
+        let args = renew_args("5h", Some(deadline), Some(1));
+        let now = deadline - 10;
+        let chain = |record: &AgentSessionRecord| record_renew_in_chain(record, &host.emitter);
+
+        let first = renew_and_chain(&store, &args, now, chain).unwrap();
+        assert!(!first.is_replay());
+        assert_eq!(first.record().retain_until_unix, Some(now + 5 * HOUR));
+        assert_eq!(host.entries("session.renewed"), 1);
+
+        let retry = renew_and_chain(&store, &args, now + 60, chain).unwrap();
+        assert!(retry.is_replay());
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(
+            host.entries("session.renewed"),
+            1,
+            "a replayed renewal must not chain a second entry"
+        );
+        let report = TransitionReport::of(TransitionVerb::Renew, &retry, now + 60);
+        assert!(
+            transition_lines(&report)
+                .join("\n")
+                .contains("replay: this renew had already applied")
+        );
+    }
+
+    #[test]
+    fn renew_refuses_to_shorten_and_leaves_the_record_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let deadline = parked_for_an_hour(&store);
+        let before = store.list().unwrap();
+        let err =
+            renew_record(&store, &renew_args("1m", None, None), deadline - HOUR / 2).unwrap_err();
+        assert!(format!("{err:#}").contains("can only extend"), "{err:#}");
+        assert_eq!(store.list().unwrap(), before);
+    }
+
+    #[test]
+    fn renew_refuses_an_expired_session_saying_it_is_past_its_promise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let deadline = parked_for_an_hour(&store);
+        let err = renew_record(&store, &renew_args("7d", None, None), deadline + 1).unwrap_err();
+        assert!(format!("{err:#}").contains("past its promise"), "{err:#}");
+    }
+
+    #[test]
+    fn renew_refuses_a_closed_or_active_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&active("sess-alpha")).unwrap();
+        let err = renew_record(&store, &renew_args("1h", None, None), TEST_NOW).unwrap_err();
+        assert!(format!("{err:#}").contains("not hibernated"), "{err:#}");
+
+        let mut closed = parked("sess-alpha", ParkReason::Operator);
+        closed.state = SandboxResidency::Closed;
+        store.write(&closed).unwrap();
+        let err = renew_record(&store, &renew_args("1h", None, None), TEST_NOW).unwrap_err();
+        assert!(format!("{err:#}").contains("closed"), "{err:#}");
+    }
+
+    #[test]
+    fn renew_refuses_a_malformed_duration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        parked_for_an_hour(&store);
+        let err = renew_record(&store, &renew_args("soon", None, None), TEST_NOW).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid --for"), "{err:#}");
+    }
+
+    #[test]
+    fn the_renew_entry_keys_do_not_collide_with_the_plan_labels() {
+        // Past the operator default, so the renewal extends rather than refuses.
+        let parked = parked("sess-alpha", ParkReason::Operator);
+        let renewed = parked.renew(72 * HOUR, 1_755_000_150).unwrap();
+        assert_extras_are_disjoint_from_the_plan_labels(&renewed, &renew_audit_extras(&renewed));
+    }
+
+    #[test]
+    fn listings_report_an_alive_deadline_and_an_expired_one() {
+        let record = parked("sess-alpha", ParkReason::Operator);
+        let until = record.retain_until_unix.unwrap();
+
+        let alive = summary_line(&record, until - 2 * HOUR);
+        assert!(alive.contains("retention=alive(2h left)"), "{alive}");
+        let detail = detail_lines(&record, until - 2 * HOUR).join("\n");
+        assert!(
+            detail.contains(&format!("retain until:   {until} (unix) — alive")),
+            "{detail}"
+        );
+
+        let expired = summary_line(&record, until + 3 * HOUR);
+        assert!(expired.contains("retention=expired(3h ago)"), "{expired}");
+        let detail = detail_lines(&record, until + 3 * HOUR).join("\n");
+        assert!(
+            detail.contains("past its promise, so renew refuses"),
+            "{detail}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&SessionView::at(&record, until + 3 * HOUR)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["retention"]["state"], "expired");
+        assert_eq!(json["retention"]["expired_for_secs"], 3 * HOUR);
+        assert_eq!(json["retain_until_unix"], until);
+        assert_eq!(
+            json["session_id"], "sess-alpha",
+            "the record is flattened in"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&SessionView::at(&record, until - 1)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["retention"]["state"], "alive");
+    }
+
+    #[test]
+    fn an_active_session_reports_no_retention() {
+        let record = active("sess-alpha");
+        assert!(!summary_line(&record, TEST_NOW).contains("retention="));
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&SessionView::at(&record, TEST_NOW)).unwrap(),
+        )
+        .unwrap();
+        assert!(json.get("retention").is_none(), "{json}");
+    }
+
+    #[test]
+    fn park_extras_carry_the_deadline() {
+        let record = parked("sess-alpha", ParkReason::Operator);
+        let extras = park_audit_extras(&record);
+        assert!(extras.contains(&(
+            "park_retain_until_unix".to_string(),
+            record.retain_until_unix.unwrap().to_string()
+        )));
     }
 }

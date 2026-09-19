@@ -1453,6 +1453,15 @@ can be wired and reviewed while the Linux implementation is still absent.
 
 ### Task 9: The CPU bound, via a systemd transient scope
 
+- [x] Follow-up: resolve `systemd-run` to one absolute executable before
+      binding a launch, and make the unresponsive-manager regression use a
+      real executable with the same process-name contract. Forty-seven focused
+      host tests and all-target `mvm-core` Clippy pass; Linux CI carries the
+      process-table witness. Delivery evidence:
+      `specs/sprint/delivery/3477-spawn-scope-launcher-fixture.md`.
+- [ ] Deliver the follow-up through the merge queue and close #3477 from landed
+      Linux evidence.
+
 **Redesigned after Task 8's spike. Read `specs/benchmarks/308-cgroup-delegation-findings.md`
 before starting.** The original design — `mkdir` a leaf under
 `user@<uid>.service` and migrate the VMM into it — does not work unprivileged,
@@ -3081,8 +3090,9 @@ Note no production code constructs a `StandbyClaim` today, so (b) is currently
 unreachable in production; that lowers its urgency but does not make it wrong.
 
 **Witnesses:**
-- `a_restored_child_is_cpu_bounded_by_its_admitted_grant` — assert the bound is
-  in effect on the restored VM, not that a field was copied
+- `a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant` and
+  `an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant` — assert the
+  bound is in effect on the restored VM, not that a field was copied
 - `a_restored_child_reports_its_enforced_tier`
 - `a_restored_child_without_a_grant_runs_unbounded_and_says_so`
 - for (b) if built: `a_claimed_child_is_bounded_by_the_pool_grant`

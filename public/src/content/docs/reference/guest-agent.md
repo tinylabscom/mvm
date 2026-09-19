@@ -53,6 +53,52 @@ and version-pinned for the life of a running VM.
 
 ## Protocol
 
+### Telemetry transport foundation (not enabled)
+
+The shared libraries define a separate `Telemetry` service on reserved vsock
+port **5254**. It is not yet installed as a guest listener or supervised host
+collector: this does **not** provide detached tracing today.
+
+Its `mvm.telemetry.v1` records cover span open/update/close, standalone or
+span-associated events, logs, binary stdout/stderr chunks, producer coverage,
+and explicit guest loss summaries. Records reuse the existing authenticated,
+encrypted session machinery. The host receiver requires a registered guest
+public key; guest-authored VM/tenant/boot identity fields are rejected.
+
+The worker protocol has no per-record ACK. Socket I/O still belongs on a
+dedicated worker, never a tracing callback. The current library is an
+allocation-conscious wire boundary. A prepared-record outbox now provides fixed
+storage with count/byte limits and single-attempt admission; it never waits for
+a contended queue lock. Preparation still allocates outside that admission path.
+Independent cumulative counters retain capacity, contention and unavailable
+losses, and failed writes mark transport delivery uncertain. The outbox is not
+yet connected to runtime source adapters or an event-driven worker supervisor.
+The receiver supports a receive-only session authenticated through an external
+signer, without retaining the host signing key. Guest identity is checked before
+requesting that signature. The resident signer accepts a typed telemetry handshake,
+validates its service domain and guest proof, and returns only a signature. Its
+async client bounds socket I/O with one deadline and verifies the response before
+use. VM-lifetime collection and authoritative generation registration are not yet
+connected to this interface.
+
+The workload runner provisions guest credentials even for a secret-free,
+deny-all network policy. That path uses only the host's public anchor, creates
+no network endpoint, and grants no egress. Cold boots receive a fresh guest key
+through the existing private identity drive; warm claims retain the registered
+key already held in restored memory. Missing or malformed required identity
+material refuses launch. This credential provisioning does not itself start
+telemetry capture or collection.
+Records are capped at 32 KiB encoded, with eight JSON nesting levels, 16
+primitive attributes, eight span links, 128-byte labels, 2 KiB text fields,
+and 4 KiB stdio chunks. Malformed input terminates the connection without
+quoting payloads in its error. A partial write has unknown delivery, not a
+claim of successful collection.
+
+All-source subscriber wiring, source/host redaction policy, VM-generation
+registration, active guest service binding, lifetime collection, bounded
+retention, and detached retrieval remain under implementation. Structural
+validation alone does not make workload text safe to retain.
+
 The agent communicates using a **binary protocol with length-prefixed JSON frames** over vsock on every supported microVM backend.
 
 ### Frame Structure
@@ -140,6 +186,16 @@ share the 48-request data admission budget.
 | `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture                  | 256 KiB           | Protocol-bounded result             | Response itself                          | Oversized encoded responses fail closed.                                       | No.                                             |
 | Console PTY traffic                         | Raw bytes on a dedicated vsock port           | Raw transport     | TTY-shaped reads                    | Close or PTY exit                        | Kernel/socket backpressure; only the host CID may connect.                     | No.                                             |
 | Declared ingress                            | Authenticated FlowMux frames on `NetworkFlow` | 256 KiB per frame | Credit-bounded stream chunks        | Flow close/refusal                       | Shared per-VM FlowMux budget.                                                  | Metadata only; payload bytes never enter audit. |
+
+Entrypoint capture bounds both pipe-reader and consumer handoffs. Queue offers
+do not wait for capacity; saturation discards old stdout/stderr and emits
+`mvm.stream.gap` with a `pipe_reader` or `consumer_handoff` stage. Reader failures
+emit `mvm.stream.capture_incomplete` with an unknown tail. Completion transfers
+bounded tails without queue sends; each pipe retains order, but cross-pipe order
+is unspecified. A ring may retain one newest frame above a sub-frame byte cap,
+in addition to fixed queue slots. Pending tails/loss summaries may wait for the
+next offer or EOF. This is invocation capture, not detached, every-VM tracing;
+synchronous host sinks and pipe-EOF waits still exist.
 
 ### Redaction invariant
 

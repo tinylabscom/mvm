@@ -22,7 +22,8 @@ use thiserror::Error;
 
 use crate::parallel::par_map;
 
-use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Xattr};
+use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Owner, Xattr};
+use crate::ownership::{OwnerTable, RootOwnedPaths};
 
 /// Version of the deterministic ext4 materializer's output contract.
 ///
@@ -269,12 +270,14 @@ fn read_walk_entry(
         Node::Symlink {
             path: guest_path,
             target: target.to_string_lossy().into_owned(),
+            owner: Owner::ROOT,
         }
     } else if file_type.is_dir() {
         Node::Dir {
             path: guest_path,
             mode: mode_of(&path, 0o755),
             xattrs: node_xattrs(options.xattrs, &path),
+            owner: Owner::ROOT,
         }
     } else if options.file_contents != FileContentPolicy::ReadDuringWalk
         && let Some(len) = deferrable_file_len(&path)
@@ -296,6 +299,7 @@ fn read_walk_entry(
             len,
             expected_sha256,
             xattrs: node_xattrs(options.xattrs, &path),
+            owner: Owner::ROOT,
         }
     } else {
         let data = match read_file_for_guest_image(&path) {
@@ -307,6 +311,7 @@ fn read_walk_entry(
             mode: mode_of(&path, 0o644),
             data,
             xattrs: node_xattrs(options.xattrs, &path),
+            owner: Owner::ROOT,
         }
     };
     Ok(Some(node))
@@ -451,10 +456,11 @@ fn collect_walk_entries(
 ///
 /// Unlike [`crate::hash::hash_source`], this identity includes Unix mode bits
 /// and guest-visible extended attributes because both affect the emitted
-/// image. Timestamps, uid, and gid are excluded because the deterministic
-/// writer normalizes them. The walk shares enumeration and policy handling
-/// with [`collect_nodes`] so a cache key cannot silently accept an inode the
-/// materializer rejects.
+/// image. Timestamps are excluded because the deterministic writer zeroes
+/// them. A host walk yields root-owned nodes whatever the host ids are, so the
+/// host's uid and gid never reach the identity. The walk shares enumeration
+/// and policy handling with [`collect_nodes`] so a cache key cannot silently
+/// accept an inode the materializer rejects.
 pub fn fingerprint_ext4_source(
     root: &Path,
     options: WalkOptions,
@@ -469,6 +475,12 @@ pub fn fingerprint_ext4_source(
 /// This lets a content-addressed caller compare a fresh source snapshot with
 /// its expected identity and then consume those exact nodes to build the image,
 /// closing the race inherent in hashing and materializing with separate walks.
+///
+/// A node's owner is part of its identity, because it is part of the inode the
+/// writer emits. A root-owned node hashes exactly as it did before nodes
+/// carried owners, so identities of root-owned trees are stable; any other
+/// owner marks the node's kind byte and appends the ids, so a tree differing
+/// only in ownership never shares an identity with a root-owned one.
 pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> Result<String, MaterializeError> {
     let mut ordered = nodes.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.path().cmp(right.path()));
@@ -507,7 +519,7 @@ pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> Result<String, MaterializeError
             }
             Node::Symlink { target, .. } => {
                 fold_fingerprint_field(&mut hasher, node.path().as_bytes());
-                hasher.update(b"l");
+                fold_fingerprint_kind(&mut hasher, b'l', node.owner());
                 hasher.update(0u16.to_be_bytes());
                 fold_fingerprint_field(&mut hasher, target.as_bytes());
                 hasher.update(0u64.to_be_bytes());
@@ -515,7 +527,7 @@ pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> Result<String, MaterializeError
             }
         };
         fold_fingerprint_field(&mut hasher, node.path().as_bytes());
-        hasher.update([kind]);
+        fold_fingerprint_kind(&mut hasher, kind, node.owner());
         hasher.update(mode.to_be_bytes());
         fold_fingerprint_field(&mut hasher, payload.as_deref().unwrap_or_default());
         hasher.update(
@@ -529,6 +541,20 @@ pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> Result<String, MaterializeError
         }
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// Fold a node's kind byte and, when it is not root, its owner. The kind byte
+/// is lowercase for a root-owned node — the encoding every identity used before
+/// nodes carried owners — and uppercase followed by the ids otherwise, so the
+/// two encodings cannot collide.
+fn fold_fingerprint_kind(hasher: &mut sha2::Sha256, kind: u8, owner: Owner) {
+    if owner.is_root() {
+        hasher.update([kind]);
+        return;
+    }
+    hasher.update([kind.to_ascii_uppercase()]);
+    hasher.update(owner.uid.to_be_bytes());
+    hasher.update(owner.gid.to_be_bytes());
 }
 
 fn fold_fingerprint_field(hasher: &mut sha2::Sha256, value: &[u8]) {
@@ -622,10 +648,7 @@ pub fn measure_ext4_pure(
     let source_hash_micros = elapsed_micros(hash_started.elapsed());
 
     let walk_started = Instant::now();
-    let nodes = merge_extra_nodes(
-        collect_nodes(root, options.walk)?,
-        options.extra_nodes.clone(),
-    );
+    let nodes = collect_image_nodes(root, options)?;
     let nodes_report = count_nodes(&nodes);
     let walk_micros = elapsed_micros(walk_started.elapsed());
 
@@ -699,6 +722,16 @@ pub struct MaterializeOptions {
     /// [`crate::oci::unpack::UnpackReport::deferred_nodes`]. A node here
     /// wins over a walked node at the same path.
     pub extra_nodes: Vec<Node>,
+    /// Owners to give the image's nodes, by guest path. The walk cannot read
+    /// them off the host tree — an unprivileged unpack could not apply them —
+    /// so a caller building from container image layers supplies the owners
+    /// the layers declared. Empty (the default) leaves every node root-owned.
+    pub owners: OwnerTable,
+    /// Paths the image builder owns, whose nodes are root-owned however
+    /// `owners` names them. A caller that injects files into the tree after
+    /// the layers are stacked claims them here; claiming nothing (the default)
+    /// lets every declared owner through.
+    pub root_owned: RootOwnedPaths,
 }
 
 impl MaterializeOptions {
@@ -748,6 +781,20 @@ impl MaterializeOptionsBuilder {
         self
     }
 
+    /// Set `owners`.
+    #[must_use]
+    pub fn owners(mut self, owners: OwnerTable) -> Self {
+        self.inner.owners = owners;
+        self
+    }
+
+    /// Set `root_owned`.
+    #[must_use]
+    pub fn root_owned(mut self, root_owned: RootOwnedPaths) -> Self {
+        self.inner.root_owned = root_owned;
+        self
+    }
+
     /// Finish.
     #[must_use]
     pub fn build(self) -> MaterializeOptions {
@@ -787,6 +834,46 @@ impl MaterializeOptions {
         self.extra_nodes = extra_nodes;
         self
     }
+
+    /// Give the image's nodes the owners the source layers declared.
+    pub fn with_owners(mut self, owners: OwnerTable) -> Self {
+        self.owners = owners;
+        self
+    }
+
+    /// Claim the paths the image builder owns, so no declared owner reaches
+    /// them.
+    pub fn with_root_owned(mut self, root_owned: RootOwnedPaths) -> Self {
+        self.root_owned = root_owned;
+        self
+    }
+}
+
+/// The node list [`build_ext4_pure`] would write, without writing it.
+///
+/// Exposed so a caller can assert what its own options produce — which paths
+/// the image carries and who owns them — against the list the image is built
+/// from, rather than against a second derivation of it.
+pub fn image_nodes(
+    root: &Path,
+    options: &MaterializeOptions,
+) -> Result<Vec<Node>, MaterializeError> {
+    collect_image_nodes(root, options)
+}
+
+/// The node list a whole-tree materialization builds from: the walk of `root`,
+/// the caller's extra nodes merged over it, and the caller's owners applied to
+/// everything the caller did not claim as its own.
+fn collect_image_nodes(
+    root: &Path,
+    options: &MaterializeOptions,
+) -> Result<Vec<Node>, MaterializeError> {
+    let mut nodes = merge_extra_nodes(
+        collect_nodes(root, options.walk)?,
+        options.extra_nodes.clone(),
+    );
+    options.owners.apply(&mut nodes, &options.root_owned);
+    Ok(nodes)
 }
 
 /// Merge `extra` over `walked`, last-wins by path.
@@ -821,10 +908,7 @@ pub fn build_ext4_pure(
     root: &Path,
     options: &MaterializeOptions,
 ) -> Result<(Vec<u8>, u64), MaterializeError> {
-    let nodes = merge_extra_nodes(
-        collect_nodes(root, options.walk)?,
-        options.extra_nodes.clone(),
-    );
+    let nodes = collect_image_nodes(root, options)?;
     let image = crate::ext4::build_image_with_options(nodes, &options.build)?;
     let size_bytes = image.len() as u64;
     Ok((image, size_bytes))
@@ -851,10 +935,7 @@ pub fn materialize_ext4_pure(
     output: &Path,
     options: &MaterializeOptions,
 ) -> Result<MaterializedImage, MaterializeError> {
-    let nodes = merge_extra_nodes(
-        collect_nodes(root, options.walk)?,
-        options.extra_nodes.clone(),
-    );
+    let nodes = collect_image_nodes(root, options)?;
     materialize_ext4_nodes_pure(nodes, output, &options.build)
 }
 
@@ -984,6 +1065,37 @@ fn collect_guest_xattrs(path: &Path) -> Vec<Xattr> {
     // Deterministic order (the writer also sorts, but keep the node stable).
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The first node under `root` carrying an extended attribute the guest needs
+/// (a file capability, a POSIX ACL, a `user.`/`trusted.` attribute), with the
+/// attribute's name. Links are not followed.
+///
+/// For a writer that cannot carry these attributes: it refuses a tree this
+/// finds anything in, rather than emit an image in which `ping` has lost its
+/// capability or a directory its ACL.
+pub fn first_guest_semantic_xattr(root: &Path) -> std::io::Result<Option<(PathBuf, String)>> {
+    // The root directory is an inode of the image too: a default ACL on `/`
+    // is exactly as lost as one on any directory beneath it.
+    if let Some(xattr) = collect_guest_xattrs(root).into_iter().next() {
+        return Ok(Some((root.to_path_buf(), xattr.name)));
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = std::fs::read_dir(&dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        for path in entries {
+            if let Some(xattr) = collect_guest_xattrs(&path).into_iter().next() {
+                return Ok(Some((path, xattr.name)));
+            }
+            if std::fs::symlink_metadata(&path)?.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Whether an xattr name carries guest-relevant image semantics the pure
@@ -1262,6 +1374,39 @@ mod tests {
     const SUPERBLOCK: usize = 1024;
     const S_UUID: usize = SUPERBLOCK + 0x68;
     const S_VOLUME_NAME: usize = SUPERBLOCK + 0x78;
+
+    #[test]
+    fn a_guest_semantic_xattr_anywhere_in_the_tree_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+        let bin = root.path().join("usr/bin/ping");
+        std::fs::write(&bin, b"elf").unwrap();
+        std::fs::write(root.path().join("plain"), b"x").unwrap();
+        assert_eq!(first_guest_semantic_xattr(root.path()).unwrap(), None);
+        // Skip where the host filesystem can't hold a user attribute.
+        if xattr::set(&bin, "user.mvm.cap", b"c").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        assert_eq!(
+            first_guest_semantic_xattr(root.path()).unwrap(),
+            Some((bin, "user.mvm.cap".to_string()))
+        );
+    }
+
+    /// The root directory itself is checked, not only what is beneath it.
+    #[test]
+    fn a_guest_semantic_xattr_on_the_root_itself_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        if xattr::set(root.path(), "user.mvm.acl", b"a").is_err() {
+            eprintln!("SKIPPED: host filesystem refused a user extended attribute");
+            return;
+        }
+        assert_eq!(
+            first_guest_semantic_xattr(root.path()).unwrap(),
+            Some((root.path().to_path_buf(), "user.mvm.acl".to_string()))
+        );
+    }
 
     #[test]
     fn only_image_semantic_xattrs_are_captured() {
@@ -1695,6 +1840,7 @@ mod tests {
         let deferred = Node::Symlink {
             path: "/usr/share/man/man7/pam.7.gz".to_string(),
             target: "PAM.7.gz".to_string(),
+            owner: Owner::ROOT,
         };
         let options = MaterializeOptions::default().with_extra_nodes(vec![deferred.clone()]);
 
@@ -1726,12 +1872,14 @@ mod tests {
             mode: 0o644,
             data: b"walked".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         }];
         let extra = vec![Node::File {
             path: "/etc/motd".to_string(),
             mode: 0o600,
             data: b"extra".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         }];
 
         let merged = merge_extra_nodes(walked, extra.clone());
@@ -1746,6 +1894,7 @@ mod tests {
         let walked = vec![Node::Symlink {
             path: "/bin/sh".to_string(),
             target: "bash".to_string(),
+            owner: Owner::ROOT,
         }];
         assert_eq!(merge_extra_nodes(walked.clone(), Vec::new()), walked);
     }

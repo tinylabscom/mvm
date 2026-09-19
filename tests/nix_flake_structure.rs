@@ -160,15 +160,24 @@ fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
         "the workload guest must pass pkgs into mvm-setpriv.nix"
     );
 
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("nix/packages/guest.nix must be readable"),
+    );
+    assert!(
+        guest_recipes.contains(
+            "mvm-setpriv = import ./mvm-setpriv.nix { inherit pkgs lib mvmSrc; rustPlatform = staticPkgs.rustPlatform;"
+        ),
+        "the exported setpriv recipe must pass pkgs into mvm-setpriv.nix"
+    );
+
     let builder_flake = normalized_whitespace(
         &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
             .expect("builder VM flake must be readable"),
     );
     assert!(
-        builder_flake.contains(
-            "import (workspace + \"/nix/packages/mvm-setpriv.nix\") { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
-        ),
-        "the builder guest must pass pkgs into mvm-setpriv.nix"
+        builder_flake.contains("builderSetprivFor = system: mvm.packages.${system}.mvm-setpriv;"),
+        "the builder guest must take setpriv from the mvm flake's exported recipe"
     );
 }
 
@@ -372,13 +381,25 @@ fn workspace_versioned_packages_read_the_version_from_the_manifest() {
         );
     }
 
-    let runtime_overlay = fs::read_to_string("nix/images/runtime-overlay/flake.nix")
-        .expect("read runtime-overlay flake");
+    // The exported recipes read the version from the unfiltered workspace
+    // root, never from the filtered source store path.
+    let flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("flake.nix")).expect("read nix/flake.nix"),
+    );
     assert!(
-        runtime_overlay.contains(
-            "(nixpkgs.lib.importTOML (workspaceRoot + \"/Cargo.toml\")).workspace.package.version;"
-        ) && runtime_overlay.contains("inherit pkgs libc workspaceVersion;"),
-        "the runtime-overlay flake must pass manifest metadata from its stable workspace root"
+        flake.contains(
+            "manifest = if envPath != \"\" then /. + envPath + \"/Cargo.toml\" else ../Cargo.toml;"
+        ) && flake.contains("(nixpkgs.lib.importTOML manifest).workspace.package.version;"),
+        "nix/flake.nix must read the workspace version from its stable workspace root"
+    );
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("read nix/packages/guest.nix"),
+    );
+    assert!(
+        guest_recipes.contains("inherit pkgs lib mvmSrc libc workspaceVersion;")
+            && guest_recipes.contains("version = workspaceVersion;"),
+        "the exported SDK cdylib and runner must take the manifest version"
     );
 }
 
@@ -752,6 +773,69 @@ fn minimal_profile_exists_and_has_required_settings() {
 /// `services`) plus the explicit `dev` overrides, and asserts the
 /// `passthru.mvm.{accessible, sealed, entrypointKind}` metadata is
 /// inferred correctly.
+/// A workspace root reached through a symlink must be refused by name, not
+/// filtered to an empty tree: Nix hands the filter symlink-resolved paths, and
+/// the filter strips the root as text. On macOS every path under `/tmp` is such
+/// a root.
+#[test]
+fn workspace_filter_refuses_a_symlinked_root_when_nix_available() {
+    use std::process::Command;
+
+    if Command::new("nix").arg("--version").output().is_err() {
+        eprintln!("[nix_flake_structure::workspace_filter_eval] skipped — `nix` not on PATH");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("ws");
+    fs::create_dir_all(canonical.join("docs")).expect("mkdir workspace");
+    fs::write(canonical.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+    fs::write(canonical.join("Cargo.lock"), "version = 4\n").expect("write lockfile");
+    fs::write(canonical.join("docs/a.md"), "not admitted\n").expect("write doc");
+    let linked = tmp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("link");
+    std::os::unix::fs::symlink(&canonical, &linked).expect("symlink the workspace");
+
+    let eval_file = repo_dir().join("nix/tests/workspace-filter-eval.nix");
+    let expr = format!(
+        "import {} {{ canonical = \"{}\"; linked = \"{}\"; }}",
+        eval_file.display(),
+        canonical.display(),
+        linked.display()
+    );
+    let out = Command::new("nix")
+        .args(["--extra-experimental-features", "nix-command flakes"])
+        .args(["eval", "--impure", "--json", "--expr", &expr])
+        .output()
+        .expect("nix eval invocation");
+    assert!(
+        out.status.success(),
+        "nix eval failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("workspace-filter-eval.nix returns JSON");
+    for check in [
+        "canonicalKeepsTheLockfile",
+        "canonicalDropsUnlistedEntries",
+        "linkedRootIsRefused",
+    ] {
+        assert_eq!(
+            json[check],
+            serde_json::Value::Bool(true),
+            "{check}: {json}"
+        );
+    }
+}
+
 #[test]
 fn mk_guest_eval_assertions_all_pass_when_nix_available() {
     use std::process::Command;
@@ -1043,6 +1127,113 @@ fn mk_guest_exports_a_proxy_environment_naming_one_loopback_listener() {
     }
 }
 
+/// Split a rendered `/init` block into its `mvm-setpriv` launches, each up to
+/// and including the `&` that backgrounds it.
+fn setpriv_launches(block: &str) -> Vec<&str> {
+    block
+        .match_indices("/bin/busybox setsid ${setpriv}")
+        .map(|(start, _)| {
+            let rest = &block[start..];
+            let end = rest.find(" &\n").expect("each launch is backgrounded");
+            &rest[..end]
+        })
+        .collect()
+}
+
+/// The CRNG reseed helper is the only process the init grants CAP_SYS_ADMIN,
+/// and the agent's own launch never carries it: the capability boundary is
+/// between two processes, not a hand-off inside the agent.
+#[test]
+fn mk_guest_gives_sys_admin_to_the_reseed_helper_and_never_the_agent() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let agent_start = content
+        .find("# Stage 2.5 — guest agent supervisor")
+        .expect("guest agent init block starts");
+    let agent_end = content[agent_start..]
+        .find("# Stage 3 — hostname + console")
+        .map(|offset| agent_start + offset)
+        .expect("hostname stage follows the agent block");
+    let launches = setpriv_launches(&content[agent_start..agent_end]);
+    use mvmctl::guest::crng_reseed::{HELPER_ARG, HELPER_SOCKET, LISTEN_ARG};
+    let helper_args = format!("{HELPER_ARG} {LISTEN_ARG}");
+    let socket_dir = Path::new(HELPER_SOCKET)
+        .parent()
+        .and_then(Path::to_str)
+        .expect("the helper socket has a parent directory");
+    let helper = launches
+        .iter()
+        .find(|launch| launch.ends_with(&format!("\"$MVM_AGENT_BIN\" {helper_args}")))
+        .expect("the init launches the reseed helper with the agent's own arguments");
+    let agent = launches
+        .iter()
+        .find(|launch| launch.ends_with("-- \"$MVM_AGENT_BIN\""))
+        .expect("the init launches the agent");
+
+    for flag in [
+        "--inh-caps=+sys_admin --ambient-caps=+sys_admin",
+        "--no-new-privs",
+        "--clear-groups",
+    ] {
+        assert!(helper.contains(flag), "helper launch must carry {flag}");
+    }
+    for other in ["+kill", "+sys_time", "+net_bind_service"] {
+        assert!(
+            !helper.contains(other),
+            "helper must hold only CAP_SYS_ADMIN, not {other}"
+        );
+    }
+    assert!(
+        agent.contains("--inh-caps=+kill --ambient-caps=+kill")
+            && agent.contains("--inh-caps=+sys_time --ambient-caps=+sys_time")
+            && agent.contains("--no-new-privs"),
+        "agent launch keeps its restore capabilities"
+    );
+    assert!(
+        !agent.contains("sys_admin"),
+        "the agent must never be launched with CAP_SYS_ADMIN"
+    );
+
+    assert!(
+        helper.contains("--reuid=${toString crngReseedUid} --regid=${toString agentUid}"),
+        "the helper runs under its own uid, in the agent's group so the agent can connect"
+    );
+    assert!(
+        agent.contains("--reuid=${toString agentUid}"),
+        "the agent keeps its own uid"
+    );
+
+    let block = &content[agent_start..agent_end];
+    let dir_owned = block
+        .find(&format!(
+            "/bin/busybox chown ${{toString crngReseedUid}}:${{toString agentUid}} {socket_dir}\n"
+        ))
+        .expect("the socket directory belongs to the helper, readable by the agent's group");
+    let dir_private = block
+        .find(&format!("/bin/busybox chmod 0750 {socket_dir}\n"))
+        .expect("no other uid can enter the socket directory");
+    let helper_at = block.find(&helper_args).expect("helper launch");
+    assert!(
+        dir_owned < helper_at && dir_private < helper_at,
+        "the directory must be locked down before the helper binds in it"
+    );
+
+    // The uid the image reserves is the one the agent trusts on the socket, and
+    // the image refuses to build if anything else was given it.
+    let helper_uid = mvmctl::guest::guest_mount::CRNG_RESEED_HELPER_UID;
+    assert!(
+        content.contains(&format!("crngReseedUid = {helper_uid};")),
+        "mkGuest must reserve the uid the agent checks the helper against"
+    );
+    assert!(
+        content.contains(&format!(
+            "uid {helper_uid} is reserved for the CRNG reseed helper"
+        )) && content.contains("builtins.seq assertDedicatedCrngReseedUid"),
+        "a collision with the reserved uid must fail the image build"
+    );
+}
+
 #[test]
 fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
@@ -1306,12 +1497,27 @@ fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
         .and_then(|tail| tail.split(" in {").next())
         .expect("runtime-overlay derivation body");
 
-    assert!(
-        content.contains("pkgs = pkgs.pkgsStatic;"),
-        "all runtime-overlay guest package recipes must be instantiated from pkgsStatic"
+    let guest_recipes = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("read nix/packages/guest.nix"),
     );
+    for recipe in [
+        "mvm-guest-agent",
+        "mvm-egress-client",
+        "mvm-addon-dns",
+        "mvm-exit-report",
+    ] {
+        assert!(
+            guest_recipes.contains(&format!(
+                "{recipe} = import ./{recipe}.nix {{ pkgs = staticPkgs;"
+            )),
+            "the exported {recipe} recipe must be instantiated from pkgsStatic"
+        );
+    }
+    let runner = fs::read_to_string(nix_dir().join("packages").join("mvm-runner.nix"))
+        .expect("read nix/packages/mvm-runner.nix");
     assert!(
-        content.contains("staticPkgs.rustPlatform.buildRustPackage"),
+        runner.contains("pkgs.pkgsStatic.rustPlatform.buildRustPackage"),
         "the runner must use the static-musl Rust platform too"
     );
     for forbidden in [
@@ -1959,4 +2165,122 @@ fn image_fetches_do_not_derive_their_release_url_from_the_cli_version() {
          whenever the crate version is ahead of the last CLI tag: {offenders:?}. \
          Use `update::boot_image_release()`."
     );
+}
+
+/// The guest recipes every image needs, exported by `nix/flake.nix` as
+/// `packages.<linux-system>.*`. This list is the interface an image
+/// repository pins `mvm` for; renaming or dropping one breaks it.
+const EXPORTED_GUEST_RECIPES: &[&str] = &[
+    "mvm-guest-agent",
+    "mvm-guest-agent-static",
+    "mvm-setpriv",
+    "mvm-runner",
+    "mvm-egress-client",
+    "mvm-addon-dns",
+    "mvm-exit-report",
+    "mvm-sdk-cdylib-glibc",
+    "mvm-sdk-cdylib-musl",
+];
+
+const IMAGE_FLAKES: &[&str] = &[
+    "builder-vm",
+    "default-tenant",
+    "runtime-overlay",
+    "initramfs",
+];
+
+/// Nix source with `#` comments removed, so an assertion about what a flake
+/// imports is not satisfied (or tripped) by prose.
+fn nix_code_only(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn nix_flake_exports_the_guest_recipes_for_the_linux_systems() {
+    let guest = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
+            .expect("nix/packages/guest.nix must be present"),
+    );
+    for name in EXPORTED_GUEST_RECIPES {
+        assert!(
+            guest.contains(&format!("{name} = ")),
+            "nix/packages/guest.nix must define the exported recipe {name}"
+        );
+    }
+
+    let flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("flake.nix")).expect("nix/flake.nix must be present"),
+    );
+    assert!(
+        flake.contains("guestPackagesFor = system: import ./packages/guest.nix {")
+            && flake.contains("mvmSrc = workspaceSrc;"),
+        "nix/flake.nix must build the guest recipes from the same workspace source as mkGuest"
+    );
+    assert!(
+        flake.contains(
+            "// nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system));"
+        ),
+        "the guest recipes must be exported under packages for the Linux image systems only"
+    );
+    assert!(
+        flake.contains("hostBinaries = import ./lib/mvm-host-binaries.nix;"),
+        "nix/flake.nix must export the host-binaries manifest under lib.<system>"
+    );
+    assert!(
+        flake.contains("libFor { inherit system; } // {"),
+        "the exported lib.<system> must still be the mkGuest library, extended not replaced"
+    );
+}
+
+#[test]
+fn image_flakes_build_guest_recipes_through_the_mvm_flake() {
+    for image in IMAGE_FLAKES {
+        let path = nix_dir().join("images").join(image).join("flake.nix");
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be present: {e}", path.display()));
+        let code = nix_code_only(&content);
+        let normalized = normalized_whitespace(&code);
+
+        assert!(
+            normalized.contains("mvm = (import (workspaceRoot + \"/nix/flake.nix\")).outputs {")
+                && normalized.contains("mvm-workspace = workspace;"),
+            "{image} must evaluate the mvm flake's outputs against its filtered workspace"
+        );
+        assert!(
+            !code.contains("/nix/packages/"),
+            "{image} must not path-import a guest recipe; use mvm.packages.<system>.*"
+        );
+        // The workspace filter stages the source the mvm flake is called
+        // with, so it is the one nix/lib file an image flake still reads.
+        for (idx, _) in code.match_indices("/nix/lib") {
+            assert!(
+                code[idx..].starts_with("/nix/lib/workspace-filter.nix"),
+                "{image} must take mkGuest and the host-binaries manifest from the mvm flake, \
+                 not import nix/lib directly"
+            );
+        }
+        for (idx, _) in code.match_indices("mvm.packages.${system}.") {
+            let rest = &code[idx + "mvm.packages.${system}.".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.is_empty() {
+                // `mvm.packages.${system}."mvm-sdk-cdylib-${libc}"`
+                assert!(
+                    rest.starts_with("\"mvm-sdk-cdylib-${libc}\""),
+                    "{image} indexes mvm.packages with an unexpected expression"
+                );
+                continue;
+            }
+            assert!(
+                EXPORTED_GUEST_RECIPES.contains(&name.as_str()),
+                "{image} consumes mvm.packages.<system>.{name}, which the mvm flake does not export"
+            );
+        }
+    }
 }

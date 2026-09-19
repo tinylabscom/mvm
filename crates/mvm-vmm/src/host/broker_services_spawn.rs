@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 
+use crate::host::aux_bin::HostProcess;
+
 /// Filename of the per-VM audit-signer UDS under the VM state dir (the broker
 /// connects here; the supervisor owns it).
 pub const AUDIT_SIGNER_SOCK: &str = "audit-signer.sock";
@@ -214,25 +216,25 @@ fn spawn_audit_signer_with_timeout(
     Ok(AuditSignerHandle { uds_path })
 }
 
-/// Locate a per-VM subprocess binary `bin`: `<env_var>` override → sibling of
-/// the current exe → workspace `target/{release,debug}`. Mirrors
+/// Locate a per-VM subprocess binary `bin`: `<env_var>` override → the host
+/// binary directory ([`HostProcess::binary_dir`]) → workspace
+/// `target/{release,debug}`. Mirrors
 /// `network_endpoint_spawn::resolve_network_endpoint_path`; shared by the
 /// audit-signer + broker spawns so the lookup can't drift.
 pub fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
+    resolve_subprocess_bin_for(bin, env_var, &HostProcess::current())
+}
+
+/// [`resolve_subprocess_bin`] on behalf of an explicitly described process.
+pub fn resolve_subprocess_bin_for(bin: &str, env_var: &str, host: &HostProcess) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(env_var).map(PathBuf::from) {
         if p.is_file() {
             return Ok(p);
         }
         bail!("{env_var} points at {} which is not a file", p.display());
     }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        let candidate = dir.join(bin);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
+    if let Some(candidate) = host.binary_named(bin) {
+        return Ok(candidate);
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
@@ -1157,5 +1159,46 @@ mod audit_signer_spawn_params_builder_tests {
             err,
             BuilderError::missing("AuditSignerSpawnParams", "workload_id")
         );
+    }
+}
+
+#[cfg(test)]
+mod resolve_subprocess_bin_tests {
+    use super::*;
+
+    /// No environment sets this, so only the process description decides.
+    const UNSET_OVERRIDE: &str = "MVM_RESOLVE_SUBPROCESS_BIN_TEST_UNSET_PATH";
+
+    fn test_exe() -> (PathBuf, String) {
+        let exe = std::env::current_exe().expect("test binary path");
+        let name = exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("test binary name")
+            .to_string();
+        (exe, name)
+    }
+
+    /// The test binary stands in for a helper sitting beside the executable.
+    #[test]
+    fn an_undeclared_process_finds_a_helper_beside_its_executable() {
+        let (exe, name) = test_exe();
+
+        let found =
+            resolve_subprocess_bin_for(&name, UNSET_OVERRIDE, &HostProcess::undeclared()).unwrap();
+
+        assert_eq!(found, exe);
+    }
+
+    #[test]
+    fn a_declared_directory_wins_over_the_executable_directory() {
+        let (_, name) = test_exe();
+        let declared = tempfile::tempdir().unwrap();
+        std::fs::write(declared.path().join(&name), b"helper").unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+
+        let found = resolve_subprocess_bin_for(&name, UNSET_OVERRIDE, &host).unwrap();
+
+        assert_eq!(found, declared.path().join(&name));
     }
 }

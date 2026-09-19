@@ -126,6 +126,8 @@ pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
 pub struct WorkloadSockets<'a> {
     /// Agent RPC: the host dials the guest agent listening on `GUEST_AGENT_PORT`.
     pub agent: &'a Path,
+    /// Dedicated host-dialed encrypted observations, independent of workload grants.
+    pub telemetry: &'a Path,
     /// Egress gateway: the guest dials `EGRESS_PORT`; the host-side bridge
     /// (claim-10 gate + substitution) listens here — the sole path off the box.
     /// `None` means the admitted policy grants no egress and the guest carries
@@ -146,7 +148,7 @@ pub struct WorkloadSockets<'a> {
 }
 
 /// The standing vsock ports every workload VM carries: the agent RPC channel the
-/// host dials, the channels the guest dials (egress + exit, plus the broker when
+/// host dials alongside telemetry, the channels the guest dials (egress + exit, plus the broker when
 /// admitted), and — only when `dev_console` is set — the pre-opened interactive
 /// console data ports.
 pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
@@ -154,6 +156,11 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
         VsockPort {
             service: GuestService::MachineControl,
             host_uds: socks.agent.into(),
+            direction: VsockDirection::HostDials,
+        },
+        VsockPort {
+            service: GuestService::Telemetry,
+            host_uds: socks.telemetry.into(),
             direction: VsockDirection::HostDials,
         },
         VsockPort {
@@ -317,11 +324,16 @@ const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
 /// No NIC, no policy (those live in the role above and the bridge it spawns,
 /// never in the spec the driver boots).
 pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
-    let mut spec = VmmSpec {
+    let spec = VmmSpec {
         vsock: workload_vsock_ports(&inputs.sockets),
         ..workload_device_spec(inputs.config, &inputs.cmdline, &inputs.console_log)
     };
-    if let Some(drive) = inputs.identity_drive {
+    with_identity_drive(spec, inputs.identity_drive)
+}
+
+/// Append a boot's private, read-only identity drive after its workload disks.
+pub fn with_identity_drive(mut spec: VmmSpec, identity_drive: Option<&Path>) -> VmmSpec {
+    if let Some(drive) = identity_drive {
         let slot = spec.blocks.len() as u8;
         spec.blocks.push(BlockDev {
             source: drive.to_path_buf(),
@@ -339,6 +351,19 @@ mod tests {
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
     use std::path::PathBuf;
+
+    #[test]
+    fn identity_attachment_preserves_disks_and_uses_a_private_read_only_slot() {
+        let base = workload_device_spec(&base(), "boot", Path::new("console.log"));
+        assert_eq!(with_identity_drive(base.clone(), None), base);
+        let attached = with_identity_drive(base.clone(), Some(Path::new("identity.ext4")));
+        let (identity, disks) = attached.blocks.split_last().unwrap();
+        assert_eq!(disks, base.blocks);
+        assert_eq!(identity.source, Path::new("identity.ext4"));
+        assert!(identity.read_only);
+        assert!(!identity.ephemeral);
+        assert_eq!(usize::from(identity.slot), base.blocks.len());
+    }
 
     fn base() -> VmStartConfig {
         VmStartConfig {
@@ -786,9 +811,31 @@ mod tests {
     }
 
     #[test]
-    fn workload_vsock_ports_wire_the_three_standing_channels_with_correct_direction() {
+    fn telemetry_is_host_dialed_without_egress_broker_or_console_grants() {
+        let socks = WorkloadSockets {
+            egress_gateway: None,
+            broker: None,
+            ..sample_sockets()
+        };
+        let ports = workload_vsock_ports(&socks);
+        let telemetry: Vec<_> = ports
+            .iter()
+            .filter(|port| port.service == GuestService::Telemetry)
+            .collect();
+        assert_eq!(telemetry.len(), 1);
+        assert_eq!(telemetry[0].direction, VsockDirection::HostDials);
+        assert_eq!(telemetry[0].host_uds, Path::new("/run/telemetry.sock"));
+        assert!(ports.iter().all(|port| !matches!(
+            port.service,
+            GuestService::NetworkFlow | GuestService::Broker | GuestService::ConsoleData { .. }
+        )));
+    }
+
+    #[test]
+    fn workload_vsock_ports_wire_the_standing_channels_with_correct_direction() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
@@ -817,13 +864,14 @@ mod tests {
     fn workload_vsock_ports_omit_egress_when_the_policy_grants_none() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: None,
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
-        assert_eq!(ports.len(), 2);
+        assert_eq!(ports.len(), 3);
         assert!(
             ports
                 .iter()
@@ -844,6 +892,7 @@ mod tests {
     fn sample_sockets() -> WorkloadSockets<'static> {
         WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
@@ -872,6 +921,7 @@ mod tests {
         // Admitted (broker socket present) ⇒ a BROKER_PORT GuestDials channel.
         let admitted = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
@@ -919,7 +969,7 @@ mod tests {
         assert_eq!(spec.vcpus, 2);
         assert_eq!(spec.memory_mib, 512);
         assert_eq!(nodes(&spec.blocks), vec!["/dev/vda", "/dev/vdb"]);
-        assert_eq!(spec.vsock.len(), 3);
+        assert_eq!(spec.vsock.len(), 4);
         assert_eq!(spec.console.log_path, PathBuf::from("/run/console.log"));
     }
 
@@ -1057,6 +1107,7 @@ mod tests {
         let console_data = console_data_sockets(state_dir, true);
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
@@ -1064,8 +1115,8 @@ mod tests {
         };
         let ports = workload_vsock_ports(&socks);
 
-        // 3 standing + 128 console = 131
-        assert_eq!(ports.len(), 131);
+        // Four standing channels plus 128 console channels.
+        assert_eq!(ports.len(), 132);
 
         // All console ports are HostDials and land in the expected range.
         let console_ports: Vec<_> = ports
@@ -1082,20 +1133,21 @@ mod tests {
     }
 
     #[test]
-    fn workload_vsock_ports_without_dev_console_carries_only_three_ports() {
+    fn workload_vsock_ports_without_dev_console_carries_only_four_ports() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
+            telemetry: Path::new("/run/telemetry.sock"),
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
-        assert_eq!(ports.len(), 3, "no console ports on a sealed prod boot");
+        assert_eq!(ports.len(), 4, "no console ports on a sealed prod boot");
     }
 
     #[test]
-    fn workload_spec_with_dev_console_carries_131_vsock_entries() {
+    fn workload_spec_with_dev_console_carries_132_vsock_entries() {
         let state_dir = Path::new("/state/w");
         let console_data = console_data_sockets(state_dir, true);
         let cfg = VmStartConfig {
@@ -1107,6 +1159,7 @@ mod tests {
             config: &cfg,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
+                telemetry: Path::new("/run/telemetry.sock"),
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
@@ -1115,11 +1168,11 @@ mod tests {
             cmdline: String::new(),
             console_log: PathBuf::from("/run/console.log"),
         });
-        assert_eq!(spec.vsock.len(), 131);
+        assert_eq!(spec.vsock.len(), 132);
     }
 
     #[test]
-    fn workload_spec_without_dev_console_carries_three_vsock_entries() {
+    fn workload_spec_without_dev_console_carries_four_vsock_entries() {
         let spec = workload_spec(&WorkloadSpecInputs {
             identity_drive: None,
             config: &base(),
@@ -1127,6 +1180,6 @@ mod tests {
             cmdline: String::new(),
             console_log: PathBuf::from("/run/console.log"),
         });
-        assert_eq!(spec.vsock.len(), 3);
+        assert_eq!(spec.vsock.len(), 4);
     }
 }

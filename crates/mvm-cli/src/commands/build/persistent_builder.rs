@@ -862,9 +862,7 @@ fn read_supervisor_pid(vm_state_dir: &Path) -> u32 {
 // Used in the `start` doc string; pulled in here just so the
 // unused-import lint stays silent in the cfg-feature-gated
 // signatures.
-#[allow(dead_code)]
 const _MARKER_CONST: &str = DISPATCH_SOCK_MARKER;
-#[allow(dead_code)]
 fn _force_read_use(r: HostVmResponseRead) -> HostVmResponseRead {
     r
 }

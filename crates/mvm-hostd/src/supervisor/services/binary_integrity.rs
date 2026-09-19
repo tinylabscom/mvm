@@ -211,8 +211,7 @@ impl ReleaseKeyBundle {
 // ============================================================================
 
 /// Trait so the supervisor's spawn site can hold an `Arc<dyn
-/// IntegrityChecker>` and tests can supply a `NoopChecker` or
-/// `AlwaysFailingChecker` without touching the production type.
+/// IntegrityChecker>` rather than naming the production type.
 pub trait IntegrityChecker: Send + Sync {
     /// Verify a binary. Returns `Ok(())` if the bundled signature
     /// matches; otherwise a typed `IntegrityError`.
@@ -281,17 +280,6 @@ impl IntegrityChecker for SignedBinaryChecker {
     }
 }
 
-/// Test convenience — always returns `Ok`. Use only in tests; never
-/// register in production.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopChecker;
-
-impl IntegrityChecker for NoopChecker {
-    fn verify(&self, _binary: &Path) -> Result<(), IntegrityError> {
-        Ok(())
-    }
-}
-
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -309,7 +297,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// renders without an unused-import warning (we'll wire it in
 /// when mmap-then-fexecve lands and we need a long-lived
 /// FD for the TOCTOU close).
-#[allow(dead_code)]
 fn _unused_file_import() -> Option<File> {
     None
 }
@@ -471,13 +458,6 @@ mod tests {
         let id_b = BinarySignature::key_id_for(&vk);
         assert_eq!(id_a, id_b);
         assert_eq!(id_a.len(), 64); // 32-byte SHA-256 → 64 hex chars
-    }
-
-    #[test]
-    fn noop_checker_accepts_anything() {
-        let dir = tempdir().unwrap();
-        let binary = write_test_binary(&dir, b"whatever");
-        NoopChecker.verify(&binary).expect("noop must accept");
     }
 
     #[test]

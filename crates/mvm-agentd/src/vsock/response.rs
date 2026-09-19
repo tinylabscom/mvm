@@ -12,6 +12,19 @@ fn is_false(value: &bool) -> bool {
 use mvm_core::security::AgentProfile;
 use serde::{Deserialize, Serialize};
 
+/// Why a restored guest did not reseed its kernel generator when asked to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ReseedShortfall {
+    /// The guest has no reseed helper: its init predates restore reseeding,
+    /// or the helper could not be started at boot. Rebuilding the image is
+    /// the fix; retrying is not.
+    HelperMissing,
+    /// A helper exists but the reseed did not complete.
+    Failed,
+}
+
 /// State of a single guest subsystem during boot.
 ///
 /// `Disabled` is distinct from `Ready` — a missing optional subsystem
@@ -226,6 +239,13 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
+    /// One event from the grant-gated drive program. The payload deliberately
+    /// reuses the established bounded entrypoint stream shape; the distinct
+    /// envelope keeps the request/response contract unambiguous.
+    DriveEvent(EntrypointEvent),
+    /// Drive authorization failed before any filesystem access or process
+    /// spawn. The host records this typed reason in its signed audit chain.
+    DriveRefused { reason: DriveRefusal },
     /// The exact active extension invocation accepted cancellation.
     ExtensionCancellationAck,
     /// One event in the streaming response of a DevOnly `Exec` call.
@@ -244,8 +264,9 @@ pub enum GuestResponse {
         success: bool,
         detail: Option<String>,
         /// `true` iff the delivered generation token changed and the guest
-        /// reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero
-        /// token (a plain wake or no-rotation restore). Defaults to `false`
+        /// rekeyed its kernel generator from it (a fresh clone). `false` for an
+        /// unchanged/zero token (a plain wake or no-rotation restore) and for a
+        /// reseed that failed. Defaults to `false`
         /// on the wire for forward-compat with a pre-rotation ack.
         #[serde(default)]
         reseeded: bool,
@@ -253,6 +274,11 @@ pub enum GuestResponse {
         /// signaling init. Defaults to `false` for older agents.
         #[serde(default, skip_serializing_if = "is_false")]
         clock_resynced: bool,
+        /// Why a requested rotation did not happen, so the host can tell an
+        /// image that cannot reseed from a reseed that failed. `None` when the
+        /// guest reseeded or no rotation was requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reseed_shortfall: Option<ReseedShortfall>,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -346,7 +372,8 @@ name_enum! {
     pub enum Verb {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint, RunExtension,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
         PostRestore,
@@ -366,7 +393,7 @@ name_enum! {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExtensionCancellationAck, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
@@ -431,6 +458,8 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::DriveOpen
+            | Self::DriveFile
             | Self::RunExtension
             | Self::FsDiff
             | Self::FsRead
@@ -493,6 +522,7 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::DriveOpen
             | Self::RunExtension
             | Self::RunDetached
             | Self::RunCode
@@ -518,6 +548,7 @@ impl Verb {
             | Self::CancelExtension
             | Self::PostRestore
             | Self::FsDiff
+            | Self::DriveFile
             | Self::StartUnixSocketForward
             | Self::ConsoleClose
             | Self::ConsoleResize
@@ -579,6 +610,8 @@ impl Verb {
             Verb::Exec => stream(&[R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::DriveOpen => stream(&[R::DriveEvent, R::DriveRefused]),
+            Verb::DriveFile => unary(&[R::FsResult, R::DriveRefused]),
             Verb::RunExtension => stream(&[R::EntrypointEvent]),
             Verb::CancelExtension => unary(&[R::ExtensionCancellationAck]),
             Verb::RunDetached => unary(&[R::DetachedStarted]),
@@ -642,6 +675,8 @@ impl GuestResponse {
             GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
             GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
+            GuestResponse::DriveEvent(_) => ResponseVariant::DriveEvent,
+            GuestResponse::DriveRefused { .. } => ResponseVariant::DriveRefused,
             GuestResponse::ExtensionCancellationAck => ResponseVariant::ExtensionCancellationAck,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
@@ -672,9 +707,37 @@ impl GuestResponse {
     pub fn is_stream_terminal(&self) -> bool {
         match self {
             GuestResponse::EntrypointEvent(e) => e.is_terminal(),
+            GuestResponse::DriveEvent(e) => e.is_terminal(),
             GuestResponse::ExecEvent(e) => e.is_terminal(),
             GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
             _ => true,
+        }
+    }
+}
+
+/// Stable reason a drive request was refused. No request content or secret
+/// material is carried back or written to the host audit chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DriveRefusal {
+    NotGranted,
+    ProgramMismatch,
+    OutsideWorkspaceRoots,
+    InputLimitExceeded,
+    OutputLimitExceeded,
+}
+
+impl DriveRefusal {
+    /// Wire-stable reason word used by the chain-signed host refusal record.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NotGranted => "not-granted",
+            Self::ProgramMismatch => "program-mismatch",
+            Self::OutsideWorkspaceRoots => "outside-workspace-roots",
+            Self::InputLimitExceeded => "input-limit-exceeded",
+            Self::OutputLimitExceeded => "output-limit-exceeded",
         }
     }
 }
@@ -689,6 +752,7 @@ pub enum GuestCapability {
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
+    Drive,
     RunExtension,
     FilesystemRpc,
     ProcessRpc,
@@ -732,6 +796,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
+        GuestCapability::Drive,
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
@@ -902,6 +967,7 @@ mod tests {
             detail: None,
             reseeded: true,
             clock_resynced: true,
+            reseed_shortfall: None,
         };
         let json = serde_json::to_string(&ack).unwrap();
         match serde_json::from_str::<GuestResponse>(&json).unwrap() {
@@ -917,12 +983,38 @@ mod tests {
             GuestResponse::PostRestoreAck {
                 reseeded,
                 clock_resynced,
+                reseed_shortfall,
                 ..
             } => {
                 assert!(!reseeded);
                 assert!(!clock_resynced);
+                assert_eq!(reseed_shortfall, None);
             }
             other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reseed_shortfall_round_trips_by_its_wire_name() {
+        for (shortfall, wire) in [
+            (ReseedShortfall::HelperMissing, "helper_missing"),
+            (ReseedShortfall::Failed, "failed"),
+        ] {
+            let ack = GuestResponse::PostRestoreAck {
+                success: true,
+                detail: None,
+                reseeded: false,
+                clock_resynced: true,
+                reseed_shortfall: Some(shortfall),
+            };
+            let json = serde_json::to_string(&ack).unwrap();
+            assert!(json.contains(wire), "{json}");
+            match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+                GuestResponse::PostRestoreAck {
+                    reseed_shortfall, ..
+                } => assert_eq!(reseed_shortfall, Some(shortfall)),
+                other => panic!("expected PostRestoreAck, got {other:?}"),
+            }
         }
     }
 
@@ -979,6 +1071,12 @@ mod tests {
             GuestResponse::Error {
                 message: "oops".to_string(),
             },
+            GuestResponse::DriveEvent(EntrypointEvent::Stdout {
+                chunk: b"driven".to_vec(),
+            }),
+            GuestResponse::DriveRefused {
+                reason: DriveRefusal::OutsideWorkspaceRoots,
+            },
             GuestResponse::UnsupportedInProfile {
                 profile: AgentProfile::SealedProd,
                 verb: "Exec".to_string(),
@@ -1029,6 +1127,7 @@ mod tests {
                 detail: Some("post-restore signal sent to init".to_string()),
                 reseeded: false,
                 clock_resynced: false,
+                reseed_shortfall: Some(ReseedShortfall::HelperMissing),
             },
             GuestResponse::FsDiffResult {
                 changes: vec![
@@ -1607,6 +1706,7 @@ mod tests {
         assert_eq!(
             streaming,
             BTreeSet::from([
+                "DriveOpen",
                 "Exec",
                 "ProcWait",
                 "RunCode",

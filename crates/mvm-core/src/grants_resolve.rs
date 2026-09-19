@@ -69,6 +69,7 @@ pub struct GrantProvenance {
     pub cpu: Option<GrantSurface>,
     pub wall_clock: Option<GrantSurface>,
     pub egress: Option<GrantSurface>,
+    pub drive: Option<GrantSurface>,
 }
 
 impl GrantProvenance {
@@ -85,6 +86,7 @@ impl GrantProvenance {
             "cpu" => self.cpu,
             "wall_clock" => self.wall_clock,
             "egress" => self.egress,
+            "drive" => self.drive,
             _ => None,
         }
     }
@@ -157,6 +159,12 @@ pub fn resolve_grants(layers: &[GrantLayer]) -> ResolvedGrants {
             resolved.grants.egress = Some(egress.clone());
             resolved.provenance.egress = Some(layer.surface);
         }
+        if resolved.grants.drive.is_none()
+            && let Some(drive) = layer.grants.drive.as_ref()
+        {
+            resolved.grants.drive = Some(drive.clone());
+            resolved.provenance.drive = Some(layer.surface);
+        }
     }
     resolved
 }
@@ -176,8 +184,10 @@ pub fn load_grants_file(path: &Path) -> Result<Grants> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::num::NonZeroU32;
-    use mvm_contract::grants::{CpuGrant, EgressGrant, WallClockGrant};
+    use core::num::{NonZeroU32, NonZeroU64};
+    use mvm_contract::grants::{
+        CpuGrant, DriveGrant, DriveProgramId, EgressGrant, WallClockGrant, WorkspaceRoot,
+    };
     use mvm_contract::policy::network_policy::HostPort;
 
     fn cpu(millicores: u32) -> Grants {
@@ -192,6 +202,22 @@ mod tests {
             egress: Some(EgressGrant {
                 allow: vec![HostPort::new(host, port)],
             }),
+            ..Default::default()
+        }
+    }
+
+    fn drive(program: &str, root: &str) -> Grants {
+        Grants {
+            drive: Some(
+                DriveGrant::builder()
+                    .workspace_root(WorkspaceRoot::parse(root).expect("workspace root"))
+                    .program_id(DriveProgramId::parse(program).expect("program id"))
+                    .max_bytes_in(NonZeroU64::new(1024).expect("nonzero"))
+                    .max_bytes_out(NonZeroU64::new(2048).expect("nonzero"))
+                    .ttl(NonZeroU32::new(60).expect("nonzero"))
+                    .build()
+                    .expect("drive grant"),
+            ),
             ..Default::default()
         }
     }
@@ -271,6 +297,7 @@ mod tests {
             Some(GrantSurface::HostConfig)
         );
         assert_eq!(resolved.provenance().egress, None);
+        assert_eq!(resolved.provenance().drive, None);
     }
 
     #[test]
@@ -281,6 +308,7 @@ mod tests {
             cpu: Some(GrantSurface::Manifest),
             wall_clock: Some(GrantSurface::Cli),
             egress: None,
+            drive: Some(GrantSurface::GrantsFile),
         };
         assert_eq!(
             provenance.surface_for_dimension("cpu.share_millicores"),
@@ -293,6 +321,22 @@ mod tests {
         // Memory is sized, not granted, so no surface authored it.
         assert_eq!(provenance.surface_for_dimension("memory_mib"), None);
         assert_eq!(provenance.surface_for_dimension("egress"), None);
+        assert_eq!(
+            provenance.surface_for_dimension("drive.max_bytes_in"),
+            Some(GrantSurface::GrantsFile)
+        );
+    }
+
+    #[test]
+    fn drive_is_resolved_as_one_indivisible_authority() {
+        let resolved = resolve_grants(&[
+            GrantLayer::new(GrantSurface::GrantsFile, drive("reviewer", "/review")),
+            GrantLayer::new(GrantSurface::Manifest, drive("agent", "/workspace")),
+        ]);
+        let grant = resolved.grants().drive.as_ref().expect("drive grant");
+        assert_eq!(grant.program_id.as_str(), "reviewer");
+        assert_eq!(grant.workspace_roots[0].as_str(), "/review");
+        assert_eq!(resolved.provenance().drive, Some(GrantSurface::GrantsFile));
     }
 
     #[test]

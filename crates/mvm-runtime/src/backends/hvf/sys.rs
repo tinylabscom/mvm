@@ -8,9 +8,6 @@
 //! `hv_vm_create` returns a denied error.
 
 #![allow(non_camel_case_types)]
-// The FFI surface intentionally declares the full set of symbols/constants the
-// backend will use; not all are exercised by the boot smoke yet.
-#![allow(dead_code)]
 
 use core::ffi::c_void;
 
@@ -20,6 +17,7 @@ pub const HV_SUCCESS: hv_return_t = 0;
 /// Stub error returned by the HVF FFI on non-Apple targets. Hypervisor.framework
 /// is unavailable there; the HVF backend is never selected, but the symbols must
 /// still link.
+#[cfg(not(target_os = "macos"))]
 pub const HV_ERROR_UNSUPPORTED: hv_return_t = i32::MAX;
 
 /// Guest physical address.
@@ -43,9 +41,6 @@ pub const HV_MEMORY_EXEC: hv_memory_flags_t = 1 << 2;
 /// `hv_reg_t` indices (subset). X0..X30 = 0..30, then PC/FPCR/FPSR/CPSR.
 pub type hv_reg_t = u32;
 pub const HV_REG_X0: hv_reg_t = 0;
-pub const HV_REG_X1: hv_reg_t = 1;
-pub const HV_REG_X2: hv_reg_t = 2;
-pub const HV_REG_X3: hv_reg_t = 3;
 /// Highest general-purpose register index; X0..X30 are contiguous from 0, so a
 /// GP register index `n` maps directly to `HV_REG_X0 + n`.
 pub const HV_REG_X30: hv_reg_t = 30;
@@ -113,7 +108,6 @@ pub type hv_exit_reason_t = u32;
 pub const HV_EXIT_REASON_CANCELED: hv_exit_reason_t = 0;
 pub const HV_EXIT_REASON_EXCEPTION: hv_exit_reason_t = 1;
 pub const HV_EXIT_REASON_VTIMER_ACTIVATED: hv_exit_reason_t = 2;
-pub const HV_EXIT_REASON_UNKNOWN: hv_exit_reason_t = 3;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -220,9 +214,6 @@ unsafe extern "C" {
     /// Raise/lower a Shared Peripheral Interrupt line (absolute INTID). Used to
     /// signal virtio device completions to the guest.
     pub fn hv_gic_set_spi(intid: u32, level: bool) -> hv_return_t;
-    pub fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
-    pub fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
-    pub fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;
     /// The guest-physical base of one vCPU's redistributor frame. HVF assigns
     /// these itself as vCPUs are created; this is the only way to learn where a
     /// given vCPU's landed, and hence whether it matches the device tree the
@@ -230,11 +221,6 @@ unsafe extern "C" {
     pub fn hv_gic_get_redistributor_base(
         vcpu: hv_vcpu_t,
         redistributor_base: *mut hv_ipa_t,
-    ) -> hv_return_t;
-    pub fn hv_gic_get_redistributor_base_alignment(alignment: *mut usize) -> hv_return_t;
-    pub fn hv_gic_get_spi_interrupt_range(
-        spi_intid_base: *mut u32,
-        spi_intid_count: *mut u32,
     ) -> hv_return_t;
     pub fn hv_gic_state_create() -> hv_gic_state_t;
     pub fn hv_gic_state_get_size(state: hv_gic_state_t, size: *mut usize) -> hv_return_t;
@@ -372,37 +358,9 @@ pub unsafe fn hv_gic_set_spi(_intid: u32, _level: bool) -> hv_return_t {
 }
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::missing_safety_doc)]
-pub unsafe fn hv_gic_get_distributor_size(_size: *mut usize) -> hv_return_t {
-    HV_ERROR_UNSUPPORTED
-}
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe fn hv_gic_get_distributor_base_alignment(_alignment: *mut usize) -> hv_return_t {
-    HV_ERROR_UNSUPPORTED
-}
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe fn hv_gic_get_redistributor_size(_size: *mut usize) -> hv_return_t {
-    HV_ERROR_UNSUPPORTED
-}
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe fn hv_gic_get_redistributor_base(
     _vcpu: hv_vcpu_t,
     _redistributor_base: *mut hv_ipa_t,
-) -> hv_return_t {
-    HV_ERROR_UNSUPPORTED
-}
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe fn hv_gic_get_redistributor_base_alignment(_alignment: *mut usize) -> hv_return_t {
-    HV_ERROR_UNSUPPORTED
-}
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe fn hv_gic_get_spi_interrupt_range(
-    _spi_intid_base: *mut u32,
-    _spi_intid_count: *mut u32,
 ) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }

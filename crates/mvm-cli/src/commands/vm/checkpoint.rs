@@ -634,20 +634,35 @@ fn session_pinning_checkpoint(
 /// `mvmctl cache prune` applies, closing the manual door to the identical
 /// data-loss class: an operator deleting by hand can otherwise make a parked
 /// session permanently unresumable exactly as an unguarded sweep could.
-/// `rm` has no force/override flag, so this refusal is unconditional; the
-/// operator must close the session first.
+///
+/// Refuses, likewise, when another stored checkpoint names this one as its
+/// parent. Restoring or forking that descendant walks its lineage through this
+/// record and fails once it is gone, so removal goes leaf-first.
+///
+/// `rm` has no force/override flag, so both refusals are unconditional; the
+/// operator must close the session, or remove the descendants, first.
 fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
-    if let Ok(meta) = store.read_meta(&id)
-        && let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)?
-    {
-        bail!(
-            "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
-             close that session before removing the checkpoint",
-            id.as_str(),
-            session_id.as_str()
-        );
+    if let Ok(meta) = store.read_meta(&id) {
+        if let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)? {
+            bail!(
+                "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
+                 close that session before removing the checkpoint",
+                id.as_str(),
+                session_id.as_str()
+            );
+        }
+        let descendants = mvm_runtime::checkpoint::dependent_children(&store, &meta)
+            .context("listing checkpoints that name this one as their parent")?;
+        if !descendants.is_empty() {
+            bail!(
+                "cannot remove checkpoint '{}': {} through it; remove {} first",
+                id.as_str(),
+                descendants_restoring_through(&descendants),
+                if descendants.len() == 1 { "it" } else { "them" }
+            );
+        }
     }
     store.remove(&id)?;
     if json {
@@ -661,6 +676,18 @@ fn rm(id: &str, json: bool) -> Result<()> {
         ui::success(&format!("checkpoint {} removed", id.as_str()));
     }
     Ok(())
+}
+
+/// `checkpoint 'a' restores` or `checkpoints 'a', 'b' restore`, for a refusal
+/// message.
+fn descendants_restoring_through(ids: &[CheckpointId]) -> String {
+    let quoted: Vec<String> = ids.iter().map(|id| format!("'{}'", id.as_str())).collect();
+    let (noun, verb) = if ids.len() == 1 {
+        ("checkpoint", "restores")
+    } else {
+        ("checkpoints", "restore")
+    };
+    format!("{noun} {} {verb}", quoted.join(", "))
 }
 
 /// JSON shape of a completed same-identity restore.
@@ -1005,6 +1032,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        outputs: Vec::new(),
         network_mode: parent_network_mode(p.parent_checkpoint, p.store),
         tenant: &tenant,
         vm_name: p.child_vm_name,
@@ -1699,6 +1727,8 @@ mod tests {
                 approval_head: None,
                 storage_tier: None,
                 park_reason: None,
+                retain_until_unix: None,
+                last_transition: None,
             })
             .unwrap();
 
@@ -1710,6 +1740,58 @@ mod tests {
         assert!(
             store.read_meta(&CheckpointId::new("ckpt-pinned")).is_ok(),
             "the checkpoint must still be on disk after the refusal"
+        );
+    }
+
+    /// Removing a checkpoint another stored checkpoint names as its parent
+    /// leaves that descendant unrestorable: its lineage walk would find no
+    /// record for the parent link. `rm` must refuse and name the descendant.
+    #[test]
+    fn rm_refuses_a_checkpoint_a_stored_descendant_restores_through() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let mk = |id: &str, parent: Option<&CheckpointMeta>| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm-alpha")
+                .parent(parent.map(|p| p.meta_digest.clone()))
+                .content(vec![])
+                .supervisor_config_digest("d")
+                .created_unix(1)
+                .build()
+        };
+        let parent = mk("ckpt-parent", None);
+        let child = mk("ckpt-child", Some(&parent));
+        store.write_meta(&parent).unwrap();
+        store.write_meta(&child).unwrap();
+
+        let err = rm("ckpt-parent", false).unwrap_err();
+        assert!(
+            err.to_string().contains("ckpt-child"),
+            "refusal must name the descendant that restores through it: {err}"
+        );
+        assert!(store.read_meta(&CheckpointId::new("ckpt-parent")).is_ok());
+
+        rm("ckpt-child", false).unwrap();
+        rm("ckpt-parent", false).unwrap();
+        assert!(
+            store.read_meta(&CheckpointId::new("ckpt-parent")).is_err(),
+            "once the descendant is gone the parent is removable"
+        );
+    }
+
+    #[test]
+    fn descendants_restoring_through_agrees_in_number() {
+        assert_eq!(
+            descendants_restoring_through(&[CheckpointId::new("a")]),
+            "checkpoint 'a' restores"
+        );
+        assert_eq!(
+            descendants_restoring_through(&[CheckpointId::new("a"), CheckpointId::new("b")]),
+            "checkpoints 'a', 'b' restore"
         );
     }
 
@@ -2123,6 +2205,7 @@ mod tests {
             plan_nonce: mvm_core::plan::Nonce::from_bytes([1u8; 16]),
             not_after: chrono::Utc::now() + chrono::Duration::hours(1),
             verbs: vec![],
+            drive: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -2165,6 +2248,7 @@ mod tests {
                 plan_nonce: nonce.clone(),
                 not_after: chrono::Utc::now() + chrono::Duration::hours(1),
                 verbs: vec![],
+                drive: None,
                 sig: vec![0u8; 64],
             },
         };

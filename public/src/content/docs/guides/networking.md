@@ -33,7 +33,9 @@ Proxy-aware TCP applications use the injected loopback SOCKS5 listener; UDP
 applications use SOCKS5 `UDP ASSOCIATE`. The host resolves names, applies the
 signed allow/deny policy separately for TCP and UDP, and opens the external
 socket only after admission. This keeps DNS and egress on the same auditable
-host seam.
+host seam. An allow-list of hosts admits TCP to those hosts and no UDP, DNS
+port included: a `UDP ASSOCIATE` under it is refused, and names resolve
+through the host's DNS path instead.
 
 Raw ICMP and arbitrary non-proxy-aware sockets are intentionally not available
 on this path. `ping` is therefore not a valid egress smoke test; use an HTTP,
@@ -68,6 +70,16 @@ listener for the machine lifecycle. Dynamic forwarding after admission is
 refused; update the machine declaration and restart when the mapping changes.
 
 ## vsock Communication
+
+Port **5254** is assigned to the typed `Telemetry` service. Shared sender and
+receiver libraries use authenticated encrypted sessions and a separate
+connection from control, workload exit, networking and audit. No telemetry
+guest listener or VM-lifetime collector is active yet. Workload specifications
+now include a dedicated host-dialed telemetry channel without requiring egress,
+broker or console grants, and backend connection paths recognize it. Endpoint
+wiring alone must not be interpreted as working detached tracing or an external
+guest export route. See [Guest Agent](/reference/guest-agent/) for its current
+implementation boundaries.
 
 MicroVMs don't use networking for host communication -- they use **vsock** with two distinct protocols:
 

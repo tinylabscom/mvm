@@ -32,14 +32,14 @@ pub use activation::{
     RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
 pub use api::{
-    PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
-    mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,
-    post_restore_with_grant_at, query_fs_diff, query_fs_diff_at, query_fs_diff_on,
-    query_integration_status, query_integration_status_at, query_primed_at, query_probe_status,
-    query_probe_status_at, query_resource_usage, query_resource_usage_at, query_worker_status,
-    query_worker_status_at, request_sleep_prep, request_sleep_prep_on, send_fs_request,
-    send_fs_request_on, send_proc_request, send_proc_request_on, send_proc_wait, send_proc_wait_on,
-    signal_wake, workload_is_primed_at,
+    PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, describe_missing_reseed,
+    interpret_primed_status, mount_volume_on, ping, ping_at, post_restore_at,
+    post_restore_with_grant_and_clock_at, post_restore_with_grant_at, query_fs_diff,
+    query_fs_diff_at, query_fs_diff_on, query_integration_status, query_integration_status_at,
+    query_primed_at, query_probe_status, query_probe_status_at, query_resource_usage,
+    query_resource_usage_at, query_worker_status, query_worker_status_at, request_sleep_prep,
+    request_sleep_prep_on, send_fs_request, send_fs_request_on, send_proc_request,
+    send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake, workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
@@ -48,13 +48,13 @@ pub use connection::{
 pub use framing::{
     AuthenticatedSession, handshake_as_guest, handshake_as_host, read_frame, write_frame,
 };
-pub use request::{GuestRequest, StageFile};
+pub use request::{DriveFileOperation, GuestRequest, StageFile};
 pub use request_policy::RequestClass;
 pub use response::{
-    BootTimingReport, ComponentState, GuestCapability, GuestResponse, ProtocolNegotiation,
-    ProtocolUpgradeAction, ReadinessReport, ResponseContract, ResponseKind, ResponseVariant,
-    RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind, VolumeMountResult,
-    protocol_hello_response, supported_capabilities,
+    BootTimingReport, ComponentState, DriveRefusal, GuestCapability, GuestResponse,
+    ProtocolNegotiation, ProtocolUpgradeAction, ReadinessReport, ReseedShortfall, ResponseContract,
+    ResponseKind, ResponseVariant, RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind,
+    VolumeMountResult, protocol_hello_response, supported_capabilities,
 };
 pub use response_payloads::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsChange, FsChangeKind, FsEntry, FsEntryKind,
@@ -62,18 +62,19 @@ pub use response_payloads::{
     StreamInputRefusal, StreamInputResult,
 };
 pub use rpc::{
-    ControlSession, RpcError, RunEntrypointCall, call_streaming, call_unary, check_response,
-    negotiate_protocol, probe_agent_ready, read_exec_stream, require_capabilities,
-    send_cancel_extension, send_close_stream_input, send_exec_streaming, send_run_code_streaming,
-    send_run_detached, send_run_entrypoint, send_run_entrypoint_while, send_run_extension,
-    send_stream_input,
+    ControlSession, DriveOpenCall, RpcError, RunEntrypointCall, call_streaming, call_unary,
+    check_response, negotiate_protocol, probe_agent_ready, read_exec_stream, require_capabilities,
+    send_cancel_extension, send_close_stream_input, send_drive_file, send_drive_open,
+    send_exec_streaming, send_run_code_streaming, send_run_detached, send_run_entrypoint,
+    send_run_entrypoint_while, send_run_extension, send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,
-    enforce_verb_grant, host_signer_pub_token, is_verb_trust_baseline, launch_requires_grant,
-    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy,
-    parse_require_grant_cmdline, pin_verb_grant, provision_host_signer_anchor_from_cmdline,
-    re_pin_verb_grant, trust_decision, verifying_key_from_hex, write_host_signer_anchor,
+    enforce_drive_grant, enforce_verb_grant, host_signer_pub_token, is_verb_trust_baseline,
+    launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
+    load_verb_trust_policy, parse_require_grant_cmdline, pin_verb_grant,
+    provision_host_signer_anchor_from_cmdline, re_pin_verb_grant, trust_decision,
+    verifying_key_from_hex, write_host_signer_anchor,
 };
 pub use workload_privilege::{current_uid, workload_privilege_refusal};
 

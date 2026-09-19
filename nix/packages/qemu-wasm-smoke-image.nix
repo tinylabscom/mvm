@@ -107,9 +107,14 @@ console::respawn:-/bin/sh
 EOF2
 
       # Create a small ext2 rootfs. 8 MiB is enough for busybox + inodes.
+      # The UUID and directory hash seed are pinned so the image bytes are a
+      # function of the tree alone; mke2fs otherwise draws both at random.
       rm -f $out
       dd if=/dev/zero of=$out bs=1M count=8
-      mkfs.ext2 -d rootfs -F -q $out
+      mkfs.ext2 -d rootfs -F -q \
+        -U 00000000-0000-0000-0000-000000000001 \
+        -E hash_seed=00000000-0000-0000-0000-000000000002 \
+        $out
     '';
 in
 

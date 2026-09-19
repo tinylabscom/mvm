@@ -39,8 +39,6 @@ pub enum TemplateSource {
 /// Raw remote index shape.
 #[derive(Debug, Deserialize)]
 struct RemoteIndex {
-    #[allow(dead_code)]
-    schema_version: u32,
     templates: Vec<RemoteIndexEntry>,
 }
 
@@ -274,7 +272,7 @@ fn parse_version_triple(s: &str) -> Option<(u64, u64, u64)> {
     //
     // Dropping it makes a pre-release count as the version it precedes, which
     // is what a minimum-version gate should say: `0.18.0-rc.1` carries
-    // `0.18.0`'s template surface. Deliberately not `update::ReleaseVersion`,
+    // `0.18.0`'s template surface. Deliberately not `ReleaseVersion`,
     // which orders an rc *below* its own release because it answers a
     // different question — whether to move a user onto it.
     let s = s.split(['-', '+']).next().unwrap_or(s);

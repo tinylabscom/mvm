@@ -100,13 +100,6 @@
       ]
     },
     {
-      "path": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "package": "mvm-cli",
-      "claims": [
-        10
-      ]
-    },
-    {
       "path": "crates/mvm-cli/src/commands/vm/console.rs",
       "package": "mvm-cli",
       "claims": [
@@ -119,10 +112,24 @@
       }
     },
     {
-      "path": "crates/mvm-cli/src/commands/vm/up/admission.rs",
+      "path": "crates/mvm-cli/src/update.rs",
       "package": "mvm-cli",
       "claims": [
+        20
+      ]
+    },
+    {
+      "path": "crates/mvm-client/src/admission/mod.rs",
+      "package": "mvm-client",
+      "claims": [
         17
+      ]
+    },
+    {
+      "path": "crates/mvm-client/src/admission/run_network.rs",
+      "package": "mvm-client",
+      "claims": [
+        10
       ]
     },
     {
@@ -130,6 +137,13 @@
       "package": "mvm-contract",
       "claims": [
         19
+      ]
+    },
+    {
+      "path": "crates/mvm-contract/src/policy/dns_guard.rs",
+      "package": "mvm-contract",
+      "claims": [
+        10
       ]
     },
     {
@@ -161,20 +175,6 @@
       ]
     },
     {
-      "path": "crates/mvm-contract/src/substitution.rs",
-      "package": "mvm-contract",
-      "claims": [
-        13
-      ]
-    },
-    {
-      "path": "crates/mvm-core/src/cpu_scope.rs",
-      "package": "mvm-core",
-      "claims": [
-        18
-      ]
-    },
-    {
       "path": "crates/mvm-core/src/crypto/policy/mount.rs",
       "package": "mvm-core",
       "claims": [
@@ -197,10 +197,10 @@
       ]
     },
     {
-      "path": "crates/mvm-core/src/policy/dns_guard.rs",
+      "path": "crates/mvm-core/src/spawn_scope.rs",
       "package": "mvm-core",
       "claims": [
-        10
+        18
       ]
     },
     {
@@ -221,6 +221,7 @@
       "path": "crates/mvm-hostd/src/audit/emitter.rs",
       "package": "mvm-hostd",
       "claims": [
+        18,
         19
       ]
     },
@@ -284,16 +285,11 @@
       ]
     },
     {
-      "path": "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
+      "path": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
       "package": "mvm-hostd",
       "claims": [
-        13
-      ],
-      "scope": {
-        "examine_re": "prepare_request|SubstitutionDriver.*substitute",
-        "why": "This file enters claim 13's mutation surface because it implements the generically named `SubstitutionDriver::substitute` witness adapter. The claim-relevant boundary is that adapter plus `prepare_request`, which refuses substitution errors before forwarding. The rest of this 4,700-line module is FlowMux transport, streaming, redaction, AI metering, and vsock plumbing covered by its focused unit, integration, and fuzz suites rather than the no-secret-over-broker-channel claim.",
-        "excluded_tracked_by": "#2033"
-      }
+        16
+      ]
     },
     {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
@@ -347,10 +343,6 @@
     {
       "number": 7,
       "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
-    },
-    {
-      "number": 16,
-      "why": "every fn: witness lives in test-only code (crates/*/tests/, or a #![cfg(test)] module file), which cargo-mutants does not mutate"
     }
   ],
   "accepted_misses": [
@@ -918,26 +910,6 @@
       "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
       "mutant": "replace write_config_blob -> Result<Option<String>> with Ok(Some(String::new()))",
       "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "delete ! in resolve_running_vm",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace resolve_running_vm -> Result<String> with Ok(\"xyzzy\".into())",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace resolve_running_vm -> Result<String> with Ok(String::new())",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace || with && in resolve_manifest_arg",
-      "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
       "file": "crates/mvm-contract/src/plan/types.rs",

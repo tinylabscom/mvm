@@ -79,6 +79,8 @@ mvmctl machine checkpoint ls
 mvmctl machine checkpoint rm <checkpoint-id>
 ```
 
+`rm` refuses a checkpoint that a live or parked agent session resumes from, or that another stored checkpoint was forked from — restoring that descendant walks its parent chain and would fail once the parent is gone. Remove descendants first. `mvmctl cache prune` follows the same rule: it keeps every ancestor of a checkpoint it keeps.
+
 Fork a checkpoint to a new identity (new VM name, same state):
 
 ```sh

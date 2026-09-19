@@ -123,27 +123,57 @@ have separate owners and compatibility contracts.
 
 ### `mvm-images` owns
 
-- `nix/images/builder-vm/`;
-- `nix/images/default-tenant/` and the production workload kernel build;
-- `nix/images/runtime-overlay/`;
-- `nix/images/sdk-sidecar/`;
-- image-specific Nix libraries and lock files;
+- `nix/images/builder-vm/` — the builder kernel and rootfs, `stage0-rootfs`,
+  the kernel attributes, and the SDK sidecar re-export;
+- `nix/images/default-tenant/`;
+- `nix/images/runtime-overlay/` — the overlay **and** the glibc and musl SDK
+  sidecars (there is no separate `nix/images/sdk-sidecar/`);
+- `nix/images/initramfs/`, which `release.yml` publishes on the CLI train today;
+- `nix/images/kernel/` (base, builder and workload configs, flake, README),
+  `scripts/build-kernel-artifacts.sh`, the kernel config budget, and kernel
+  publication, which `kernel-build.yml` uploads to the CLI release today;
+- the QEMU/WebAssembly smoke pack: `nix/packages/qemu-wasm.nix`,
+  `qemu-wasm-smoke-image.nix`, `qemu-wasm-smoke-pack.nix`,
+  `emscripten-cross.meson`, `scripts/build-qemu-wasm-smoke-pack.sh`, and the
+  `scripts/run-qemu-wasm-*.py` and `serve-qemu-wasm-smoke-pack.py` harnesses;
+- `nix/packaging/release/assert-sidecar-coherent.sh`;
+- the image-only CI lanes: builder and pack reproducibility, verified-boot
+  artifacts, cache warming, and the kernel CVE watch;
 - image assembly, boot tests, SBOM generation, signing, and publication;
 - the immutable image-set manifest and revocation documents; and
 - reproducibility instructions for every published artifact.
 
-The exact file inventory is established mechanically before any move. Shared
-Nix helpers move only if all remaining consumers are image concerns; otherwise
-they become a small versioned interface rather than being copied.
+The guest and builder binaries inside the images are **not** moved. They are
+compiled from `mvm` source against `mvm`'s `Cargo.lock`, so their recipes stay
+beside that lockfile and the tests that pin them. `mvm-images` consumes them
+from an `mvm` flake input pinned to an exact commit: `mvm.packages.<system>.*`
+for the guest recipes, `mvm.lib.<system>.mkGuest` for the guest assembly, and a
+`cargo zigbuild` of `mvm-host-vm-init`, `mvm-egress-proxy` and `mvm-builderd`
+from a checkout of the same commit. Nothing is copied from `mvm` into
+`mvm-images`.
 
 ### `mvm` continues to own
 
 - host CLI/runtime source and guest-agent source;
+- the Nix recipes that compile that source for a guest
+  (`nix/packages/mvm-guest-agent*.nix`, `mvm-setpriv.nix`,
+  `mvm-egress-client.nix`, `mvm-addon-dns.nix`, `mvm-exit-report.nix`,
+  `mvm-sdk-cdylib.nix`, `workspace-unpack.nix`, `embedded-rust-toolchain.nix`)
+  and the helpers they share with host packages (`nix/lib/workspace-filter.nix`,
+  `static-crates-cargo-deps.nix`, `crates-io.nix`, `mvm-host-binaries.nix`),
+  exported as flake outputs;
+- the user-facing flake API (`nix/lib/default.nix`, `mk-guest.nix`,
+  `mkFunctionWorkload.nix`, `factories/`, `wrappers/`, `profiles/`);
 - artifact acquisition, verification, cache, and admission code;
 - the guest/host protocol and compatibility declarations;
 - the compiled default image-set pin;
-- live boot and cross-version compatibility tests; and
+- live boot and cross-version compatibility tests;
+- the code that boots a builder: Stage 0 orchestration in `mvm-build`, the
+  builder runner in `mvm-runtime`, and the VMM drivers both use; and
 - explicit source-build integration used by contributors.
+
+Stage 0's *seed inputs* move; the code that runs Stage 0 does not. Fixes to how
+a builder boots, stops, or reclaims its store (#3360) therefore land in `mvm`.
 
 `mvm-images` may check out an exact public `mvm` commit to cross-compile guest
 and builder binaries. It records that commit in the image-set manifest. It must
@@ -270,15 +300,17 @@ staging directories, VM/TAP/socket names, and mutable Stage 0 state to the
 worktree pair. Immutable, content-addressed outputs may be shared only after an
 atomic publish into the cache.
 
-Two current worktrees overlap this migration:
+Two worktrees overlapped this migration when it was planned; both are resolved:
 
-- `mvm-m1-e2e-docs-sidecar` changes the documented-surface E2E path used by W1;
-- `mvm-fc-builder-image` changes builder-image behavior and later W4 paths.
+- `mvm-m1-e2e-docs-sidecar` was deleted unmerged. W1 supersedes it, and its
+  diff is archived on #3374, which tracks the part W1's workflow changes do not
+  fix.
+- `mvm-fc-builder-image` landed as #3376 (Firecracker builder image, and a
+  builder guest that halts instead of powering off). It changed host-side
+  builder code, which stays in `mvm`, so W4 has nothing of it to move.
 
-Reconcile or land the M1 sidecar work before W1 edits that workflow. Preserve
-and land or deliberately transplant the Firecracker builder work before W4
-moves its paths. Do not begin destructive path moves while either source area
-has unintegrated changes. In steady state, independent paired worktrees should
+Do not begin destructive path moves while a source area W4 touches has
+unintegrated changes. In steady state, independent paired worktrees should
 collide less than they do in the monorepository, provided mutable state remains
 pair-scoped.
 
@@ -289,14 +321,50 @@ may combine the trust-root switch with deletion of the old producer.
 
 ### W1 — Remove source image preparation from release E2E (#3363)
 
-- [ ] Set the Linux documented-surface release lane to fetch the currently
+- [x] Set the Linux documented-surface release lane to fetch the currently
       pinned signed builder image, matching the live macOS lane.
-- [ ] Move the source/Stage-0 bootstrap witness into a focused trusted nightly
+- [x] Move the source/Stage-0 bootstrap witness into a focused trusted nightly
       job instead of running it before all 313 release scenarios.
-- [ ] Retain a live flake build through the fetched builder so the release gate
+- [x] Retain a live flake build through the fetched builder so the release gate
       still exercises user-visible build behavior.
-- [ ] Record phase timings in the suite output and compare against the
-      2026-09-15 baseline.
+- [x] Record phase timings in the suite output.
+- [x] Compare two post-merge runs against the 2026-09-15 baseline (10 minutes
+      of build, 37 minutes of source image preparation, 67 minutes of
+      scenarios; 118-minute job) and record the result on #3363.
+
+**Measured, and the 25-minute hypothesis is rejected as stated.** The Linux
+documented-surface job, all 313 scenarios passing in each run:
+
+| | baseline 2026-09-15 | 2026-09-17 | 2026-09-18 nightly |
+|---|---:|---:|---:|
+| job wall clock | 118 min | 92 min | 106 min |
+| build | ~10 min | 8.8 min | 10.4 min |
+| builder image | (in preparation) | 6.6 min | 7.7 min |
+| SDK sidecar | (in preparation) | 23.4 min | 26.5 min |
+| image preparation total | 37 min | 30.0 min | 34.2 min |
+| scenarios | 67 min | 50.2 min | 57.8 min |
+
+The saving is 26 and 12 minutes, so one of the two runs misses the 25-minute
+bar. Fetching the builder image did what it was meant to: preparation that was
+a from-source Stage 0 is now a 7-minute verified download. What remains is the
+source-matched SDK sidecar, which the baseline had already been paying inside
+the same 37 minutes and which is now the single largest preparation cost.
+
+The larger effect is not in the table: on 2026-09-16 this lane twice spent its
+entire 180-minute budget on a Stage 0 that hung, and was cancelled before the
+suite ran. Release evidence went from unobtainable to obtained.
+
+Next lever, deliberately not taken here: acquire the published signed SDK
+sidecar when its source fingerprint matches the tree. That changes what the
+release gate covers — a released CLI consumes the published sidecar, so it is
+arguably closer to the shipped artifact — and it is a decision of its own
+rather than a speedup to fold in.
+
+Delivered so far: `specs/sprint/delivery/3363-release-e2e-fetches-the-builder-image.md`.
+The published-image fetch now stages and swaps atomically, refuses a foreign
+architecture or a manifest that disagrees with the signed pins, and records its
+provenance. Revocation is deferred to W3: boot images have no published
+revocation channel yet, so a fail-closed check would refuse every fetch.
 
 Acceptance:
 
@@ -323,24 +391,89 @@ untrusted branch cannot mint the allow-listed release identity.
 
 ### W3 — Define the manifest, lock, and compatibility contract (#3365)
 
-- [ ] Add a versioned image-set manifest schema and round-trip/negative tests.
-- [ ] Model guest architecture, boot protocol, artifact format, and required
+- [x] Add a versioned image-set manifest schema and round-trip/negative tests.
+- [x] Model guest architecture, boot protocol, artifact format, and required
       capabilities independently of the host OS so Firecracker, HVF, and future
       Windows backends can select compatible packs without host-named images.
-- [ ] Add `mvm`'s single checked-in image lock and generate consumers from it.
+- [x] Add `mvm`'s single checked-in image lock and generate consumers from it.
+      It pins the trains that exist today; the image-set digest joins it when
+      the first set is published (W6).
 - [ ] Define guest/host protocol compatibility and refuse incompatible sets
-      before boot.
-- [ ] Include source commits, Nix inputs, SBOM references, sizes, and digests.
-- [ ] Add offline verification tooling that needs only the manifest, bundle,
-      and artifacts.
+      before boot. Defined and negatively tested, and `verify_image_set`
+      refuses a non-overlapping range when given the host's; no acquisition
+      path consumes an image set yet, so the before-boot refusal is wired in W6.
+- [x] Include source commits, Nix inputs, SBOM references, sizes, and digests.
+- [x] Add offline verification tooling that needs only the manifest, bundle,
+      and artifacts (plus the lock that pins them): `mvmctl image boot verify`.
 
 Acceptance: tampering, wrong repository/workflow identity, wrong architecture,
 partial sets, incompatible protocol ranges, replayed superseded metadata, and
 revoked packs all have negative tests.
 
+Design constraints found while scoping (inventory taken 2026-09-17):
+
+- **Reuse the pack model; do not add a third manifest.** `mvm_core::packs::PackManifest`
+  is already strict (`deny_unknown_fields`), arch-typed, content-hashed, signed
+  (ed25519 or keyless) and carries inputs, SBOM references and trust metadata.
+  `crypto::image_verify::SignedManifest` and its `RevocationList` were a second,
+  string-typed model whose only caller was an example binary — which
+  `pack-signing-smoke.yml` ran, so it was a live witness rather than dead code
+  (retired in W3d). The image set is a
+  signed index over member packs — each member names its role, guest
+  architecture, boot protocol and `pack_hash` — and the unused model is removed
+  rather than kept beside it.
+- **Guest contract, not host.** Selection keys are guest architecture, boot
+  protocol, artifact format and required capabilities. Backends declare what
+  they satisfy; no member is named after a host OS, and no Windows variant is
+  added until a backend and native witness exist.
+- **Compatibility before boot.** Today the guest-agent protocol range is checked
+  only at the vsock handshake, after boot, and the builder image is gated only
+  by an exact `cache_contract_version`. The set declares its protocol ranges and
+  the host refuses a non-overlapping set before acquisition.
+- **One lock, generated consumers.** The boot-image tag is hand-kept in at least
+  eight places (the Rust default, a second copy in the Stage 0 kernel pin, CI
+  workflows, tests, and a Nix `getEnv`), and two workflows plus a script select
+  the QEMU-wasm smoke pack by "latest", which trust invariant 7 forbids. The
+  existing checked-in value → `build.rs` → compile-time constant path
+  (`[workspace.metadata.mvm.toolchain]`) and `xtask release-boot-image tag`
+  are the mechanisms to extend.
+- **Revocation channel is not live.** No runtime path fetches a revocation list
+  and the `revocations` release has never been published, so the revocation
+  check is built and negatively tested here but enabling it on the fetch path is
+  gated on W6 publishing a signed list.
+
+Delivery slices, one PR each:
+
+- [x] W3a — image-set manifest and lock types, pure validation (completeness,
+      architecture, boot protocol, capabilities, protocol range, supersession),
+      round-trip and negative tests. `mvm_core::image_set`; semver parsing
+      consolidated into `mvm_core::release_version`, shared with the updater.
+- [x] W3b — offline verification of a signed set against the lock identity and
+      digest, member pack and artifact digests, and revocation.
+      `mvm_core::image_set::verify_image_set`; the "try each accepted identity"
+      loop the packs and revocation paths had each hand-rolled is now one
+      function.
+- [x] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
+      gate over workflow and script copies, and removal of "latest" selection.
+      `crates/mvm-core/images.lock` pins what exists today: the repository, the
+      boot-image tag, and the Stage 0 kernel tag and per-arch digests. It
+      carries no `manifest_sha256`, because no image set has been published;
+      `ImageLock` joins the file when one is. The signing identity is derived
+      from the locked tag rather than pinned separately.
+- [x] W3d — an offline verifier command over manifest, bundle and artifacts,
+      and with it the retirement of `image_verify::SignedManifest` /
+      `RevocationList`. That family looked dead, but
+      `.github/workflows/pack-signing-smoke.yml` runs the
+      `verify-signed-manifest` example against a real cosign bundle as a live
+      witness, so retiring it means moving that lane onto the new verifier
+      rather than deleting an unused type. Landed as `mvmctl image boot
+      verify`; the smoke lane signs a real image set and runs it, fully on a
+      release-tag push and as a signature-stage refusal nightly, because a lock
+      cannot name the branch identity a nightly run signs under.
+
 ### W4 — Move image sources and reproduce current bytes (#3362)
 
-- [ ] Inventory the exact image-owned paths and shared helper edges.
+- [x] Inventory the exact image-owned paths and shared helper edges.
 - [ ] Move image flakes, locks, assembly scripts, and image-specific tests to
       `mvm-images` without copying product runtime source.
 - [ ] Build guest/builder binaries from an explicit `mvm` source commit.
@@ -350,6 +483,96 @@ revoked packs all have negative tests.
 
 Acceptance: both architecture sets build, verify, and boot; every unexplained
 byte or closure difference blocks publication.
+
+Inventory taken 2026-09-18 against `main` at `713bf1c172`. The ownership lists
+above are its result; what follows is what shapes the order of work.
+
+- **The image flakes import `mvm` by path, not by flake input.** Every one
+  resolves `workspaceRoot` (`../../..`, or `$MVM_WORKSPACE_PATH`) and imports
+  `nix/lib` and `nix/packages` files from it. Moving a flake means rewriting
+  each of those imports onto a pinned `mvm` input. `nix/flake.nix` does not
+  export the guest recipes today — its `packages` are `mvmctl`, the tpm2
+  variants, libkrun and the QEMU-wasm outputs — so `mvm` has to export them
+  before anything can move.
+- **Three builder binaries are built outside Nix.** `release-boot-image.yml`
+  runs `cargo zigbuild` for `mvm-host-vm-init`, `mvm-egress-proxy` and
+  `mvm-builderd`, and the builder-vm flake reads them from `MVM_HOST_BIN_DIR`
+  under `--impure`.
+- **Two published image assets are not on the boot-image train.** The
+  initramfs is built by `release.yml`, and kernels are published by
+  `kernel-build.yml` into the CLI release. Both join the image set.
+- **Changing `mvmSrc` from a filtered path to a flake-input store path changes
+  derivation inputs.** Whether that reaches the output bytes is the question
+  the comparison below answers; it is not assumed.
+- **The builder-vm flake is also a "source checkout" marker for things that
+  are not images**, such as the libkrun supervisor auto-build
+  (`libkrun_builder.rs`). Removing the flake before W5 would quietly turn a
+  contributor build into an installed build.
+- **The builder cache fingerprint misses inputs today.** It does not hash the
+  kernel configs, the runtime-overlay flake or the setpriv recipe the
+  builder-vm flake imports. That is a current bug (#3447), fixed in `mvm`
+  independently of this migration.
+- `xtask build-dev-image` targets `nix/images/builder`, which does not exist.
+  It is removed rather than moved.
+
+Rust code that builds from `nix/images/*` in a source checkout, all of which W5
+must route through the explicit sibling selector before W8 deletes anything:
+`find_builder_vm_flake` / `builder_vm_is_source_checkout` and their callers
+(bootstrap, default microVM, kernel acquisition, doctor, `image boot update`,
+`up`), the `MVM_BOOT_IMAGE=build|fetch` resolver, the builder source
+fingerprint in `stage0_cache.rs`, the hard-coded flake references in
+`stage0-init.rs`, the kernel and image attribute-name contract,
+`default_microvm.rs`'s default-tenant reference, both SDK sidecar build paths,
+runtime-overlay checkout detection (`commands/runtime_overlay.rs` and its
+duplicate in `mvm-build/src/runtime_overlay.rs`), and
+`builder_vm_source_checkout_root` in `libkrun_builder.rs`.
+
+Gates and tests: the kernel config budget, `check-runtime-overlay-version`, the
+image tests in `tests/nix_flake_structure.rs`, and the `tests/release_assets.rs`
+tests that read `release-boot-image.yml` move with the images.
+`check-kernel-pin-freshness` splits (libkrunfw stays, the kernel flake moves).
+The guest-image, guest-agent, host-binary-sync and guest-init parity gates stay
+in `mvm` as contract checks.
+
+No open PR touches `nix/`. Two local branches without PRs do
+(`fix/3330-extended-ci-privilege` on `workspace-filter.nix`, and
+`fix/github-actions-issues-20260915` on `kernel/base.nix` and `libkrunfw.nix`);
+nothing is deleted from `mvm` until W8, but the copy into `mvm-images` should be
+taken after they land or are abandoned.
+
+Delivery slices, one PR each:
+
+- [x] W4a (`mvm`) — export the guest recipes from `nix/flake.nix` for Linux
+      systems, and have the in-tree image flakes consume those outputs, so the
+      interface `mvm-images` will pin is the one `mvm` already builds through.
+      Landed as `packages.<linux-system>.*` (agent, static agent, setpriv,
+      runner, egress client, addon DNS, exit report, SDK cdylib glibc/musl) and
+      `lib.<system>.hostBinaries`. For the same source, all 52 image and check
+      `drvPath`s are identical on both systems under the old and new wiring.
+- [x] W4b (`mvm-images`) — the image flakes, kernel, initramfs and QEMU-wasm
+      pack, with every `mvm` import rewritten onto an `mvm` input pinned to an
+      exact commit, plus a no-publish build workflow for both architectures.
+      Landed as tinylabscom/mvm-images#4, pinned to `6717e2451e`.
+- [ ] W4c (`mvm-images`) — compare the outputs against the published
+      `boot-image/v0.1.5` set: file set, digests, closures, and boot on
+      Firecracker (x86_64 and aarch64) and HVF, with every difference explained.
+      Comparison done; aarch64 Firecracker boot outstanding
+      (`specs/sprint/delivery/3362-w4c-image-comparison.md`). Every byte
+      difference from `v0.1.5` traces to a named `mvm` commit or to the
+      `generatorRev` rewrite. None is unexplained, and none comes from the build
+      environment. Built from mvm's in-tree flakes at the pinned commit, the
+      builder and default images have the same `drvPath`s as `mvm-images`
+      (tinylabscom/mvm-images#5). Two builds of one derivation still differ in
+      ext4 hash seeds, verity UUIDs and cpio inode numbers, with identical file
+      trees (#3499). Until that is fixed, equivalence is checked file by file.
+      Development-tier boots from an isolated `MVM_HOME`: x86_64 Firecracker ran
+      the dev and prod default images, and built and booted a sealed workload
+      through the `mvm-images` builder. On HVF the dev and prod default images
+      ran, and the `mvm-images` builder booted, but its build did not finish
+      within 90 minutes on the loaded host. The aarch64 Firecracker host was
+      unreachable. Also found: #3500 (the Nix initramfs
+      says `VERSION` `0.18.0`, which an rc CLI refuses) and #3502 (a Firecracker
+      run rewrites the cached dev rootfs).
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 
@@ -376,11 +599,116 @@ Acceptance:
 - path traversal, symlink substitution, stale manifest, and wrong-architecture
   tests fail safely.
 
+Design, taken 2026-09-19 against `main` at `fd555b5ef9`.
+
+- **Selector.** `MVM_IMAGES_DIR`, an environment variable, resolved in
+  `mvm_build::image_source`. Not a config key: `~/.mvm` configuration is shared
+  by every worktree, and the complexity budget forbids editing global config.
+  Not only a flag: it has to reach every child `mvmctl` a build spawns, the way
+  `MVM_BOOT_IMAGE` and `MVM_BUILDER_BACKEND` do. A global `--images-dir` flag
+  may be added later as sugar that sets the variable (as `--builder` does).
+  The path is canonicalized, must be a directory, must be the root of its git
+  work tree, and must carry the `mvm-images` layout (`flake.nix`, `flake.lock`,
+  `kernel/flake.nix`, `images/<role>/image.nix` for all four roles) as regular
+  files, not symlinks. Selection records the canonical root, the commit, and
+  the working-tree state (clean, or a fingerprint over the tracked diff, the
+  status listing and every untracked file). `reverify` re-resolves the path and
+  re-reads the identity before anything built from it is trusted, so a
+  retargeted symlink or an edit after selection is refused. Nothing searches
+  for a sibling.
+- **Sources and tiers.** `ImageSource` is `Released`, `LocalCheckout`, or
+  `InTree` (the mvm checkout's own `nix/images`, the contributor default until
+  W8). `mvm_core::image_set::ImageTrustTier` has two values with no conversion
+  between them: `verified-release`, produced only by verifying a signed,
+  lock-pinned manifest, and `local-dev`, for anything built locally in either
+  checkout. A configured selector that cannot be used is an error; it never
+  falls back to the in-tree flakes or to the released set.
+- **Release binaries and production.** A binary built with the
+  `release-channel` feature (`artifact_acquisition::compiled_channel()`, the
+  existing contributor-versus-release switch) refuses `MVM_IMAGES_DIR` before
+  any verb runs, whether or not the path is valid; `doctor` is exempt so it can
+  report the refusal. A sealed-production admission (`Variant::Prod`) refuses
+  while the variable is set. Once consumers record the tier of what they built
+  (W5k), admission refuses a `local-dev` image under `Variant::Prod` however it
+  was selected; comparing against a signed release during development is
+  `MVM_BOOT_IMAGE=fetch` with the selector unset.
+- **Building.** Host Nix is never used. A local image is built inside the
+  builder VM, as the in-tree images are today: both checkouts are staged into
+  the guest and the build is
+  `nix build path:<images>#legacyPackages.<sys>.<role>.<attr> --override-input mvm path:<mvm>`,
+  with the three host binaries built from the paired mvm checkout rather than
+  the pinned commit. `mvm-images` has to accept that override (W5b).
+- **Cache identity.** One key per artifact: both repository identities (commit
+  plus dirty fingerprint), role, guest architecture, and the digests of the
+  pinned toolchain (`rust-toolchain.toml`, the zig pin) and of each flake lock
+  the role evaluates. Outputs are content-addressed under `mvm_cache_dir()` and
+  published atomically through `cache_install`, so they are the only state two
+  pairs share. A change in one repository invalidates only the keys that
+  include it.
+- **Pair-scoped state.** The wrapper derives `MVM_HOME`, `CARGO_TARGET_DIR`,
+  image staging and Stage 0 work directories from the pair's two canonical
+  roots, and VM, TAP and socket names from `MVM_HOME` as today, so two pairs
+  never share mutable state.
+- **The in-tree window.** From W5a to W8 the in-tree flakes keep working
+  unchanged for a contributor build that leaves the selector unset. A consumer
+  moved onto the selector builds only from the checkout it names when set; a
+  consumer not yet moved keeps using the in-tree flake and `doctor` says so. W8
+  deletes `InTree`; after that an unset selector means the released set, and
+  `MVM_BOOT_IMAGE=build` requires the selector.
+
+Delivery slices, one PR each:
+
+- [x] W5a (`mvm`) — the selector, `ImageTrustTier`, the release-build refusal at
+      CLI entry, the production-admission refusal, and a `doctor` line
+      (`image source`) reporting tier, source and both repositories' commits
+      and working-tree state. Negative tests: traversal, a symlinked marker, a
+      retargeted selection symlink, a non-directory, a non-checkout, a
+      subdirectory of a checkout, a copy with no repository, and the release
+      refusal. No consumer reads the selection yet.
+- [ ] W5b (`mvm-images`) — accept a local `mvm` through `--override-input`,
+      build the host binaries from a given mvm checkout, and emit a local
+      image-set manifest recording both identities.
+- [ ] W5c (`mvm`) — the local manifest in the released schema and parser, with
+      a provenance that is either a release producer or the two checkout
+      identities; classification refuses a local manifest that claims a
+      release producer, a manifest whose identities disagree with a
+      re-verified checkout (stale), a missing role, and the wrong
+      architecture.
+- [ ] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
+      local outputs.
+- [ ] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
+      selected checkout inside the builder VM, plus the `bin/dev` wrapper that
+      sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.
+- [ ] W5f (`mvm`) — the builder VM: `find_builder_vm_flake`,
+      `builder_vm_is_source_checkout` and their callers, the Stage 0 source
+      fingerprint in `stage0_cache.rs`, the flake references `stage0-init.rs`
+      hard-codes, and the kernel and image attribute-name contract.
+- [ ] W5g (`mvm`) — the default workload image (`default_microvm.rs`) and the
+      `MVM_BOOT_IMAGE=build|fetch` resolver.
+- [ ] W5h (`mvm`) — kernel acquisition and the initramfs.
+- [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
+      the duplicate checkout detection in `commands/runtime_overlay.rs` and
+      `mvm-build/src/runtime_overlay.rs` collapsed into the selector.
+- [ ] W5j (`mvm`) — key the libkrun supervisor auto-build on
+      `mvm_source_checkout` instead of `builder_vm_source_checkout_root`, so
+      deleting `nix/images` does not turn a contributor build into an
+      installed one.
+- [ ] W5k (`mvm`) — `image boot update`, `up` and admission read the tier
+      recorded with the image they boot; production refuses `local-dev`; the
+      `doctor` line adds artifact digests.
+- [ ] W5l — contributor documentation, the two-repository example change, and
+      a paired-change CI job checking out both repositories at explicit SHAs.
+- [ ] W5m — the acceptance witnesses: cache reuse and single-sided
+      invalidation, two concurrent pairs, stale manifest, wrong architecture,
+      and a live boot from a sibling checkout.
+
 ### W6 — Publish from `mvm-images` and migrate consumer trust (#3369)
 
 - [ ] Publish a complete candidate image set from the protected image workflow.
 - [ ] Update verifier identities and revocation URLs through an explicit
       old-plus-new trust window.
+- [ ] Refuse an image set whose protocol range does not overlap the host's
+      before acquisition, on every path that consumes one (carried from W3).
 - [ ] Update Stage 0 kernel acquisition, default-image resolution, image update
       commands, CI downloads, and WebLinux consumers to the lock file.
 - [ ] Boot every pack through its intended backend before advancing the pin.

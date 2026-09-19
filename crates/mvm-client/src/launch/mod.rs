@@ -8,7 +8,13 @@
 //! boot) and typed secret references are validated fail-closed and recorded
 //! as metadata-only sidecars before any boot.
 
+pub mod grants_report;
+pub mod machine_start;
+pub mod persistent;
 mod request;
+pub mod runtime_overlay;
+pub mod runtime_source;
+pub mod start_params;
 #[cfg(test)]
 mod tests;
 
@@ -542,7 +548,23 @@ impl LocalBackend {
             })?;
         match reconcile {
             mp::SpecReconcile::Create => {
-                mp::save_machine_spec(&desired, false).map_err(crate::local::backend_err)?;
+                // The exists() above only informed the reconcile decision;
+                // it is not relied on for exclusivity. Another creator can
+                // still win the race between that check and this write, but
+                // `save_machine_spec`'s write is itself exclusive below, so
+                // a lost race surfaces here as an `already exists` failure
+                // rather than a clobber — map it to the same conflict a
+                // caller gets from a pre-existing spec, instead of a
+                // generic backend error.
+                mp::save_machine_spec(&desired, false).map_err(|err| {
+                    if mvm_core::atomic_io::is_already_exists(&err) {
+                        MvmError::Conflict {
+                            reason: err.to_string(),
+                        }
+                    } else {
+                        crate::local::backend_err(err)
+                    }
+                })?;
                 mvm_core::audit_emit!(ConfigChange, vm: name, "action=machine.create mode=persistent");
                 Ok(desired)
             }
@@ -1006,7 +1028,20 @@ impl LocalBackend {
         if let Some(span) = outcome.launched_at.map(|at| at.elapsed()) {
             usage.wall_ms = mvm_core::usage_capture::wall_ms(span);
         }
+        // Read before cleanup: a transient's state dir, which names the scope,
+        // is removed below.
+        let memory_limit_exceeded =
+            mvm_core::spawn_scope::ScopeProbe::default().memory_limit_exceeded(&state_dir);
         if let Some(emitter) = build_audit_emitter() {
+            if let Some(exceeded) = &memory_limit_exceeded
+                && let Err(e) = emitter.emit_memory_limit_exceeded(&outcome.plan, exceeded)
+            {
+                tracing::warn!(
+                    error = %e,
+                    machine = name,
+                    "audit emit_memory_limit_exceeded failed (non-fatal)"
+                );
+            }
             if let Err(e) = emitter.emit_exited_with_capture(
                 &outcome.plan,
                 ExitRecord {

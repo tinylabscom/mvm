@@ -596,10 +596,8 @@ mod tests {
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
-    use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use mvm_core::plan::TenantId;
-    use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use rustls::pki_types::pem::PemObject;
     use secrecy::SecretBox;
 
@@ -607,6 +605,7 @@ mod tests {
     use crate::keyholder::{LocalResolver, SecretResolver};
     use crate::supervisor::audit_file::FileAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;
+    use crate::supervisor::network_endpoint_proxy::test_support::gate_admitting;
     use crate::supervisor::network_endpoint_proxy::{
         ForwardError, ForwardResponse, Forwarder, PreparedRequest,
     };
@@ -618,32 +617,32 @@ mod tests {
     /// A second admitted name, so the deny test can point the policy somewhere
     /// real rather than at an empty allow-list.
     const OTHER_HOST: &str = "api.other.test";
-    /// Where the two names are pinned. Both must be routable public unicast or
-    /// the claim-10 gate mandatory-denies them regardless of the allow-list,
-    /// and they must differ from each other, because the gate decides on
-    /// addresses: two names behind one address are one destination to it.
-    /// Nothing is ever dialed, because the forward leg is a double —
-    /// production's forwarder refuses loopback by construction, which is why
-    /// it is the one piece swapped out.
-    const BOUND_IP: &str = "93.184.216.34";
-    const OTHER_IP: &str = "198.51.100.9";
-    /// A subdomain wildcard binding, a name two labels below it that the
-    /// binding admits, and where that name is pinned.
+    /// A subdomain wildcard binding, and a name two labels below it that the
+    /// binding admits.
     const WILDCARD_PATTERN: &str = "*.wild.test";
     const WILDCARD_SUBDOMAIN: &str = "api.eu.wild.test";
-    const WILDCARD_IP: &str = "203.0.113.17";
 
     /// Records the request the forward leg was handed, so a test can prove the
     /// destination received the real credential without a network call.
+    ///
+    /// With `fail_after_send` set it records the request and then fails, which
+    /// is an upstream that took the credential and never answered.
     struct RecordingForwarder {
         seen: Mutex<Option<PreparedRequest>>,
         body: Vec<u8>,
+        fail_after_send: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
     impl Forwarder for RecordingForwarder {
         async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
             *self.seen.lock().expect("forwarder record lock") = Some(req);
+            if self
+                .fail_after_send
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ForwardError::Failed("upstream reset".into()));
+            }
             Ok(ForwardResponse {
                 status: 200,
                 headers: vec![
@@ -720,6 +719,7 @@ mod tests {
         let forwarder = Arc::new(RecordingForwarder {
             seen: Mutex::new(None),
             body: response_body.to_vec(),
+            fail_after_send: std::sync::atomic::AtomicBool::new(false),
         });
 
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -741,11 +741,17 @@ mod tests {
         .expect("the endpoint rebuilds its ca from the delivered pems");
         let intermediate_pem = delivery.cert_pem().to_string();
 
-        let service = SubstitutionService::new(Arc::new(registry), resolver, forwarder.clone())
-            .with_tenant(TENANT)
-            .with_recorder(recorder)
-            .with_tls_intermediate(intermediate)
-            .with_egress_gate(pinned_gate(admitted));
+        // Nothing is ever dialed: the forward leg is a double, and the gate pins
+        // the admitted name without DNS.
+        let service = SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+            gate_admitting(&[(admitted, 443)]),
+        )
+        .with_tenant(TENANT)
+        .with_recorder(recorder)
+        .with_tls_intermediate(intermediate);
 
         Harness {
             service: Arc::new(service),
@@ -756,32 +762,6 @@ mod tests {
             audit_key,
             _dir: dir,
         }
-    }
-
-    /// A gate admitting `admitted:443`, with both test names pinned to a
-    /// routable address so no test needs DNS.
-    fn pinned_gate(admitted: &str) -> mvm_runtime::vmm::egress_gate::EgressGate {
-        let now = chrono::Utc::now();
-        let later = now + chrono::Duration::hours(1);
-        let mut pins = DnsPinRegistry::new();
-        for (name, ip) in [
-            (BOUND_HOST, BOUND_IP),
-            (OTHER_HOST, OTHER_IP),
-            (WILDCARD_SUBDOMAIN, WILDCARD_IP),
-        ] {
-            pins.add(DnsPin::at(
-                name,
-                vec![ip.parse().expect("pinned ip parses")],
-                now.to_rfc3339(),
-                later.to_rfc3339(),
-            ));
-        }
-        let policy = NetworkPolicy::allow_list(vec![HostPort::new(admitted, 443)]);
-        mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(
-            &policy,
-            &pins,
-            &now.to_rfc3339(),
-        )
     }
 
     /// A rustls client that trusts only the per-VM intermediate, which is what
@@ -1337,6 +1317,11 @@ mod tests {
             String::from_utf8_lossy(&response)
         );
         assert!(
+            String::from_utf8_lossy(&response).contains("claim-10"),
+            "the refusal must be the gate's, not another 502: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(
             harness
                 .forwarder
                 .seen
@@ -1349,6 +1334,123 @@ mod tests {
             !String::from_utf8_lossy(&response).contains(REAL_SECRET),
             "a refusal carries no credential"
         );
+    }
+
+    /// The credential that went out is on the chain even when no response
+    /// came back.
+    ///
+    /// `secret.substituted` used to be written only once the upstream response
+    /// had finished, so a forward that failed after sending (a reset, a
+    /// timeout, an oversized response) left the destination holding the real
+    /// key and the chain saying nothing. It is now written when the request is
+    /// handed to the forward leg, and how the forward ended is a separate entry
+    /// after it.
+    #[test]
+    fn substitution_is_audited_when_upstream_fails_after_send() {
+        let harness = harness(BOUND_HOST, b"never sent");
+        harness
+            .forwarder
+            .fail_after_send
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 502"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+
+        let seen = harness
+            .forwarder
+            .seen
+            .lock()
+            .expect("forwarder record lock")
+            .clone()
+            .expect("the forward leg ran");
+        assert!(
+            seen.headers
+                .iter()
+                .any(|(_, value)| value.contains(REAL_SECRET)),
+            "the forward leg was handed the real credential"
+        );
+
+        let chain = harness.audit_chain();
+        let substituted = chain
+            .find("secret.substituted")
+            .unwrap_or_else(|| panic!("the send must be on the chain: {chain}"));
+        let outcome = chain
+            .find("secret.forward_outcome")
+            .unwrap_or_else(|| panic!("the failure must be on the chain: {chain}"));
+        assert!(
+            substituted < outcome,
+            "the hand-off is recorded before the outcome: {chain}"
+        );
+        assert!(chain.contains("upstream_failed"), "{chain}");
+        assert!(chain.contains("model-api"), "{chain}");
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
+        assert!(
+            !chain.contains("upstream reset"),
+            "error text is not recorded: {chain}"
+        );
+    }
+
+    /// A forward that completes records its substitution once, and then that
+    /// it completed.
+    #[test]
+    fn a_completed_forward_records_the_substitution_once_then_completed() {
+        let harness = harness(BOUND_HOST, b"{\"ok\":true}");
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(status_line(&response).starts_with("HTTP/1.1 200"));
+
+        let chain = harness.audit_chain();
+        assert_eq!(
+            chain.matches("secret.substituted").count(),
+            1,
+            "one substitution, one entry: {chain}"
+        );
+        let substituted = chain.find("secret.substituted").expect("substituted");
+        let outcome = chain
+            .find("secret.forward_outcome")
+            .unwrap_or_else(|| panic!("no outcome entry: {chain}"));
+        assert!(substituted < outcome, "{chain}");
+        assert!(chain[outcome..].contains("completed"), "{chain}");
+        assert!(!chain.contains("upstream_failed"), "{chain}");
+    }
+
+    /// The 502 a policy refusal produces on a terminated flow is recorded in
+    /// the chain, naming the refused `host:port` and a fixed reason, and none
+    /// of the request: not its path, its placeholder, or its body.
+    #[test]
+    fn a_policy_refusal_on_a_terminated_flow_is_recorded_in_the_chain_signed_log() {
+        let harness = harness(OTHER_HOST, b"never sent");
+        let response = exchange(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+        );
+        assert!(status_line(&response).starts_with("HTTP/1.1 502"));
+
+        let chain = harness.audit_chain();
+        assert!(chain.contains("secret.flow_refused"), "{chain}");
+        assert!(chain.contains("policy_denied"), "{chain}");
+        assert!(chain.contains(&format!("{BOUND_HOST}:443")), "{chain}");
+        // The body is `{"a":"b"}`; a JSON chain would carry it escaped.
+        for content in [
+            "/v1/messages",
+            harness.placeholder.as_str(),
+            "\"a\":\"b\"",
+            "\\\"a\\\":\\\"b\\\"",
+        ] {
+            assert!(
+                !chain.contains(content),
+                "request content `{content}` reached the chain: {chain}"
+            );
+        }
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
     }
 
     #[test]

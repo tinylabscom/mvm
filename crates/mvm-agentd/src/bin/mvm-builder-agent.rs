@@ -1,23 +1,34 @@
-// The vsock leaf (`sys`) is Linux-only, so the accept loop lives behind a
-// Linux `main`; the request-handling helpers stay compiled (but unused) off
-// Linux so the workspace still builds on macOS dev hosts.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
+// The vsock leaf (`sys`) is Linux-only, so the accept loop and every helper
+// it reaches compile only on Linux. Elsewhere `main` just says so.
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
 use mvm_agentd::builder_agent::{
     HostVmRequest, HostVmResponse, load_security_policy, validate_build_attr, validate_flake_ref,
 };
 #[cfg(target_os = "linux")]
 use mvm_agentd::vsock::sys;
 
+#[cfg(target_os = "linux")]
 const PORT: u32 = mvm_agentd::builder_agent::BUILDER_AGENT_PORT;
 
 /// Accept-queue depth for the builder-agent listener.
+#[cfg(target_os = "linux")]
 const LISTEN_BACKLOG: i32 = 16;
 
+#[cfg(target_os = "linux")]
+fn child_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    command
+}
+
+#[cfg(target_os = "linux")]
 fn handle_client(conn: OwnedFd) {
     let file = std::fs::File::from(conn);
     let mut reader = BufReader::new(file);
@@ -106,6 +117,7 @@ fn handle_client(conn: OwnedFd) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn write_resp(reader: &mut BufReader<std::fs::File>, resp: HostVmResponse) {
     let writer = reader.get_mut();
     if let Err(e) = writeln!(
@@ -121,6 +133,7 @@ fn write_resp(reader: &mut BufReader<std::fs::File>, resp: HostVmResponse) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_mount(
     reader: &mut BufReader<std::fs::File>,
     dev: &str,
@@ -131,7 +144,7 @@ fn ensure_mount(
         mp = mountpoint,
         dev = dev
     );
-    let output = Command::new("sh").arg("-c").arg(&cmd).output()?;
+    let output = child_command("sh").arg("-c").arg(&cmd).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = format!("mount {} -> {} failed: {}", dev, mountpoint, stderr);
@@ -144,6 +157,7 @@ fn ensure_mount(
 }
 
 /// Find the nix binary, searching well-known install locations.
+#[cfg(target_os = "linux")]
 fn find_nix_bin() -> Option<String> {
     let candidates = [
         "/nix/var/nix/profiles/default/bin/nix",
@@ -156,7 +170,7 @@ fn find_nix_bin() -> Option<String> {
         }
     }
     // Fallback: search /nix/store for the nix binary.
-    if let Ok(out) = Command::new("find")
+    if let Ok(out) = child_command("find")
         .args([
             "/nix/store",
             "-maxdepth",
@@ -181,6 +195,7 @@ fn find_nix_bin() -> Option<String> {
 }
 
 /// Return PATH prefix that includes the directory containing nix.
+#[cfg(target_os = "linux")]
 fn nix_path_prefix() -> String {
     if let Some(nix_bin) = find_nix_bin()
         && let Some(dir) = std::path::Path::new(&nix_bin).parent()
@@ -191,6 +206,7 @@ fn nix_path_prefix() -> String {
     "/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin".to_string()
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
     // Check if nix is already available.
     if find_nix_bin().is_some() {
@@ -206,7 +222,7 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
     );
 
     // Capture install output for diagnostics.
-    let output = Command::new("sh")
+    let output = child_command("sh")
         .arg("-c")
         .arg("curl --retry 3 --retry-delay 2 -L https://nixos.org/nix/install | sh -s -- --no-daemon 2>&1")
         .output()?;
@@ -241,7 +257,7 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
         }
         None => {
             // Log what we can find in /nix for diagnostics.
-            let diag = Command::new("sh")
+            let diag = child_command("sh")
                 .arg("-c")
                 .arg("ls -la /nix/var/nix/profiles/ 2>&1; echo '---'; ls -la /root/.nix-profile/bin/ 2>&1; echo '---'; find /nix/store -maxdepth 3 -name nix -type f 2>/dev/null | head -5")
                 .output()
@@ -259,6 +275,7 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_nix_conf() {
     let conf = "experimental-features = nix-command flakes\n";
     if let Err(e) = std::fs::create_dir_all("/etc/nix") {
@@ -275,6 +292,7 @@ fn ensure_nix_conf() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_build(
     reader: &mut BufReader<std::fs::File>,
     flake_ref: &str,
@@ -310,7 +328,7 @@ fn run_build(
         attr = attr
     );
 
-    let mut child = Command::new("sh")
+    let mut child = child_command("sh")
         .arg("-c")
         .arg(&build_cmd)
         .stdout(Stdio::piped())
@@ -364,7 +382,7 @@ fn run_build(
          echo '{{\"note\":\"Base fc config placeholder\"}}' > /build-out/fc-base.json",
         p = out_path
     );
-    let status = Command::new("sh").arg("-c").arg(&copy_cmd).status()?;
+    let status = child_command("sh").arg("-c").arg(&copy_cmd).status()?;
     if !status.success() {
         return Err(anyhow::anyhow!(
             "failed to copy artifacts (exit {}): {}",

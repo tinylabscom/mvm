@@ -1,0 +1,295 @@
+name: Installer compat
+
+# The current install.sh and uninstall.sh against what has actually been
+# published. tests/install_sh.rs drives both scripts against synthetic releases;
+# nothing ran them against real ones, so a release whose archive the installer
+# cannot handle — or a Linux binary a supported distribution cannot load — was
+# found by a user rather than by CI.
+#
+# Four lanes:
+#
+#   installer  every one of the newest published releases, freshly installed,
+#              checked against its own archive, and uninstalled — on Linux and
+#              on Apple Silicon macOS
+#   upgrade    one prefix walked through those releases oldest to newest, then
+#              rolled back one release and uninstalled
+#   distro     the newest release (and a newer prerelease) installed and run in
+#              debian, ubuntu, rocky and fedora containers on x86_64 and
+#              aarch64, reporting required-vs-available glibc and failing on a
+#              loader error
+#   docs-smoke the Linux install page's own commands, extracted from the page
+#
+# The release list is resolved from the releases API on every run
+# (scripts/installer-compat/matrix.sh), never kept here. What each release must
+# produce is read from its own archive, because releases differ: older ones
+# predate the versioned layout and the assets/ entitlement profiles.
+#
+# Not a required check. Every lane depends on github.com release downloads and
+# public container registries, so a red run can be an outage rather than a
+# regression, and a merge must not wait on either. The pure logic that decides
+# each verdict is gated on every pull request instead, by
+# scripts/installer-compat/installer-compat.test.sh in ci.yml. A scheduled
+# failure opens a tracking issue (the `report` job), since nobody is watching a
+# cron run.
+#
+# Hosted macOS runners cannot boot a guest, so the macOS lanes stop at install,
+# --version, doctor and uninstall. Booting is the documented-surface e2e lane's
+# job (e2e-docs.yml), on the self-hosted Apple Silicon runner.
+
+on:
+  # Weekly, not nightly. Nothing in this repository changes these lanes'
+  # outcome without a pull request, and a pull request touching the installer,
+  # the uninstaller or the install pages runs them below. What drifts on its
+  # own is external — a new published release, a moved `debian:stable` or
+  # `fedora:latest` tag, a runner image — and none of that moves daily. A
+  # release does not trigger this: `release.yml` publishes with GITHUB_TOKEN,
+  # whose events start no workflows, so dispatch this after cutting one.
+  # Monday 10:37 UTC stays clear of the 04:17–09:23 nightly cluster, which is
+  # where the hosted macOS concurrency this run needs is already spent.
+  schedule:
+    - cron: "37 10 * * 1"
+  workflow_dispatch:
+    inputs:
+      release_count:
+        description: "How many of the newest published releases the installer and upgrade lanes cover"
+        type: number
+        default: 3
+  pull_request:
+    paths:
+      - install.sh
+      - uninstall.sh
+      - public/src/content/docs/install/**
+      - public/src/content/docs/getting-started/installation.md
+      - scripts/installer-compat/**
+      - .github/workflows/installer-compat.yml
+
+permissions:
+  contents: read
+
+# The event name is part of the key: a cron run and a dispatch both carry the
+# default branch's ref, and must not share (or cancel) a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  resolve:
+    name: Resolve published releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      compat: ${{ steps.resolve.outputs.compat }}
+      upgrade: ${{ steps.resolve.outputs.upgrade }}
+      latest: ${{ steps.resolve.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Pick releases from the releases API
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # install.sh downloads from this repository whatever repository the
+          # workflow runs in, so the releases are resolved from it too.
+          RELEASES_REPO: tinylabscom/mvm
+          COUNT: ${{ inputs.release_count || 3 }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$RELEASES_REPO/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+
+          matrix() {
+            sh scripts/installer-compat/matrix.sh "$@" < "$RUNNER_TEMP/releases.json"
+          }
+          compat="$(matrix compat install.sh "$COUNT" \
+            ubuntu-latest:x86_64-unknown-linux-gnu macos-latest:aarch64-apple-darwin)"
+          upgrade="$(matrix upgrade install.sh "$COUNT" \
+            ubuntu-latest:x86_64-unknown-linux-gnu macos-latest:aarch64-apple-darwin)"
+          latest="$(matrix latest x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)"
+
+          {
+            echo "compat=$compat"
+            echo "upgrade=$upgrade"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Releases under test"
+            echo
+            echo "Baked installer default: \`$(sed -n 's/^DEFAULT_VERSION="\(.*\)"$/\1/p' install.sh)\`"
+            echo
+            echo "| Runner | Release | Must install |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$compat" | jq -r '.include[] | "| \(.runner) | `\(.release)` | \(.strict) |"'
+            echo
+            echo "Distribution lane: $(printf '%s' "$latest" | jq -r 'map("`\(.)`") | join(", ")')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  installer:
+    name: Install ${{ matrix.release }} (${{ matrix.runner }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.compat) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      # v0.16.1's Apple Silicon mvmctl dynamically links libkrunfw. Exercise
+      # that immutable release with the dependency it documented rather than
+      # misclassifying a missing host library as an installer regression.
+      - name: Install historical macOS runtime dependency
+        if: matrix.runner == 'macos-latest'
+        uses: ./.github/actions/install-libkrun
+
+      - name: Install, verify against the archive, and uninstall
+        env:
+          RELEASE: ${{ matrix.release }}
+          TARGET: ${{ matrix.target }}
+          STRICT: ${{ matrix.strict }}
+        run: |
+          set -eu
+          {
+            echo "| Release | Target | Install | Uninstall |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          sh scripts/installer-compat/check-release.sh "$RELEASE" "$TARGET" "$STRICT"
+
+  upgrade:
+    name: Upgrade and roll back (${{ matrix.runner }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.upgrade) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install historical macOS runtime dependency
+        if: matrix.runner == 'macos-latest'
+        uses: ./.github/actions/install-libkrun
+
+      - name: Walk one prefix through the releases, roll back, uninstall
+        env:
+          TARGET: ${{ matrix.target }}
+          RELEASES: ${{ matrix.releases }}
+          TOLERATED: ${{ matrix.tolerated }}
+        run: |
+          set -eu
+          {
+            echo "| Target | Step | Result |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          sh scripts/installer-compat/check-upgrade.sh "$TARGET" "$RELEASES" "$TOLERATED"
+
+  distro:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        # rockylinux/rockylinux rather than the Docker library `rockylinux`
+        # image, which stopped being published in 2024.
+        image: ["debian:stable", "ubuntu:24.04", "rockylinux/rockylinux:9", "fedora:latest"]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # The same free arm64 runner ci.yml's native aarch64 lane uses.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install and run the released mvmctl in the container
+        env:
+          IMAGE: ${{ matrix.image }}
+          RELEASES: ${{ join(fromJSON(needs.resolve.outputs.latest), ' ') }}
+          # These immutable artifacts predate the static-payload fix in #3393.
+          # Keep reporting their measured loader failures, but fail closed for
+          # every later release.
+          TOLERATED_LOADER_RELEASES: "v0.17.0 v0.18.0-rc.1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/distro"
+          docker run --rm \
+            -e TOLERATED_LOADER_RELEASES \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -v "$RUNNER_TEMP/distro:/out" \
+            "$IMAGE" \
+            sh /src/scripts/installer-compat/distro-smoke.sh /src/install.sh "$RELEASES" /out/summary.md
+
+      - name: Report glibc versions
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/distro/summary.md" ]; then
+            cat "$RUNNER_TEMP/distro/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  docs-smoke:
+    name: Linux install page, cold first run
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      # On a pull request the page's commands run against the install.sh that
+      # pull request changes; on the schedule and on dispatch, against the
+      # published installer the page names, exactly as a user would run them.
+      - name: Run the page's install and verify commands
+        env:
+          INSTALLER_URL: ${{ github.event_name == 'pull_request' && format('file://{0}/install.sh', github.workspace) || '' }}
+        run: sh scripts/installer-compat/docs-install-smoke.sh public/src/content/docs/install/linux.md "$INSTALLER_URL"
+
+  report:
+    name: Open, update, or close the tracking issue
+    needs: [resolve, installer, upgrade, distro, docs-smoke]
+    # Pull requests show their own red; a dispatch has an operator watching.
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: ${{ toJSON(needs) }}
+          TITLE: "Installer compat lane is red"
+        run: |
+          set -euo pipefail
+          # A cancelled job is a timed-out one here — nobody cancels a cron
+          # run — so it is reported with the failures rather than ignored.
+          failing="$(printf '%s' "$RESULTS" | jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "- `\(.key)`: \(.value.result)"')"
+          existing="$(gh issue list --repo "$REPO" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [ -z "$failing" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "The installer compat lanes are green again. Run: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          {
+            printf 'The weekly installer compat run failed.\n\nRun: %s\n\n' "$RUN_URL"
+            printf '%s\n\n' "$failing"
+            printf 'Each job summary names the release, platform or distribution and the\n'
+            printf 'assertion that failed. These lanes depend on published releases and\n'
+            printf 'container registries, so check for an outage before a regression.\n'
+          } > body.md
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file body.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file body.md
+          fi
+          exit 1

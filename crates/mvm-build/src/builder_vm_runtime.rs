@@ -171,6 +171,26 @@ pub fn builder_store_gc_cap_kib() -> u64 {
     u64::from(gib) * 1024 * 1024
 }
 
+/// Kernel-cmdline token carrying [`builder_store_gc_cap_kib`] into the Stage 0
+/// guest.
+///
+/// The guest cannot read the host's environment, so without this the
+/// [`MVM_BUILDER_STORE_GC_GIB_ENV`] override would govern the steady-state
+/// store and silently not the Stage 0 one. It rides the cmdline rather than
+/// `stage0-build.conf` because the ordinary builder-image bootstrap writes no
+/// config at all — only the SDK-sidecar and external-kernel paths do — so a
+/// config-carried cap reached the guest on exactly the paths that did not need
+/// it.
+pub const STAGE0_STORE_GC_KIB_CMDLINE_KEY: &str = "mvm.store_gc_kib";
+
+/// The cmdline token every Stage 0 boot carries.
+pub fn stage0_store_gc_cmdline_token() -> String {
+    format!(
+        "{STAGE0_STORE_GC_KIB_CMDLINE_KEY}={}",
+        builder_store_gc_cap_kib()
+    )
+}
+
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
 /// through the application-dependency install pipeline. Migrated
 /// from `libkrun_builder.rs` because the install spec staging is a
@@ -405,7 +425,13 @@ pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
         let from = entry.path();
         let to = dst.join(&raw);
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Copied as a link. `fs::copy` follows it, which read whatever the
+            // link named on the host — for an image tree, a link such as
+            // `../../../.ssh/id_ed25519` carried a host file into the guest.
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if file_type.is_dir() {
             copy_dir_filtered(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
@@ -694,6 +720,15 @@ store_kib=$(du -s -k /nix 2>/dev/null | cut -f1 || echo 0)
 if [ "$store_kib" -gt {gc_cap_kib} ]; then
   echo "mvm-builder: /nix store ${{store_kib}} KiB > cap {gc_cap_kib} KiB — nix-collect-garbage --delete-older-than 14d" >&2
   nix-collect-garbage --delete-older-than 14d >&2 2>&1 || echo "mvm-builder: nix-collect-garbage failed (continuing)" >&2
+  # Hand the blocks the GC freed back to the host. The store disk is a sparse
+  # file, so deleting store paths alone leaves it at its high-water mark: the
+  # guest filesystem stops using those blocks but the host still has them
+  # allocated. `fstrim` issues the discards that release them, which the device
+  # turns into holes. Best-effort: a device that does not offer discard reports
+  # the operation unsupported, and the build carries on either way.
+  # `/nix-store` is the ext4 store disk; `/nix` is the overlay over it, and an
+  # overlay has no FITRIM of its own.
+  fstrim /nix-store >&2 2>&1 || echo "mvm-builder: fstrim /nix-store failed (continuing)" >&2
 fi
 "#,
         flake_ref_assign = flake_ref_assign,
@@ -1361,6 +1396,36 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    /// A link in the staged tree stays a link. Following it read whatever it
+    /// named on the host, so an image's `srv/k -> ../../../.ssh/id_ed25519`
+    /// carried the host key into the guest image.
+    #[test]
+    fn filtered_work_input_copies_a_symlink_as_a_link_and_never_reads_its_target() {
+        let host = tempfile::TempDir::new().unwrap();
+        let secret = host.path().join("id_ed25519");
+        std::fs::write(&secret, b"host private key").unwrap();
+        let source = host.path().join("image");
+        std::fs::create_dir_all(source.join("srv")).unwrap();
+        std::os::unix::fs::symlink(&secret, source.join("srv/k")).unwrap();
+        std::os::unix::fs::symlink("/does/not/exist", source.join("srv/dangling")).unwrap();
+
+        let staged = stage_filtered_work_input(&source).unwrap();
+
+        let link = staged.path().join("srv/k");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), secret);
+        assert_eq!(
+            std::fs::read_link(staged.path().join("srv/dangling")).unwrap(),
+            Path::new("/does/not/exist"),
+            "a dangling link is carried, not an error"
+        );
+    }
+
     #[test]
     fn filtered_work_input_excludes_mutable_mvm_state() {
         let source = tempfile::TempDir::new().unwrap();
@@ -2009,6 +2074,16 @@ mod tests {
             body.contains("-gt 25165824 ]"),
             "missing default cap literal in:\n{body}"
         );
+        // The trim follows the GC inside the same cap branch: it is what turns
+        // deleted store paths into host blocks, and running it when nothing was
+        // collected would walk the whole store for nothing.
+        let gc_idx = body.find("nix-collect-garbage").expect("gc present");
+        let trim_idx = body.find("fstrim /nix-store").expect("store trim present");
+        assert!(trim_idx > gc_idx, "the trim must follow the GC in:\n{body}");
+        assert!(
+            body[gc_idx..trim_idx].find("\nfi").is_none(),
+            "the trim must sit inside the cap branch in:\n{body}"
+        );
         // GC must be POST-build — after the mvm-meta.json emission block.
         let meta_idx = body.find("mvm-meta.json").expect("meta block present");
         let gc_idx = body.find("nix-collect-garbage").expect("gc present");
@@ -2193,5 +2268,21 @@ mod tests {
         // Zero → also falls back (zero would GC the just-built closure).
         env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+    }
+
+    #[test]
+    fn the_stage0_cmdline_carries_the_same_cap_the_steady_state_builder_uses() {
+        let mut env = TestEnv::new();
+
+        env.remove(MVM_BUILDER_STORE_GC_GIB_ENV);
+        assert_eq!(stage0_store_gc_cmdline_token(), "mvm.store_gc_kib=25165824");
+
+        // The override reaches the guest; before this token it governed only
+        // the steady-state store.
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "2");
+        assert_eq!(
+            stage0_store_gc_cmdline_token(),
+            format!("{STAGE0_STORE_GC_KIB_CMDLINE_KEY}={}", 2 * 1024 * 1024)
+        );
     }
 }

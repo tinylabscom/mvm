@@ -43,24 +43,6 @@ pub fn clap_volume_spec(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-/// Parse a port spec like `3000` or `8080:3000` into `(local, guest)`.
-pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
-    if let Some((local, guest)) = spec.split_once(':') {
-        let local: u16 = local
-            .parse()
-            .with_context(|| format!("invalid local port '{}'", local))?;
-        let guest: u16 = guest
-            .parse()
-            .with_context(|| format!("invalid guest port '{}'", guest))?;
-        Ok((local, guest))
-    } else {
-        let port: u16 = spec
-            .parse()
-            .with_context(|| format!("invalid port '{}'", spec))?;
-        Ok((port, port))
-    }
-}
-
 /// Parsed mount specification from the `--mount` CLI flag, its compatibility
 /// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///
@@ -119,17 +101,7 @@ fn is_volume_keyword(tok: &str) -> bool {
     matches!(tok.to_ascii_lowercase().as_str(), "ro" | "rw" | "enc")
 }
 
-/// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
-/// directory tree the run binds by content identity without attaching it
-/// to the guest (unlike a `--mount`, nothing is materialized or shared —
-/// the asset's canonical hash is recorded in the signed plan and the
-/// chain-signed audit log).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetSpec {
-    pub kind: mvm_contract::plan::AssetKind,
-    /// Host file or directory to hash. Must exist at admission time.
-    pub host_path: String,
-}
+pub use mvm_client::admission::AssetSpec;
 
 const ASSET_GRAMMAR_HINT: &str = "expected KIND:HOST_PATH with KIND one of dataset, model, prompt, agent, policy, compute_environment, other";
 
@@ -158,6 +130,108 @@ pub fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
         kind,
         host_path: path.to_string(),
     })
+}
+
+/// A parsed `--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]`: a guest directory
+/// the workload writes into and the host collects from after it exits.
+///
+/// Deliberately not a `--mount` mode. The direction is the point: nothing on
+/// the host is shared with the guest, the guest gets a fresh empty disk, and
+/// what comes back is bounded and checked before any of it lands in
+/// `host_dir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSpec {
+    /// Host directory the collected files land in, as the user wrote it.
+    pub host_dir: String,
+    /// Absolute guest mount point the workload writes under.
+    pub guest: String,
+    /// Byte bound: the collection is refused past this many file bytes.
+    pub max_bytes: u64,
+    /// Entry bound: the collection is refused past this many files and directories.
+    pub max_entries: u64,
+}
+
+/// Byte bound when `--output` names no SIZE.
+pub const DEFAULT_OUTPUT_SIZE: &str = "64M";
+/// Entry bound when `--output` names no MAX_ENTRIES.
+pub const DEFAULT_OUTPUT_MAX_ENTRIES: u64 = 10_000;
+
+const OUTPUT_GRAMMAR_HINT: &str = "expected HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]";
+
+/// Parse `--output`. Pure: the host directory is checked separately by
+/// [`resolve_output_destination`], so the grammar is testable on its own.
+pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (host_dir, guest, size, entries) = match parts.as_slice() {
+        [host, guest] => (*host, *guest, None, None),
+        [host, guest, size] => (*host, *guest, Some(*size), None),
+        [host, guest, size, entries] => (*host, *guest, Some(*size), Some(*entries)),
+        _ => anyhow::bail!("invalid output '{spec}' — {OUTPUT_GRAMMAR_HINT}"),
+    };
+    if host_dir.is_empty() {
+        anyhow::bail!("invalid output '{spec}' — empty host directory; {OUTPUT_GRAMMAR_HINT}");
+    }
+    validate_guest_mount(guest)
+        .map_err(|error| anyhow::anyhow!("invalid output '{spec}': {error}"))?;
+    let size = size.unwrap_or(DEFAULT_OUTPUT_SIZE);
+    let size_mib = mvm_core::util::parse_human_size(size)
+        .with_context(|| format!("invalid output '{spec}' — size '{size}'"))?;
+    if size_mib == 0 {
+        anyhow::bail!("invalid output '{spec}' — the size bound must be at least 1M");
+    }
+    let max_entries = match entries {
+        None => DEFAULT_OUTPUT_MAX_ENTRIES,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => anyhow::bail!(
+                "invalid output '{spec}' — MAX_ENTRIES '{raw}' must be a positive integer"
+            ),
+        },
+    };
+    Ok(OutputSpec {
+        host_dir: host_dir.to_string(),
+        guest: guest.to_string(),
+        max_bytes: u64::from(size_mib) * 1024 * 1024,
+        max_entries,
+    })
+}
+
+/// Resolve an output's host directory to the absolute path collection writes
+/// to: the parent must exist and is canonicalized, the directory itself must
+/// be absent or empty, and it may not sit inside a protected host directory.
+/// Returning the resolved path is what lets collection refuse a parent that
+/// was swapped for a link after the grant was signed.
+pub fn resolve_output_destination(host_dir: &str) -> Result<std::path::PathBuf> {
+    let raw = expand_tilde(host_dir);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .context("resolving current dir for a relative output directory")?
+            .join(raw)
+    };
+    let name = match absolute.file_name() {
+        Some(name) => name.to_os_string(),
+        None => {
+            anyhow::bail!("output directory '{host_dir}' must name a directory, not a root or `..`")
+        }
+    };
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("output directory '{host_dir}' has no parent directory"))?;
+    let parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("output directory '{host_dir}': its parent must already exist"))?;
+    let destination = parent.join(name);
+    if let Some(denied) = protected_root_containing(&destination, &denied_host_roots()) {
+        anyhow::bail!(
+            "refusing to collect outputs into '{}' — it is inside a protected directory '{}'",
+            destination.display(),
+            denied.display()
+        );
+    }
+    mvm_fs::output::check_destination_available(&destination)
+        .with_context(|| format!("output directory '{host_dir}'"))?;
+    Ok(destination)
 }
 
 pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
@@ -377,6 +451,14 @@ fn denied_host_roots() -> Vec<std::path::PathBuf> {
         }
     }
     roots
+}
+
+/// The first protected root `path` sits at or under. Pure (lexical).
+fn protected_root_containing<'r>(
+    path: &std::path::Path,
+    roots: &'r [std::path::PathBuf],
+) -> Option<&'r std::path::PathBuf> {
+    roots.iter().find(|root| path_is_under(path, root))
 }
 
 /// True if `path` is `root` or lives under it. Pure (lexical).
@@ -891,5 +973,96 @@ mod asset_spec_tests {
         for bad in ["", "model", "model:", "bogus:/x", ":x", "kindx:/y"] {
             let _ = parse_asset_spec(bad).expect_err("refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod output_spec_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_apply_when_size_and_entries_are_omitted() {
+        let spec = parse_output_spec("./results:/data/out").expect("parse");
+        assert_eq!(spec.host_dir, "./results");
+        assert_eq!(spec.guest, "/data/out");
+        assert_eq!(spec.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(spec.max_entries, DEFAULT_OUTPUT_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn size_and_entries_are_positional() {
+        let spec = parse_output_spec("/r:/work/out:2M:50").expect("parse");
+        assert_eq!(spec.max_bytes, 2 * 1024 * 1024);
+        assert_eq!(spec.max_entries, 50);
+        assert_eq!(
+            parse_output_spec("/r:/work/out:1G").unwrap().max_bytes,
+            1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn malformed_specs_are_refused_with_the_grammar() {
+        for bad in [
+            "",
+            "/r",
+            ":/data/out",
+            "/r:/data/out:1M:5:extra",
+            "/r:/data/out:lots",
+            "/r:/data/out:1M:0",
+            "/r:/data/out:1M:-3",
+            "/r:/data/out:0M",
+        ] {
+            let error = parse_output_spec(bad).expect_err(bad).to_string();
+            assert!(error.contains("invalid output"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_guest_path_outside_the_mount_allow_list_is_refused() {
+        for bad in ["/r:relative", "/r:/etc", "/r:/"] {
+            parse_output_spec(bad).expect_err(bad);
+        }
+    }
+
+    #[test]
+    fn destination_resolves_through_a_canonical_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let destination =
+            resolve_output_destination(&dir.path().join("out").to_string_lossy()).unwrap();
+        assert_eq!(destination, canonical.join("out"));
+    }
+
+    #[test]
+    fn destination_refuses_a_missing_parent_and_a_populated_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        resolve_output_destination(&dir.path().join("absent/out").to_string_lossy())
+            .expect_err("a missing parent is refused");
+        let populated = dir.path().join("populated");
+        std::fs::create_dir(&populated).unwrap();
+        std::fs::write(populated.join("keep"), b"").unwrap();
+        let error = resolve_output_destination(&populated.to_string_lossy()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not an empty directory"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_destination_inside_a_protected_root_is_found() {
+        let roots = vec![
+            std::path::PathBuf::from("/home/u/state/keys"),
+            std::path::PathBuf::from("/home/u/.ssh"),
+        ];
+        let under = std::path::Path::new("/home/u/.ssh/collected");
+        assert_eq!(protected_root_containing(under, &roots), Some(&roots[1]));
+        assert_eq!(
+            protected_root_containing(std::path::Path::new("/home/u/state/keys"), &roots),
+            Some(&roots[0])
+        );
+        assert_eq!(
+            protected_root_containing(std::path::Path::new("/home/u/.sshx/out"), &roots),
+            None
+        );
     }
 }

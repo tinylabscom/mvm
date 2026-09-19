@@ -173,14 +173,16 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
 
 /// Find the built-in images directory (e.g., images/openclaw/).
 fn find_images_dir() -> Result<PathBuf> {
-    let exe_dir = std::env::current_exe()?
-        .parent()
-        .expect("executable path must have a parent directory")
-        .to_path_buf();
+    find_images_dir_for(&mvm_vmm::host::aux_bin::HostProcess::current())
+}
 
-    // Next to binary
-    let candidate = exe_dir.join("images");
-    if candidate.exists() {
+fn find_images_dir_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> Result<PathBuf> {
+    // Beside the host binaries.
+    if let Some(candidate) = host
+        .binary_dir()
+        .map(|dir| dir.join("images"))
+        .filter(|candidate| candidate.exists())
+    {
         return Ok(candidate);
     }
 
@@ -727,6 +729,24 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod images_dir_tests {
+    use super::*;
+    use mvm_vmm::host::aux_bin::HostProcess;
+
+    #[test]
+    fn images_beside_a_declared_host_binary_dir_win() {
+        let declared = tempfile::tempdir().unwrap();
+        std::fs::create_dir(declared.path().join("images")).unwrap();
+        let host = HostProcess::undeclared().with_binary_dir(declared.path());
+
+        assert_eq!(
+            find_images_dir_for(&host).unwrap(),
+            declared.path().join("images")
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

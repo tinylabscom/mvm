@@ -2,6 +2,7 @@
 //! keypair, plan persistence, and the checkpoint bind helpers. Library API so
 //! both the CLI and fleet consumers emit identical chain entries.
 
+pub mod active_signer;
 pub mod assurance;
 pub mod bind;
 /// Whether a run's `plan.admitted` entry is a control or a note — the one
@@ -14,6 +15,7 @@ pub mod host_keypair;
 /// tenant's chain-signed audit log.
 pub mod leaf_cache;
 pub mod merkle;
+pub mod output_audit;
 pub mod plan_persist;
 /// Writer for `.mvmev` evidence archives over the chain-signed audit log.
 pub mod receipt_archive;

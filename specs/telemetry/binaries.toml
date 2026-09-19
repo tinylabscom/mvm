@@ -1,0 +1,565 @@
+# Static Rust binary discovery inventory, not runtime coverage evidence.
+# See README.md for scope, gap semantics, and required live follow-up.
+version = 1
+
+[[binary]]
+package = "mvm-agentd"
+name = "audit-probe"
+source = "crates/mvm-agentd/src/bin/audit-probe.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
+
+[[binary]]
+package = "mvm-agentd"
+name = "emit_protocol_schema"
+source = "crates/mvm-agentd/src/bin/emit_protocol_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-agentd"
+name = "fake-runner"
+source = "crates/mvm-agentd/tests/bin/fake_runner.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-addon-dns"
+source = "crates/mvm-agentd/src/bin/mvm-addon-dns.rs"
+required_features = ["addons"]
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-addon-vsock-bridge"
+source = "crates/mvm-agentd/src/bin/mvm-addon-vsock-bridge.rs"
+required_features = ["addons"]
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-builder-agent"
+source = "crates/mvm-agentd/src/bin/mvm-builder-agent.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Builder guest service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-egress-client"
+source = "crates/mvm-agentd/src/bin/mvm-egress-client.rs"
+required_features = ["addons"]
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-entrypoint-test-wrapper"
+source = "crates/mvm-agentd/tests/bin/entrypoint_test_wrapper.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-exit-report"
+source = "crates/mvm-agentd/src/bin/mvm-exit-report.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest workload-exit wrapper"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-guest-agent"
+source = "crates/mvm-agentd/src/bin/mvm-guest-agent.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-guest-netinit"
+source = "crates/mvm-agentd/src/bin/mvm-guest-netinit.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-oci-entrypoint"
+source = "crates/mvm-agentd/src/bin/mvm-oci-entrypoint.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-ping"
+source = "crates/mvm-agentd/src/bin/mvm-ping.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest workload process"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-runner"
+source = "crates/mvm-agentd/src/bin/mvm-runner.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest agent entrypoint execution and worker pool"
+signals = ["diagnostics", "events", "logs", "spans"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-seccomp-apply"
+source = "crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "mvm-setpriv"
+source = "crates/mvm-agentd/src/bin/mvm-setpriv.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
+name = "syscall-probe"
+source = "crates/mvm-agentd/src/bin/syscall-probe.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
+
+[[binary]]
+package = "mvm-build"
+name = "mvm-builderd"
+source = "crates/mvm-build/src/bin/mvm-builderd.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Builder guest init"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-build"
+name = "mvm-egress-proxy"
+source = "crates/mvm-build/src/bin/mvm-egress-proxy.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Builder guest init"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-build"
+name = "mvm-host-vm-init"
+source = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Builder VM PID 1"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-build"
+name = "mvm-rootfs-patcher"
+source = "crates/mvm-build/src/bin/mvm-rootfs-patcher.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Bootstrap patcher PID 1"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-build"
+name = "mvm-test-image-lock-holder"
+source = "crates/mvm-build/src/bin/mvm-test-image-lock-holder.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
+
+[[binary]]
+package = "mvm-build"
+name = "stage0-init"
+source = "crates/mvm-build/src/bin/stage0-init.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "builder-guest"
+owner = "Bootstrap seed PID 1"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-contract"
+name = "emit_assurance_schema"
+source = "crates/mvm-contract/src/bin/emit_assurance_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-core"
+name = "emit_broker_schema"
+source = "crates/mvm-core/src/bin/emit_broker_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-core"
+name = "mvm-extension-pack-verify"
+source = "crates/mvm-core/src/bin/mvm-extension-pack-verify.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "artifact-tool"
+reason = "Standalone local artifact construction or verification command, not an installed VM producer."
+
+[[binary]]
+package = "mvm-fs"
+name = "mvm-extension-image"
+source = "crates/mvm-fs/src/bin/mvm-extension-image.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "artifact-tool"
+reason = "Standalone local artifact construction or verification command, not an installed VM producer."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-apfs-snapshot-helper"
+source = "crates/mvm-hostd/src/bin/mvm-apfs-snapshot-helper.rs"
+required_features = ["trusted-apfs"]
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Privileged host service manager"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-audit-signer"
+source = "crates/mvm-hostd/src/bin/mvm-audit-signer.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Host service or supervisor"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-broker"
+source = "crates/mvm-hostd/src/bin/mvm-broker.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Host service or supervisor"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-extension-provider"
+source = "crates/mvm-hostd/src/bin/mvm-extension-provider.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Admitted host extension provider"
+signals = ["diagnostics", "events", "logs", "spans"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-host-agent"
+source = "crates/mvm-hostd/src/bin/mvm-host-agent.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Host machine agent"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-host-signer"
+source = "crates/mvm-hostd/src/bin/mvm-host-signer.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Host service or supervisor"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-hvf-supervisor"
+source = "crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM HVF host process"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-libkrun-supervisor"
+source = "crates/mvm-hostd/src/bin/mvm-libkrun-supervisor.rs"
+required_features = ["libkrun-sys"]
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM libkrun host process"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-network-endpoint"
+source = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM host network endpoint"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-signer-helper"
+source = "crates/mvm-hostd/src/bin/mvm-signer-helper.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Host service or supervisor"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Local fmt subscriber is not VM-lifetime host collection with bounded non-waiting capture."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_addon_schema"
+source = "crates/mvm-sdk/src/bin/emit_addon_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_runtime_schema"
+source = "crates/mvm-sdk/src/bin/emit_runtime_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_sdk_ctors"
+source = "crates/mvm-sdk/src/bin/emit_sdk_ctors.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_sdk_env"
+source = "crates/mvm-sdk/src/bin/emit_sdk_env.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_sdk_errors"
+source = "crates/mvm-sdk/src/bin/emit_sdk_errors.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-sdk"
+name = "emit_workload_schema"
+source = "crates/mvm-sdk/src/bin/emit_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvmctl"
+name = "mvmctl"
+source = "src/main.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Invoking host process"
+signals = ["diagnostics", "events", "logs", "spans"]
+entrypoint = "fn main("
+gap = "CLI-scoped logging and optional OTLP do not provide detached per-VM collection."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "xtask"
+name = "xtask"
+source = "xtask/src/main.rs"
+required_features = []
+[binary.capture]
+kind = "non-runtime"
+category = "developer-tool"
+reason = "Repository maintenance command; does not run as a VM telemetry producer."

@@ -35,7 +35,7 @@ delete resources belonging to another process or stale generation.
 | Area | Representative modules |
 |---|---|
 | Backend lifecycle | `backend`, `backends`, `driver`, `selection` |
-| Machine state | `machine`, `handle_registry`, `lineage`, `catalog` |
+| Machine state | `machine`, `lineage`, `catalog` |
 | Boot artifacts | `artifacts`, `image`, `base`, `sdk_sidecar` |
 | Build execution | `builder_runner`, `build_env` |
 | Storage | `storage`, `volume`, `warm_snapshot` |

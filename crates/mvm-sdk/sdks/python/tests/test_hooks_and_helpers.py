@@ -221,3 +221,21 @@ def test_network_still_refuses_an_unknown_mode():
     # positionally, turning a typo into a `custom` provider.
     with pytest.raises(ValueError, match="network mode must be"):
         mvm.network(mode="nonsense")
+
+
+def test_network_agent_preset_and_ai_budget_are_reachable():
+    network = mvm.network(
+        mode="bridge",
+        preset="agent",
+        ai=mvm.ai_policy(budget=mvm.ai_budget(max_total_tokens=12_000)),
+    )
+    assert network.preset.value == "agent"
+    assert network.ai.budget.max_total_tokens == 12_000
+
+
+def test_network_preset_conflicts_with_explicit_egress():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        mvm.network(
+            preset="agent",
+            egress=mvm.egress([mvm.host_port("example.com", 443)]),
+        )

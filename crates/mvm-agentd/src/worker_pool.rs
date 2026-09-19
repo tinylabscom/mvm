@@ -23,6 +23,8 @@
 //! frame.
 
 use std::io::{self, BufReader};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -608,6 +610,12 @@ fn spawn_worker(
     worker_env: &[(String, String)],
 ) -> io::Result<WorkerHandle> {
     let program = entrypoint::spawn_path(entrypoint);
+    #[cfg(target_os = "linux")]
+    let program_fd = entrypoint
+        .file
+        .as_raw_fd()
+        .try_into()
+        .map_err(|_| io::Error::other("validated worker entrypoint descriptor is negative"))?;
 
     // Same envelope as `entrypoint::execute` minus the per-call
     // tmpdir (workers are shared across calls so a per-worker tmpdir
@@ -624,6 +632,17 @@ fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, entrypoint::spawn_fd_to_keep(entrypoint));
+
+    // Workers execute through the validated `/proc/self/fd/<n>` path, so keep
+    // that descriptor and close every other inherited agent descriptor.
+    unsafe {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
+            Ok(())
+        });
+    }
 
     let mut child = cmd.spawn()?;
     let pid = child.id();

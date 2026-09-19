@@ -529,41 +529,328 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
     );
 }
 
+fn ci_full() -> String {
+    fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
+}
+
+fn source_bootstrap_script() -> String {
+    fs::read_to_string("scripts/e2e-source-bootstrap.sh").expect("read source bootstrap witness")
+}
+
+/// The release lane fetches the builder image the macOS lane already fetches.
+///
+/// Building it from source put 37 minutes of Stage 0 ahead of 313 scenarios
+/// that never examine the image, and a two-hour Stage 0 hang cancelled the lane
+/// before a single scenario ran. The fetch is not a trust shortcut: the binary
+/// carries `release-artifact-bootstrap`, so the image is held to the pinned
+/// boot-image tag's signed checksum manifest.
 #[test]
-fn linux_documented_surface_makes_the_stage0_boot_files_readable() {
+fn linux_documented_surface_fetches_the_pinned_signed_builder_image() {
     let workflow = extended_ci();
     let linux = job_block(&workflow, "e2e-docs-linux");
 
+    assert_eq!(
+        field_after(linux, "MVM_BOOT_IMAGE:").as_deref(),
+        Some("fetch"),
+        "the Linux release lane must fetch the signed builder image rather than run Stage 0"
+    );
     assert!(
-        linux.contains("sudo chmod a+r")
-            && linux.contains("/boot/vmlinuz-${KERNEL_RELEASE}")
-            && linux.contains("/boot/initrd.img-${KERNEL_RELEASE}"),
+        field_after(linux, "MVM_E2E_FEATURES:")
+            .is_some_and(|features| features.contains("release-artifact-bootstrap")),
+        "fetching without the release verifier compiled in refuses outright"
+    );
+    assert_eq!(
+        field_after(linux, "MVM_BUILDER_BACKEND:").as_deref(),
+        Some("firecracker"),
+        "left unset, the helper the unembedded binary re-executes picks QEMU, \
+         which reaches a builder only through Stage 0"
+    );
+}
+
+/// A lane that drifts back into a source bootstrap must fail fast.
+///
+/// Stage 0 on a hosted runner needs the distro kernel made readable and the
+/// vhost-vsock device handed to the job. Without those grants an accidental
+/// Stage 0 dies in seconds; with them it spends the whole budget.
+#[test]
+fn linux_documented_surface_grants_nothing_stage0_needs() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    for stage0_only in [
+        "/dev/vhost-vsock",
+        "/boot/vmlinuz",
+        "qemu-system-x86",
+        "virtiofsd",
+    ] {
+        assert!(
+            !linux.contains(stage0_only),
+            "the fetching release lane must not provision `{stage0_only}` for a Stage 0 it no longer runs"
+        );
+    }
+}
+
+/// The cold source path keeps a live witness of its own.
+#[test]
+fn extended_ci_runs_the_cold_source_bootstrap_witness() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert!(
+        job.contains("run: just e2e-source-bootstrap"),
+        "the nightly source bootstrap job must run the dedicated witness"
+    );
+    assert!(
+        job.contains("MVM_E2E_HOME: ${{ runner.temp }}/source-bootstrap-home"),
+        "the witness needs a cold home under the runner's temp directory"
+    );
+    assert!(
+        field_after(job, "MVM_BOOT_IMAGE:").is_none(),
+        "the source witness must not be pointed at the published image"
+    );
+    assert!(
+        justfile().contains("e2e-source-bootstrap:\n    ./scripts/e2e-source-bootstrap.sh"),
+        "the recipe must run the source bootstrap witness"
+    );
+}
+
+/// The job runs checkout-controlled Nix inputs on a KVM host; it gets a
+/// read-only token and runs only in the canonical repository.
+#[test]
+fn the_source_bootstrap_job_is_least_privilege() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert!(
+        job.contains("permissions:\n      contents: read\n"),
+        "the source bootstrap job must hold a read-only token and nothing else"
+    );
+    assert!(
+        job.contains("if: github.repository == 'tinylabscom/mvm'"),
+        "the source bootstrap job must not run on forks"
+    );
+}
+
+/// Stage 0's builder timeout is two hours; a job budget below that reports a
+/// hang as a cancellation instead of as the builder error that names it.
+#[test]
+fn the_source_bootstrap_budget_outlasts_the_stage0_builder_timeout() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+    let minutes: u64 = field_after(job, "timeout-minutes:")
+        .and_then(|value| value.parse().ok())
+        .expect("the source bootstrap job must declare a budget");
+
+    assert!(
+        minutes > 120 + 30,
+        "timeout-minutes {minutes} leaves no room for setup beyond a two-hour Stage 0"
+    );
+}
+
+/// A refusing Stage 0 guest explains itself only on its console.
+#[test]
+fn the_source_bootstrap_job_keeps_the_guest_consoles_of_a_failed_run() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert!(
+        job.contains("if: failure()")
+            && job.contains("uses: actions/upload-artifact@v7")
+            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log"),
+        "a failed source bootstrap must upload the guest consoles that name the cause"
+    );
+}
+
+#[test]
+fn the_source_bootstrap_job_makes_the_stage0_boot_files_readable() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert!(
+        job.contains("sudo chmod a+r")
+            && job.contains("/boot/vmlinuz-${KERNEL_RELEASE}")
+            && job.contains("/boot/initrd.img-${KERNEL_RELEASE}"),
         "the unprivileged QEMU Stage 0 process must be able to read the hosted runner kernel and initramfs"
     );
 }
 
 #[test]
-fn linux_documented_surface_grants_stage0_vhost_vsock_access() {
-    let workflow = extended_ci();
-    let linux = job_block(&workflow, "e2e-docs-linux");
+fn the_source_bootstrap_job_grants_stage0_vhost_vsock_access() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
 
     assert!(
-        linux.contains("test -c /dev/vhost-vsock")
-            && linux.contains("sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock")
-            && linux.contains("sudo chmod 0600 /dev/vhost-vsock")
-            && linux.contains("test -r /dev/vhost-vsock && test -w /dev/vhost-vsock"),
+        job.contains("test -c /dev/vhost-vsock")
+            && job.contains("sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock")
+            && job.contains("sudo chmod 0600 /dev/vhost-vsock")
+            && job.contains("test -r /dev/vhost-vsock && test -w /dev/vhost-vsock"),
         "the unprivileged QEMU Stage 0 process must own and be able to open the hosted vhost-vsock device"
     );
 }
 
+/// Stage 0 on a hosted runner has only ever worked under QEMU. Auto-detect
+/// answers Firecracker there, whose Stage 0 VM never opens its API socket.
 #[test]
-fn linux_documented_surface_installs_virtiofsd_for_stage0_shares() {
-    let workflow = extended_ci();
-    let linux = job_block(&workflow, "e2e-docs-linux");
+fn the_source_bootstrap_job_names_the_backend_its_stage0_can_use() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert_eq!(
+        field_after(job, "MVM_BUILDER_BACKEND:").as_deref(),
+        Some("qemu"),
+        "the cold source witness must name QEMU rather than auto-detecting a \
+         backend whose Stage 0 cannot boot on a hosted runner"
+    );
+}
+
+#[test]
+fn the_source_bootstrap_job_installs_qemu_for_stage0() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
 
     assert!(
-        linux.contains("packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd"),
-        "the QEMU builder must install virtiofsd before sharing the checkout with Stage 0"
+        job.contains("packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd"),
+        "the QEMU Stage 0 builder must be installed before the source bootstrap"
+    );
+}
+
+/// Every step of the source witness is fatal, in the order the path runs.
+#[test]
+fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
+    let script = source_bootstrap_script();
+    let steps = [
+        "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
+        "\"$MVMCTL\" bootstrap",
+        "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
+    ];
+    let mut last = 0;
+    for step in steps {
+        let at = script
+            .find(step)
+            .unwrap_or_else(|| panic!("the source witness must run `{step}`"));
+        assert!(at > last, "`{step}` ran out of order");
+        last = at;
+    }
+    assert!(
+        script.contains("set -euo pipefail"),
+        "every step must be fatal"
+    );
+    assert!(
+        !script.contains("|| true") && !script.contains("if ! "),
+        "the source witness must not tolerate a failed step"
+    );
+}
+
+/// A witness that is told to fetch, or handed a warm home, would pass on an
+/// image it did not build. Both refusals happen before anything is compiled.
+#[cfg(unix)]
+#[test]
+fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
+    let warm = tempfile::tempdir().expect("create warm home fixture");
+    fs::write(warm.path().join("leftover"), b"x").expect("seed warm home");
+    let cold = tempfile::tempdir().expect("create cold home fixture");
+
+    let cases = [
+        ("a warm home", warm.path().to_path_buf(), None),
+        (
+            "MVM_BOOT_IMAGE=fetch",
+            cold.path().join("home"),
+            Some("fetch"),
+        ),
+    ];
+    for (case, home, boot_image) in cases {
+        let mut command = Command::new("bash");
+        command
+            .arg("scripts/e2e-source-bootstrap.sh")
+            .env("MVM_E2E_HOME", &home)
+            .env_remove("MVM_BOOT_IMAGE");
+        if let Some(value) = boot_image {
+            command.env("MVM_BOOT_IMAGE", value);
+        }
+        let output = command.output().expect("run the source bootstrap witness");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{case} must be refused before any build: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn both_live_harnesses_report_phase_timings() {
+    let documented = documented_surface_script();
+    for phase in [
+        "build",
+        "builder-image",
+        "sdk-sidecar",
+        "launch-artifacts",
+        "suite",
+    ] {
+        assert!(
+            documented.contains(&format!("e2e_phase {phase}\n")),
+            "the documented surface must time its `{phase}` phase"
+        );
+    }
+    assert!(
+        documented.contains("  e2e_phase_summary "),
+        "the documented surface must print its timings on exit, including a failed or killed run"
+    );
+
+    let source = source_bootstrap_script();
+    for phase in ["build", "sdk-sidecar", "builder-image", "flake-build"] {
+        assert!(
+            source.contains(&format!("e2e_phase {phase}\n")),
+            "the source bootstrap witness must time its `{phase}` phase"
+        );
+    }
+    assert!(
+        source.contains("trap 'e2e_phase_summary "),
+        "the source bootstrap witness must print its timings on exit"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_timings_report_each_phase_and_a_total() {
+    let scratch = tempfile::tempdir().expect("create step summary fixture");
+    let summary = scratch.path().join("step-summary.md");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            "set -euo pipefail; source scripts/e2e-phase-timings.sh; \
+             e2e_phase_summary empty; \
+             e2e_phase first; e2e_phase second; e2e_phase_summary 'Fixture timings'",
+        ])
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .expect("run the phase timing helper");
+    assert!(
+        output.status.success(),
+        "the helper must work under set -u with no phases recorded: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        "[phase] name=first seconds=0",
+        "[phase] name=second seconds=0",
+    ] {
+        assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
+    }
+    assert!(stdout.contains("total"), "missing total in:\n{stdout}");
+
+    let table = fs::read_to_string(&summary).expect("read step summary");
+    assert!(
+        table.contains("### Fixture timings")
+            && table.contains("| first | 0 |")
+            && table.contains("| second | 0 |")
+            && table.contains("| total | 0 |"),
+        "the step summary must carry the same table:\n{table}"
+    );
+    assert!(
+        !table.contains("### empty"),
+        "a run with no phases must not write an empty table"
     );
 }
 
@@ -862,8 +1149,12 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     );
 }
 
+/// The sidecar is still built through the unembedded binary, but after the
+/// builder image is acquired: the embedded binary fetches and verifies it once,
+/// so the helper the unembedded binary re-executes finds it ready instead of
+/// being compiled only to acquire it.
 #[test]
-fn documented_surface_cold_builds_the_sidecar_through_an_unembedded_cli() {
+fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
 
     let unembedded_build = script
@@ -880,8 +1171,11 @@ fn documented_surface_cold_builds_the_sidecar_through_an_unembedded_cli() {
         .expect("the suite must retain the explicit bootstrap check");
 
     assert!(unembedded_build < embedded_build);
-    assert!(embedded_build < sidecar_warm);
-    assert!(sidecar_warm < explicit_bootstrap);
+    assert!(embedded_build < explicit_bootstrap);
+    assert!(
+        explicit_bootstrap < sidecar_warm,
+        "the builder image must be acquired before the sidecar build needs it"
+    );
 }
 
 #[test]

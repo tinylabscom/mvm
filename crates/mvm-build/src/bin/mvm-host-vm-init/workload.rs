@@ -32,6 +32,7 @@ use std::process::Command;
 /// production; the id-only `WorkloadStop` / `WorkloadStatus`
 /// requests key off it (they carry no base). Treated as the
 /// host→guest convention until the contract is formalised.
+#[cfg(target_os = "linux")]
 pub const WORKLOAD_STATE_BASE: &str = "/var/lib/mvm/workloads";
 
 /// Path the Firecracker binary is baked at by the builder-vm flake
@@ -65,8 +66,6 @@ pub struct WorkloadSpawnConfig {
 /// A VMM that can launch a workload microVM inside the host VM.
 /// The swap seam that keeps mvm from being locked into Firecracker.
 pub trait WorkloadVmm {
-    /// Stable name for logs / status (e.g. `"firecracker"`).
-    fn name(&self) -> &'static str;
     /// Render the VMM's config-file contents for this workload. The
     /// state dir supplies VMM-agnostic paths (vsock UDS, etc.).
     fn render_config(&self, cfg: &WorkloadSpawnConfig, state: &WorkloadStateDir) -> String;
@@ -81,10 +80,6 @@ pub trait WorkloadVmm {
 pub struct FirecrackerVmm;
 
 impl WorkloadVmm for FirecrackerVmm {
-    fn name(&self) -> &'static str {
-        "firecracker"
-    }
-
     fn render_config(&self, cfg: &WorkloadSpawnConfig, state: &WorkloadStateDir) -> String {
         let boot_args = if cfg.kernel_cmdline_extras.is_empty() {
             FC_BASE_CMDLINE.to_string()
@@ -163,6 +158,7 @@ impl WorkloadStateDir {
         })
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -356,7 +352,6 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, vec!["--no-api", "--config-file", "/some/config.json"]);
-        assert_eq!(FirecrackerVmm.name(), "firecracker");
     }
 
     #[test]
@@ -407,9 +402,6 @@ mod tests {
     /// no-op on Windows) proves the lifecycle is VMM-agnostic.
     struct FakeVmm;
     impl WorkloadVmm for FakeVmm {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
         fn render_config(&self, _cfg: &WorkloadSpawnConfig, _state: &WorkloadStateDir) -> String {
             r#"{"fake":true}"#.to_string()
         }

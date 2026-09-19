@@ -115,17 +115,32 @@ let
   relativeTo = path: lib.removePrefix "${root}/" (toString path);
 
   topLevelOf = rel: lib.head (lib.splitString "/" rel);
+
+  filtered = builtins.path {
+    inherit name;
+    path = workspaceRoot;
+    filter =
+      path: _type:
+      let
+        rel = relativeTo path;
+        base = baseNameOf path;
+      in
+      (rel == "" || builtins.elem (topLevelOf rel) includedTopLevel)
+      && !(builtins.elem base excludedBasenames)
+      && !(lib.hasPrefix "result-" base);
+  };
 in
-builtins.path {
-  inherit name;
-  path = workspaceRoot;
-  filter =
-    path: _type:
-    let
-      rel = relativeTo path;
-      base = baseNameOf path;
-    in
-    (rel == "" || builtins.elem (topLevelOf rel) includedTopLevel)
-    && !(builtins.elem base excludedBasenames)
-    && !(lib.hasPrefix "result-" base);
-}
+# Nix hands the filter symlink-resolved paths, and `relativeTo` strips the root
+# as text, so a root reached through a symlink (any path under /tmp on macOS)
+# matches nothing and the tree comes out empty. Nix has no way to resolve the
+# root here, so refuse by name instead of letting the build fail later on a
+# missing Cargo.lock that points away from the cause.
+if builtins.pathExists (filtered + "/Cargo.lock") then
+  filtered
+else
+  throw ''
+    workspace-filter: the filtered tree of ${root} has no Cargo.lock.
+    The root is probably reached through a symlink (on macOS, /tmp is one),
+    so no path Nix hands the filter starts with it. Pass the resolved path,
+    e.g. MVM_WORKSPACE_PATH="$(cd ${root} && pwd -P)".
+  ''

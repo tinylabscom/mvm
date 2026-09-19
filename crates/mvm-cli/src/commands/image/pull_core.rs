@@ -22,7 +22,7 @@ use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present, upsert_
 use super::materialize::{
     RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
     inject_runtime_and_materialize, oci_entrypoint_from_cache_path, oci_runtime_tag,
-    prepare_rootfs_only_tree, rematerialize_cached_image, rootfs_verity_sidecars_present,
+    prepare_rootfs_only_tree, rematerialize_cached_image,
 };
 use super::oci_types::{CachedOciImage, CachedOciLayer, OciTrustDecision, ResolvedOciRunImage};
 use super::source;
@@ -42,9 +42,24 @@ pub(in crate::commands) fn ensure_prod_digest_pin(reference: &str, prod: bool) -
     }
     if let source::ImageSource::Registry(_) = source::ImageSource::classify(reference)? {
         let image_ref: ImageReference = reference.parse()?;
-        if !image_ref.is_digest_pinned() {
-            bail!("mvmctl run --image --prod requires a digest-pinned reference");
-        }
+        require_prod_digest_pin(&image_ref, true, "mvmctl run --image")?;
+    }
+    Ok(())
+}
+
+/// The digest-pin rule every `--prod` registry fetch shares: a tag can be
+/// moved to other bytes after the fact, a digest cannot. `surface` names the
+/// command in the refusal.
+pub(in crate::commands) fn require_prod_digest_pin(
+    image_ref: &ImageReference,
+    prod: bool,
+    surface: &str,
+) -> Result<()> {
+    if prod && !image_ref.is_digest_pinned() {
+        bail!(
+            "{surface} --prod requires a digest-pinned reference; {} names a tag",
+            image_ref.canonical()
+        );
     }
     Ok(())
 }
@@ -56,12 +71,13 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
-    crate::commands::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
+    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
     resolve_or_pull_run_image_with(
         cache_root,
         reference,
         prod,
         super::materialize::inject_runtime_and_materialize,
+        &CosignCommandVerifier,
     )
 }
 
@@ -83,6 +99,7 @@ pub(super) fn resolve_or_pull_run_image_with(
     reference: &str,
     prod: bool,
     materialize: RuntimeMaterializer,
+    verifier: &dyn super::trust::CosignVerifier,
 ) -> Result<ResolvedOciRunImage> {
     // Local sources route to their own ingest; a registry reference falls
     // through to the cache-or-pull path below.
@@ -102,22 +119,29 @@ pub(super) fn resolve_or_pull_run_image_with(
     let image_ref: ImageReference = reference.parse()?;
     let canonical = image_ref.canonical();
     let runtime_tag = oci_runtime_tag(cache_root);
-    let (image, pulled, trust_from_pull, auth_source_from_pull) = match load_index(cache_root)
+    let cached_entry = load_index(cache_root)
         .ok()
-        .and_then(|index| find_image(&index, &canonical).cloned())
-    {
-        Some(cached) if cached_rootfs_is_current(&cached, &runtime_tag) => {
-            (cached, false, None, None)
+        .and_then(|index| find_image(&index, &canonical).cloned());
+    // Trust first. Nothing is materialized, and no provenance mark is signed,
+    // for a production run of an image the policy has not verified: a refusal
+    // after the fact would leave a signed, sealed image in the cache.
+    let cached_trust = cached_entry
+        .as_ref()
+        .map(|cached| trust_decision_for_cached_image(&image_ref, cached, prod, verifier))
+        .transpose()?;
+    let (image, pulled, trust, auth_source_from_pull) = match (cached_entry, cached_trust) {
+        (Some(cached), Some(trust)) if cached_rootfs_is_current(&cached, &runtime_tag, prod) => {
+            (cached, false, trust, None)
         }
-        Some(cached) => {
+        (Some(cached), Some(trust)) => {
             sweep_before_builder_vm();
             match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize, prod)? {
-                Some(repaired) => (repaired, false, None, None),
+                Some(repaired) => (repaired, false, trust, None),
                 None => {
                     sweep_before_builder_vm();
                     let (cached, trust, auth_source) =
                         pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
-                    (cached, true, Some(trust), Some(auth_source))
+                    (cached, true, trust, Some(auth_source))
                 }
             }
         }
@@ -125,7 +149,7 @@ pub(super) fn resolve_or_pull_run_image_with(
             sweep_before_builder_vm();
             let (cached, trust, auth_source) =
                 pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
-            (cached, true, Some(trust), Some(auth_source))
+            (cached, true, trust, Some(auth_source))
         }
     };
     let Some(rootfs_relative) = image.rootfs_path.as_deref() else {
@@ -137,7 +161,7 @@ pub(super) fn resolve_or_pull_run_image_with(
     };
     let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
     let mut rematerialized_from = None;
-    if !rootfs_path.is_file() || !rootfs_verity_sidecars_present(&rootfs_path) {
+    if !super::materialize::reusable_rootfs(&rootfs_path, prod)? {
         // Self-heal a cache whose index still records a materialized rootfs but
         // whose sealed block-root artifacts have since drifted. That covers a
         // vanished `rootfs.ext4` (interrupted prune / manual delete) and older
@@ -146,8 +170,11 @@ pub(super) fn resolve_or_pull_run_image_with(
         // seal `image pull` performs — network-free, from the cached layers —
         // rather than failing the run. Only when the unpacked tree is gone too
         // is this a genuine cache loss the user must re-pull.
-        match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
-            Some(unpacked_root) => {
+        // A tree whose recorded owners are missing or unreadable counts as
+        // gone: rebuilding from it would boot every file owned by root.
+        match super::cache::read_cached_unpack(cache_root, &image.resolved_digest)? {
+            Some(cached) => {
+                let unpacked_root = cached.root;
                 sweep_before_builder_vm();
                 let signer;
                 let evidence = if prod {
@@ -173,10 +200,8 @@ pub(super) fn resolve_or_pull_run_image_with(
                     )?
                     .as_ref(),
                     sealed: prod,
-                    deferred_nodes: super::cache::read_deferred_nodes(
-                        cache_root,
-                        &image.resolved_digest,
-                    )?,
+                    deferred_nodes: cached.deferred_nodes,
+                    owners: cached.owners,
                     evidence,
                 })
                 .with_context(|| {
@@ -202,10 +227,7 @@ pub(super) fn resolve_or_pull_run_image_with(
         &image.reference,
         rematerialized_from.as_deref(),
     )?;
-    let trust = match trust_from_pull {
-        Some(trust) => trust,
-        None => trust_decision_for_cached_image(&image_ref, &image, prod, &CosignCommandVerifier)?,
-    };
+    super::materialize::refuse_unsealed_prod_rootfs(&rootfs_path, prod)?;
     let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest)
         .map(|raw| prepare_rootfs_only_tree(cache_root, &raw, &image.resolved_digest))
         .transpose()?;
@@ -229,7 +251,7 @@ pub(super) fn pull_image_with_trust(
         cache_root,
         reference,
         prod,
-        crate::commands::runtime_overlay::prepare_oci_guest_runtime,
+        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime,
     )
 }
 
@@ -240,9 +262,7 @@ fn pull_image_with_trust_with_prepare(
     prepare_guest_runtime: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
     let image_ref: ImageReference = reference.parse()?;
-    if prod && !image_ref.is_digest_pinned() {
-        bail!("mvmctl image pull --prod requires a digest-pinned reference");
-    }
+    require_prod_digest_pin(&image_ref, prod, "mvmctl image pull")?;
     ensure_prod_registry_policy(&image_ref, prod)?;
     prepare_guest_runtime(cache_root)?;
     pull_image_ref(cache_root, image_ref, reference, prod)
@@ -259,6 +279,22 @@ fn ensure_prod_registry_reference_policy(reference: &str, prod: bool) -> Result<
     Ok(())
 }
 
+/// Under `--prod`, refuse a registry the OCI registry policy does not allow.
+/// Needs only the policy's allowlist, so it applies to callers whose content
+/// is signed some other way.
+pub(in crate::commands) fn ensure_prod_registry_allowed(
+    image_ref: &ImageReference,
+    prod: bool,
+) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    let policy = super::trust_policy::load_oci_registry_allowlist()?;
+    enforce_registry_allowlist(image_ref, &policy)
+}
+
+/// Under `--prod`, load the OCI registry policy, refuse a registry it does not
+/// allow, and require the cosign signature section an image pull verifies.
 fn ensure_prod_registry_policy(image_ref: &ImageReference, prod: bool) -> Result<()> {
     if !prod {
         return Ok(());
@@ -331,6 +367,10 @@ fn pull_image_ref(
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
+    // Another run of this image may be injecting into or copying from the
+    // tree this is about to remove. Released before materializing, which
+    // takes it again itself.
+    let tree_lock = mvm_build::run_image::lock_unpacked_tree(&unpacked_root)?;
     if unpacked_root.exists() {
         fs::remove_dir_all(&unpacked_root)
             .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
@@ -341,6 +381,7 @@ fn pull_image_ref(
     let mut cached_layers = Vec::with_capacity(layers.len());
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     for layer in &layers {
         let report = fetch_or_unpack_layer(
             cache_root,
@@ -352,6 +393,7 @@ fn pull_image_ref(
             &prior_layer_paths,
         )
         .with_context(|| format!("layer {}", layer.digest))?;
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
         cached_layers.push(CachedOciLayer {
@@ -362,26 +404,33 @@ fn pull_image_ref(
     }
 
     let runtime_tag = oci_runtime_tag(cache_root);
-    let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
+    let rootfs_path = super::materialize::oci_rootfs_rel(&manifest.digest, &runtime_tag, prod)?;
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &manifest.digest, &owners)?;
     // The config blob written above is the image's own declaration of `Env`,
     // `WorkingDir` and `Entrypoint`/`Cmd`. Materializing without it discards
     // all three: the guest then falls back to `workload_env::DEFAULT_PATH`, so
     // an image's own tools are off `PATH` even though the binaries are in the
     // rootfs. The cache-hit path beside this one has always passed it; this
     // one computed `config_path` forty lines earlier and dropped it.
+    drop(tree_lock);
     let entrypoint = oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?;
-    inject_runtime_and_materialize(super::materialize::MaterializeCall {
-        cache_root,
-        unpacked_root: &unpacked_root,
-        rootfs_abs: &rootfs_abs,
-        image_label: &image_ref.canonical(),
-        entrypoint: entrypoint.as_ref(),
-        sealed: false,
-        deferred_nodes,
-        evidence: None,
-    })?;
+    let canonical_label = image_ref.canonical();
+    materialize_pulled_rootfs(
+        PulledRootfs {
+            cache_root,
+            unpacked_root: &unpacked_root,
+            rootfs_abs: &rootfs_abs,
+            canonical_reference: &canonical_label,
+            resolved_digest: &manifest.digest,
+            entrypoint: entrypoint.as_ref(),
+            prod,
+            deferred_nodes,
+            owners,
+        },
+        inject_runtime_and_materialize,
+    )?;
 
     let provenance = super::oci_types::OciProvenance {
         schema_version: 1,
@@ -439,6 +488,53 @@ fn pull_image_ref(
     upsert_image(&mut index, cached.clone());
     save_index(cache_root, &index)?;
     Ok((cached, trust, registry_auth.source))
+}
+
+/// Everything a fresh pull hands to the materializer.
+struct PulledRootfs<'a> {
+    cache_root: &'a Path,
+    unpacked_root: &'a Path,
+    rootfs_abs: &'a Path,
+    canonical_reference: &'a str,
+    resolved_digest: &'a str,
+    entrypoint: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
+    prod: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    owners: mvm_fs::ownership::OwnerTable,
+}
+
+/// Materialize a freshly pulled image as the variant the run asked for.
+///
+/// A production pull is sealed and carries a signed provenance mark. The
+/// caller reaches here only after the trust policy has verified the image.
+/// This used to materialize the dev variant whatever the flag said, and a
+/// `--prod` run on a cold cache then booted it.
+fn materialize_pulled_rootfs(
+    pulled: PulledRootfs<'_>,
+    materialize: RuntimeMaterializer,
+) -> Result<()> {
+    let signer = pulled
+        .prod
+        .then(crate::commands::vm::host_signer::load_or_init)
+        .transpose()
+        .context("load host signing key for the provenance mark")?;
+    let evidence = signer.as_ref().map(|signer| {
+        mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
+            .with_image_ref(pulled.canonical_reference)
+            .with_image_digest(pulled.resolved_digest)
+            .build()
+    });
+    materialize(super::materialize::MaterializeCall {
+        cache_root: pulled.cache_root,
+        unpacked_root: pulled.unpacked_root,
+        rootfs_abs: pulled.rootfs_abs,
+        image_label: pulled.canonical_reference,
+        entrypoint: pulled.entrypoint,
+        sealed: pulled.prod,
+        deferred_nodes: pulled.deferred_nodes,
+        owners: pulled.owners,
+        evidence,
+    })
 }
 
 fn write_config_blob(
@@ -617,7 +713,20 @@ mod tests {
             .join(sha256_hex(digest).unwrap());
         fs::create_dir_all(&unpacked).expect("create unpacked root");
         fs::write(unpacked.join("layer-file"), b"from-layer").expect("write unpacked file");
+        crate::commands::image::cache::write_layer_owners(
+            cache_root,
+            digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
         unpacked
+    }
+
+    /// Where a dev run expects this image's rootfs, for the runtime currently
+    /// seeded under `cache_root`.
+    fn dev_rootfs_rel(cache_root: &Path, digest: &str) -> String {
+        super::super::materialize::oci_rootfs_rel(digest, &oci_runtime_tag(cache_root), false)
+            .expect("rootfs path")
     }
 
     fn seed_guest_runtime_cache(cache_root: &Path) {
@@ -662,7 +771,289 @@ mod tests {
             parent.join("deferred-seen.json"),
             serde_json::to_vec(&call.deferred_nodes)?,
         )?;
+        fs::write(
+            parent.join("owners-seen.json"),
+            serde_json::to_vec(&call.owners)?,
+        )?;
+        fs::write(
+            parent.join("seal-seen.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "sealed": call.sealed,
+                "evidence": call.evidence.is_some(),
+            }))?,
+        )?;
+        // The sidecar the real materializer writes, with the variant it built.
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(call.image_label, call.sealed, true)
+            .write_to_dir(parent)?;
         Ok(())
+    }
+
+    /// A materializer that records a dev sidecar whatever it was asked for:
+    /// the shape of an image the reuse check or the final gate must refuse
+    /// for a `--prod` run.
+    fn unsealed_materialize(call: super::super::materialize::MaterializeCall<'_>) -> Result<()> {
+        fake_runtime_materialize(super::super::materialize::MaterializeCall {
+            sealed: false,
+            evidence: None,
+            ..call
+        })
+    }
+
+    /// Accepts every signature, and counts how often it was asked.
+    struct AcceptingVerifier(std::cell::Cell<u32>);
+
+    impl super::super::trust::CosignVerifier for AcceptingVerifier {
+        fn verify(
+            &self,
+            _reference: &str,
+            _identity: &super::super::oci_types::CosignIdentity,
+        ) -> Result<(), super::super::trust::CosignVerifyError> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    struct RejectingVerifier;
+
+    impl super::super::trust::CosignVerifier for RejectingVerifier {
+        fn verify(
+            &self,
+            _reference: &str,
+            _identity: &super::super::oci_types::CosignIdentity,
+        ) -> Result<(), super::super::trust::CosignVerifyError> {
+            Err(super::super::trust::CosignVerifyError::MissingSignature(
+                "no matching signatures".to_string(),
+            ))
+        }
+    }
+
+    const PINNED: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PINNED_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A scratch mvm home with a production OCI policy, a seeded guest
+    /// runtime, and an index entry plus unpacked tree for [`PINNED`] — every
+    /// input a `--prod` resolve reads, none of them the developer's.
+    struct ProdFixture {
+        _env: mvm_core::util::test_env::TestEnv,
+        _home: tempfile::TempDir,
+        cache: std::path::PathBuf,
+    }
+
+    fn prod_fixture() -> ProdFixture {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let policy = home.path().join("oci-policy.toml");
+        fs::write(
+            &policy,
+            r#"
+allowed_registries = ["docker.io"]
+require_signatures = true
+
+[[cosign]]
+certificate_identity = "https://github.com/example/images/.github/workflows/release.yml@refs/tags/v1"
+certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
+"#,
+        )
+        .expect("write policy");
+        env.set("MVM_OCI_POLICY", &policy);
+        let cache = home.path().join("cache/oci");
+        seed_guest_runtime_cache(&cache);
+        let mut image = sample_image(PINNED, PINNED_DIGEST, "blobs/a");
+        image.config_path = None;
+        write_index(
+            &cache,
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        create_unpacked_root(&cache, PINNED_DIGEST);
+        ProdFixture {
+            _env: env,
+            _home: home,
+            cache,
+        }
+    }
+
+    fn sidecar_sealed(rootfs: &Path) -> bool {
+        crate::commands::vm::agent_verbs::image_is_sealed(rootfs)
+    }
+
+    fn resolve(
+        fixture: &ProdFixture,
+        prod: bool,
+        materialize: RuntimeMaterializer,
+    ) -> Result<ResolvedOciRunImage> {
+        resolve_or_pull_run_image_with(
+            &fixture.cache,
+            PINNED,
+            prod,
+            materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+        )
+    }
+
+    /// The reported bug: a dev run cached its image first, and a `--prod` run
+    /// of the same image reused it — unsealed, so the boot picked the dev
+    /// agent profile. The prod run now builds its own sealed image beside it.
+    #[test]
+    fn a_prod_run_after_a_dev_run_gets_its_own_sealed_image() {
+        let fixture = prod_fixture();
+        let dev = resolve(&fixture, false, fake_runtime_materialize).expect("dev resolves");
+        assert!(!sidecar_sealed(&dev.rootfs_path));
+
+        let prod = resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
+
+        assert_ne!(
+            prod.rootfs_path, dev.rootfs_path,
+            "the variants never share a file"
+        );
+        assert!(sidecar_sealed(&prod.rootfs_path));
+        let seen: serde_json::Value = serde_json::from_slice(
+            &fs::read(prod.rootfs_path.parent().unwrap().join("seal-seen.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(seen["sealed"], true);
+        assert_eq!(seen["evidence"], true, "a sealed image carries its mark");
+        assert!(
+            !sidecar_sealed(&dev.rootfs_path),
+            "the dev image is untouched"
+        );
+    }
+
+    /// And the other way round: a dev run after a prod run does not reuse the
+    /// sealed image; it gets a dev one.
+    #[test]
+    fn a_dev_run_after_a_prod_run_gets_its_own_dev_image() {
+        let fixture = prod_fixture();
+        let prod = resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
+        assert!(sidecar_sealed(&prod.rootfs_path));
+
+        let dev = resolve(&fixture, false, fake_runtime_materialize).expect("dev resolves");
+
+        assert_ne!(dev.rootfs_path, prod.rootfs_path);
+        assert!(!sidecar_sealed(&dev.rootfs_path));
+        assert!(sidecar_sealed(&prod.rootfs_path));
+    }
+
+    /// A file at the sealed path whose sidecar says otherwise — an interrupted
+    /// or older build — is rebuilt, not trusted.
+    #[test]
+    fn a_prod_run_rebuilds_an_unsealed_image_at_the_sealed_path() {
+        let fixture = prod_fixture();
+        let rel = super::super::materialize::oci_rootfs_rel(
+            PINNED_DIGEST,
+            &oci_runtime_tag(&fixture.cache),
+            true,
+        )
+        .unwrap();
+        let rootfs = fixture.cache.join(&rel);
+        fs::create_dir_all(rootfs.parent().unwrap()).unwrap();
+        for (name, body) in [
+            ("rootfs.ext4", "dev bytes"),
+            ("rootfs.verity", "v"),
+            ("rootfs.roothash", "h\n"),
+        ] {
+            fs::write(rootfs.parent().unwrap().join(name), body).unwrap();
+        }
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(PINNED, false, true)
+            .write_to_dir(rootfs.parent().unwrap())
+            .unwrap();
+        let mut index = load_index(&fixture.cache).unwrap();
+        index.images[0].rootfs_path = Some(rel.clone());
+        index.images[0].runtime_tag = Some(oci_runtime_tag(&fixture.cache));
+        save_index(&fixture.cache, &index).unwrap();
+
+        let prod = resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
+
+        assert_eq!(prod.rootfs_path, rootfs);
+        assert!(sidecar_sealed(&rootfs));
+        assert_ne!(fs::read_to_string(&rootfs).unwrap(), "dev bytes");
+    }
+
+    /// Whatever the cache or a materializer did, a `--prod` resolve never
+    /// hands back an image whose sidecar is not sealed.
+    #[test]
+    fn a_prod_run_is_refused_an_image_that_is_not_sealed() {
+        let fixture = prod_fixture();
+        let err = resolve(&fixture, true, unsealed_materialize)
+            .expect_err("an unsealed image must not reach a production boot");
+        assert!(
+            format!("{err:#}").contains("does not record a sealed image"),
+            "{err:#}"
+        );
+    }
+
+    /// The trust check runs before anything is built or signed: an image the
+    /// policy refuses leaves no sealed, signed image in the cache.
+    #[test]
+    fn a_prod_run_the_trust_policy_refuses_materializes_nothing() {
+        let fixture = prod_fixture();
+        let err = resolve_or_pull_run_image_with(
+            &fixture.cache,
+            PINNED,
+            true,
+            fake_runtime_materialize,
+            &RejectingVerifier,
+        )
+        .expect_err("an unverified image must be refused");
+        assert!(
+            format!("{err:#}").contains("cosign verification failed"),
+            "{err:#}"
+        );
+        let sealed_dir = fixture
+            .cache
+            .join(
+                super::super::materialize::oci_rootfs_rel(
+                    PINNED_DIGEST,
+                    &oci_runtime_tag(&fixture.cache),
+                    true,
+                )
+                .unwrap(),
+            )
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            !sealed_dir.exists(),
+            "nothing was materialized for the refused run"
+        );
+    }
+
+    /// A fresh `--prod` pull materializes the sealed variant with its mark;
+    /// it used to hard-code the dev variant.
+    #[test]
+    fn a_fresh_prod_pull_materializes_the_sealed_variant() {
+        let fixture = prod_fixture();
+        let rootfs_abs = fixture.cache.join("rootfs/pulled-sealed/rootfs.ext4");
+        let unpacked = fixture
+            .cache
+            .join("unpacked")
+            .join(sha256_hex(PINNED_DIGEST).unwrap());
+        materialize_pulled_rootfs(
+            PulledRootfs {
+                cache_root: &fixture.cache,
+                unpacked_root: &unpacked,
+                rootfs_abs: &rootfs_abs,
+                canonical_reference: PINNED,
+                resolved_digest: PINNED_DIGEST,
+                entrypoint: None,
+                prod: true,
+                deferred_nodes: Vec::new(),
+                owners: mvm_fs::ownership::OwnerTable::new(),
+            },
+            fake_runtime_materialize,
+        )
+        .expect("prod pull materializes");
+
+        assert!(sidecar_sealed(&rootfs_abs));
+        let seen: serde_json::Value = serde_json::from_slice(
+            &fs::read(rootfs_abs.parent().unwrap().join("seal-seen.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(seen["evidence"], true);
     }
 
     #[test]
@@ -781,7 +1172,7 @@ mod tests {
         seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
         image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
@@ -790,13 +1181,22 @@ mod tests {
                 images: vec![image],
             },
         );
-        write_file(tmp.path(), "rootfs/alpine/rootfs.ext4", b"rootfs");
-        write_file(tmp.path(), "rootfs/alpine/rootfs.verity", b"verity");
+        let rel = dev_rootfs_rel(tmp.path(), digest);
+        let dir = Path::new(&rel).parent().expect("rootfs dir");
+        write_file(tmp.path(), &rel, b"rootfs");
         write_file(
             tmp.path(),
-            "rootfs/alpine/rootfs.roothash",
+            &dir.join("rootfs.verity").to_string_lossy(),
+            b"verity",
+        );
+        write_file(
+            tmp.path(),
+            &dir.join("rootfs.roothash").to_string_lossy(),
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
         );
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("alpine", false, true)
+            .write_to_dir(&tmp.path().join(dir))
+            .expect("publish the sidecar that marks the set complete");
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
@@ -804,7 +1204,7 @@ mod tests {
 
         assert_eq!(resolved.reference, "docker.io/library/alpine:3.20");
         assert_eq!(resolved.resolved_digest, digest);
-        assert!(resolved.rootfs_path.ends_with("rootfs/alpine/rootfs.ext4"));
+        assert!(resolved.rootfs_path.ends_with(&rel));
         assert!(!resolved.pulled);
         assert_eq!(resolved.provenance.source, "run_image");
         assert_eq!(
@@ -842,14 +1242,12 @@ mod tests {
             "docker.io/library/alpine:3.20",
             false,
             fake_runtime_materialize,
+            &super::super::trust::CosignCommandVerifier,
         )
         .expect("stale cached image should be repaired from unpacked layers");
 
         let runtime_tag = oci_runtime_tag(tmp.path());
-        let expected = format!(
-            "rootfs/{}-{runtime_tag}/rootfs.ext4",
-            sha256_hex(digest).unwrap()
-        );
+        let expected = dev_rootfs_rel(tmp.path(), digest);
         assert_eq!(resolved.rootfs_path, tmp.path().join(&expected));
         assert!(!resolved.pulled);
         assert_eq!(
@@ -872,7 +1270,7 @@ mod tests {
         seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
         image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
@@ -889,12 +1287,13 @@ mod tests {
             "docker.io/library/alpine:3.20",
             false,
             fake_runtime_materialize,
+            &super::super::trust::CosignCommandVerifier,
         )
         .expect("missing current rootfs should be repaired from unpacked layers");
 
         assert_eq!(
             resolved.rootfs_path,
-            tmp.path().join("rootfs/alpine/rootfs.ext4")
+            tmp.path().join(dev_rootfs_rel(tmp.path(), digest))
         );
         assert!(!resolved.pulled);
         assert_eq!(
@@ -917,7 +1316,7 @@ mod tests {
         seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine-deferred/rootfs.ext4".to_string());
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
         image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
@@ -932,6 +1331,7 @@ mod tests {
         let deferred = vec![mvm_fs::ext4::Node::Symlink {
             path: "/usr/share/man/man7/pam.7.gz".to_string(),
             target: "PAM.7.gz".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         crate::commands::image::cache::write_deferred_nodes(tmp.path(), digest, &deferred)
             .expect("record deferred nodes");
@@ -941,6 +1341,7 @@ mod tests {
             "docker.io/library/alpine:3.20",
             false,
             fake_runtime_materialize,
+            &super::super::trust::CosignCommandVerifier,
         )
         .expect("repair from unpacked layers");
 
@@ -959,6 +1360,113 @@ mod tests {
     }
 
     #[test]
+    fn self_heal_restores_the_layer_owners_the_pull_recorded() {
+        // The unpacked tree is owned by whoever ran the pull, so the owners
+        // the layers declared exist only in the sidecar. A rebuild that
+        // skipped it would boot a service's data directory owned by root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        let unpacked = create_unpacked_root(tmp.path(), digest);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("var/lib/svc/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o750);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(999);
+        header.set_gid(999);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let report = mvm_fs::oci::unpack::unpack_layer(
+            builder.into_inner().unwrap().as_slice(),
+            &unpacked,
+            &UnpackOptions::default(),
+        )
+        .expect("unpack");
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+        crate::commands::image::cache::write_layer_owners(tmp.path(), digest, &owners)
+            .expect("record layer owners");
+
+        let resolved = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+            &super::super::trust::CosignCommandVerifier,
+        )
+        .expect("repair from unpacked layers");
+
+        let seen: mvm_fs::ownership::OwnerTable = serde_json::from_slice(
+            &fs::read(
+                resolved
+                    .rootfs_path
+                    .parent()
+                    .expect("rootfs has parent")
+                    .join("owners-seen.json"),
+            )
+            .expect("materializer recorded what it was handed"),
+        )
+        .expect("parse recorded owners");
+        assert_eq!(seen, owners);
+        assert_eq!(
+            seen.owner_of("/var/lib/svc"),
+            mvm_fs::ext4::Owner::new(999, 999)
+        );
+    }
+
+    #[test]
+    fn a_missing_rootfs_over_a_tree_with_no_recorded_owners_asks_for_repull() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:8888888888888888888888888888888888888888888888888888888888888888";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        fs::remove_file(
+            tmp.path()
+                .join("unpacked")
+                .join(format!("{}.owners.json", sha256_hex(digest).unwrap())),
+        )
+        .expect("drop the owner sidecar");
+
+        let err = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+            &super::super::trust::CosignCommandVerifier,
+        )
+        .expect_err("a tree with no recorded owners must not rebuild the image");
+        assert!(
+            format!("{err:#}").contains("mvmctl image pull"),
+            "error should tell the user to re-pull: {err:#}"
+        );
+    }
+
+    #[test]
     fn resolve_run_image_missing_rootfs_without_unpacked_layers_asks_for_repull() {
         // The index records a materialized rootfs whose ext4 has vanished AND
         // whose unpacked layer tree is also gone — genuine cache loss. The run
@@ -971,7 +1479,7 @@ mod tests {
         seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
         image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
@@ -1005,7 +1513,7 @@ mod tests {
         seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
-        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.rootfs_path = Some(dev_rootfs_rel(tmp.path(), digest));
         image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
@@ -1015,19 +1523,26 @@ mod tests {
             },
         );
         write_minimal_config(tmp.path());
-        write_file(tmp.path(), "rootfs/alpine/rootfs.ext4", b"stale-rootfs");
+        let rel = dev_rootfs_rel(tmp.path(), digest);
+        write_file(tmp.path(), &rel, b"stale-rootfs");
         let unpacked = tmp
             .path()
             .join("unpacked")
             .join(sha256_hex(digest).expect("hex digest key"));
         std::fs::create_dir_all(unpacked.join("etc")).expect("create unpacked tree");
         std::fs::write(unpacked.join("etc/hostname"), b"box\n").expect("write unpacked file");
+        crate::commands::image::cache::write_layer_owners(
+            tmp.path(),
+            digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("record layer owners");
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
                 .expect("stale verity-free cached rootfs must be re-sealed");
 
-        assert!(resolved.rootfs_path.ends_with("rootfs/alpine/rootfs.ext4"));
+        assert!(resolved.rootfs_path.ends_with(&rel));
         assert!(resolved.rootfs_path.is_file());
         assert!(
             resolved

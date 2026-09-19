@@ -27,8 +27,9 @@ pub mod ts_runner;
 pub mod ui;
 pub mod update;
 pub mod watch;
+pub(crate) mod workspace_graph;
 
-pub use commands::run;
+pub use commands::{declare_binary_features, run};
 
 /// Launch-budget contract consumed by external validation harnesses.
 pub mod launch_contract {
@@ -40,7 +41,7 @@ pub mod launch_contract {
 /// Gherkin steps. Not a general-purpose API; other consumers must not take a
 /// dependency on it.
 pub mod boot_policy {
-    pub use crate::commands::vm::up::oci_persist::persistent_oci_effective_initrd;
+    pub use mvm_client::launch::persistent::persistent_oci_effective_initrd;
 }
 
 /// Plan synthesis for library consumers — building an

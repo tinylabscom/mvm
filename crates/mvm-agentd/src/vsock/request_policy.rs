@@ -56,6 +56,8 @@ impl GuestRequest {
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::DriveOpen { .. } => Verb::DriveOpen,
+            GuestRequest::DriveFile { .. } => Verb::DriveFile,
             GuestRequest::RunExtension { .. } => Verb::RunExtension,
             GuestRequest::CancelExtension { .. } => Verb::CancelExtension,
             GuestRequest::RunDetached { .. } => Verb::RunDetached,
@@ -119,6 +121,8 @@ impl GuestRequest {
             | GuestRequest::ProbeStatus
             | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
+            | GuestRequest::DriveOpen { .. }
+            | GuestRequest::DriveFile { .. }
             | GuestRequest::RunExtension { .. }
             | GuestRequest::CancelExtension { .. }
             | GuestRequest::PostRestore { .. }
@@ -205,6 +209,8 @@ impl GuestRequest {
             "post-restore",
             "entrypoint-status",
             "run-entrypoint",
+            "drive-open",
+            "drive-file",
             "run-extension",
             "cancel-extension",
             "stream-input",

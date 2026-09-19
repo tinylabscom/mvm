@@ -194,6 +194,7 @@ impl MvmConfig {
                 .and_then(std::num::NonZeroU32::new)
                 .map(|secs| mvm_contract::grants::WallClockGrant::Secs { secs }),
             egress: None,
+            drive: None,
         }
     }
 

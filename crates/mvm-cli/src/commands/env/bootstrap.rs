@@ -61,7 +61,7 @@ where
 }
 
 fn prepare_launch_runtime_artifacts() -> Result<()> {
-    use crate::commands::runtime_overlay::{
+    use mvm_client::launch::runtime_overlay::{
         RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
         runtime_overlay_acquire_mode,
     };
@@ -70,7 +70,7 @@ fn prepare_launch_runtime_artifacts() -> Result<()> {
     let oci_cache_root = cache_root.join("oci");
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    crate::commands::runtime_overlay::prepare_oci_guest_runtime(&oci_cache_root)?;
+    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&oci_cache_root)?;
     let mode = runtime_overlay_acquire_mode();
     match mode {
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {

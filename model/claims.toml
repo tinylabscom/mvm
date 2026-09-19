@@ -34,8 +34,6 @@
 #   fn:NAME   -- a `fn NAME(` must exist under `crates/`
 #   ci:NAME   -- NAME must appear in some `.github/workflows/*` file
 
-spec = "mvm/1"
-
 [[claim]]
 id = "MVM-SEC-01"
 level = "build"
@@ -197,7 +195,7 @@ id = "MVM-SEC-11"
 level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "app_deps"
-statement = "Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated"
+statement = "App-dep volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked and reverified at admission"
 witnesses = [
     "fn:verify_sealed_volume",
     "fn:apply_install_gate",
@@ -224,7 +222,7 @@ statement = "The managed substitution path hands the guest placeholders, never r
 witnesses = [
     "fn:handed_placeholders_never_contain_the_secret_value",
     "fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination",
-    "fn:substitute",
+    "fn:substitute_bound_credential",
 ]
 
 [[claim]]
@@ -264,6 +262,7 @@ witnesses = [
     "fn:handed_placeholders_never_contain_the_secret_value",
     "fn:network_endpoint_refuses_unbound_destination",
     "fn:audit_chain_carries_no_secret_value",
+    "fn:substitution_is_audited_when_upstream_fails_after_send",
 ]
 
 [[claim]]
@@ -326,7 +325,7 @@ id = "MVM-SEC-18"
 level = "build"
 witness_kinds = ["fn"]
 suite = "admission_budget"
-statement = "A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism"
+statement = "A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism"
 # Preview, not shipped, and the three controls have sharply different
 # strengths. Admission is strong and host-independent: an operator-configured
 # per-workload ceiling plus a host-wide budget that sums each live machine's
@@ -340,7 +339,10 @@ statement = "A workload's resource consumption is bounded at admission — per w
 # likewise declared but unwired; and a warm-claimed child is bounded at
 # admission by the host-wide ceiling — the weakest bound available, since a
 # shared standby parent carries no grant of its own — with its host-side CPU
-# control re-armed on only one of the three claim paths.
+# control re-armed on only one of the three claim paths. Memory and task
+# ceilings ride the same scope for every VMM spawn, granted or not, but only on
+# a Linux host with a systemd user session; elsewhere they read back `declared`
+# and refuse nothing.
 # The limits are stated in full, marked open or closed individually, in the
 # ADR-001 ledger's "Preview 18 limits" note; do not read this row as enforced
 # without it.
@@ -360,12 +362,19 @@ witnesses = [
     "fn:relay_config_threads_cpu_share_to_quota_scheduler",
     "fn:apply_grants_reads_quota_record_from_state_dir",
     "fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present",
+    "fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings",
     "fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error",
+    "fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement",
+    "fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it",
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
+    "fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
     "fn:a_signed_plan_from_the_launch_path_arms_the_timer",
     "fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota",
-    "fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant",
+    "fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded",
+    "fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited",
+    "fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant",
+    "fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant",
     "fn:a_claimed_child_over_the_host_ceiling_is_refused",
     "fn:a_claimed_child_within_the_ceiling_is_admitted",
     "fn:the_refusal_names_the_ceiling_and_the_request",
@@ -377,7 +386,7 @@ id = "MVM-SEC-20"
 level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "supply_chain"
-statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid"
+statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, and self-update paths refuse an artifact whose required signature is missing or invalid"
 # `release.yml` signs archives and manifests keyless through GitHub OIDC and
 # publishes bundles carrying the Fulcio certificate and Rekor inclusion proof.
 # Raw kernels, root filesystems, and metadata are covered by those signed
@@ -389,20 +398,16 @@ statement = "Every published release artifact is authenticated under the release
 # manifest before parsing it, with the hash-skip hatch explicitly not waiving
 # the signature.
 #
-# The limit, which the statement carries deliberately: the two enforcement paths
-# do not share a posture. `verify_signature` on the self-update path returns Ok
-# with a warning when cosign is absent, so there the signature is best-effort and
-# the SHA-256 pin is what still holds. A claim that said "every path refuses"
-# would be false.
+# The self-update path used to be the exception: `verify_signature` shelled out
+# to cosign and returned Ok with a warning when it was absent. It now calls the
+# same in-process verifier with the CLI release train, so all three consuming
+# paths refuse. `install.sh`, which runs before any mvmctl exists, is outside
+# the claim and still best-effort.
 #
-# `a_malformed_bundle_is_refused` is deliberately NOT listed. It exists, it is a
-# good test, and it passes — but it is `#[cfg(feature = "manifest-verify")]`, and
-# every use of that feature in CI is `cargo run --example`, never `cargo test
-# --features`. No lane executes it. `check-claim-catalog` resolves `fn:` needles
-# by text search and cannot see a cfg gate, so listing it would buy a witness
-# that is green because nothing runs it — the same shape as the retired
-# `mvm.secret_env` witness on claim 13. Wire the feature into a test lane and it
-# becomes citable.
+# The `manifest-verify`-gated tests on these paths now run in the `Lint feature
+# coverage` job of ci.yml. `a_real_release_bundle_verifies_under_its_tag` is one
+# of them, and is citable because of that step: `check-claim-catalog` resolves
+# `fn:` needles by text search and cannot see a cfg gate.
 #
 # `ci:release-provenance` anchors the step that attests the binary tarballs with
 # `actions/attest-build-provenance`. It witnesses authenticity because the
@@ -418,4 +423,6 @@ witnesses = [
     "fn:a_missing_bundle_refuses_and_names_the_asset",
     "fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing",
     "fn:skip_hash_verify_does_not_waive_the_manifest_signature",
+    "fn:an_archive_without_a_bundle_is_refused",
+    "fn:a_real_release_bundle_verifies_under_its_tag",
 ]

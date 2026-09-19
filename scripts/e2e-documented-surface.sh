@@ -18,6 +18,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO="$PWD"
+# shellcheck source=scripts/e2e-phase-timings.sh
+source "$REPO/scripts/e2e-phase-timings.sh"
 
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
@@ -186,6 +188,7 @@ on_exit() {
   local status=$?
   stop_watcher
   echo
+  e2e_phase_summary "Documented surface phase timings ($(uname -s))"
   reap "post-run"
   reap_orphan_supervisors
   release_lock
@@ -242,6 +245,7 @@ release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] 
 # deleted helpers the build had just produced and every launch then failed with
 # "mvm-hvf-supervisor not found" — a worse failure than the stale one it was
 # meant to fix.
+e2e_phase build
 echo "==> refreshing embedded aux helpers"
 just embed-refresh
 
@@ -343,6 +347,7 @@ start_watcher
 # difference. A stale one makes the golden-argv scenarios report SDK drift that
 # is really just an old build — which is exactly how it read the first time.
 # `tsc` is incremental, so the cost when nothing changed is small.
+e2e_phase typescript-sdk
 echo "==> building the TypeScript SDK"
 if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
   just sdk-install-typescript
@@ -381,12 +386,20 @@ echo "    boot image: ${MVM_BOOT_IMAGE:-auto (resolver decides from the checkout
 # need it then fail on their own, naming themselves.
 echo "==> warming artifacts in $E2E_HOME"
 
-# This is deliberately before the explicit bootstrap. A cold cache proves the
-# unembedded public command can hand the entire source build to its embedded
-# helper, including Stage 0, HVF image baking, and both Nix sidecar variants.
-echo "==> warming source-matched SDK sidecar through unembedded mvmctl"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
-
+# The builder image comes first, from the binary that carries the host payload
+# and the release verifier. With `MVM_BOOT_IMAGE=fetch` that binary downloads
+# and verifies the pinned signed image in-process, once, and the sidecar build
+# below then finds it ready. The helper the unembedded binary re-executes is
+# built with that binary's own features and could acquire the image itself, but
+# only after compiling first; acquiring it here keeps the sidecar step to the
+# sidecar.
+#
+# A cold *source* bootstrap — Stage 0, and the unembedded command handing the
+# whole build to its helper — is not this lane's to prove. Doing it here made a
+# 313-scenario release gate wait on 37 minutes of image preparation that no
+# scenario examines, and on a bad day on a Stage 0 that hung for two hours.
+# `scripts/e2e-source-bootstrap.sh` witnesses that path on its own, nightly.
+e2e_phase builder-image
 if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo
   echo "!!! bootstrap FAILED — the builder VM image is unavailable."
@@ -395,6 +408,14 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo
   BOOTSTRAP_FAILED=1
 fi
+
+# The sidecar is still built from this tree: its fingerprint watches the host
+# services crate, so a published sidecar would test an older C ABI. Running it
+# through the unembedded binary keeps the hand-off to the embedded helper
+# covered on every release.
+e2e_phase sdk-sidecar
+echo "==> warming source-matched SDK sidecar through unembedded mvmctl"
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.
@@ -459,6 +480,7 @@ warm_launch_artifacts() {
   fi
   rm -f "$warm_log"
 }
+e2e_phase launch-artifacts
 warm_launch_artifacts
 
 # Compose the prebuilt guest-runtime directory the `@guest_bins` scenarios need.
@@ -639,6 +661,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   ALLOWED_SKIPS="$ALLOWED_SKIPS,needs-firecracker"
 fi
 
+e2e_phase suite
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
@@ -685,6 +708,7 @@ MVM_E2E_HOME="$E2E_HOME" \
     -- ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 SUITE_STATUS=$?
 set -e
+e2e_phase_end
 
 if (( SUITE_STATUS == 124 )); then
   echo

@@ -80,7 +80,9 @@
   ],
   "permissions": {
     "allow": [
+      "mcp__graft",
       "Bash(graft:*)",
+      "mcp__graft",
       "Bash(npx graft:*)",
       "Bash(graft-dev:*)",
       "Bash(node dist/cli.js:*)"

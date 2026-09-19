@@ -26,16 +26,23 @@ use mvm_core::protocol::host_time::TimeNowResponse;
 /// `$defs` (`ServiceErrorCode`, `CorrelationId`, `EmitBatchEntryStatus`, …)
 /// are emitted once and the generated clients reference one definition set.
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct BrokerServices {
-    service_call: ServiceCall,
-    service_response: ServiceResponse,
-    emit_request: EmitRequest,
-    emit_response: EmitResponse,
-    emit_batch_request: EmitBatchRequest,
-    emit_batch_response: EmitBatchResponse,
-    time_now_response: TimeNowResponse,
-    cost_report: CostReport,
+    #[schemars(rename = "service_call")]
+    _service_call: ServiceCall,
+    #[schemars(rename = "service_response")]
+    _service_response: ServiceResponse,
+    #[schemars(rename = "emit_request")]
+    _emit_request: EmitRequest,
+    #[schemars(rename = "emit_response")]
+    _emit_response: EmitResponse,
+    #[schemars(rename = "emit_batch_request")]
+    _emit_batch_request: EmitBatchRequest,
+    #[schemars(rename = "emit_batch_response")]
+    _emit_batch_response: EmitBatchResponse,
+    #[schemars(rename = "time_now_response")]
+    _time_now_response: TimeNowResponse,
+    #[schemars(rename = "cost_report")]
+    _cost_report: CostReport,
 }
 
 fn main() {

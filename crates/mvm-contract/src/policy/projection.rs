@@ -258,36 +258,6 @@ pub fn canonicalize_effective(
     Ok(CanonicalEgress::Rules(rules))
 }
 
-/// The DNS service port. The bare lowering carves out UDP/53 for it; which
-/// names a guest may resolve is decided separately, by the gate's DNS verdict
-/// over the pin registry.
-const DNS_PORT: u16 = 53;
-
-/// The DNS carve-out rules: **UDP/53 only** (IPv4 + IPv6 `0.0.0.0/0` / `::/0`).
-/// TCP/53 is deliberately NOT carved out, so a TCP/53-to-anywhere allowance
-/// cannot become a direct dial to an unlisted target. Guest resolvers
-/// (busybox / glibc / musl) query over UDP; TCP/53 fallback is rare.
-/// `CanonicalEgress::permits` still denies the mandatory-deny ranges first, so 53
-/// to cloud-metadata / link-local stays blocked.
-///
-/// These rules admit a UDP/53 datagram to any other address. A DNS question
-/// asked through the host's resolver is gated on its name against the pins; a
-/// raw datagram to port 53 is decided by these rules alone, so nothing here
-/// constrains its payload or its resolver.
-fn dns_carve_out_rules() -> Vec<CanonicalRule> {
-    let any_v4: IpNet = "0.0.0.0/0".parse().expect("0.0.0.0/0 is a valid CIDR");
-    let any_v6: IpNet = "::/0".parse().expect("::/0 is a valid CIDR");
-    [any_v4, any_v6]
-        .into_iter()
-        .map(|net| CanonicalRule {
-            proto: Proto::Udp,
-            net,
-            port_lo: DNS_PORT,
-            port_hi: DNS_PORT,
-        })
-        .collect()
-}
-
 /// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
 /// no-signed-bundle transient/dev path) + admission-time DNS pins into the
 /// canonical egress grant set — the transient analogue of
@@ -297,9 +267,10 @@ fn dns_carve_out_rules() -> Vec<CanonicalRule> {
 ///
 /// - unrestricted ⇒ [`CanonicalEgress::Unrestricted`] (mandatory-deny still applies).
 /// - deny-all (empty rule set) ⇒ `Rules([])`: admits nothing.
-/// - allow-list / preset ⇒ a DNS carve-out (UDP/53 only; see
-///   `dns_carve_out_rules` for what it does and does not gate) plus one TCP
-///   rule per (pinned IP, port).
+/// - allow-list / preset ⇒ one TCP rule per (pinned IP, port), and nothing
+///   else. It admits no UDP at all, port 53 included: a guest resolves names
+///   through the gate's DNS verdict over the pin registry, never by sending
+///   raw datagrams to a resolver of its choosing.
 ///
 /// Fail-closed: a host with no live, non-empty pin returns an error and the
 /// caller drops to deny-all. Lenient on mandatory-deny overlap (matching
@@ -315,11 +286,7 @@ pub fn canonicalize_network_policy(
         None => return Ok(CanonicalEgress::Unrestricted),
         Some(rules) => rules,
     };
-    // Empty rule set ⇒ deny-all: admit nothing, and no DNS carve-out.
-    if rules.is_empty() {
-        return Ok(CanonicalEgress::Rules(Vec::new()));
-    }
-    let mut canon = dns_carve_out_rules();
+    let mut canon = Vec::new();
     for hp in &rules {
         let pin = pins
             .lookup(&hp.host)
@@ -631,13 +598,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(eg, CanonicalEgress::Rules(vec![]));
-        // No carve-out on deny-all: even DNS is denied (the flow gate drops it).
+        // Deny-all admits no datagram, DNS port included.
         assert!(!eg.permits(&Proto::Udp, ip("1.1.1.1"), 53));
         assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
     }
 
     #[test]
-    fn bare_allow_list_pins_host_port_and_carves_out_dns() {
+    fn bare_allow_list_pins_host_port_and_admits_no_udp() {
         let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
             crate::policy::network_policy::HostPort::new("example.com", 443),
         ]);
@@ -653,12 +620,14 @@ mod tests {
         assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 8080));
         // …and a direct dial to an unlisted IP is denied (the bypass closed).
         assert!(!eg.permits(&Proto::Tcp, ip("8.8.8.8"), 443));
-        // UDP/53 is carved out (name resolution) to any non-mandatory-deny dest…
-        assert!(eg.permits(&Proto::Udp, ip("1.1.1.1"), 53));
-        // …but TCP/53 is NOT carved out (the qname gate only covers UDP/53, so a
-        // TCP/53-to-anywhere allowance would be an ungated channel).
+        // No UDP is admitted, port 53 included, to a public or a private
+        // resolver: names resolve through the gate's DNS verdict, not raw UDP.
+        assert!(!eg.permits(&Proto::Udp, ip("1.1.1.1"), 53));
+        assert!(!eg.permits(&Proto::Udp, ip("192.168.1.1"), 53));
+        assert!(!eg.permits(&Proto::Udp, ip("93.184.216.34"), 443));
+        // TCP/53 to an unlisted resolver is refused as well.
         assert!(!eg.permits(&Proto::Tcp, ip("1.1.1.1"), 53));
-        // …and mandatory-deny still wins, even on UDP/53.
+        // Mandatory-deny still refuses UDP/53 to the metadata address.
         assert!(!eg.permits(&Proto::Udp, ip("169.254.169.254"), 53));
     }
 

@@ -1,6 +1,6 @@
 //! VM lifecycle commands — start, stop, list, attach, exec.
 
-pub(super) mod agent_verbs;
+pub(super) use mvm_client::admission::agent_verbs;
 pub(super) mod artifact;
 pub(super) mod audit_chain;
 pub(in crate::commands) mod checkpoint;
@@ -8,7 +8,7 @@ pub(crate) mod console;
 pub(super) mod cp;
 pub(super) mod diff;
 pub(super) mod down;
-mod entrypoint_resolve;
+use mvm_client::admission::entrypoint_resolve;
 pub(super) mod exec;
 pub(in crate::commands) mod explain;
 pub(super) mod forward;
@@ -20,16 +20,17 @@ pub(crate) mod invoke;
 pub(crate) mod launch_sample;
 pub(super) mod logs;
 pub(super) mod managed_secrets;
+mod outputs;
 pub(super) mod pause;
 pub(crate) mod phase_timing;
 pub(super) mod plan_persist;
-pub(super) mod policy_resolver;
 pub(in crate::commands) mod prepare;
 pub(super) mod proc;
 pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
+mod run_validation;
 pub(super) mod runtime_pack;
 pub(super) mod sandbox;
 pub(super) mod sdk_no_vm;

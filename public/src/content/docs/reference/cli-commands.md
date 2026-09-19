@@ -103,7 +103,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env update`               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
 | `mvmctl env update --check`       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
-| `mvmctl env update --skip-verify` | Skip cosign signature verification                                                                                                                                                                                                                            |
+| `mvmctl env update --skip-verify` | Skip release signature verification                                                                                                                                                                                                                              |
 
 ## Building
 
@@ -323,6 +323,7 @@ admission until their transports are wired.
 | `mvmctl image boot status [--json]`              | Report each cached default boot image variant (`dev`, `prod`): tag, source (`built-local` / `fetched`), acquisition time, protocol version, on-disk size, and whether the next run would use it. Cache only, no network              |
 | `mvmctl image boot check [--json]`               | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code                                                             |
 | `mvmctl image boot update [--tag <t>] [--force]` | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative            |
+| `mvmctl image boot verify --manifest <f> --bundle <f> --lock <f> --artifacts <dir> [--require-complete] [--json]` | Verify a published image set offline: the manifest digest against the lock, the cosign signature against the lock's signing identity, the manifest's structure and producer, and every member artifact's size and digest. No network and no cache writes; a refusal names the stage that refused and exits nonzero |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
@@ -375,13 +376,14 @@ shell).
 | `mvmctl run --runtime <name> -- <cmd>...`            | Boot a named runtime from the built-in catalog; an unknown name is refused, never defaulted                                                                                                                                        |
 | `mvmctl run --no-detect -- <cmd>...`                 | Skip inference and use the bundled default image                                                                                                                                                                                   |
 | `mvmctl run --image <ref> -- <cmd>...`               | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
-| `mvmctl run --image <ref> --prod -- <cmd>...`        | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot                                                                                                    |
+| `mvmctl image pull --prod <ref@sha256:...>`          | Production OCI-image policy: require the reference to be digest-pinned and cosign-verified by the OCI policy before anything is cached, then build its sealed rootfs. A `--prod` run of an image refuses an ad-hoc command after `--` or a `--launch-plan` (each is dispatched as a DevOnly verb, which a sealed image does not serve) and `--profile dev`, before anything is pulled |
 | `mvmctl run --profile standard -- <cmd>`             | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only                                                                                                                            |
 | `mvmctl run --profile dev -- <cmd>`                  | Dev tier: as standard, plus a writable (`:rw`) host share on a persistent machine and the dev guest profile for a sealed-image entrypoint run                                                                                      |
 | `mvmctl run --profile restrictive -- <cmd>`          | No env injection and no host directory shares                                                                                                                                                                                      |
 | `mvmctl run --mount .:/work:ro -- <cmd>`             | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                       |
 | `mvmctl run --profile permissive -- <cmd>`           | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1`                                                                                                                                                                                  |
 | `mvmctl run --mount HOST:GUEST:ro -- <cmd>`          | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                       |
+| `mvmctl run --output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]] -- <cmd>` | Give the workload a fresh writable disk at `/GUEST`; after it exits, copy its regular files and directories into `HOST_DIR` (absent or empty) under a byte bound (default `64M`) and an entry bound (default `10000`), refusing the whole collection past either. Repeatable; also on `machine run` (foreground only); disabled by `--profile restrictive` |
 | `mvmctl run --env KEY=VAL -- <cmd>`                  | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                           |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`     | Resize the transient VM                                                                                                                                                                                                            |
 | `mvmctl run --timeout <secs> -- <cmd>`               | Per-command timeout                                                                                                                                                                                                                |
@@ -411,13 +413,25 @@ With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`
 1. **An explicit source flag.** Nothing is inferred.
 2. **`--runtime <name>`** against the built-in catalog. An unknown name is
    refused and lists the known ones — a typo never falls through to a default.
-3. **`--no-detect`** stops here, leaving the bundled default image.
-4. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
+3. **A first command word that reads as an OCI image reference** — a tag
+   colon, a digest, or an explicit registry host before a `/`, and not a
+   path — refuses right here, before any inference runs. This is not part
+   of inference and is not gated on steps 5–6 below finding nothing: it
+   applies equally to `--no-detect` and to `machine run`, which never reach
+   steps 5 or 6 at all. `mvmctl machine run app:1.0 -- sh` refuses with a
+   hint to pass `--image app:1.0` for exactly this reason. A source flag
+   from step 1, or `--runtime` from step 2, skips this check entirely, so a
+   legitimate command whose first word happens to contain a colon still
+   runs. A word that names an existing path relative to the working
+   directory is never refused, whichever marker it carries: `app.d/run`
+   reads like a registry host and `bin/run:dev` like a tag.
+4. **`--no-detect`** stops here, leaving the bundled default image.
+5. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
    found by the same walk-up `mvmctl machine build` uses, stopping at a `.git` boundary.
-5. **The command, then a project file.** `npm` selects node; `Cargo.toml`
+6. **The command, then a project file.** `npm` selects node; `Cargo.toml`
    selects rust. The command wins over the directory — argv is what you just
    typed, the directory is where you happened to be standing.
-6. **The bundled default image.**
+7. **The bundled default image.**
 
 | Runtime  | Image                | Commands                                     | Project files                                               |
 | -------- | -------------------- | -------------------------------------------- | ----------------------------------------------------------- |
@@ -428,6 +442,25 @@ With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`
 | `ruby`   | `ruby:3-alpine`      | `ruby`, `bundle`, `rake`, `gem`              | `Gemfile`, `Rakefile`                                       |
 | `shell`  | `alpine:3`           | `sh`, `bash`, `ash`                          | —                                                           |
 
+Separately, a known flag (`--image`, `--net`, …) placed as the very first
+word after `--` is refused and named rather than passed to the guest
+verbatim: `trailing_var_arg` never reinterprets anything after `--` as an
+option, so `mvmctl run -- --image alpine` would otherwise hand `--image` to
+the guest silently. Only that first position is checked; the same flag name
+appearing deeper in a workload's own argv is left alone. The flag list is
+read from the subcommand being run, including the global flags clap passes
+down to it, so it covers `machine run` flags (`--name`, `-d`), `run`'s own
+(`--mode`), the flags they share, and `--verbose`/`-v`, `--builder` and the
+other global flags. The error says whether the flag belongs to that
+subcommand or is a global one. Every spelling counts: aliases, hidden or not
+(`--volume`), `--flag=value`, short flags, short clusters (`-it`), and a
+short flag with its value attached (`-p8080:80`). A standalone `--help` or
+`-h` is not refused, since a workload may forward it to its own program;
+inside a cluster (`-ih`), `h` is a flag like any other. `--version` and `-V`
+are never refused, because neither subcommand has them. On
+`mvmctl run` the check also runs before an SDK `--mode`, whose first word is
+a script path.
+
 An inferred source always announces itself on stderr before booting
 (`[mvm] detected node from the command `npm` — booting node:22-alpine`), so a
 run never boots an image you did not choose without saying so. `--json` stdout
@@ -437,12 +470,13 @@ Detection picks a **source**, never a posture. An inferred run admits through
 the same signed `ExecutionPlan`, with the same `--profile standard` default and
 the same deny-all egress, as one that named its image.
 
-**`machine run` does not infer.** Steps 4 and 5 are skipped there: it creates a
+**`machine run` does not infer.** Steps 5 and 6 are skipped there: it creates a
 named, possibly persistent machine, and picking its base image from whatever
 directory you were standing in is a footgun — `machine run` inside any Rust
 checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
 naming every way to supply a source. `--runtime <name>` works on both verbs,
-because that is you naming one.
+because that is you naming one. The misplaced-image-reference refusal (step 3)
+still runs for `machine run`, exactly as it does for `run`.
 
 The catalog is curated, in-tree, and versioned with the code; it is never
 fetched at runtime. Its refs are **tags, not digests**, which is deliberate:
@@ -890,10 +924,11 @@ concept over a different store.
 | Command                                                                                                                                                                | Description                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `mvmctl agent-session open <id> [--resume-point <sha256:...>] [--member <name>]...`                                                                                    | Record a new session, resident from the start, at generation 1. Refuses if a record already exists under that id. `--member` is repeatable.                                                                  |
-| `mvmctl agent-session ls [--json]`                                                                                                                                     | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason and storage tier.                                                                     |
-| `mvmctl agent-session show <id> [--json]`                                                                                                                              | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
-| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>]`                                                               | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier. Emits a `session.parked` chain entry.    |
-| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                     |
+| `mvmctl agent-session ls [--json]`                                                                                                                                     | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason, storage tier and whether the retention deadline is alive or expired.                  |
+| `mvmctl agent-session show <id> [--json]`                                                                                                                              | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, retention deadline and its status, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
+| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--retain-for <duration>] [--expected-generation <n>] [--json]` | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier and the default retention deadline. Emits a `session.parked` chain entry. |
+| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry. |
+| `mvmctl agent-session renew <id> --for <duration> [--expected-generation <n>] [--expected-deadline <unix>] [--json]` | Move a parked session's retention deadline to `--for` from now. Extend-only. Emits a `session.renewed` chain entry. |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -916,7 +951,78 @@ park time, so a session cannot silently resume under grants it was never
 admitted for. A session parked without a head resumes unfenced, and
 `agent-session show` says so in as many words.
 
-Both chain entries are best-effort: if the entry cannot be written the
+### Retention deadlines
+
+A park sets a retention deadline: the time until which the host promises to
+keep the parked session resumable. `--retain-for` names it (`30m`, `48h`, `7d`,
+at most `30d`). Without it the reason picks a default:
+
+| Reason               | Default | Why                                                      |
+| -------------------- | ------- | -------------------------------------------------------- |
+| `approval-wait`      | 24h     | the longest an approval can live                         |
+| `idle`               | 30m     | the standby TTL a resident sandbox is reaped on          |
+| `host-shutdown`      | 48h     | starting proposal, not measured                          |
+| `operator`           | 48h     | starting proposal, not measured                          |
+| `retention-demotion` | 30d     | the record-and-journal tier costs kilobytes to hold      |
+
+`renew --for <duration>` moves the deadline to that long from now, and only
+ever later. It refuses if the new deadline would end before the current one,
+if the deadline has already passed (the session is past its promise), and if
+the session is active or closed. `ls` and `show` report the deadline as
+`alive` or `expired`. Under `--json` they add a `retention` object with `state`
+and either `remaining_secs` or `expired_for_secs`.
+
+A deadline is a promise, not an enforcement. Nothing reclaims a session when its
+deadline passes, and an expired session still resumes. No demotion yet actually
+releases what a lower storage tier claims to, so no scheduler demotes on expiry.
+
+Successive renewals of one parked session share a generation. A renew retry
+therefore needs `--expected-deadline` as well as `--expected-generation` to be
+recognised as a replay. The deadline is the value `show` prints. Without both, a
+retry is applied as a new renewal.
+
+### Retrying after a lost response
+
+A caller whose `park` or `resume` applied but whose response never arrived
+cannot tell that apart from one that did not apply. `--expected-generation`
+makes the retry safe. Pass the generation you read the session at (as `show`
+prints it) and repeat the command unchanged:
+
+- If that exact transition already applied, the command returns its original
+  result marked as a replay — `replay: this park had already applied` in text,
+  `"replayed": true` under `--json` — writes nothing, and adds no audit entry.
+  A replayed `resume` reports the plan the original was admitted under and
+  admits no second one.
+- If the same step was taken with different inputs (another `--reason`, other
+  plan material, `--boot` added or dropped), the command refuses and names each
+  input that differs. It never applies a second transition.
+- If the session has since moved past that generation, the command refuses
+  naming the current generation and the transition that moved it.
+
+The same rules apply to `renew`, which also needs `--expected-deadline` (see
+above).
+
+The identity a retry is compared by is a SHA-256 over a domain-separation tag
+and length-prefixed fields: the transition kind, the session, the observed
+generation, and every input that decides the outcome — for `park` the reason,
+journal cursor, approval head and retention; for `renew` the observed deadline
+and the extension; for `resume` the approval head, backend,
+image, image and kernel SHA-256, vCPUs, memory, and whether it boots.
+Timestamps are not part of it. Only the session's last transition is kept, so a
+retry of anything older is refused as superseded.
+
+Without `--expected-generation` the generation is read at call time. That fences
+nothing, and a retry cannot be recognised: a second `park` refuses because the
+session is no longer active, and a second `resume` refuses because it is no
+longer parked.
+
+`resume --boot` is never replayed. A retry of a boot resume that already applied
+is refused with a message saying it applied and under which plan: the record
+moves before the boot is attempted, so it cannot say whether that boot
+succeeded, and answering "booted" from it would claim something it does not
+know. Check the machine named after the session directly.
+
+All three chain entries are best-effort: if the entry cannot be written the
 transition is still reported as done, with a warning, because the store write
 already succeeded and failing afterwards would tell an operator a park did not
 happen when it did. A caller that needs the entry must verify the chain
@@ -940,6 +1046,47 @@ paths and file contents are not written to audit logs; successful copies emit
 `--json` follows the same redaction rule: the summary includes direction, VM
 name, guest path, copied byte count, and effective copy options, but not the
 host endpoint.
+
+### Handing results back (`--output`)
+
+`--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]` is how a transient run returns
+files. It is not a share: nothing on the host is visible to the guest. The guest
+gets a new, empty ext4 disk mounted writable at `/GUEST` (which must sit under
+the same guest-mount allow-roots as `--mount`), and the workload writes there.
+When the workload exits — whatever its exit code — its filesystem is flushed,
+the VM is torn down, and the host reads the disk image in-process. There is no
+protocol with the guest to speak.
+
+Collection accepts only regular files and directories. It refuses, and writes
+nothing, when the disk holds a symlink, device node, FIFO, or socket; a name
+that is empty, `.`, `..`, not UTF-8, or contains `/` or NUL; a directory entry
+whose type disagrees with its inode; a path deeper than 64 components or longer
+than 4096 bytes; more file bytes than `SIZE`; or more entries than
+`MAX_ENTRIES`. The refusal names the rule or bound that fired. `HOST_DIR` must
+be absent or empty and its parent must exist; files are created exclusively
+through directory handles that never follow a link, so nothing is overwritten
+and nothing lands outside `HOST_DIR`. File permissions are not carried over
+(files are `0644`, directories `0755`).
+
+A file hard-linked under two names inside the disk is collected as two
+independent host files, each counted against `SIZE` — the ext4 reader does not
+expose inode identity, so the link cannot be refused, but the host never
+receives an alias.
+
+The grant — guest path, resolved `HOST_DIR`, and both bounds — is recorded in
+the signed execution plan before boot. After collection a chain-signed
+`plan.outputs` audit entry records `outcome=collected` with `manifest_sha256`,
+`entry_count`, `total_bytes`, and `tree_sha256` (the identity `--asset` would
+compute for `HOST_DIR`, so a later run consuming these files names them the
+same way), or `outcome=refused` with the rule's `reason`. The full manifest —
+every `(path, size, sha256)` sorted by path — is written beside the outputs as
+`HOST_DIR.manifest.json`, which must not already exist.
+
+```bash
+mvmctl machine run --image alpine --output ./results:/data/out:16M \
+  -- sh -c 'echo done > /data/out/status.txt'
+cat ./results/status.txt ./results.manifest.json
+```
 
 ### Run examples
 
@@ -1088,7 +1235,8 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache prune --dry-run`       | Show what would be removed without deleting                                                                                                                                                                                                       |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`)                                                                                                                    |
 | `mvmctl cache prune --orphan-dirs`   | Also remove retired top-level cache dirs — leftovers from a subsystem mvm no longer has. Only names on the built-in retired list are candidates; a cache still in use is never removed                                                            |
-| `mvmctl cache prune --deep`          | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs`                                                                          |
+| `mvmctl cache prune --deep`          | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs` and `--stage0-store` |
+| `mvmctl cache prune --stage0-store`  | Remove only the Stage 0 Nix store image, keeping the builder image it produced. The next bootstrap starts cold. Refuses while a bootstrap is running |
 | `mvmctl cache repair`                | Clear a degraded builder VM store so the next build cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running builder VM first                                                                                       |
 | `mvmctl cache repair --force`        | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash)                                                                                                                                   |
 
@@ -1128,8 +1276,9 @@ running microVM.
 | `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
 | `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
-| `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` against the local trust store, reporting the parsed manifest                                                                                   |
-| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` into `~/.mvm/bundles/<sha>/`                                                                                            |
+| `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
+| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`                                                                  |
+| `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
 | `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts                                                                                                                            |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
@@ -1137,6 +1286,54 @@ running microVM.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+### Bundles in image registries
+
+`mvmctl bundle push ./app.mvmpkg oci://registry.example/team/app:v1` stores the
+bundle as one artifact manifest: `artifactType` is
+`application/vnd.mvm.bundle.v1`, the config is the empty descriptor, and the
+single layer (`application/vnd.mvm.bundle.v1.tar`) is the archive itself, which
+already carries its signature. Push refuses a bundle that does not verify
+against the local trust store, skips blobs the registry already holds, and
+prints the digest-pinned reference.
+
+`bundle fetch` and `bundle install` accept `oci://<registry>/<repository>:<tag>`
+and `oci://<registry>/<repository>@sha256:<digest>`. Only the `oci://` prefix
+selects a registry; any other string that is not an `https://` or `http://` URL
+is a local path, even one shaped like `host/name:tag`. The manifest is held to
+the pinned digest and to the digest the registry advertises, the layer to its
+descriptor digest and size, and both to size caps. A blob redirect is followed
+to any origin, without credentials, at most five times, and never from HTTPS to
+HTTP. The registry is only a transport: the bundle is accepted or refused by the
+same signature check as a local file. A pull by tag reports the digest it
+resolved to, and `bundle install` records the resolved reference in its audit
+entry.
+
+`--prod` on `fetch` and `install`:
+
+- refuses `--allow-http`, for every source;
+- for an `oci://` source, refuses a tag instead of a digest, and refuses a
+  registry the OCI registry policy (`MVM_OCI_POLICY`, the same policy
+  `mvmctl image pull --prod` enforces) does not allow. Both checks run before
+  the registry is contacted;
+- does not restrict a local path or an `https://` URL further. Those carry no
+  mutable name to pin; what is installed is identified by its sha256 and must
+  pass the signature check like any other source.
+
+Registry authentication:
+
+| Mode                       | How it is configured                                           | Behaviour                                                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anonymous with token realm | No token variable set                                          | On a `401` bearer challenge, fetches a token from the challenge realm without credentials and reuses it for that registry and repository only               |
+| Static bearer token        | `MVM_OCI_BEARER_TOKEN_<REGISTRY>`, else `MVM_OCI_BEARER_TOKEN` | Sent as `Authorization: Bearer`. If the registry refuses it, the command fails and names the token realm; the token is never exchanged for an anonymous one |
+
+`<REGISTRY>` is the registry host upper-cased with `.`, `-` and `:` replaced by
+`_`. Credentials and issued tokens are only sent to the registry they were
+configured or issued for, never to a redirect target. A token realm must be
+HTTPS, or the registry's own origin when the registry is reached over plain
+HTTP. `MVM_OCI_BEARER_TOKEN` is not host-specific, so it is not sent over plain
+HTTP; `--allow-http` uses only the registry-specific variable. Username and
+password credentials are not configurable from the CLI.
 
 ## Security
 
@@ -1225,6 +1422,7 @@ All commands accept these global options:
 | `MVM_BUILDER_MODE`                        | Builder execution mode: `host` (default) or `vsock`; `auto` is accepted as a legacy alias for `vsock`                                                                                                                                                                                                                                                                               | `host`                           |
 | `MVM_BUILDER_BACKEND`                     | Builder VMM selection: `hvf`, `firecracker`, `qemu`, or the optional development-only `libkrun` integration. Platform defaults are Apple Silicon macOS → `hvf` and Linux-with-KVM → `firecracker`; every other host → `qemu`. libkrun is never auto-detected and never fallen back to, so an unsupported host fails an availability check rather than gaining a hidden Homebrew dependency.                                                                                  | Platform default                 |
 | `MVM_BUILDER_LOCK_WAIT_SECS`              | Seconds to wait for the shared Nix store image lock when another build holds it; set to `0` to fail fast instead of queueing                                                                                                                                                                                                                                                        | `3600` (1 hour)                  |
+| `MVM_IMAGES_DIR`                          | Contributor builds only: path to a local `mvm-images` checkout, reported by `mvmctl doctor` as the `local-dev` image source. Never discovered automatically; a path that is not a checkout is an error, not a fallback. A release build refuses it before any command runs, and a production admission refuses to boot while it is set. Image builds do not read it yet             | Unset                            |
 | `MVM_NO_PERSISTENT_BUILDER`               | Set to `1` to disable automatic routing through a persistent-builder session                                                                                                                                                                                                                                                                                                        | Unset                            |
 | `MVM_TEMPLATE_REGISTRY_ENDPOINT`          | S3-compatible endpoint URL for template push/pull                                                                                                                                                                                                                                                                                                                                   | None                             |
 | `MVM_TEMPLATE_REGISTRY_BUCKET`            | S3 bucket name for templates                                                                                                                                                                                                                                                                                                                                                        | None                             |

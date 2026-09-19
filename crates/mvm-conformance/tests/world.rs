@@ -13,6 +13,13 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId};
 use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 
+/// Observed output from the hermetic bounded-capture scenario.
+#[derive(Debug)]
+pub struct CaptureReport {
+    pub outcome: mvm_agentd::stream_pump::PumpOutcome,
+    pub events: Vec<mvm_agentd::vsock::EntrypointEvent>,
+}
+
 /// Points `MVM_HOME` at a scenario-local directory and restores the
 /// previous value when the guard drops.
 ///
@@ -128,6 +135,8 @@ impl LaunchRecord {
 /// fixture name.
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
+    /// Hermetic pipe-capture result; not a live-VM telemetry witness.
+    pub stream_capture: Option<CaptureReport>,
     pub last_run: Option<Output>,
     /// Artifact-warm `MVM_HOME` the end-to-end launch scenarios share.
     pub e2e_home: Option<PathBuf>,

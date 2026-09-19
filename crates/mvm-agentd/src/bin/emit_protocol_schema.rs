@@ -14,10 +14,11 @@ use schemars::JsonSchema;
 /// `$defs` (`FsResult`, `ProcResult`, `EntrypointEvent`, …) are emitted
 /// once and the generated clients reference a single definition set.
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct Protocol {
-    request: mvm_agentd::vsock::GuestRequest,
-    response: mvm_agentd::vsock::GuestResponse,
+    #[schemars(rename = "request")]
+    _request: mvm_agentd::vsock::GuestRequest,
+    #[schemars(rename = "response")]
+    _response: mvm_agentd::vsock::GuestResponse,
 }
 
 fn main() {
