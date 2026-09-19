@@ -160,121 +160,18 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         .as_deref()
         .map(String::from)
         .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
-    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
-    // A granted allow-list is what the gate enforces; the legacy
-    // `net`/`allow_host` fields decide the policy only for a spec that granted
-    // no egress. Deriving it from the same spec the plan is admitted under is
-    // what keeps the enforced policy and the signed one from diverging.
-    let network_policy = shared::enforced_network_policy(
-        spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
-        spec.net,
-        None,
-        &spec.allow_host,
-    )?
-    .with_ai(spec.ai.clone());
-    let (memory_mib, mem_initial_mib) =
-        validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
-    let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
-
-    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
-        "MVM_DIRECT_BOOT",
-    )
-    .as_deref()
-        == Ok("1")
-    {
-        let kernel = std::env::var("MVM_KERNEL_PATH")
-            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
-        let rootfs = std::env::var("MVM_ROOTFS_PATH")
-            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_ROOTFS_PATH"))?;
-        (
-            Some(kernel),
-            "direct-boot".to_string(),
-            std::path::PathBuf::from(rootfs),
-            "direct-boot".to_string(),
-        )
-    } else {
-        let (label, rootfs, digest) = if let Some(deployment_path) = &spec.deployment {
-            let deployment =
-                super::resolve_local_deployment(std::path::Path::new(deployment_path))?;
-            (
-                format!("deployment:{}", deployment.directory.display()),
-                deployment.rootfs,
-                deployment.boot_artifact_sha256,
-            )
-        } else if let Some(slot_hash) = &spec.manifest {
-            let (_, _vmlinux, _initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
-                    .with_context(|| {
-                        format!("loading manifest slot {slot_hash:?} for machine start")
-                    })?;
-            (
-                format!("manifest:{slot_hash}"),
-                std::path::PathBuf::from(rootfs),
-                rev,
-            )
-        } else if let Some(image_ref) = &spec.image {
-            let cached =
-                image::resolve_or_pull_run_image(&image::oci_cache_root(), image_ref, false)?;
-            if cached.pulled {
-                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-                mvm_core::audit_emit!(
-                    ImageFetch,
-                    "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
-                    cached.reference,
-                    cached.resolved_digest,
-                    cached.provenance.layer_digests.len(),
-                    cached.provenance.trust_policy,
-                    cached.provenance.verification_status,
-                    auth_source
-                );
-            }
-            (
-                cached.reference.clone(),
-                cached.rootfs_path.clone(),
-                cached.resolved_digest.clone(),
-            )
-        } else {
-            anyhow::bail!(
-                "machine {name:?} spec has neither deployment, image, nor manifest — use `machine rm` to remove and recreate it",
-                name = spec.name
-            );
-        };
-        (None, label, rootfs, digest)
-    };
-    let kernel_path = match direct_boot_kernel {
-        Some(k) => Some(k),
-        None => up::resolve_kernel_pin_path(args.kernel_pin.is_some())?,
-    };
-    // Both resolved here rather than inside the start: merging registered
-    // volumes reaches the CLI's mount cache, and resolving the kernel may build
-    // one through the builder VM, which a library embedder must never do.
-    let prepared_volumes =
-        crate::commands::vm::volume::merge_registered_volumes_for_launch(&spec.name, &volume_cfg)
-            .context("resolving registered local volumes before admission")?;
-    let kernel_path = match kernel_path {
-        Some(kernel_path) => kernel_path,
-        None => crate::commands::env::builder_vm::ensure_workload_kernel()?,
-    };
-    up::start_persistent_oci_machine(up::PersistentImageStartParams {
-        name: &spec.name,
-        image_label: &boot_label,
-        resolved_digest: &boot_digest,
-        rootfs_path: &boot_rootfs,
-        profile: &spec.profile,
-        cpus: spec.cpus,
-        memory_mib,
-        mem_initial_mib,
-        prepared_volumes,
-        network_policy,
-        ports: &spec.ports,
-        backend_name: &effective_hypervisor,
-        kernel_path,
-        agent_verb: spec.agent_verb.clone(),
-        caller_commitment: spec.caller_commitment.clone(),
-        has_ad_hoc_argv: args.has_ad_hoc_argv,
-        grants: spec.grants.clone(),
-    })?;
+    let started = mvm_client::launch::machine_start::start_machine_spec(
+        &spec,
+        &CliStartHost {
+            kernel_pinned: args.kernel_pin.is_some(),
+        },
+        mvm_client::launch::machine_start::MachineStartParams {
+            hypervisor: &effective_hypervisor,
+            has_ad_hoc_argv: args.has_ad_hoc_argv,
+        },
+    )?;
+    let boot_digest = started.resolved_digest;
     if !spec.init.is_empty()
         && let Err(err) = run_machine_init_commands(&spec.name, &spec.init)
     {
@@ -308,6 +205,57 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         println!("started machine {}", spec.name);
     }
     Ok(())
+}
+
+/// How the CLI supplies a machine start with what differs by process: it may
+/// build the workload kernel through the builder VM, and it prepares volumes
+/// through its mount cache.
+struct CliStartHost {
+    /// `--kernel-pin` was passed: boot the pinned kernel.
+    kernel_pinned: bool,
+}
+
+impl mvm_client::launch::machine_start::StartHost for CliStartHost {
+    fn workload_kernel(&self) -> Result<String> {
+        match up::resolve_kernel_pin_path(self.kernel_pinned)? {
+            Some(kernel_path) => Ok(kernel_path),
+            None => crate::commands::env::builder_vm::ensure_workload_kernel(),
+        }
+    }
+
+    fn resolve_image(
+        &self,
+        reference: &str,
+    ) -> Result<mvm_client::launch::machine_start::BootImage> {
+        let cached = image::resolve_or_pull_run_image(&image::oci_cache_root(), reference, false)?;
+        if cached.pulled {
+            let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+            mvm_core::audit_emit!(
+                ImageFetch,
+                "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
+                cached.reference,
+                cached.resolved_digest,
+                cached.provenance.layer_digests.len(),
+                cached.provenance.trust_policy,
+                cached.provenance.verification_status,
+                auth_source
+            );
+        }
+        Ok(mvm_client::launch::machine_start::BootImage {
+            label: cached.reference.clone(),
+            rootfs: cached.rootfs_path.clone(),
+            digest: cached.resolved_digest.clone(),
+        })
+    }
+
+    fn prepare_volumes(
+        &self,
+        name: &str,
+        volume_specs: &[String],
+    ) -> Result<mvm_client::volume::LaunchPreparation> {
+        let volume_cfg = build_machine_volume_cfg(volume_specs)?;
+        crate::commands::vm::volume::merge_registered_volumes_for_launch(name, &volume_cfg)
+    }
 }
 
 /// Gate `machine shell` / `machine exec` on the machine existing at all,

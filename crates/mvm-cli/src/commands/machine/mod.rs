@@ -429,38 +429,7 @@ impl MachineRunArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LocalDeployment {
-    pub directory: PathBuf,
-    pub rootfs: PathBuf,
-    pub boot_artifact_sha256: String,
-}
-
-/// Validate and resolve a local deployment before it can influence boot.
-/// Both the record schema and the exact selected rootfs bytes are checked.
-pub(super) fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
-    let directory = fs::canonicalize(path)
-        .with_context(|| format!("resolving deployment directory {}", path.display()))?;
-    if !directory.is_dir() {
-        bail!(
-            "deployment path is not a directory: {}",
-            directory.display()
-        );
-    }
-    let record_path = directory.join("deploy.json");
-    let rootfs = directory.join("rootfs.ext4");
-    let record = mvm_sdk::deploy::read_deploy_record(&record_path)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("reading deployment record {}", record_path.display()))?;
-    mvm_sdk::deploy::verify_boot_artifact(&rootfs, &record.boot_artifact)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("verifying deployment boot artifact {}", rootfs.display()))?;
-    Ok(LocalDeployment {
-        directory,
-        rootfs,
-        boot_artifact_sha256: record.boot_artifact.sha256,
-    })
-}
+pub(super) use mvm_client::launch::machine_start::{LocalDeployment, resolve_local_deployment};
 
 /// Turn a validated deployment into the common transient-run image source.
 pub(super) fn local_deployment_image_source(
@@ -1474,10 +1443,7 @@ fn rm_running_refusal(running: &[String]) -> Option<String> {
     ))
 }
 
-fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
-    spec.resolved_digest = Some(resolved_digest);
-    spec.last_started_at = Some(mvm_core::time::utc_now());
-}
+use mvm_client::launch::machine_start::record_machine_started as mark_machine_started;
 
 /// Human/JSON notice printed when `machine start` targets a machine that is
 /// already running. Pure so the wording is unit-testable; the liveness probe
