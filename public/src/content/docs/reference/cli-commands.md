@@ -104,6 +104,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env update --check`       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
 | `mvmctl env update --skip-verify` | Skip release signature verification                                                                                                                                                                                                                              |
+| `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed |
 
 ## Building
 

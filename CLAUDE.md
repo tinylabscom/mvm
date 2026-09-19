@@ -720,8 +720,9 @@ this row as enforced without it.
     refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
     verifies a real one only under its own tag
     (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
-    `manifest-verify` therefore cannot self-update, and `install.sh`, which runs
-    before any `mvmctl` exists, is still best-effort. ADR-001's "Claim 20
+    `manifest-verify` therefore cannot self-update. `install.sh` verifies an
+    upgrade with the installed `mvmctl env verify-release`, or with `cosign`, and
+    is best-effort only on a first install to a host with neither. ADR-001's "Claim 20
     limits" note records both; do not paraphrase this row as covering the
     installer.
 

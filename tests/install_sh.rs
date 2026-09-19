@@ -880,11 +880,102 @@ fn install_sh_verifies_the_new_mvmctl_before_switching_to_it() {
     assert_eq!(host.mvmctl_version(), "mvmctl v1.0.0");
     assert_eq!(host.snapshot(), before, "a refused upgrade changes nothing");
     let invocations = std::fs::read_to_string(&log).unwrap_or_default();
+    // The broken mvmctl logs the path it ran through. The installed v1 also
+    // logs, its arguments, when the installer probes it as a signature
+    // verifier; that is the old binary, so it is not what this test is about.
+    let broken_runs: Vec<&str> = invocations
+        .lines()
+        .filter(|line| line.starts_with('/'))
+        .collect();
     assert!(
-        !invocations.is_empty() && invocations.lines().all(|path| path.contains("/lib/mvm/")),
+        !broken_runs.is_empty() && broken_runs.iter().all(|path| path.contains("/lib/mvm/")),
         "the broken mvmctl must be caught from its release directory, before any PATH \
          entry reaches it: {invocations}"
     );
+}
+
+/// An installed mvmctl that knows `env verify-release`: answers the help probe,
+/// records each verification, and exits with `MVM_TEST_VERIFY_STATUS`.
+fn verifying_mvmctl(version: &str) -> String {
+    format!(
+        "#!/bin/sh\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) printf '%s\\n' \"$*\" >> \"$MVM_TEST_INVOCATION_LOG\"; exit \"${{MVM_TEST_VERIFY_STATUS:-0}}\" ;;\nesac\necho 'mvmctl {version}'\n"
+    )
+}
+
+/// Serve a verifier-capable v1 and a v2, optionally with v2's bundle, and
+/// install v1 so the upgrade to v2 has an mvmctl to verify with.
+fn host_with_verifier(publish_bundle: bool) -> (Host, String, mpsc::Sender<()>) {
+    let v1 = Release::new("v1.0.0").with_mvmctl(verifying_mvmctl("v1.0.0"));
+    let v2 = Release::new("v2.0.0");
+    let mut routes = v1.routes();
+    routes.extend(v2.routes());
+    if publish_bundle {
+        routes.push((
+            format!(
+                "/tinylabscom/mvm/releases/download/v2.0.0/{}.bundle",
+                Release::archive_name()
+            ),
+            b"bundle".to_vec(),
+        ));
+    }
+    let (base, stop) = serve(routes);
+    let host = Host::new();
+    host.install_ok(&base, "v1.0.0");
+    (host, base, stop)
+}
+
+#[test]
+fn install_sh_verifies_the_signature_with_the_installed_mvmctl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_dir.path().join("verifications.log");
+    let (host, base, _stop) = host_with_verifier(true);
+
+    let output = host
+        .installer(&base, "v2.0.0")
+        .env("MVM_TEST_INVOCATION_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(host.mvmctl_version(), "mvmctl v2.0.0");
+    let verifications = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        verifications.contains(&Release::archive_name()) && verifications.contains("--tag v2.0.0"),
+        "the installed mvmctl must verify the new archive under its tag: {verifications}"
+    );
+}
+
+#[test]
+fn install_sh_refuses_an_archive_the_installed_mvmctl_rejects() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let (host, base, _stop) = host_with_verifier(true);
+    let before = host.snapshot();
+
+    let output = host
+        .installer(&base, "v2.0.0")
+        .env("MVM_TEST_INVOCATION_LOG", log_dir.path().join("log"))
+        .env("MVM_TEST_VERIFY_STATUS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a rejected signature must not install"
+    );
+    assert!(stderr(&output).contains("signature verification failed"));
+    assert_eq!(host.snapshot(), before, "a refused upgrade changes nothing");
+}
+
+#[test]
+fn install_sh_refuses_a_missing_bundle_once_it_can_verify() {
+    let (host, base, _stop) = host_with_verifier(false);
+    let before = host.snapshot();
+
+    let output = host.install(&base, "v2.0.0");
+    assert!(
+        !output.status.success(),
+        "an unsigned release must not install"
+    );
+    assert!(stderr(&output).contains("no signature bundle"));
+    assert_eq!(host.snapshot(), before, "a refused upgrade changes nothing");
 }
 
 #[test]
