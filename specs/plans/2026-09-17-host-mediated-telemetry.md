@@ -187,12 +187,27 @@ tested progress. A documentation PR must not close the implementation epic.
         workspace and xtask all-target clippy are warning-free. See the
         [validation record](../sprint/delivery/3420-telemetry-binary-inventory.md)
         for broader checks and host-test limitations.
-  - [ ] W1b — Extend discovery to library producers, SDK/dispatch scripts and
+  - [x] W1b — Extend discovery to library producers, SDK/dispatch scripts and
         guest init/early-boot sources; map actual initialization, image/launcher
         membership and backend service endpoints. Add startup witness checking.
+        `specs/telemetry/sources.toml` registers subscriber-initialization
+        sites (with a fail-closed workspace scan for unregistered installs),
+        wrapper/SDK script sources (with wrapper-directory and SDK
+        output-pattern scans), launcher-to-producer edges with activation
+        policy covering every guest/builder runtime gap, and per-backend
+        telemetry endpoint anchors; validated by the extended
+        `check-telemetry-inventory` gate. The startup-witness half is a pure,
+        activation-aware `WitnessLedger` model in `mvm-core`'s telemetry
+        protocol module — bounded findings for missing/degraded/unavailable/
+        unexpected producers — with no runtime constructor: collector
+        integration and live witness checking remain W4 work, and no entry or
+        finding certifies runtime capture. See the
+        [validation record](../sprint/delivery/3420-telemetry-source-inventory.md).
 
-The current [binary inventory](../telemetry/README.md) classifies 45 targets:
-28 runtime gaps and 17 non-runtime tools/fixtures. Passing its static gate is not
+The current [binary inventory](../telemetry/README.md) classifies 48 targets:
+29 runtime gaps and 19 non-runtime tools/fixtures; the source inventory adds
+12 subscriber-initialization sites, 12 script sources, 20 launch edges and 8
+backend endpoint anchors. Passing these static gates is not
 runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 - [x] Add tests proving current outside-span, detached-lifetime and capture gaps.

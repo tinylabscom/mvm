@@ -48,7 +48,7 @@ enum Capture {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Role {
+pub(crate) enum Role {
     WorkloadGuest,
     BuilderGuest,
     Host,
@@ -66,7 +66,7 @@ enum Signal {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum NonRuntimeCategory {
+pub(crate) enum NonRuntimeCategory {
     CodeGenerator,
     TestFixture,
     DeveloperTool,
@@ -269,17 +269,43 @@ fn validate(root: &Path, inventory: &Inventory, targets: &[BinaryTarget]) -> Res
     Ok(summary)
 }
 
-/// Validate static target classification without certifying runtime capture.
-pub fn run(workspace: &Path) -> Result<()> {
+fn launchable_producers(inventory: &Inventory) -> crate::check_telemetry_sources::KnownProducers {
+    let mut launchable = BTreeSet::new();
+    for binary in &inventory.binary {
+        if let Capture::RuntimeGap {
+            role: Role::WorkloadGuest | Role::BuilderGuest,
+            ..
+        } = &binary.capture
+        {
+            launchable.insert(format!("{}/{}", binary.package, binary.name));
+        }
+    }
+    crate::check_telemetry_sources::KnownProducers { launchable }
+}
+
+fn load(workspace: &Path) -> Result<Inventory> {
     let text =
         std::fs::read_to_string(workspace.join(INVENTORY)).context("read telemetry inventory")?;
-    let inventory: Inventory = toml::from_str(&text).context("parse telemetry inventory")?;
+    toml::from_str(&text).context("parse telemetry inventory")
+}
+
+/// Producer keys the source inventory's launch edges must cover.
+#[cfg(test)]
+pub(crate) fn known_producers(
+    workspace: &Path,
+) -> Result<crate::check_telemetry_sources::KnownProducers> {
+    Ok(launchable_producers(&load(workspace)?))
+}
+
+/// Validate static target classification without certifying runtime capture.
+pub fn run(workspace: &Path) -> Result<()> {
+    let inventory = load(workspace)?;
     let summary = validate(workspace, &inventory, &discover(workspace)?)?;
     eprintln!(
         "check-telemetry-inventory: {} runtime gaps, {} non-runtime binaries classified; runtime coverage is NOT certified",
         summary.runtime_gaps, summary.non_runtime
     );
-    Ok(())
+    crate::check_telemetry_sources::run(workspace, &launchable_producers(&inventory))
 }
 
 #[cfg(test)]

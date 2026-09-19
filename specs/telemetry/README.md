@@ -52,16 +52,51 @@ developer tool, or standalone artifact tool). These are exclusions from this
 VM-runtime inventory, not claims that their output is captured or harmless.
 Review a classification again if a tool becomes part of a runtime image/launcher.
 
+## Source inventory (`sources.toml`)
+
+`sources.toml` extends discovery past binary targets, validated by the same
+gate. Four sections, all fail-closed on drift:
+
+- `subscriber_init` — every Rust site that installs a subscriber or other
+  process-global diagnostic state. A scan over non-test workspace sources
+  (install verbs such as `set_global_default`, logger/panic-hook installs, and
+  `tracing_subscriber` builders that `init`) fails the gate when a new site
+  appears unregistered. Regions after `#[cfg(test)]` and `tests`/`fuzz`/
+  `benches`/`examples` directories are exempt.
+- `script_source` — non-Rust producer surfaces: every dispatch wrapper under
+  `nix/wrappers/`, and every Python/TypeScript SDK module whose text writes to
+  an output or diagnostic stream. New wrappers and newly-emitting SDK modules
+  fail the gate until classified.
+- `launch_edge` — which launcher starts which guest/builder producer, with an
+  activation policy (`always`, `conditional` + named condition, `on-demand`,
+  `mediated`, `legacy`, `seed`, `unwired`). Every guest/builder runtime gap in
+  `binaries.toml` must carry at least one edge; an edge naming an unknown
+  producer is an error. Activation is what makes future live expectations
+  activation-aware: an optional helper that is not launched is not a missing
+  producer, and `unwired` records a binary no current image launches at all.
+- `backend_endpoint` — the telemetry-service provisioning anchors per backend
+  (firecracker, libkrun, hvf, qemu, apple-container, wasm, plus the shared
+  seam). Every backend must be covered; the wasm row records the honest
+  distinction that it has no vsock and needs a separate host adapter.
+
+The startup-witness *model* lives in `mvm-core`'s telemetry protocol module as
+an activation-aware ledger (`WitnessLedger`): required producers that never
+report startup, degraded or unavailable coverage, and unregistered producers
+become deterministic findings, bounded in count. Nothing constructs it at
+runtime yet — collector integration is later-workstream work, and neither the
+ledger nor any inventory entry certifies runtime capture.
+
 ## Scope still open
 
-This inventory does **not** yet discover library-only producer initialization,
-language SDK adapters/dispatch scripts, guest init and kernel/early-boot sources,
-arbitrary application instrumentation, or independently built non-workspace
-artifacts. It cannot detect a new logging call inside an existing binary, a
-missing startup witness, or a producer that is registered but never initialized.
+This inventory does **not** discover arbitrary application instrumentation,
+independently built non-workspace artifacts, or a new logging *call* inside an
+already-registered file; the subscriber scan sees installation sites, not
+emissions. No startup witness is checked at runtime: the ledger is a model
+without a collector, and a producer that is registered but never initialized
+is still invisible until one exists.
 
-W1 still requires those source classes, image/launcher and backend mappings,
-the executable outside-span/detached/capture conformance harness, and repeated
-hardware-qualified emission/memory/control-latency/fairness measurements.
-W2–W7 then implement and certify the actual transport, capture, collection and
-rollout. No live tracing or nonblocking guarantee follows from this gate passing.
+W1 still requires the executable outside-span/detached/capture conformance
+harness and repeated hardware-qualified emission/memory/control-latency/
+fairness measurements. W2–W7 then implement and certify the actual transport,
+capture, collection and rollout. No live tracing or nonblocking guarantee
+follows from these gates passing.

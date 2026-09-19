@@ -81,6 +81,7 @@ mod check_single_workload_env;
 mod check_sprint_append;
 mod check_stream_redaction_seam;
 mod check_telemetry_inventory;
+mod check_telemetry_sources;
 mod check_test_home_isolation;
 mod check_trust_gradient;
 mod check_two_surfaces;
