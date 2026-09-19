@@ -17,6 +17,7 @@ mod blk_discard;
 pub mod device;
 pub mod device_state;
 pub(crate) mod host_dial_bridge;
+pub(crate) mod host_write;
 // Promoted to the top-level backend-agnostic bridge module; re-exported at the
 // old paths so the hvf run loop and cross-crate consumers keep working.
 pub use crate::vsock_egress_bridge::egress_gate;

@@ -295,7 +295,21 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
         Err(e) => eprintln!("mvm-egress-client: ICMP mediator not serving: {e:#}"),
     }
 
-    match rt.block_on(mvm_agentd::flowmux_egress::run(addr, client)) {
+    // Once the session cannot be re-established there is no egress left to
+    // serve. Exiting turns every later dial into an immediate refusal that the
+    // build reports, rather than a request that waits out a timeout and fails
+    // with nothing on the console to say why.
+    let watch = client.clone();
+    let served = rt.block_on(async move {
+        tokio::select! {
+            served = mvm_agentd::flowmux_egress::run(addr, client) => served,
+            () = watch.gave_up() => Err(std::io::Error::other(
+                "the FlowMux session to the host endpoint was lost and could not be \
+                 re-established; stopping so dependent requests fail instead of hanging",
+            )),
+        }
+    });
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mvm-egress-client: {e}");

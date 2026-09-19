@@ -50,7 +50,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use super::agent_bridge::write_nonblocking;
+use super::host_write::{HostWrite, HostWriteBacklog};
 use super::vsock_transport::{CONNECTION_IDLE_TIMEOUT, MAX_CONNECTIONS};
 
 /// Per-drain read budget per host connection.
@@ -70,6 +70,8 @@ struct HostDialConn {
     /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
     established: bool,
     last_activity: Instant,
+    /// Guest bytes the host socket has not taken yet.
+    backlog: HostWriteBacklog,
 }
 
 /// Host→guest console stream bridge for one guest: a per-guest-port set of Unix
@@ -239,6 +241,7 @@ impl HostDialBridge {
                     guest_port,
                     established: false,
                     last_activity: Instant::now(),
+                    backlog: HostWriteBacklog::default(),
                 },
             );
             self.bump(1);
@@ -287,12 +290,47 @@ impl HostDialBridge {
         ready
     }
 
-    /// Write guest→host data (`OP_RW` the device received) to the host socket.
-    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) {
-        if let Some(c) = self.conns.get_mut(&conn_id) {
-            write_nonblocking(&mut c.stream, payload);
-            c.last_activity = Instant::now();
+    /// Hand guest→host data (`OP_RW` the device received) to the host socket.
+    /// What the socket cannot take yet stays queued for [`Self::flush_backlogs`];
+    /// a stream the bridge no longer holds fails, so the guest is reset rather
+    /// than left waiting for credit that will never come.
+    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
+        let Some(c) = self.conns.get_mut(&conn_id) else {
+            return HostWrite::Failed;
+        };
+        c.last_activity = Instant::now();
+        c.backlog.submit(&mut c.stream, payload)
+    }
+
+    /// Retry queued guest bytes. Returns `(conn_id, guest_port, bytes
+    /// forwarded)` for each stream that made progress; a stream whose host
+    /// socket failed is closed and reported through [`Self::take_host_closed`].
+    pub fn flush_backlogs(&mut self) -> Vec<(u32, u32, usize)> {
+        let mut forwarded = Vec::new();
+        let mut failed = Vec::new();
+        for (conn_id, c) in self.conns.iter_mut() {
+            if !c.backlog.is_pending() {
+                continue;
+            }
+            match c.backlog.flush(&mut c.stream) {
+                HostWrite::Forwarded(0) => {}
+                HostWrite::Forwarded(n) => {
+                    c.last_activity = Instant::now();
+                    forwarded.push((*conn_id, c.guest_port, n));
+                }
+                HostWrite::Failed => failed.push((*conn_id, c.guest_port)),
+            }
         }
+        for (conn_id, guest_port) in failed {
+            self.close(conn_id);
+            self.host_closed.push((conn_id, guest_port));
+        }
+        forwarded
+    }
+
+    /// Whether any stream has guest bytes waiting for its host socket.
+    pub fn has_backlog(&self) -> bool {
+        self.conns.values().any(|c| c.backlog.is_pending())
     }
 
     /// Drain host-side closures so the device can reset the guest stream.
@@ -447,7 +485,10 @@ mod tests {
         assert_eq!(got.as_deref(), Some(&b"stty\n"[..]));
 
         // Guest → host: the device writes the guest's PTY output to the host socket.
-        bridge.write_to_host(conn_id, b"# ");
+        assert_eq!(
+            bridge.write_to_host(conn_id, b"# "),
+            HostWrite::Forwarded(2)
+        );
         let mut buf = [0u8; 64];
         let mut n = 0;
         for _ in 0..200 {
@@ -599,6 +640,7 @@ mod tests {
                 guest_port: 20_001,
                 established: true,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+                backlog: HostWriteBacklog::default(),
             },
         );
 
@@ -630,6 +672,7 @@ mod tests {
                 guest_port: dispatch_port,
                 established: true,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+                backlog: HostWriteBacklog::default(),
             },
         );
 
@@ -657,6 +700,7 @@ mod tests {
                 guest_port: 20_001,
                 established: true,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+                backlog: HostWriteBacklog::default(),
             },
         );
 
@@ -683,6 +727,7 @@ mod tests {
                 guest_port: dispatch_port,
                 established: true,
                 last_activity: Instant::now(),
+                backlog: HostWriteBacklog::default(),
             },
         );
         drop(peer);

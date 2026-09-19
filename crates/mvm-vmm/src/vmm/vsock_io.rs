@@ -29,6 +29,7 @@ use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -37,6 +38,9 @@ use super::vsock::{IrqLine, VsockShared};
 
 /// The waker used to break the poll for a prompt stop or a readiness-set resync.
 const WAKER: Token = Token(0);
+
+/// Retry interval for guest bytes queued behind a full host socket.
+const HOST_BACKLOG_RETRY: Duration = Duration::from_millis(1);
 
 /// Handle to a running host-I/O thread. Dropping it (or calling [`Self::stop`])
 /// stops and joins the thread.
@@ -104,15 +108,16 @@ fn io_loop(
     let mut events = Events::with_capacity(16);
     let mut registered = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
-        let current = shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .poll_fds()
-            .into_iter()
-            .collect::<HashSet<_>>();
+        let (current, backlog) = {
+            let shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                shared.poll_fds().into_iter().collect::<HashSet<_>>(),
+                shared.has_host_backlog(),
+            )
+        };
         sync_ready_fds(&poll, &mut registered, &current);
         // `EINTR` surfaces as `Err` — just loop and re-check `stop`.
-        let _ = poll.poll(&mut events, None);
+        let _ = poll.poll(&mut events, poll_timeout(backlog));
         if stop.load(Ordering::Relaxed) {
             break;
         }
@@ -124,6 +129,13 @@ fn io_loop(
             irq.signal(spi);
         }
     }
+}
+
+/// How long to block for readiness. Queued guest bytes wait on a host socket
+/// draining, which the read-only registration cannot report, so while any are
+/// queued the loop wakes on this interval to retry them.
+fn poll_timeout(host_backlog: bool) -> Option<Duration> {
+    host_backlog.then_some(HOST_BACKLOG_RETRY)
 }
 
 fn sync_ready_fds(poll: &Poll, registered: &mut HashSet<RawFd>, current: &HashSet<RawFd>) {
@@ -149,4 +161,15 @@ fn sync_ready_fds(poll: &Poll, registered: &mut HashSet<RawFd>, current: &HashSe
 
 fn fd_token(fd: RawFd) -> Token {
     Token(fd as usize + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_loop_blocks_until_ready_unless_guest_bytes_are_queued() {
+        assert_eq!(poll_timeout(false), None);
+        assert_eq!(poll_timeout(true), Some(HOST_BACKLOG_RETRY));
+    }
 }

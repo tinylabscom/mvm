@@ -16,7 +16,7 @@
 //! those bytes buffered in the socket until the stream is up, preserving order.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use super::host_write::{HostWrite, HostWriteBacklog};
 use super::vsock_transport::{CONNECTION_IDLE_TIMEOUT, MAX_CONNECTIONS};
 
 /// Per-drain read budget per host connection.
@@ -39,6 +40,8 @@ struct AgentConn {
     /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
     established: bool,
     last_activity: Instant,
+    /// Guest bytes the host socket has not taken yet.
+    backlog: HostWriteBacklog,
 }
 
 /// Host→guest agent stream bridge for one guest: a Unix listener plus the open
@@ -164,6 +167,7 @@ impl AgentBridge {
                             stream,
                             established: false,
                             last_activity: Instant::now(),
+                            backlog: HostWriteBacklog::default(),
                         },
                     );
                     self.bump(1);
@@ -217,12 +221,47 @@ impl AgentBridge {
         ready
     }
 
-    /// Write guest→host data (`OP_RW` the device received) to the host socket.
-    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) {
-        if let Some(c) = self.conns.get_mut(&conn_id) {
-            write_nonblocking(&mut c.stream, payload);
-            c.last_activity = Instant::now();
+    /// Hand guest→host data (`OP_RW` the device received) to the host socket.
+    /// What the socket cannot take yet stays queued for [`Self::flush_backlogs`];
+    /// a stream the bridge no longer holds fails, so the guest is reset rather
+    /// than left waiting for credit that will never come.
+    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
+        let Some(c) = self.conns.get_mut(&conn_id) else {
+            return HostWrite::Failed;
+        };
+        c.last_activity = Instant::now();
+        c.backlog.submit(&mut c.stream, payload)
+    }
+
+    /// Retry queued guest bytes. Returns `(conn_id, bytes forwarded)` for each
+    /// stream that made progress; a stream whose host socket failed is closed
+    /// and reported through [`Self::take_host_closed`].
+    pub fn flush_backlogs(&mut self) -> Vec<(u32, usize)> {
+        let mut forwarded = Vec::new();
+        let mut failed = Vec::new();
+        for (conn_id, c) in self.conns.iter_mut() {
+            if !c.backlog.is_pending() {
+                continue;
+            }
+            match c.backlog.flush(&mut c.stream) {
+                HostWrite::Forwarded(0) => {}
+                HostWrite::Forwarded(n) => {
+                    c.last_activity = Instant::now();
+                    forwarded.push((*conn_id, n));
+                }
+                HostWrite::Failed => failed.push(*conn_id),
+            }
         }
+        for conn_id in failed {
+            self.close(conn_id);
+            self.host_closed.push(conn_id);
+        }
+        forwarded
+    }
+
+    /// Whether any stream has guest bytes waiting for its host socket.
+    pub fn has_backlog(&self) -> bool {
+        self.conns.values().any(|c| c.backlog.is_pending())
     }
 
     /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
@@ -291,29 +330,11 @@ fn dbg_log(msg: &str) {
     }
 }
 
-/// Write `payload` to a non-blocking socket, briefly spinning past `WouldBlock` so
-/// a small frame goes out without stalling the run loop indefinitely. Mirrors the
-/// egress proxy's writer. Shared with the console bridge (same host-socket writer).
-pub(super) fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
-    let mut off = 0;
-    let mut spins = 0u32;
-    while off < payload.len() {
-        match stream.write(&payload[off..]) {
-            Ok(0) => break,
-            Ok(n) => off += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && spins < 10_000 => {
-                spins += 1;
-                std::thread::yield_now();
-            }
-            Err(_) => break,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::error_chain_has_permission_denied;
+    use std::io::Write;
     use std::time::Duration;
 
     /// Full host→guest relay: a host client connects, the bridge accepts and
@@ -375,7 +396,10 @@ mod tests {
         assert_eq!(got.as_deref(), Some(&b"GuestRequest"[..]));
 
         // Guest → host: the device writes the agent's reply to the host socket.
-        bridge.write_to_host(conn_id, b"GuestResponse");
+        assert_eq!(
+            bridge.write_to_host(conn_id, b"GuestResponse"),
+            HostWrite::Forwarded(13)
+        );
         let mut buf = [0u8; 64];
         let mut n = 0;
         for _ in 0..200 {
@@ -487,6 +511,7 @@ mod tests {
                 stream,
                 established: true,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+                backlog: HostWriteBacklog::default(),
             },
         );
 

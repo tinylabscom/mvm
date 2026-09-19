@@ -29,6 +29,7 @@ use tracing::warn;
 
 use super::registry::{RegistryError, StreamRegistry};
 use super::socket::FlowSocket;
+use super::wire::write_stream_frame_to;
 use super::{PER_IP_CONNECT_TIMEOUT, lock_registry, lock_validator, write_frame_to};
 
 /// How often the wait re-checks. The relay thread is blocked either way, so
@@ -133,8 +134,15 @@ pub(super) fn run_tcp_relay(params: TcpRelayParams) {
         match upstream.read(&mut buf) {
             Ok(0) => {
                 host_half_closed.store(true, Ordering::Relaxed);
-                if !retired.load(Ordering::Relaxed)
-                    && write_frame_to(&session, &writer, Opcode::HalfClose, stream_id, &[]).is_err()
+                if write_stream_frame_to(
+                    &session,
+                    &writer,
+                    &retired,
+                    Opcode::HalfClose,
+                    stream_id,
+                    &[],
+                )
+                .is_err()
                 {
                     warn!(stream_id, "FlowMux relay failed to send HalfClose");
                 }
@@ -145,13 +153,15 @@ pub(super) fn run_tcp_relay(params: TcpRelayParams) {
                     await_host_credit(&registry, stream_id, n as u32, &retired, credit_wait)
                 {
                     warn!(stream_id, error = %e, "FlowMux host credit exhausted");
-                    let _ = write_frame_to(
-                        &session,
-                        &writer,
-                        Opcode::Reset,
-                        stream_id,
-                        b"host credit exhausted",
-                    );
+                    if !retired.swap(true, Ordering::AcqRel) {
+                        let _ = write_frame_to(
+                            &session,
+                            &writer,
+                            Opcode::Reset,
+                            stream_id,
+                            b"host credit exhausted",
+                        );
+                    }
                     host_half_closed.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -172,14 +182,25 @@ pub(super) fn run_tcp_relay(params: TcpRelayParams) {
                     warn!(stream_id, error = %e, "FlowMux relay data refused by validator");
                     break;
                 }
-                if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
-                    warn!(stream_id, "FlowMux relay failed to send Data");
-                    break;
+                match write_stream_frame_to(
+                    &session,
+                    &writer,
+                    &retired,
+                    Opcode::Data,
+                    stream_id,
+                    &buf[..n],
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => {
+                        warn!(stream_id, "FlowMux relay failed to send Data");
+                        break;
+                    }
                 }
             }
             Err(e) => {
                 warn!(stream_id, error = %e, "FlowMux upstream read failed");
-                if !retired.load(Ordering::Relaxed) {
+                if !retired.swap(true, Ordering::AcqRel) {
                     let reason = format!("upstream error: {e}");
                     let _ = write_frame_to(
                         &session,
