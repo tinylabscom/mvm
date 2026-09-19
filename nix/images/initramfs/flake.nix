@@ -121,9 +121,12 @@
 
             mkdir -p "$out"
 
-            # Deterministic newc cpio: sorted paths, root owner, no timestamps.
+            # Deterministic newc cpio: sorted paths, root owner, epoch
+            # timestamps, and `--reproducible` so the headers carry renumbered
+            # inodes and a zero device instead of the build host's.
             ( cd "$staging" \
-              && find . -print0 | sort -z | cpio --null -o -H newc --owner=0:0 \
+              && find . -print0 | LC_ALL=C sort -z \
+                | cpio --null -o -H newc --owner=0:0 --reproducible \
             ) > "$TMPDIR/initramfs.cpio"
 
             # Gzip without filename/timestamp in the header.

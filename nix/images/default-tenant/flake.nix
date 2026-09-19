@@ -66,6 +66,9 @@
       verityHashBlockSize = 4096;
       veritySalt = "0000000000000000000000000000000000000000000000000000000000000000";
       verityHashAlgorithm = "sha256";
+      # Mirrors `mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID`, so the
+      # hash device's superblock carries no random UUID.
+      verityUuid = "00000000-0000-0000-0000-000000000003";
       pinnedCryptsetupVersion = "2.8.6";
       pinnedCryptsetupSrcHash = "sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=";
       pinnedCryptsetupFor = pkgs:
@@ -250,6 +253,7 @@
                 --hash-block-size=${toString verityHashBlockSize} \
                 --salt=${veritySalt} \
                 --hash=${verityHashAlgorithm} \
+                --uuid=${verityUuid} \
                 $out/rootfs.ext4 \
                 $out/rootfs.verity
             )
