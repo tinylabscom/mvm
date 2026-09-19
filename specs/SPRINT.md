@@ -203,6 +203,13 @@
       builder built and booted a workload on Firecracker. Outstanding: aarch64
       Firecracker, and a build through the builder on HVF, which did not finish
       on the loaded host.
+      W5 (#3364) slice W5a: `MVM_IMAGES_DIR` names a local `mvm-images`
+      checkout explicitly (canonical root, commit and dirty fingerprint
+      recorded, re-verified before use); `local-dev` and `verified-release` are
+      distinct tiers; a release build and a sealed-production admission refuse
+      the variable; `mvmctl doctor` reports the source, both repositories'
+      identities and the tier. No image consumer reads it yet — W5b–W5m in the
+      plan move them one by one.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

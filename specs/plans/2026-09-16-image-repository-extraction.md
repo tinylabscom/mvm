@@ -599,6 +599,109 @@ Acceptance:
 - path traversal, symlink substitution, stale manifest, and wrong-architecture
   tests fail safely.
 
+Design, taken 2026-09-19 against `main` at `fd555b5ef9`.
+
+- **Selector.** `MVM_IMAGES_DIR`, an environment variable, resolved in
+  `mvm_build::image_source`. Not a config key: `~/.mvm` configuration is shared
+  by every worktree, and the complexity budget forbids editing global config.
+  Not only a flag: it has to reach every child `mvmctl` a build spawns, the way
+  `MVM_BOOT_IMAGE` and `MVM_BUILDER_BACKEND` do. A global `--images-dir` flag
+  may be added later as sugar that sets the variable (as `--builder` does).
+  The path is canonicalized, must be a directory, must be the root of its git
+  work tree, and must carry the `mvm-images` layout (`flake.nix`, `flake.lock`,
+  `kernel/flake.nix`, `images/<role>/image.nix` for all four roles) as regular
+  files, not symlinks. Selection records the canonical root, the commit, and
+  the working-tree state (clean, or a fingerprint over the tracked diff, the
+  status listing and every untracked file). `reverify` re-resolves the path and
+  re-reads the identity before anything built from it is trusted, so a
+  retargeted symlink or an edit after selection is refused. Nothing searches
+  for a sibling.
+- **Sources and tiers.** `ImageSource` is `Released`, `LocalCheckout`, or
+  `InTree` (the mvm checkout's own `nix/images`, the contributor default until
+  W8). `mvm_core::image_set::ImageTrustTier` has two values with no conversion
+  between them: `verified-release`, produced only by verifying a signed,
+  lock-pinned manifest, and `local-dev`, for anything built locally in either
+  checkout. A configured selector that cannot be used is an error; it never
+  falls back to the in-tree flakes or to the released set.
+- **Release binaries and production.** A binary built with the
+  `release-channel` feature (`artifact_acquisition::compiled_channel()`, the
+  existing contributor-versus-release switch) refuses `MVM_IMAGES_DIR` before
+  any verb runs, whether or not the path is valid; `doctor` is exempt so it can
+  report the refusal. A sealed-production admission (`Variant::Prod`) refuses
+  while the variable is set. Once consumers record the tier of what they built
+  (W5k), admission refuses a `local-dev` image under `Variant::Prod` however it
+  was selected; comparing against a signed release during development is
+  `MVM_BOOT_IMAGE=fetch` with the selector unset.
+- **Building.** Host Nix is never used. A local image is built inside the
+  builder VM, as the in-tree images are today: both checkouts are staged into
+  the guest and the build is
+  `nix build path:<images>#legacyPackages.<sys>.<role>.<attr> --override-input mvm path:<mvm>`,
+  with the three host binaries built from the paired mvm checkout rather than
+  the pinned commit. `mvm-images` has to accept that override (W5b).
+- **Cache identity.** One key per artifact: both repository identities (commit
+  plus dirty fingerprint), role, guest architecture, and the digests of the
+  pinned toolchain (`rust-toolchain.toml`, the zig pin) and of each flake lock
+  the role evaluates. Outputs are content-addressed under `mvm_cache_dir()` and
+  published atomically through `cache_install`, so they are the only state two
+  pairs share. A change in one repository invalidates only the keys that
+  include it.
+- **Pair-scoped state.** The wrapper derives `MVM_HOME`, `CARGO_TARGET_DIR`,
+  image staging and Stage 0 work directories from the pair's two canonical
+  roots, and VM, TAP and socket names from `MVM_HOME` as today, so two pairs
+  never share mutable state.
+- **The in-tree window.** From W5a to W8 the in-tree flakes keep working
+  unchanged for a contributor build that leaves the selector unset. A consumer
+  moved onto the selector builds only from the checkout it names when set; a
+  consumer not yet moved keeps using the in-tree flake and `doctor` says so. W8
+  deletes `InTree`; after that an unset selector means the released set, and
+  `MVM_BOOT_IMAGE=build` requires the selector.
+
+Delivery slices, one PR each:
+
+- [x] W5a (`mvm`) — the selector, `ImageTrustTier`, the release-build refusal at
+      CLI entry, the production-admission refusal, and a `doctor` line
+      (`image source`) reporting tier, source and both repositories' commits
+      and working-tree state. Negative tests: traversal, a symlinked marker, a
+      retargeted selection symlink, a non-directory, a non-checkout, a
+      subdirectory of a checkout, a copy with no repository, and the release
+      refusal. No consumer reads the selection yet.
+- [ ] W5b (`mvm-images`) — accept a local `mvm` through `--override-input`,
+      build the host binaries from a given mvm checkout, and emit a local
+      image-set manifest recording both identities.
+- [ ] W5c (`mvm`) — the local manifest in the released schema and parser, with
+      a provenance that is either a release producer or the two checkout
+      identities; classification refuses a local manifest that claims a
+      release producer, a manifest whose identities disagree with a
+      re-verified checkout (stale), a missing role, and the wrong
+      architecture.
+- [ ] W5d (`mvm`) — the cache key above and atomic, content-addressed publish of
+      local outputs.
+- [ ] W5e (`mvm`) — a `mvmctl build` subcommand that builds one role from the
+      selected checkout inside the builder VM, plus the `bin/dev` wrapper that
+      sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.
+- [ ] W5f (`mvm`) — the builder VM: `find_builder_vm_flake`,
+      `builder_vm_is_source_checkout` and their callers, the Stage 0 source
+      fingerprint in `stage0_cache.rs`, the flake references `stage0-init.rs`
+      hard-codes, and the kernel and image attribute-name contract.
+- [ ] W5g (`mvm`) — the default workload image (`default_microvm.rs`) and the
+      `MVM_BOOT_IMAGE=build|fetch` resolver.
+- [ ] W5h (`mvm`) — kernel acquisition and the initramfs.
+- [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
+      the duplicate checkout detection in `commands/runtime_overlay.rs` and
+      `mvm-build/src/runtime_overlay.rs` collapsed into the selector.
+- [ ] W5j (`mvm`) — key the libkrun supervisor auto-build on
+      `mvm_source_checkout` instead of `builder_vm_source_checkout_root`, so
+      deleting `nix/images` does not turn a contributor build into an
+      installed one.
+- [ ] W5k (`mvm`) — `image boot update`, `up` and admission read the tier
+      recorded with the image they boot; production refuses `local-dev`; the
+      `doctor` line adds artifact digests.
+- [ ] W5l — contributor documentation, the two-repository example change, and
+      a paired-change CI job checking out both repositories at explicit SHAs.
+- [ ] W5m — the acceptance witnesses: cache reuse and single-sided
+      invalidation, two concurrent pairs, stale manifest, wrong architecture,
+      and a live boot from a sibling checkout.
+
 ### W6 — Publish from `mvm-images` and migrate consumer trust (#3369)
 
 - [ ] Publish a complete candidate image set from the protected image workflow.
