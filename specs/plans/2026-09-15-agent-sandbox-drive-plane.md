@@ -294,10 +294,10 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 - [ ] Add `crates/mvm-hostlib` at the top of the dependency graph, beside
       `mvm-cli`: it links `mvm-client` and exposes one versioned C ABI over the
       `MvmClient` trait plus the drive verbs. Nothing depends on it, so no cycle
-      is possible by construction. The crate, its ABI and the read-only machine
+      is possible by construction. The crate, its ABI, the read-only machine
       methods (`machine.list`, `machine.inspect`, `machine.logs`,
-      `backend.capabilities`) have landed. Launch, guest and drive methods
-      follow.
+      `backend.capabilities`) and the DevOnly `guest.proc.*`/`guest.fs.*`
+      methods have landed. Launch and drive methods follow.
 - [x] Carry an ABI major/minor and a `mvm_hostlib_abi_is_compatible` entry point
       the bindings must call before use, so a mismatched pair fails loudly
       instead of reading a moved struct. Enforced rather than advisory:

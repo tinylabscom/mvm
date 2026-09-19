@@ -52,6 +52,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod dispatch;
 mod embedder;
+pub mod guest;
 pub mod status;
 
 use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_INTERNAL, Outcome};
@@ -154,12 +155,7 @@ pub unsafe extern "C" fn mvm_hostlib_call(
     // SAFETY: the caller guarantees each pointer covers its length.
     let (method, request) = unsafe { (borrow(method, method_len), borrow(request, request_len)) };
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        handle(
-            NEGOTIATED.load(Ordering::SeqCst),
-            method,
-            request,
-            local_client,
-        )
+        handle(NEGOTIATED.load(Ordering::SeqCst), method, request, &Local)
     }))
     .unwrap_or_else(|_| {
         Outcome::failure(
@@ -191,9 +187,20 @@ pub unsafe extern "C" fn mvm_hostlib_free(buf: MvmHostlibBuf) {
     drop(unsafe { Box::from_raw(slice) });
 }
 
-/// The client every production call is answered by: the local backend, in a
-/// process that has been told it is a library embedder.
-fn local_client() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
+/// Where a call's answers come from. Each is built only once the call is
+/// known to be valid, so a refused call touches no backend.
+trait Services {
+    /// The client that answers `machine.*` and `backend.*`.
+    fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome>;
+    /// The operations that answer `guest.*`.
+    fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome>;
+}
+
+/// This host's machines, in a process that has been told it is a library
+/// embedder.
+struct Local;
+
+fn declared() -> Result<(), Outcome> {
     embedder::ensure_declared().map_err(|e| {
         Outcome::failure(
             MVM_HOSTLIB_EMBEDDER,
@@ -201,19 +208,23 @@ fn local_client() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
             &e.to_string(),
             false,
         )
-    })?;
-    Ok(Box::new(mvm_client::LocalBackend::new()))
+    })
 }
 
-/// Everything [`mvm_hostlib_call`] does once its pointers are slices. The
-/// client is built by `client` only after the call is known to be valid, so a
-/// refused call touches no backend.
-fn handle(
-    negotiated: bool,
-    method: &[u8],
-    request: &[u8],
-    client: impl FnOnce() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome>,
-) -> Outcome {
+impl Services for Local {
+    fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
+        declared()?;
+        Ok(Box::new(mvm_client::LocalBackend::new()))
+    }
+
+    fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+        declared()?;
+        Ok(Box::new(guest::LocalGuest))
+    }
+}
+
+/// Everything [`mvm_hostlib_call`] does once its pointers are slices.
+fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Services) -> Outcome {
     if !negotiated {
         return Outcome::failure(
             MVM_HOSTLIB_ABI_NOT_NEGOTIATED,
@@ -225,10 +236,16 @@ fn handle(
     let Ok(method) = std::str::from_utf8(method) else {
         return Outcome::invalid_input("method is not valid UTF-8");
     };
+    if guest::is_known(method) {
+        return match services.guest() {
+            Ok(ops) => guest::dispatch(ops.as_ref(), method, request),
+            Err(outcome) => outcome,
+        };
+    }
     if !dispatch::is_known(method) {
         return Outcome::invalid_input(&format!("unknown method `{method}`"));
     }
-    let client = match client() {
+    let client = match services.client() {
         Ok(client) => client,
         Err(outcome) => return outcome,
     };
@@ -282,12 +299,55 @@ mod tests {
     use mvm_core::client::mock::MockBackend;
     use status::{MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_OK};
 
-    fn mock() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
-        Ok(Box::new(MockBackend::default()))
+    /// Answers with the mock client, and refuses to build guest operations.
+    struct Mock;
+
+    impl Services for Mock {
+        fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
+            Ok(Box::new(MockBackend::default()))
+        }
+        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no guest here",
+                false,
+            ))
+        }
     }
 
-    fn untouched() -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
-        panic!("a refused call must not build a client")
+    /// Panics if asked for anything: a refused call must build nothing.
+    struct Untouched;
+
+    impl Services for Untouched {
+        fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
+            panic!("a refused call must not build a client")
+        }
+        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+            panic!("a refused call must not build guest operations")
+        }
+    }
+
+    /// Fails to build either, as a process that cannot declare itself would.
+    struct Undeclared;
+
+    impl Services for Undeclared {
+        fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
     }
 
     #[test]
@@ -313,25 +373,35 @@ mod tests {
 
     #[test]
     fn a_call_before_negotiation_is_refused_without_building_a_client() {
-        let outcome = handle(false, b"machine.list", b"", untouched);
+        let outcome = handle(false, b"machine.list", b"", &Untouched);
         assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
     }
 
     #[test]
     fn an_unknown_method_is_refused_without_building_a_client() {
-        let outcome = handle(true, b"machine.shell", b"", untouched);
+        let outcome = handle(true, b"machine.shell", b"", &Untouched);
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
     }
 
     #[test]
     fn a_method_that_is_not_utf8_is_refused() {
-        let outcome = handle(true, &[0xff, 0xfe], b"", untouched);
+        let outcome = handle(true, &[0xff, 0xfe], b"", &Untouched);
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    /// A guest method goes to the guest operations, not the client, and a
+    /// process that cannot declare itself refuses it.
+    #[test]
+    fn a_guest_method_is_routed_to_the_guest_operations() {
+        let outcome = handle(true, b"guest.proc.list", br#"{"id":"web"}"#, &Undeclared);
+        assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER);
+        let outcome = handle(false, b"guest.proc.list", br#"{"id":"web"}"#, &Untouched);
+        assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
     }
 
     #[test]
     fn a_negotiated_call_is_answered() {
-        let outcome = handle(true, b"machine.list", b"", mock);
+        let outcome = handle(true, b"machine.list", b"", &Mock);
         assert_eq!(outcome.status, MVM_HOSTLIB_OK);
         assert_eq!(outcome.body, b"[]");
     }
@@ -339,14 +409,7 @@ mod tests {
     /// A client that cannot be built reports its own failure.
     #[test]
     fn a_client_failure_is_reported() {
-        let outcome = handle(true, b"machine.list", b"", || {
-            Err(Outcome::failure(
-                MVM_HOSTLIB_EMBEDDER,
-                mvm_core::error_codes::EMBEDDER,
-                "no",
-                false,
-            ))
-        });
+        let outcome = handle(true, b"machine.list", b"", &Undeclared);
         assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER);
     }
 
