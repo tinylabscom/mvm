@@ -799,10 +799,11 @@ fn run_prod_refuses_an_ad_hoc_command_before_pulling() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("does not run an ad-hoc command"),
+        stderr.contains("refuses an ad-hoc command"),
         "stderr: {stderr}"
     );
     assert!(stderr.contains("image pull --prod"), "stderr: {stderr}");
+    assert!(stderr.contains("no way to run one yet"), "stderr: {stderr}");
 }
 
 /// `--prod --profile dev` is refused before any pull.

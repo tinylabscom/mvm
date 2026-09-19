@@ -140,13 +140,6 @@ pub(super) fn oci_rootfs_rel(
     ))
 }
 
-/// Whether the rootfs at `rootfs_path` was built for this run's variant: its
-/// sidecar records `sealed` exactly when the run is `--prod`. A missing or
-/// unreadable sidecar records nothing, so it matches only a dev run.
-pub(super) fn rootfs_matches_variant(rootfs_path: &Path, prod: bool) -> bool {
-    crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path) == prod
-}
-
 /// Whether the rootfs at `rootfs_abs` can be reused by this run as it is: a
 /// finished build (its guest sidecar, published last, is present), with its
 /// verity sidecars, of this run's variant.
@@ -156,9 +149,9 @@ pub(super) fn rootfs_matches_variant(rootfs_path: &Path, prod: bool) -> bool {
 /// to rebuild takes it again through the materializer.
 pub(super) fn reusable_rootfs(rootfs_abs: &Path, prod: bool) -> Result<bool> {
     let _output = mvm_build::run_image::lock_rootfs_output(rootfs_abs)?;
-    Ok(mvm_build::run_image::rootfs_build_is_complete(rootfs_abs)
-        && rootfs_verity_sidecars_present(rootfs_abs)
-        && rootfs_matches_variant(rootfs_abs, prod))
+    Ok(mvm_build::run_image::published_build_matches(
+        rootfs_abs, prod,
+    ))
 }
 
 /// Refuse to hand a `--prod` run an image that is not sealed. The boot path
@@ -341,6 +334,9 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
         .deferred_nodes(deferred_nodes)
         .owners(owners)
         .evidence(evidence)
+        // Every OCI rootfs path names its digest, guest runtime and variant,
+        // so a complete matching set found under the lock is this image.
+        .reuse_published(true)
         .build(),
     )
 }
@@ -921,19 +917,21 @@ mod tests {
     /// else is there.
     #[test]
     fn a_rootfs_without_its_published_sidecar_is_not_reused() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs/abc-tag-dev/rootfs.ext4");
+        fs::create_dir_all(rootfs.parent().unwrap()).unwrap();
+        let dir = rootfs.parent().unwrap();
         for (file, body) in [
             ("rootfs.ext4", "partial"),
             ("rootfs.verity", "v"),
             ("rootfs.roothash", "h\n"),
         ] {
-            fs::write(dir.path().join(file), body).unwrap();
+            fs::write(dir.join(file), body).unwrap();
         }
         assert!(!reusable_rootfs(&rootfs, false).unwrap());
 
         mvm_build::builder_vm::GuestSidecar::for_oci_run("t", false, true)
-            .write_to_dir(dir.path())
+            .write_to_dir(dir)
             .unwrap();
         assert!(reusable_rootfs(&rootfs, false).unwrap());
         assert!(
@@ -956,13 +954,10 @@ mod tests {
             .unwrap();
         assert!(refuse_unsealed_prod_rootfs(&rootfs, true).is_err());
         assert!(refuse_unsealed_prod_rootfs(&rootfs, false).is_ok());
-        assert!(rootfs_matches_variant(&rootfs, false));
         mvm_build::builder_vm::GuestSidecar::for_oci_run("t", true, true)
             .write_to_dir(dir.path())
             .unwrap();
         assert!(refuse_unsealed_prod_rootfs(&rootfs, true).is_ok());
-        assert!(rootfs_matches_variant(&rootfs, true));
-        assert!(!rootfs_matches_variant(&rootfs, false));
     }
 
     /// A fn-pointer materializer cannot capture, so the evidence the

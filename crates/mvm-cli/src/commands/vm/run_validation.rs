@@ -25,10 +25,10 @@ fn validate_prod_run(args: &RunArgs) -> Result<()> {
     }
     if !args.argv.is_empty() || args.launch_plan.is_some() {
         anyhow::bail!(
-            "--prod does not run an ad-hoc command: a sealed production image serves no DevOnly \
+            "--prod refuses an ad-hoc command: a sealed production image serves no DevOnly \
              verbs, and a command after `--` or a `--launch-plan` is dispatched as one. A \
-             production image runs only its own entrypoint; `mvmctl image pull --prod <ref>` \
-             verifies and seals it"
+             --prod OCI image can be verified and sealed with `mvmctl image pull --prod <ref>`, \
+             but there is no way to run one yet"
         );
     }
     Ok(())
@@ -126,8 +126,9 @@ mod tests {
         args.prod = true;
         let err = validate_prod_run(&args).expect_err("--prod -- <cmd> must refuse");
         let msg = err.to_string();
-        assert!(msg.contains("ad-hoc command"), "{msg}");
-        assert!(msg.contains("its own entrypoint"), "{msg}");
+        assert!(msg.contains("refuses an ad-hoc command"), "{msg}");
+        assert!(msg.contains("image pull --prod"), "{msg}");
+        assert!(msg.contains("no way to run one yet"), "{msg}");
 
         args.argv.clear();
         args.launch_plan = Some("plan.json".to_string());

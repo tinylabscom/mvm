@@ -894,9 +894,21 @@ pub(in crate::commands) fn resolve_run_mode(
     run: &RunArgs,
 ) -> Result<Option<RunMode>> {
     if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
+        // The SDK modes do not go through the image run, so `--prod` would be
+        // dropped without a word; refuse the pair instead.
+        if run.prod {
+            anyhow::bail!(
+                "--prod is not honoured by an SDK run mode, and {}={env_mode} selects one; \
+                 unset it to run a production image",
+                mvm_sdk::env::MVM_SDK_MODE_ENV
+            );
+        }
         return Ok(Some(parse_env_run_mode(&env_mode)?));
     }
     if sdk.dev {
+        if run.prod {
+            anyhow::bail!("--dev selects the SDK live mode, which does not honour --prod");
+        }
         return Ok(Some(RunMode::Live));
     }
     if run.prod {
@@ -2295,6 +2307,35 @@ mod tests {
             .expect("plan resolves")
             .unwrap();
         assert_eq!(mode, RunMode::Plan);
+    }
+
+    /// An SDK mode chosen by the environment never swallows `--prod`.
+    #[test]
+    fn an_sdk_mode_from_the_environment_refuses_prod() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(mvm_sdk::env::MVM_SDK_MODE_ENV, "live");
+        let mut args = run_args(RunProfile::Standard);
+        args.image = Some(
+            "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+        );
+        args.prod = true;
+        let err = resolve_run_mode(&sdk(None, false), &args).expect_err("--prod must refuse");
+        assert!(err.to_string().contains("--prod"), "{err}");
+        args.prod = false;
+        assert_eq!(
+            resolve_run_mode(&sdk(None, false), &args).unwrap(),
+            Some(RunMode::Live)
+        );
+    }
+
+    /// `--dev` is the SDK live mode too, and refuses `--prod` the same way.
+    #[test]
+    fn the_dev_alias_refuses_prod() {
+        let mut args = run_args(RunProfile::Standard);
+        args.prod = true;
+        let err = resolve_run_mode(&sdk(None, true), &args).expect_err("--dev --prod must refuse");
+        assert!(err.to_string().contains("--prod"), "{err}");
     }
 
     #[test]

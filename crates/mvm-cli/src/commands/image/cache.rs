@@ -74,19 +74,30 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
     let mut removed_files = 0usize;
     let mut freed_bytes = 0u64;
     let shared_layer_paths = remaining_layer_paths(&index);
+    // Every file another cached reference still names stays: two references
+    // to one digest share its digest-keyed manifest, config and claims, and
+    // removing them left the other unable to rebuild ("read OCI config").
+    let shared_paths: BTreeSet<String> = index.images.iter().flat_map(all_image_paths).collect();
     validate_image_paths(cache_root, &image)?;
 
+    let rootfs_shared = index
+        .images
+        .iter()
+        .any(|other| other.resolved_digest == image.resolved_digest);
     for path in metadata_paths(&image) {
-        if image.rootfs_path.as_deref() == Some(path.as_str()) {
+        if shared_paths.contains(&path) {
             continue;
+        }
+        if image.rootfs_path.as_deref() == Some(path.as_str()) {
+            // A rootfs under `rootfs/` goes with its whole directory below; a
+            // legacy one anywhere else in the cache is removed as a file.
+            if rootfs_shared || is_rootfs_dir_member(cache_root, &path)? {
+                continue;
+            }
         }
         remove_cache_file(cache_root, &path, &mut removed_files, &mut freed_bytes)?;
     }
-    if !index
-        .images
-        .iter()
-        .any(|other| other.resolved_digest == image.resolved_digest)
-    {
+    if !rootfs_shared {
         for dir in rootfs_dirs_of(cache_root, &image)? {
             remove_rootfs_dir(cache_root, &dir, &mut removed_files, &mut freed_bytes)?;
         }
@@ -442,6 +453,15 @@ pub(super) fn read_json_optional(cache_root: &Path, relative: &str) -> Result<Op
         .with_context(|| format!("parse {}", path.display()))
 }
 
+/// Whether `relative` sits in a rootfs directory of its own under `rootfs/`,
+/// which [`remove_rootfs_dir`] removes whole.
+fn is_rootfs_dir_member(cache_root: &Path, relative: &str) -> Result<bool> {
+    let path = safe_cache_path(cache_root, relative)?;
+    Ok(path.parent().is_some_and(|dir| {
+        dir.starts_with(cache_root.join("rootfs")) && dir != cache_root.join("rootfs")
+    }))
+}
+
 /// Every materialized rootfs directory of `image`: the one its index entry
 /// names, and each directory derived from its digest — both variants, sealed
 /// and dev, under any runtime tag. Each holds one image and its sidecars.
@@ -449,9 +469,9 @@ fn rootfs_dirs_of(cache_root: &Path, image: &CachedOciImage) -> Result<BTreeSet<
     let mut dirs = BTreeSet::new();
     if let Some(rel) = image.rootfs_path.as_deref() {
         let path = safe_cache_path(cache_root, rel)?;
-        if let Some(dir) = path.parent()
-            && dir.starts_with(cache_root.join("rootfs"))
-            && dir != cache_root.join("rootfs")
+        if is_rootfs_dir_member(cache_root, rel)?
+            && let Some(dir) = path.parent()
+            && dir.file_name().is_some_and(|name| name != ".locks")
         {
             dirs.insert(dir.to_path_buf());
         }
@@ -485,6 +505,10 @@ fn remove_rootfs_dir(
     removed_files: &mut usize,
     freed_bytes: &mut u64,
 ) -> Result<()> {
+    // The build lock, so a run building or publishing this image finishes
+    // first and none starts during the removal. Its file lives outside the
+    // directory, so removing the directory does not remove the lock.
+    let _output = mvm_build::run_image::lock_rootfs_output(&dir.join("rootfs.ext4"))?;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
         let entries = match fs::read_dir(&at) {
@@ -928,18 +952,29 @@ mod tests {
         );
     }
 
-    /// Two references to one digest share its rootfs; removing one keeps it.
+    /// Two references to one digest share everything keyed by that digest —
+    /// manifest, config, claims and rootfs. Removing one keeps all of it for
+    /// the other; removing the last removes it.
     #[test]
-    fn removing_one_reference_keeps_a_rootfs_another_reference_shares() {
+    fn removing_one_reference_keeps_what_another_reference_shares() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let config_hex =
+            sha256_hex("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+                .unwrap();
+        let shared = [
+            format!("manifests/{hex}.json"),
+            format!("configs/{config_hex}.json"),
+            format!("claims/{hex}.provenance.json"),
+            format!("rootfs/{hex}-tag-dev/rootfs.ext4"),
+        ];
         let mut by_tag = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
-        by_tag.config_path = None;
-        by_tag.claims_path = None;
-        by_tag.rootfs_path = Some(format!("rootfs/{hex}-tag-dev/rootfs.ext4"));
+        by_tag.manifest_path = shared[0].clone();
+        by_tag.config_path = Some(shared[1].clone());
+        by_tag.claims_path = Some(shared[2].clone());
+        by_tag.rootfs_path = Some(shared[3].clone());
         let mut by_other = by_tag.clone();
         by_other.reference = "docker.io/library/alpine:latest".to_string();
-        by_other.manifest_path = "manifests/latest.json".to_string();
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -947,18 +982,105 @@ mod tests {
                 images: vec![by_tag, by_other],
             },
         );
-        write_file(
-            tmp.path(),
-            &format!("rootfs/{hex}-tag-dev/rootfs.ext4"),
-            b"x",
-        );
+        for path in &shared {
+            write_file(tmp.path(), path, b"x");
+        }
+        write_file(tmp.path(), "blobs/a", b"layer");
 
         remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
 
+        for path in &shared {
+            assert!(
+                tmp.path().join(path).exists(),
+                "{path} is still the other reference's"
+            );
+        }
+
+        remove_image(tmp.path(), "docker.io/library/alpine:latest").expect("remove the last");
+
+        for path in &shared {
+            assert!(
+                !tmp.path().join(path).exists(),
+                "{path} goes with the last reference"
+            );
+        }
+    }
+
+    /// A rootfs recorded outside `rootfs/` by an older cache is still removed.
+    #[test]
+    fn removing_an_image_removes_a_legacy_rootfs_outside_the_rootfs_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some("legacy/alpine.ext4".to_string());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "manifests/alpine.json", b"{}");
+        write_file(tmp.path(), "legacy/alpine.ext4", b"x");
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(!tmp.path().join("legacy/alpine.ext4").exists());
+    }
+
+    /// `image rm` waits for a run building the image, and leaves the build
+    /// lock's file in place, outside the directory it removes: a waiter must
+    /// never end up holding a lock on a file the next run cannot see.
+    #[test]
+    fn removing_an_image_waits_for_its_build_and_keeps_the_lock_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let rel = format!("rootfs/{hex}-tag-dev/rootfs.ext4");
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some(rel.clone());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), &rel, b"x");
+        let rootfs = tmp.path().join(&rel);
+        let building = mvm_build::run_image::lock_rootfs_output(&rootfs).expect("build lock");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cache = tmp.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let result = remove_image(&cache, "docker.io/library/alpine:3.20");
+            done_tx.send(result.is_ok()).unwrap();
+        });
         assert!(
-            tmp.path()
-                .join(format!("rootfs/{hex}-tag-dev/rootfs.ext4"))
-                .exists()
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "image rm removed a rootfs a run was still building"
+        );
+        drop(building);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+        );
+        worker.join().unwrap();
+
+        assert!(!rootfs.parent().unwrap().exists());
+        let lock_files: Vec<_> = std::fs::read_dir(tmp.path().join("rootfs/.locks"))
+            .expect("the lock directory survives")
+            .collect();
+        assert_eq!(
+            lock_files.len(),
+            1,
+            "the build lock's file is not removed with the image"
         );
     }
 

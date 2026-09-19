@@ -71,12 +71,15 @@ being root-owned.
   - Files are opened for the archive without following links, and an
     unreadable one is widened only after `lstat` shows it is a regular file.
   - Files are streamed into the archive, never read into memory whole.
-- `mvmctl run --prod --image` and a foreground `mvmctl machine run --prod
-  --image` now always boot a sealed image. Before this change the cached
-  rootfs path did not record the variant, so an image's dev build and its
-  sealed build shared a file, and the first one written was kept. A `--prod`
-  pull on a cold cache also materialized the dev variant, and the boot then
-  quietly picked the dev agent profile. Now:
+- `mvmctl image pull --prod` verifies and seals an image, and the resolve
+  path of a `--prod` image run only ever selects a sealed image. There is
+  currently no way to run a `--prod` OCI image (issue #3481): with no
+  command `run` and `machine run` refuse ("needs a command"), and with one
+  `--prod` refuses (below). Before this change the cached rootfs path did
+  not record the variant, so an image's dev build and its sealed build
+  shared a file, and the first one written was kept. A `--prod` pull on a
+  cold cache also materialized the dev variant, and a `--prod` run then
+  booted it with the dev agent profile. Now:
   - The rootfs path carries its variant (`…-sealed/` or `…-dev/`), so the
     two builds never share a file, a sidecar or an output lock.
   - A cached image is reused only at this variant's path, and only when its
@@ -91,20 +94,36 @@ being root-owned.
     the dev agent profile. It also refuses an ad-hoc command after `--` or a
     `--launch-plan`, which a sealed image refuses anyway. All three refusals
     happen before anything is pulled.
+  - An SDK run mode (`MVM_SDK_MODE`, `--dev`) refuses `--prod` rather than
+    dropping it.
   - Not covered yet: a persistent `mvmctl machine run --prod -d` and `--prod`
     with `--runtime-pack`, `--deployment`, `--flake` or `--manifest` still do
     not honour `--prod` (issue #3480).
-- A rebuilt rootfs is published, not written in place. The image, its
-  verity files, its provenance and, last, its guest sidecar are built in a
-  scratch directory beside the output. They are then renamed into place with
-  the old sidecar retired first. A reuse check requires that sidecar and
-  runs under the output lock. Before this, a crashed rebuild left a partial
-  `rootfs.ext4` beside the previous build's sidecars, and every later run
-  reused it and failed at dm-verity.
+- A rebuilt rootfs is published, not written in place. Before this, a
+  crashed rebuild left a partial `rootfs.ext4` beside the previous build's
+  sidecars, and every later run reused it and failed at dm-verity. Now:
+  - The image, its verity files, its provenance and, last, its guest
+    sidecar are built in a scratch directory beside the output and flushed
+    to disk.
+  - They are then renamed into place, with the old sidecar retired first.
+  - A reuse check requires that sidecar and runs under the output lock.
+  - The materializer checks reuse again once it holds the lock and keeps a
+    complete, matching set rather than rebuilding it. This is the smaller of
+    two ways to stop a reader from ever having a set it chose replaced
+    beneath it; the other, versioned directories behind an atomic pointer,
+    would have changed every path the cache records. Since a complete set
+    is never rebuilt, only an incomplete or mismatched one is ever
+    republished, and no reader accepts those.
+  - The output lock's file lives in a `.locks` directory beside the image's
+    directory, so removing an image cannot remove its lock.
 - `mvmctl image rm` removes every rootfs directory of the image, both
-  variants with all their sidecars, unless another cached reference
-  resolves to the same digest. Before, it removed only the last-written
-  variant's `rootfs.ext4`.
+  variants with all their sidecars, under each image's build lock. It
+  removes a file any other cached reference still names only when that
+  reference is gone too. That covers the digest-keyed manifest, config and
+  claims, and a rootfs another reference to the same digest shares. A
+  legacy rootfs recorded outside `rootfs/` is removed as a file. Before,
+  `image rm` removed only the last-written variant's `rootfs.ext4`, and it
+  deleted metadata another reference still needed.
 - Concurrency. Two runs of one image share its unpacked tree, which is
   injected in place. Without a lock, one run could clear `/etc/mvm` and
   rewrite `variant` and `/etc/passwd` between another run's post-injection
