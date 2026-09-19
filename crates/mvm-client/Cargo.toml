@@ -49,8 +49,9 @@ mvm-hostd = { workspace = true }
 # verifies the booting artifact against it. Already in this crate's closure
 # through mvm-hostd, so the direct edge adds no crates.
 mvm-sdk.workspace = true
-# The guest-agent request type that agent-verb grants are keyed on. Already in
-# this crate's closure through mvm-hostd.
+# The guest-agent request type agent-verb grants are keyed on, and the wire
+# protocol the guest process and filesystem operations speak. Already in this
+# crate's closure through mvm-hostd.
 mvm-agentd.workspace = true
 # The per-boot drive files the start config carries. Already in this crate's
 # closure through mvm-runtime.

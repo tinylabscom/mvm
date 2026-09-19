@@ -276,12 +276,7 @@ fn guest_stat(vm: &str, path: &str) -> Result<mvm_agentd::vsock::FsStat> {
     }
 }
 
-fn unwrap_fs(result: FsResult) -> Result<FsResult> {
-    if let FsResult::Error { kind, message } = &result {
-        bail!("Guest FS error ({:?}): {}", kind, message);
-    }
-    Ok(result)
-}
+use mvm_client::guest::unwrap_fs;
 
 #[cfg(test)]
 mod tests {
