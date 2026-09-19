@@ -65,7 +65,7 @@ pub fn republish_record(record: &StreamRecord) {
         payload_b64: &payload_b64,
     };
     match record.kind {
-        StreamKind::Stdout | StreamKind::Stderr => emit_bytes(&common),
+        StreamKind::Stdout | StreamKind::Stderr | StreamKind::Frame => emit_bytes(&common),
         StreamKind::Trace => emit_trace(&common, &record.payload),
     }
 }
@@ -155,6 +155,7 @@ fn source_name(source: StreamSource) -> &'static str {
     match source {
         StreamSource::Console => "console",
         StreamSource::Entrypoint => "entrypoint",
+        StreamSource::Display => "display",
     }
 }
 
@@ -163,6 +164,7 @@ fn kind_name(kind: StreamKind) -> &'static str {
         StreamKind::Stdout => "stdout",
         StreamKind::Stderr => "stderr",
         StreamKind::Trace => "trace",
+        StreamKind::Frame => "frame",
     }
 }
 
@@ -276,6 +278,18 @@ mod tests {
         let events = capture_tracing_events(|| republish_record(&record(StreamKind::Stderr, &raw)));
         assert_eq!(events[0].raw_payload(), raw);
         assert_eq!(events[0].field("kind"), "stderr");
+    }
+
+    #[test]
+    fn the_bridge_preserves_display_frame_bytes_verbatim() {
+        let raw = b"\xff\xd8\xff\xe0binary-jpeg".to_vec();
+        let mut frame = record(StreamKind::Frame, &raw);
+        frame.source = StreamSource::Display;
+        let events = capture_tracing_events(|| republish_record(&frame));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].raw_payload(), raw);
+        assert_eq!(events[0].field("source"), "display");
+        assert_eq!(events[0].field("kind"), "frame");
     }
 
     #[test]
