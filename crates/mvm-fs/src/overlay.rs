@@ -81,6 +81,10 @@ pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/netinit",
     "/seccomp-apply",
+    // Mediated-tools substitution skips a missing source, so an overlay
+    // without /ping silently un-mediates /bin/ping; require it instead.
+    "/ping",
+    "/display-bridge",
     "/runner",
     // The whole of a workload's egress, whether or not its plan binds a
     // credential: an overlay without it strands the workload as completely as

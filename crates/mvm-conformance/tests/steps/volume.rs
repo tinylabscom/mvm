@@ -105,6 +105,7 @@ fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: 
         ("mvm-guest-agent", &layout.agent),
         ("mvm-guest-netinit", &layout.netinit),
         ("mvm-seccomp-apply", &layout.seccomp_apply),
+        ("mvm-display-bridge", &layout.display_bridge),
         ("mvm-runner", &layout.runner),
         ("mvm-egress-client", &layout.egress_client),
         ("mvm-addon-dns", &layout.addon_dns),

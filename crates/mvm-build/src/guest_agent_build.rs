@@ -113,6 +113,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
+    pub display_bridge: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
@@ -126,6 +127,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
+    pub display_bridge: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
@@ -144,6 +146,7 @@ impl RuntimeOverlayGuestLayout {
             agent: dir.join("agent"),
             netinit: dir.join("netinit"),
             seccomp_apply: dir.join("seccomp-apply"),
+            display_bridge: dir.join("display-bridge"),
             runner: dir.join("runner"),
             egress_client: dir.join("egress-client"),
             addon_dns: dir.join("addon-dns"),
@@ -157,6 +160,7 @@ impl RuntimeOverlayGuestLayout {
         self.agent.is_file()
             && self.netinit.is_file()
             && self.seccomp_apply.is_file()
+            && self.display_bridge.is_file()
             && self.runner.is_file()
             && self.egress_client.is_file()
             && self.addon_dns.is_file()
@@ -169,6 +173,7 @@ impl RuntimeOverlayGuestLayout {
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
+            display_bridge: self.display_bridge.clone(),
             runner: self.runner.clone(),
             egress_client: self.egress_client.clone(),
             addon_dns: self.addon_dns.clone(),
@@ -687,6 +692,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-seccomp-apply".to_string(),
         "--bin".to_string(),
+        "mvm-display-bridge".to_string(),
         "--bin".to_string(),
         "mvm-ping".to_string(),
         "--bin".to_string(),
@@ -708,6 +714,10 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
+    install_one(
+        &output_dir.join("mvm-display-bridge"),
+        &layout.display_bridge,
+    )?;
     install_one(&output_dir.join("mvm-ping"), &layout.ping)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
