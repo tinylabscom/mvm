@@ -47,10 +47,10 @@ impl SubstitutionRegistry {
     /// Each call returns a distinct high-entropy token, so two requests for
     /// the same secret are not linkable by their placeholders.
     ///
-    /// The 24 bytes come from the OS RNG. This is the reason the registry is
+    /// The random bytes come from the OS RNG. This is the reason the registry is
     /// split rather than moved whole.
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
-        let mut bytes = [0u8; 24];
+        let mut bytes = [0u8; mvm_contract::substitution::SECRET_PLACEHOLDER_HEX_LEN / 2];
         rand::rng().fill_bytes(&mut bytes);
         let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
         self.map.insert(ph.clone(), secret);
@@ -427,6 +427,21 @@ mod tests {
         // Opaque: neither the secret name nor value appears in the token.
         assert!(!a.as_str().contains("openai"));
         assert!(a.as_str().starts_with("mvm-secret-"));
+    }
+
+    /// What `mint` produces is exactly what the out-of-header check looks
+    /// for, so the two cannot drift apart.
+    #[test]
+    fn a_minted_placeholder_has_the_shape_the_leak_check_matches() {
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
+        assert_eq!(
+            ph.as_str().len(),
+            mvm_contract::substitution::SECRET_PLACEHOLDER_LEN
+        );
+        assert!(mvm_contract::substitution::contains_minted_placeholder(
+            ph.as_str().as_bytes()
+        ));
     }
 
     #[test]

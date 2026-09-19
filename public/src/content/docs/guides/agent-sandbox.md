@@ -78,7 +78,11 @@ secret is not bound to, is refused before any value is read, and the guest gets
 a `502` with the reason in the body.
 
 Substitution looks only at request **headers**. Put the placeholder where the
-client sends its credential header, not in a request body.
+client sends its credential header. A request that carries a placeholder in its
+URL or its body is refused and recorded rather than sent to the destination
+with the token in place of the key. On a streamed body, the refusal comes
+before any byte of the placeholder is sent, but the request headers, carrying
+the substituted credential, may already have gone out.
 
 ## Setting it up
 
@@ -255,7 +259,7 @@ tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
 | `secret.forward_outcome` | A forward that carried a substituted secret ended: `completed`, `upstream_failed`, `request_failed`, `response_failed`, `response_refused` (a fail-closed transform refused the response) or `canceled` (the workload stopped reading) | `destination`, `outcome` |
 | `secret.redacted` | Secret-shaped or PII content was masked out of an outbound request, or a request failed or was refused fail-closed | `destination`, rule categories or reason |
 | `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
-| `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), or, on a connection the host intercepted, it was addressed to a different host than the connection or could not be framed | `destination`, `reason` |
+| `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), it carries a placeholder outside a header (`placeholder_in_url`, `placeholder_in_body`), or, on a connection the host intercepted, it was addressed to a different host than the connection or could not be framed | `destination`, `reason` |
 
 No entry carries a secret value, a request body, or a header value.
 

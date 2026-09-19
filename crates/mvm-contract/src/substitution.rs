@@ -32,11 +32,38 @@ use alloc::vec::Vec;
 use crate::ir::{AuthType, SecretRef, host_is_bound};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
-/// is reserved: it must never appear in a workload's own egress, so the
-/// leak scan can drop any non-substitution egress that contains it — the
-/// legitimate substitution path routes the placeholder to the host-local
-/// endpoint, never out the raw egress wire.
+/// is reserved: a placeholder is substituted only in a request header, so the
+/// endpoint refuses a request that carries one anywhere else rather than
+/// sending the token itself to the destination.
 pub const SECRET_PLACEHOLDER_PREFIX: &str = "mvm-secret-";
+
+/// Hex digits after [`SECRET_PLACEHOLDER_PREFIX`] in a minted placeholder:
+/// 24 random bytes, hex-encoded.
+pub const SECRET_PLACEHOLDER_HEX_LEN: usize = 48;
+
+/// Byte length of a minted placeholder.
+pub const SECRET_PLACEHOLDER_LEN: usize =
+    SECRET_PLACEHOLDER_PREFIX.len() + SECRET_PLACEHOLDER_HEX_LEN;
+
+/// Whether `bytes` contains a token of the minted placeholder shape: the
+/// reserved prefix followed by at least [`SECRET_PLACEHOLDER_HEX_LEN`] hex
+/// digits.
+///
+/// This is the check for places a placeholder may not travel, such as a URL
+/// or a request body. It is deliberately narrower than [`find_placeholder`],
+/// which accepts any hex run and suits a header, where a placeholder is
+/// expected. A body can legitimately mention the prefix (source code, logs,
+/// documentation), and a short token such as `mvm-secret-deadbeef` is not one
+/// the host minted. "At least" rather than "exactly" means a streamed body can
+/// be checked one chunk at a time with a fixed carry of
+/// `SECRET_PLACEHOLDER_LEN - 1` bytes, and a longer run is placeholder-shaped
+/// anyway.
+pub fn contains_minted_placeholder(bytes: &[u8]) -> bool {
+    let prefix = SECRET_PLACEHOLDER_PREFIX.as_bytes();
+    bytes.windows(SECRET_PLACEHOLDER_LEN).any(|window| {
+        window.starts_with(prefix) && window[prefix.len()..].iter().all(u8::is_ascii_hexdigit)
+    })
+}
 
 /// An opaque, per-session placeholder standing in for a secret on the guest
 /// side. **Not** the secret name and **not** the value: a leaked
@@ -86,6 +113,40 @@ mod tests {
     use super::*;
 
     use alloc::format;
+
+    fn minted() -> String {
+        format!("{SECRET_PLACEHOLDER_PREFIX}{}", "ab12".repeat(12))
+    }
+
+    #[test]
+    fn a_minted_placeholder_is_found_wherever_it_sits() {
+        let ph = minted();
+        assert_eq!(ph.len(), SECRET_PLACEHOLDER_LEN);
+        assert!(contains_minted_placeholder(ph.as_bytes()));
+        let body = format!("{{\"messages\":[{{\"content\":\"key={ph}\"}}]}}");
+        assert!(contains_minted_placeholder(body.as_bytes()));
+        let url = format!("https://api.example.com/v1?key={ph}&x=1");
+        assert!(contains_minted_placeholder(url.as_bytes()));
+    }
+
+    #[test]
+    fn a_mention_of_the_prefix_is_not_a_minted_placeholder() {
+        for text in [
+            "clean text",
+            "mvm-secret-",
+            "mvm-secret-deadbeef",
+            "the prefix is `mvm-secret-` followed by hex",
+        ] {
+            assert!(!contains_minted_placeholder(text.as_bytes()), "{text}");
+        }
+        // One hex digit short of the minted length.
+        let short = &minted()[..SECRET_PLACEHOLDER_LEN - 1];
+        assert!(!contains_minted_placeholder(short.as_bytes()));
+        // A non-hex byte inside the run.
+        let mut broken = minted().into_bytes();
+        broken[SECRET_PLACEHOLDER_PREFIX.len() + 10] = b'z';
+        assert!(!contains_minted_placeholder(&broken));
+    }
 
     #[test]
     fn find_placeholder_extracts_token_from_a_header_value() {

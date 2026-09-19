@@ -6,7 +6,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_contract::ir::AuthType;
 use mvm_contract::substitution::{
-    PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
+    PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver, contains_minted_placeholder,
     prepare_request as prepare_request_core,
 };
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
@@ -137,7 +137,57 @@ const REASON_POLICY_DENIED: &str = "policy_denied";
 /// The reason a request whose URL names no `host:port` is refused.
 const REASON_MALFORMED: &str = "malformed";
 /// What a refusal records as its destination when the URL names none.
-const UNPARSEABLE_DESTINATION: &str = "unparseable";
+pub(super) const UNPARSEABLE_DESTINATION: &str = "unparseable";
+/// The reason a request carrying a placeholder in its URL is refused.
+const REASON_PLACEHOLDER_IN_URL: &str = "placeholder_in_url";
+/// The reason a request carrying a placeholder in its body is refused.
+pub(super) const REASON_PLACEHOLDER_IN_BODY: &str = "placeholder_in_body";
+/// What the workload is told when it sends a placeholder outside a header.
+pub(super) const PLACEHOLDER_OUTSIDE_HEADERS: &str = "a secret placeholder is substituted only in a request header; refusing a request \
+     that carries one elsewhere";
+
+/// Finds a minted placeholder in a body that arrives in chunks, including one
+/// split across two chunks.
+///
+/// A placeholder that is not substituted would go to the destination as the
+/// token itself, authenticated to nobody, so the request is refused instead.
+/// The check sees each chunk before the streaming redactor, which holds back
+/// far more than a placeholder's length, releases any of it.
+pub(super) struct BodyPlaceholderScan {
+    /// The last `SECRET_PLACEHOLDER_LEN - 1` bytes seen, the most of a
+    /// placeholder that can end one chunk.
+    carry: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl BodyPlaceholderScan {
+    pub(super) fn new() -> Self {
+        Self {
+            carry: zeroize::Zeroizing::new(Vec::new()),
+        }
+    }
+
+    /// Whether the body, extended by `chunk`, now contains a placeholder.
+    ///
+    /// A placeholder lies wholly inside `chunk`, or starts in the carried tail
+    /// and ends within `chunk`'s first `SECRET_PLACEHOLDER_LEN - 1` bytes, so
+    /// those two places are all that need checking.
+    pub(super) fn found_in(&mut self, chunk: &[u8]) -> bool {
+        use mvm_contract::substitution::{SECRET_PLACEHOLDER_LEN, contains_minted_placeholder};
+        let reach = SECRET_PLACEHOLDER_LEN - 1;
+        let head = &chunk[..chunk.len().min(reach)];
+        let mut seam = zeroize::Zeroizing::new(Vec::with_capacity(self.carry.len() + head.len()));
+        seam.extend_from_slice(&self.carry);
+        seam.extend_from_slice(head);
+        let found = contains_minted_placeholder(&seam) || contains_minted_placeholder(chunk);
+        let tail = if chunk.len() >= reach {
+            &chunk[chunk.len() - reach..]
+        } else {
+            &seam[seam.len().saturating_sub(reach)..]
+        };
+        self.carry = zeroize::Zeroizing::new(tail.to_vec());
+        found
+    }
+}
 
 /// Why the claim-10 gate refuses `target`, or `None` when it admits it.
 ///
@@ -246,6 +296,26 @@ impl SubstitutionService {
                 message: "egress destination not admitted by network policy (claim-10)".into(),
             });
         }
+        // A placeholder is substituted only in a header. Anywhere else it would
+        // go to the destination as the token itself, so the request is refused
+        // before anything is forwarded.
+        let placeholder_elsewhere = if contains_minted_placeholder(req.url.as_bytes()) {
+            Some(REASON_PLACEHOLDER_IN_URL)
+        } else if contains_minted_placeholder(&req.body) {
+            Some(REASON_PLACEHOLDER_IN_BODY)
+        } else {
+            None
+        };
+        if let Some(reason) = placeholder_elsewhere {
+            self.audit_flow_refused(
+                destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                reason,
+            )
+            .await;
+            return Err(WireResponse::Refused {
+                message: PLACEHOLDER_OUTSIDE_HEADERS.into(),
+            });
+        }
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).
@@ -333,6 +403,45 @@ mod tests {
     use super::*;
     use crate::keyholder::SubstitutionRegistry;
     use crate::supervisor::network_endpoint_proxy::test_support::{bearer_ref, resolver_with};
+
+    fn minted_placeholder() -> String {
+        let mut reg = SubstitutionRegistry::new();
+        reg.mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string()
+    }
+
+    /// A placeholder is found wherever the body is cut, including cuts that
+    /// split it between two chunks.
+    #[test]
+    fn a_placeholder_split_at_any_offset_is_found() {
+        let body = format!("{{\"text\":\"{}\"}}", minted_placeholder());
+        for cut in 0..=body.len() {
+            let mut scan = BodyPlaceholderScan::new();
+            let (first, second) = body.as_bytes().split_at(cut);
+            let found = scan.found_in(first) || scan.found_in(second);
+            assert!(found, "missed a placeholder split at byte {cut}");
+        }
+    }
+
+    /// Byte-at-a-time delivery is the worst case for the carry.
+    #[test]
+    fn a_placeholder_delivered_one_byte_at_a_time_is_found() {
+        let body = format!("prefix {} suffix", minted_placeholder());
+        let mut scan = BodyPlaceholderScan::new();
+        assert!(body.as_bytes().iter().any(|byte| scan.found_in(&[*byte])));
+    }
+
+    /// A body that only mentions the prefix, even split the same way, passes.
+    #[test]
+    fn a_body_mentioning_the_prefix_is_not_refused() {
+        let body = b"see mvm-secret-deadbeef and the mvm-secret- prefix in the docs";
+        for cut in 0..=body.len() {
+            let mut scan = BodyPlaceholderScan::new();
+            let (first, second) = body.split_at(cut);
+            assert!(!scan.found_in(first) && !scan.found_in(second), "{cut}");
+        }
+    }
 
     /// Each refusal is named by a fixed label, and an admitted destination is
     /// not a refusal at all. The label is all the chain entry says about why.

@@ -405,6 +405,177 @@ mod server_tests {
         assert!(!logged.contains("sk-live-zzz"), "{logged}");
     }
 
+    /// A placeholder in the body is refused before anything is forwarded,
+    /// and the refusal is recorded without the token.
+    #[tokio::test]
+    async fn a_placeholder_in_a_request_body_is_refused_and_recorded() {
+        let dir = tempdir().unwrap();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let (service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::clone(&forwarder) as _,
+        );
+
+        let resp = service
+            .process(WireRequest {
+                method: "POST".into(),
+                url: "https://api.openai.com/v1".into(),
+                headers: vec![("content-type".into(), "application/json".into())],
+                body_b64: B64.encode(format!("{{\"api_key\":\"{ph}\"}}")),
+            })
+            .await;
+        assert!(
+            matches!(&resp, WireResponse::Refused { message } if message.contains("header")),
+            "{resp:?}"
+        );
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "nothing forwarded"
+        );
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("secret.flow_refused"), "{logged}");
+        assert!(logged.contains("placeholder_in_body"), "{logged}");
+        assert!(!logged.contains(&ph), "the token is not recorded: {logged}");
+        assert!(!logged.contains("secret.substituted"), "{logged}");
+    }
+
+    /// The same for a placeholder in the URL, a query parameter being the
+    /// usual place a client puts an API key when it is not in a header.
+    #[tokio::test]
+    async fn a_placeholder_in_a_url_is_refused_and_recorded() {
+        let dir = tempdir().unwrap();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let (service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::clone(&forwarder) as _,
+        );
+
+        let resp = service
+            .process(WireRequest {
+                method: "GET".into(),
+                url: format!("https://api.openai.com/v1/models?key={ph}"),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .await;
+        assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "nothing forwarded"
+        );
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("placeholder_in_url"), "{logged}");
+        assert!(!logged.contains(&ph), "{logged}");
+    }
+
+    /// Records every body chunk the forward leg receives, which is what a
+    /// production forwarder writes to the upstream socket.
+    struct ChunkRecorder {
+        received: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::supervisor::network_endpoint_proxy::Forwarder for ChunkRecorder {
+        async fn forward(
+            &self,
+            _req: crate::supervisor::network_endpoint_proxy::PreparedRequest,
+        ) -> Result<
+            crate::supervisor::network_endpoint_proxy::ForwardResponse,
+            crate::supervisor::network_endpoint_proxy::ForwardError,
+        > {
+            Ok(crate::supervisor::network_endpoint_proxy::ForwardResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+        }
+
+        async fn forward_body_stream(
+            &self,
+            _req: crate::supervisor::network_endpoint_proxy::PreparedRequest,
+            mut body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+        ) -> Result<
+            crate::supervisor::network_endpoint_proxy::ForwardStreamResponse,
+            crate::supervisor::network_endpoint_proxy::ForwardError,
+        > {
+            while let Some(next) = body.recv().await {
+                match next {
+                    Ok(chunk) => self.received.lock().unwrap().extend_from_slice(&chunk),
+                    Err(message) => {
+                        return Err(
+                            crate::supervisor::network_endpoint_proxy::ForwardError::Failed(
+                                message,
+                            ),
+                        );
+                    }
+                }
+            }
+            Err(
+                crate::supervisor::network_endpoint_proxy::ForwardError::Failed(
+                    "a refused body must not complete".into(),
+                ),
+            )
+        }
+    }
+
+    /// On the streamed path the body goes out as it arrives, so the check runs
+    /// per chunk. A placeholder split across two chunks is refused, and no
+    /// byte of it reaches the forward leg.
+    #[tokio::test]
+    async fn a_placeholder_split_across_streamed_chunks_is_never_sent() {
+        let dir = tempdir().unwrap();
+        let forwarder = Arc::new(ChunkRecorder {
+            received: Mutex::new(Vec::new()),
+        });
+        let (service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::clone(&forwarder) as _,
+        );
+
+        let body = format!("{{\"text\":\"{ph}\"}}").into_bytes();
+        let cut = body.len() / 2;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        sender
+            .send(zeroize::Zeroizing::new(body[..cut].to_vec()))
+            .await
+            .unwrap();
+        sender
+            .send(zeroize::Zeroizing::new(body[cut..].to_vec()))
+            .await
+            .unwrap();
+        drop(sender);
+
+        let result = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_len: body.len() as u64,
+                },
+                receiver,
+            )
+            .await;
+        assert!(result.is_err(), "the request is refused");
+
+        let received = forwarder.received.lock().unwrap().clone();
+        assert!(
+            !String::from_utf8_lossy(&received).contains("mvm-secret-"),
+            "no byte of the placeholder reached the forward leg"
+        );
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("placeholder_in_body"), "{logged}");
+    }
+
     /// A request that carried no placeholder hands no credential over, so it
     /// records neither a substitution nor an outcome.
     #[tokio::test]

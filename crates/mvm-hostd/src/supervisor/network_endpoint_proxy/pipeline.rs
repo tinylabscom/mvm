@@ -14,7 +14,10 @@ use zeroize::Zeroizing;
 use super::SubstitutionService;
 use super::ai_budget::AiRequestMeta;
 use super::forward::{ForwardError, ForwardResponse, ForwardStreamResponse};
-use super::prepare::{PreparedFlow, destination_host};
+use super::prepare::{
+    BodyPlaceholderScan, PLACEHOLDER_OUTSIDE_HEADERS, PreparedFlow, REASON_PLACEHOLDER_IN_BODY,
+    UNPARSEABLE_DESTINATION, destination_host,
+};
 use crate::keyholder::{NetworkEndpoint, find_placeholder};
 use crate::supervisor::ai_meter;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
@@ -225,6 +228,7 @@ impl SubstitutionService {
         let producer_destination = destination.clone();
         let producer = tokio::spawn(async move {
             let mut redactor = StreamingRedactor::new();
+            let mut placeholders = BodyPlaceholderScan::new();
             let mut hits = RedactionHits::default();
             let mut received = 0_u64;
             loop {
@@ -256,6 +260,18 @@ impl SubstitutionService {
                     let _ = sender
                         .send(Err("request body exceeded its declared length".into()))
                         .await;
+                    return Err(SensitiveDetectionError);
+                }
+                if placeholders.found_in(&chunk) {
+                    service
+                        .audit_flow_refused(
+                            producer_destination
+                                .as_deref()
+                                .unwrap_or(UNPARSEABLE_DESTINATION),
+                            REASON_PLACEHOLDER_IN_BODY,
+                        )
+                        .await;
+                    let _ = sender.send(Err(PLACEHOLDER_OUTSIDE_HEADERS.into())).await;
                     return Err(SensitiveDetectionError);
                 }
                 let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
