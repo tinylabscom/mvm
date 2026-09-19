@@ -696,40 +696,6 @@ jobs:
             echo "ok: ${checked} artifact(s) verified through the end-user acquisition path."
           fi
 
-      # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant) image
-      # manifest. The bundle (.bundle) carries the signature, the Fulcio
-      # short-lived cert, and the Rekor inclusion proof. Nothing in this
-      # workflow writes a `*-image-*.manifest.json` today and no mvmctl path
-      # reads one — the per-variant manifest verifier was retired in favour of
-      # image sets, which `mvmctl image boot verify` checks — so this step
-      # takes its no-manifests branch on every release.
-      - name: Sign image manifests (plan 36)
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          manifests=(artifacts/*-image-*.manifest.json)
-          if [ "${#manifests[@]}" -eq 0 ]; then
-            # Images are best-effort: an image-build failure must not block
-            # the binary release. Warn and skip rather than fail.
-            echo "::warning::no image manifests in artifacts/ — image jobs likely failed; publishing the binary release without image signatures" >&2
-            ls -la artifacts/ >&2 || true
-            exit 0
-          fi
-          for manifest in "${manifests[@]}"; do
-            # --new-bundle-format emits the Sigstore bundle (with
-            # verificationMaterial) that the in-binary Rust verifier
-            # (image_verify::verify_signed_payload) parses; the legacy --bundle
-            # format is rejected by that stack.
-            cosign sign-blob \
-              --yes \
-              --new-bundle-format \
-              --bundle "${manifest}.bundle" \
-              "${manifest}"
-            echo "Signed: ${manifest}"
-          done
-
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
