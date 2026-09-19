@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use virtio_queue::{Queue as SplitQueue, QueueOwnedT, QueueT};
 use virtio_vsock::packet::{PKT_HEADER_SIZE, VsockPacket};
 
-use super::RingGeometry;
 use super::guest_mem::GuestMem;
 
 pub(crate) const VIRTIO_MAGIC: u32 = 0x7472_6976;
@@ -38,26 +37,7 @@ pub(crate) const OP_CREDIT_UPDATE: u16 = 6;
 pub(crate) const OP_CREDIT_REQUEST: u16 = 7;
 pub(crate) const TYPE_STREAM: u16 = 1;
 
-#[derive(Default, Clone, Copy)]
-pub(crate) struct Queue {
-    pub(crate) num: u32,
-    pub(crate) ready: u32,
-    pub(crate) desc: u64,
-    pub(crate) avail: u64,
-    pub(crate) used: u64,
-    pub(crate) last_avail: u16,
-    pub(crate) next_used: u16,
-}
-
-impl Queue {
-    /// Rewind both device-owned ring cursors to the start of a fresh ring, on the
-    /// same two transitions the block and fs devices use: this queue being
-    /// detached (`QueueReady` ← 0) and the device being reset (`Status` ← 0).
-    fn rewind_cursors(&mut self) {
-        self.last_avail = 0;
-        self.next_used = 0;
-    }
-}
+pub(crate) use super::QueueState as Queue;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VsockHdr {
@@ -597,16 +577,7 @@ fn scatter_write(mem: &GuestMem, dsts: &[(u64, usize)], bytes: &[u8]) -> usize {
 /// Adapt this device's per-queue ring state to the module-shared
 /// [`super::build_split_queue`] (used by the TX drain and the RX delivery).
 fn build_split_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
-    super::build_split_queue(
-        RingGeometry {
-            desc: q.desc,
-            avail: q.avail,
-            used: q.used,
-            next_avail: q.last_avail,
-            next_used: q.next_used,
-        },
-        qsz,
-    )
+    super::build_split_queue(q.ring(), qsz)
 }
 
 fn set_lo(v: &mut u64, lo: u32) {

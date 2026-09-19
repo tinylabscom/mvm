@@ -12,6 +12,8 @@ use std::path::Path;
 use std::ptr::NonNull;
 
 use super::{BootFault, HvfError};
+use mvm_vmm::vmm::virtio_balloon::{GuestSpan, RamBacking, RamRegion};
+use std::ops::Range;
 use zeroize::Zeroize;
 
 /// Apple-silicon hypervisor page size; `hv_vm_map` and `MAP_FIXED` sub-maps
@@ -23,6 +25,8 @@ pub(crate) const HVF_PAGE_SIZE: usize = 16 * 1024;
 pub struct GuestRam {
     ptr: NonNull<u8>,
     len: usize,
+    /// Byte ranges replaced by a private file mapping, in mapping order.
+    file_backed: Vec<Range<usize>>,
 }
 
 impl GuestRam {
@@ -48,7 +52,11 @@ impl GuestRam {
             return Err(HvfError::Alloc);
         }
         let ptr = NonNull::new(raw.cast::<u8>()).ok_or(HvfError::Alloc)?;
-        Ok(Self { ptr, len })
+        Ok(Self {
+            ptr,
+            len,
+            file_backed: Vec::new(),
+        })
     }
 
     /// Base of the mapped region. Guest RAM is written and mapped through raw
@@ -60,6 +68,20 @@ impl GuestRam {
     /// Length of the mapped region in bytes.
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Guest RAM at `gpa_base`, split by how each part is backed on the host.
+    pub(crate) fn backing_regions(&self, gpa_base: u64) -> Vec<RamRegion> {
+        backing_layout(self.len, &self.file_backed)
+            .into_iter()
+            .map(|(range, backing)| RamRegion {
+                span: GuestSpan {
+                    gpa: gpa_base + range.start as u64,
+                    len: (range.end - range.start) as u64,
+                },
+                backing,
+            })
+            .collect()
     }
 
     /// Return the number of resident bytes currently backing this mapping.
@@ -249,8 +271,39 @@ impl GuestRam {
         if mapped == libc::MAP_FAILED || mapped != dst.cast() {
             return Err(HvfError::Alloc);
         }
+        self.file_backed.push(offset..offset + mapped_len);
         Ok(())
     }
+}
+
+/// Split `0..len` into maximal runs of one backing, given the byte ranges that
+/// were replaced by private file mappings (possibly overlapping, in any order).
+fn backing_layout(len: usize, file_backed: &[Range<usize>]) -> Vec<(Range<usize>, RamBacking)> {
+    let mut files: Vec<Range<usize>> = file_backed
+        .iter()
+        .map(|range| range.start.min(len)..range.end.min(len))
+        .filter(|range| range.start < range.end)
+        .collect();
+    files.sort_by_key(|range| range.start);
+    let mut layout: Vec<(Range<usize>, RamBacking)> = Vec::new();
+    let mut cursor = 0;
+    for file in files {
+        if file.start > cursor {
+            layout.push((cursor..file.start, RamBacking::Anonymous));
+        }
+        let start = file.start.max(cursor);
+        if file.end > start {
+            match layout.last_mut() {
+                Some((last, RamBacking::PrivateFile)) if last.end == start => last.end = file.end,
+                _ => layout.push((start..file.end, RamBacking::PrivateFile)),
+            }
+            cursor = file.end;
+        }
+    }
+    if cursor < len {
+        layout.push((cursor..len, RamBacking::Anonymous));
+    }
+    layout
 }
 
 pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
@@ -413,6 +466,74 @@ mod tests {
         assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"Zbcdefgh");
+    }
+
+    #[test]
+    fn fresh_ram_is_one_anonymous_region() {
+        let ram = GuestRam::new(HVF_PAGE_SIZE * 4).unwrap();
+        assert_eq!(
+            ram.backing_regions(0x8000_0000),
+            vec![RamRegion {
+                span: GuestSpan {
+                    gpa: 0x8000_0000,
+                    len: (HVF_PAGE_SIZE * 4) as u64,
+                },
+                backing: RamBacking::Anonymous,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_mapped_kernel_is_carved_out_of_anonymous_ram() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, b"abcdefgh").unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 4).unwrap();
+        ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).unwrap();
+
+        let page = HVF_PAGE_SIZE as u64;
+        let region = |gpa, len, backing| RamRegion {
+            span: GuestSpan { gpa, len },
+            backing,
+        };
+        assert_eq!(
+            ram.backing_regions(0),
+            vec![
+                region(0, page, RamBacking::Anonymous),
+                region(page, page, RamBacking::PrivateFile),
+                region(2 * page, 2 * page, RamBacking::Anonymous),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_whole_ram_snapshot_mapping_leaves_nothing_anonymous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ram.bin");
+        std::fs::write(&path, vec![0_u8; HVF_PAGE_SIZE * 2]).unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).unwrap();
+        ram.map_private_file(&path).unwrap();
+        let regions = ram.backing_regions(0);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].backing, RamBacking::PrivateFile);
+    }
+
+    #[test]
+    fn backing_layout_merges_overlapping_file_ranges_and_clips_to_ram() {
+        use RamBacking::{Anonymous, PrivateFile};
+        assert_eq!(backing_layout(10, &[]), vec![(0..10, Anonymous)]);
+        assert_eq!(
+            backing_layout(10, &[6..8, 2..4, 3..7]),
+            vec![(0..2, Anonymous), (2..8, PrivateFile), (8..10, Anonymous)]
+        );
+        assert_eq!(
+            backing_layout(10, &[8..20, 0..2]),
+            vec![(0..2, PrivateFile), (2..8, Anonymous), (8..10, PrivateFile)]
+        );
+        assert_eq!(
+            backing_layout(10, &[0..10, 4..6]),
+            vec![(0..10, PrivateFile)]
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod kernel_image;
 pub mod run;
 
 pub mod virtio;
+pub mod virtio_balloon;
 pub mod virtio_rng;
 pub mod vsock;
 pub(crate) mod vsock_handlers;
@@ -75,6 +76,40 @@ pub(crate) struct RingGeometry {
     pub(crate) used: u64,
     pub(crate) next_avail: u16,
     pub(crate) next_used: u16,
+}
+
+/// One split virtqueue's guest-programmed registers plus the device-owned
+/// ring cursors, for a device that keeps more than one queue.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QueueState {
+    pub(crate) num: u32,
+    pub(crate) ready: u32,
+    pub(crate) desc: u64,
+    pub(crate) avail: u64,
+    pub(crate) used: u64,
+    pub(crate) last_avail: u16,
+    pub(crate) next_used: u16,
+}
+
+impl QueueState {
+    /// Rewind both device-owned ring cursors to the start of a fresh ring, on
+    /// the two transitions every device here uses: the queue being detached
+    /// (`QueueReady` ← 0) and the device being reset (`Status` ← 0).
+    pub(crate) fn rewind_cursors(&mut self) {
+        self.last_avail = 0;
+        self.next_used = 0;
+    }
+
+    /// This queue's geometry in the form [`build_split_queue`] takes.
+    pub(crate) fn ring(&self) -> RingGeometry {
+        RingGeometry {
+            desc: self.desc,
+            avail: self.avail,
+            used: self.used,
+            next_avail: self.last_avail,
+            next_used: self.next_used,
+        }
+    }
 }
 
 /// Build a validated `virtio-queue` split [`SplitQueue`] from a device's

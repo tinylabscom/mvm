@@ -74,6 +74,25 @@ Unsupported recovery requests fail closed. They must not silently change from
 live-memory restore to disk-only warm start or cold boot; use the actionable
 error to select a supported tier or request a cold boot explicitly.
 
+## Guest memory reclaim
+
+A guest that touches memory and then frees it can either keep holding that
+memory on the host until it exits, or hand it back. Two separate mechanisms do
+the second, and `mvmctl doctor`'s capability matrix reports them as separate
+columns:
+
+| Mechanism                               | Driven by                                                                                                                                                                                                          | Backends |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Free page reporting (`page-reporting`)  | The guest kernel. It reports blocks of memory it has freed, and the VMM returns their host pages within seconds. Nothing on the host needs to run.                                                                  | HVF      |
+| Target balloon (`balloon`)              | The host. The reclaim controller sets an inflate target under host memory pressure, and `mem_initial` boots a guest pre-inflated.                                                                                   | Firecracker |
+
+On HVF a guest that fills and then frees 1.5 GiB of a 2 GiB machine drops the
+VM process's physical footprint by that amount within about 15 seconds, and the
+footprint rises again as the guest reuses the memory. Two limits apply: memory
+the guest restored from a snapshot, and the kernel image, are file-backed
+mappings and are not returned this way; and `mem_initial` has no effect on HVF,
+because there is no target to inflate toward.
+
 ## Target system strings
 
 Nix target strings describe the Linux guest artifact, not the host operating
