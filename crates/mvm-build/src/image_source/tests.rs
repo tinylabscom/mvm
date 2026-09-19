@@ -412,3 +412,33 @@ fn a_contributor_build_knows_its_own_checkout() {
     let root = mvm_source_checkout(DistributionChannel::Source).expect("tests run from source");
     assert!(root.join("crates").join("mvm-build").is_dir());
 }
+
+/// The fingerprint is a wire format shared with the image repository's
+/// manifest emitter, which computes it in Python. Both pin this value for the
+/// same tree: one tracked edit, one untracked file, one untracked link.
+#[cfg(unix)]
+#[test]
+fn the_dirty_fingerprint_matches_the_emitters_for_a_fixed_tree() {
+    const EMITTER_FINGERPRINT: &str =
+        "952dbae933d34ca2625e9964a3e919b48271a821117b03daf9a606382f7490f1";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("r");
+    write(&dir.join("a.txt"), "tracked\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "fixture"]);
+    write(&dir.join("a.txt"), "tracked\nchanged\n");
+    write(&dir.join("u.txt"), "untracked\n");
+    std::os::unix::fs::symlink("a.txt", dir.join("link")).unwrap();
+
+    let identity = probe_identity(&dir).unwrap();
+
+    assert_eq!(
+        identity.worktree,
+        WorktreeState::Dirty {
+            fingerprint: mvm_core::packs::Sha256Hex::new(EMITTER_FINGERPRINT).unwrap()
+        }
+    );
+}
+
+mod local_set;

@@ -7,11 +7,11 @@
 //! a probe never contends with a concurrent `git` in the same checkout.
 
 use std::ffi::OsStr;
-use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
 use mvm_core::image_set::GitCommit;
+pub use mvm_core::image_set::{RepoIdentity, WorktreeState};
 use mvm_core::packs::Sha256Hex;
 use sha2::{Digest, Sha256};
 
@@ -27,60 +27,21 @@ const REPOSITORY_REDIRECT_ENV: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
-/// Whether a checkout's files match its commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorktreeState {
-    Clean,
-    /// Differs from its commit. The fingerprint covers the tracked diff against
-    /// `HEAD`, the status listing, and every untracked, non-ignored file's
-    /// path and contents, so two different dirty trees on one commit do not
-    /// share an identity.
-    Dirty {
-        fingerprint: Sha256Hex,
-    },
-}
-
-impl WorktreeState {
-    #[must_use]
-    pub fn is_dirty(&self) -> bool {
-        matches!(self, Self::Dirty { .. })
-    }
-}
-
-impl fmt::Display for WorktreeState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Clean => f.write_str("clean"),
-            Self::Dirty { fingerprint } => {
-                write!(f, "dirty {}", &fingerprint.as_str()[..16])
-            }
-        }
-    }
-}
-
-/// The commit a checkout is at and whether its files match it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoIdentity {
-    pub commit: GitCommit,
-    pub worktree: WorktreeState,
-}
-
-impl RepoIdentity {
-    /// Read the identity of the checkout rooted at `root`.
-    pub fn probe(root: &Path) -> Result<Self, String> {
-        let head = git_text(root, ["rev-parse", "--verify", "HEAD^{commit}"])?;
-        let commit = GitCommit::new(head).map_err(|e| e.to_string())?;
-        Ok(Self {
-            commit,
-            worktree: worktree_state(root)?,
-        })
-    }
-}
-
-impl fmt::Display for RepoIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.commit, self.worktree)
-    }
+/// Read the identity of the checkout rooted at `root`: its commit, and whether
+/// its files match it.
+///
+/// A dirty tree is fingerprinted over the status listing, the diff against
+/// `HEAD`, and every untracked, non-ignored file. A locally built image set
+/// records identities computed this way, and is compared against a fresh
+/// reading, so the fingerprint is a wire format: the image repository's
+/// manifest emitter computes it byte for byte the same way.
+pub fn probe_identity(root: &Path) -> Result<RepoIdentity, String> {
+    let head = git_text(root, ["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let commit = GitCommit::new(head).map_err(|e| e.to_string())?;
+    Ok(RepoIdentity {
+        commit,
+        worktree: worktree_state(root)?,
+    })
 }
 
 /// The top-level directory of the work tree containing `dir`.
@@ -88,27 +49,51 @@ pub fn toplevel(dir: &Path) -> Result<String, String> {
     git_text(dir, ["rev-parse", "--show-toplevel"])
 }
 
+/// The status listing a fingerprint covers. Renames are off so a
+/// `status.renames` setting cannot change the bytes.
+const STATUS_ARGS: [&str; 6] = [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--no-renames",
+    "--ignore-submodules=none",
+];
+
+/// The diff a fingerprint covers, with every option that git configuration
+/// could otherwise change spelled out: prefixes, rename detection, relative
+/// paths, abbreviation, hunk shape, algorithm, submodules and file order.
+/// Two hosts with different `diff.*` settings must fingerprint one tree the
+/// same way, or a set built on one would read as stale on the other.
+const DIFF_ARGS: [&str; 18] = [
+    "diff",
+    "HEAD",
+    "--binary",
+    "--full-index",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color",
+    "--no-renames",
+    "--no-relative",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--unified=3",
+    "--inter-hunk-context=0",
+    "--diff-algorithm=myers",
+    "--indent-heuristic",
+    "--ignore-submodules=none",
+    "-O/dev/null",
+    "--",
+];
+
 fn worktree_state(root: &Path) -> Result<WorktreeState, String> {
-    let status = git_bytes(
-        root,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
+    let status = git_bytes(root, STATUS_ARGS)?;
     if status.is_empty() {
         return Ok(WorktreeState::Clean);
     }
     let mut hasher = Sha256::new();
     hash_section(&mut hasher, b"status", &status);
-    let diff = git_bytes(
-        root,
-        [
-            "diff",
-            "HEAD",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-        ],
-    )?;
+    let diff = git_bytes(root, DIFF_ARGS)?;
     hash_section(&mut hasher, b"diff", &diff);
     let untracked = git_bytes(root, ["ls-files", "--others", "--exclude-standard", "-z"])?;
     for name in untracked.split(|b| *b == 0).filter(|n| !n.is_empty()) {
