@@ -63,8 +63,8 @@ pub enum WireResponse {
 #[serde(deny_unknown_fields)]
 pub struct HttpFlowHead {
     pub method: String,
-    /// The real destination URL. May carry `mvm-secret-<hex>` placeholders,
-    /// which the host resolves; the guest never holds the real credential.
+    /// The real destination URL. The host substitutes placeholders only in
+    /// headers, so it refuses a request whose URL carries one.
     pub url: String,
     pub headers: Vec<(String, String)>,
     /// Exact body length to expect across the following body frames.

@@ -222,6 +222,10 @@ retires the second guest proxy (#3288).
       chain-signed `secret.flow_refused { destination, reason }`, with a fixed
       reason and no request content (#3300). This covers the terminated flow's
       502 arm, which reaches the same check.
+- [x] T17. Refuse and record a request carrying a placeholder outside a header,
+      in its URL or body, including one split across streamed body chunks
+      (#3297). Placeholders are substituted only in headers; one anywhere else
+      used to go to the destination as the token itself.
 
 ### Residual risk to record, not to hide
 

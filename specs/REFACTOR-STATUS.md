@@ -201,7 +201,8 @@ Last updated: 2026-09-18
       policy denies everything in every egress mode (T15, #3301, #3302),
       and every refusal it makes is chain-signed (T16, #3300). A substitution is
       audited when it is handed to the forward leg, with the outcome recorded
-      separately (T9, #3286). Open: the
+      separately (T9, #3286). A placeholder outside a header is refused and
+      recorded rather than forwarded (T17, #3297). Open: the
       example (#3258), the drive plane itself (#3260), the SDK's argv
       transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
       with its versioned ABI and read-only machine methods; the bindings that
