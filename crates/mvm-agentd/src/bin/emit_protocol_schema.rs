@@ -15,8 +15,10 @@ use schemars::JsonSchema;
 /// once and the generated clients reference a single definition set.
 #[derive(JsonSchema)]
 struct Protocol {
-    request: mvm_agentd::vsock::GuestRequest,
-    response: mvm_agentd::vsock::GuestResponse,
+    #[schemars(rename = "request")]
+    _request: mvm_agentd::vsock::GuestRequest,
+    #[schemars(rename = "response")]
+    _response: mvm_agentd::vsock::GuestResponse,
 }
 
 fn main() {
