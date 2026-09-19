@@ -3273,8 +3273,10 @@ dependencies = [
 name = "mvm-hostlib"
 version = "0.18.0-rc.2"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "libc",
+ "mvm-agentd",
  "mvm-client",
  "mvm-core",
  "mvm-vmm",

@@ -17,10 +17,13 @@ crate-type = ["lib", "cdylib"]
 # The local backend behind the ABI. Nothing depends on this crate, so linking
 # the whole client closure here cannot form a cycle.
 mvm-client.workspace = true
+# The guest-agent payload types the `guest.*` methods return.
+mvm-agentd.workspace = true
 mvm-core = { workspace = true, features = ["client"] }
 # The process declarations a library embedder makes before resolving or
 # spawning any helper.
 mvm-vmm.workspace = true
+anyhow.workspace = true
 base64.workspace = true
 libc.workspace = true
 serde.workspace = true
