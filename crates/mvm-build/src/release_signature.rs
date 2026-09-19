@@ -156,6 +156,9 @@ fn verify_against_release_identities(
 ///
 /// The identity set is a list because the release trust root allows more than
 /// one template; a rotation that adds one must not require a code change here.
+/// The try-each loop, including refusing an empty set and reporting the last
+/// failure, is [`mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity`]'s;
+/// this only attributes its refusal to the asset.
 pub fn verify_release_archive_bytes(
     archive: &[u8],
     bundle: &[u8],
@@ -163,30 +166,19 @@ pub fn verify_release_archive_bytes(
     identities: &[String],
     issuer: &str,
 ) -> Result<(), RuntimeOverlayError> {
-    let mut last_failure: Option<String> = None;
-
-    for identity in identities {
-        match mvm_core::crypto::image_verify::verify_signed_payload(
-            archive, bundle, identity, issuer,
-        ) {
-            Ok(()) => {
-                tracing::debug!(
-                    asset,
-                    identity = identity.as_str(),
-                    "release archive signature verified"
-                );
-                return Ok(());
-            }
-            Err(error) => last_failure = Some(error.to_string()),
-        }
-    }
-
-    Err(RuntimeOverlayError::SignatureInvalid {
+    let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
+    mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity(
+        archive,
+        bundle,
+        &identities,
+        issuer,
+    )
+    .map_err(|error| RuntimeOverlayError::SignatureInvalid {
         asset: asset.to_string(),
-        reason: last_failure.unwrap_or_else(|| {
-            "no release signing identity is configured for this version".to_string()
-        }),
-    })
+        reason: error.to_string(),
+    })?;
+    tracing::debug!(asset, "release archive signature verified");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -367,6 +359,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An empty identity set must refuse, naming the asset, rather than read as
+    /// "no identity to check against, so nothing to fail".
+    #[test]
+    fn an_empty_identity_set_refuses_and_names_the_asset() {
+        let err = verify_release_archive_bytes(
+            b"archive-bytes",
+            b"{\"not\":\"a sigstore bundle\"}",
+            ASSET,
+            &[],
+            mvm_core::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect_err("no accepted identity must never admit an archive");
+
+        assert!(
+            matches!(&err, RuntimeOverlayError::SignatureInvalid { asset, .. } if asset == ASSET),
+            "an empty identity set is a signature refusal for this asset: {err}"
+        );
     }
 
     /// The identities the verifier accepts are the release workflow's, bound to
