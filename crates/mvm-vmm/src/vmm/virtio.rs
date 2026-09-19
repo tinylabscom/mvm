@@ -91,6 +91,53 @@ const CONFIG_MAX_DISCARD_SECTORS: u64 = R_CONFIG + 0x24;
 const CONFIG_MAX_DISCARD_SEG: u64 = R_CONFIG + 0x28;
 const CONFIG_DISCARD_SECTOR_ALIGNMENT: u64 = R_CONFIG + 0x2c;
 
+/// How a writable file-backed image pushes its bytes toward stable storage.
+///
+/// There are two strengths because the host offers two, at very different
+/// prices. A guest flush arrives on every journal commit and must hand the
+/// guest's bytes to the host's storage stack, so a crash of this process or of
+/// the guest cannot lose them. Releasing the image — the VM stopping — is the
+/// durability point, and there the drive's own write cache is emptied too.
+///
+/// Opaque outside this module: only [`DiskImage::open`] chooses the operations.
+#[derive(Clone, Copy)]
+pub struct DiskSync {
+    guest_flush: fn(&File) -> std::io::Result<()>,
+    release_flush: fn(&File) -> std::io::Result<()>,
+}
+
+/// The host's sync operations. `sync_data` is the full flush on every
+/// platform: `F_FULLFSYNC` on Apple, `fdatasync` elsewhere.
+const HOST_SYNC: DiskSync = DiskSync {
+    guest_flush: guest_flush_to_host_storage,
+    release_flush: File::sync_data,
+};
+
+/// Serve a guest flush.
+///
+/// On Apple, std's `sync_data` is `F_FULLFSYNC`, which also empties the
+/// drive's write cache and costs milliseconds per call; `fsync(2)` hands the
+/// data to the drive for a fraction of that. A guest fsync on such a disk
+/// therefore survives a crash of the VM or of this process, but not a host
+/// power loss before the image is released. Elsewhere `sync_data` is
+/// `fdatasync`, already the guest-strength operation.
+#[cfg(target_vendor = "apple")]
+fn guest_flush_to_host_storage(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: `fsync` takes only a descriptor, owned by `file`, which is
+    // borrowed for the duration of the call.
+    if unsafe { libc::fsync(file.as_raw_fd()) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn guest_flush_to_host_storage(file: &File) -> std::io::Result<()> {
+    file.sync_data()
+}
+
 /// Backing store for a virtio-blk device.
 ///
 /// `Mem` keeps the whole image in host RAM — fine for tests and small ephemeral
@@ -98,13 +145,43 @@ const CONFIG_DISCARD_SECTOR_ALIGNMENT: u64 = R_CONFIG + 0x2c;
 /// `pread`/`pwrite` against the host file, so (a) a large disk (e.g. the builder's
 /// nix-store) costs no host memory, and (b) writes persist to the file across
 /// runs. A `read_only` file rejects guest writes at the device.
+///
+/// A writable file that took any write or discard gets one full flush when it
+/// is dropped. Drop, rather than a method the owner must remember to call,
+/// because every way a VM ends — guest power-off, stop signal, timeout, a
+/// failed run — releases its devices, and a skipped call would lose data
+/// silently.
 pub enum DiskImage {
     Mem(Vec<u8>),
     File {
         file: File,
         len: u64,
         read_only: bool,
+        sync: DiskSync,
+        /// Written or discarded since open, so the release flush has work.
+        dirty: bool,
     },
+}
+
+impl Drop for DiskImage {
+    fn drop(&mut self) {
+        let Self::File {
+            file,
+            read_only: false,
+            sync,
+            dirty: true,
+            ..
+        } = self
+        else {
+            return;
+        };
+        // Teardown carries on either way: the bytes are already in the host's
+        // storage stack, and a VM that cannot stop is worse than one whose last
+        // writes are not yet past the drive cache.
+        if let Err(e) = (sync.release_flush)(file) {
+            eprintln!("virtio-blk: full flush of a writable disk image at release failed: {e}");
+        }
+    }
 }
 
 impl DiskImage {
@@ -116,12 +193,18 @@ impl DiskImage {
     /// Open a file-backed image, read-write unless `read_only`. The capacity is
     /// the file's current length (images are pre-sized by the caller).
     pub fn open(path: &Path, read_only: bool) -> std::io::Result<Self> {
+        Self::open_with_sync(path, read_only, HOST_SYNC)
+    }
+
+    fn open_with_sync(path: &Path, read_only: bool, sync: DiskSync) -> std::io::Result<Self> {
         let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
         let len = file.metadata()?.len();
         Ok(Self::File {
             file,
             len,
             read_only,
+            sync,
+            dirty: false,
         })
     }
 
@@ -133,19 +216,20 @@ impl DiskImage {
         }
     }
 
-    /// Force everything written so far to stable storage. A RAM-backed or
-    /// read-only image has nothing to push, so it succeeds trivially.
+    /// Serve a guest flush: hand everything written so far to the host's
+    /// storage (see [`guest_flush_to_host_storage`]). A RAM-backed or read-only
+    /// image has nothing to push, so it succeeds trivially.
     ///
-    /// `sync_data` rather than `sync_all`: the guest filesystem's consistency
-    /// depends on its own bytes reaching the disk, not on the host's metadata
-    /// for a file whose length never changes.
+    /// Data rather than metadata: the guest filesystem's consistency depends on
+    /// its own bytes, not on the host's metadata for a file whose length never
+    /// changes.
     fn flush(&mut self) -> bool {
         match self {
             Self::Mem(_) => true,
             Self::File {
                 read_only: true, ..
             } => true,
-            Self::File { file, .. } => file.sync_data().is_ok(),
+            Self::File { file, sync, .. } => (sync.guest_flush)(file).is_ok(),
         }
     }
 
@@ -163,7 +247,10 @@ impl DiskImage {
             Self::File {
                 read_only: true, ..
             } => false,
-            Self::File { file, .. } => ranges.iter().all(|&r| punch_hole(file, r).is_ok()),
+            Self::File { file, dirty, .. } => {
+                *dirty = true;
+                ranges.iter().all(|&r| punch_hole(file, r).is_ok())
+            }
         }
     }
 
@@ -219,10 +306,13 @@ impl DiskImage {
             Self::File {
                 read_only: true, ..
             } => false,
-            Self::File { file, len, .. } => {
+            Self::File {
+                file, len, dirty, ..
+            } => {
                 if off >= *len {
                     return false;
                 }
+                *dirty = true;
                 let want = ((*len - off).min(buf.len() as u64)) as usize;
                 let mut done = 0;
                 while done < want {
@@ -913,6 +1003,164 @@ mod tests {
         f.as_file().set_len(512).unwrap();
         assert!(DiskImage::open(f.path(), true).unwrap().flush());
         assert!(DiskImage::mem(vec![0u8; 512]).flush());
+    }
+
+    thread_local! {
+        static GUEST_FLUSHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static RELEASE_FLUSHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_guest_flush(_: &File) -> std::io::Result<()> {
+        GUEST_FLUSHES.with(|c| c.set(c.get() + 1));
+        Ok(())
+    }
+
+    fn count_release_flush(_: &File) -> std::io::Result<()> {
+        RELEASE_FLUSHES.with(|c| c.set(c.get() + 1));
+        Ok(())
+    }
+
+    /// Counting sync operations, with this thread's counters reset.
+    fn counting_sync() -> DiskSync {
+        GUEST_FLUSHES.with(|c| c.set(0));
+        RELEASE_FLUSHES.with(|c| c.set(0));
+        DiskSync {
+            guest_flush: count_guest_flush,
+            release_flush: count_release_flush,
+        }
+    }
+
+    fn flush_counts() -> (u32, u32) {
+        (
+            GUEST_FLUSHES.with(std::cell::Cell::get),
+            RELEASE_FLUSHES.with(std::cell::Cell::get),
+        )
+    }
+
+    fn sized_file(len: u64) -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(len).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_guest_flush_on_a_writable_file_uses_the_guest_strength_sync() {
+        let f = sized_file(4096);
+        let mut d = blk_dev(DiskImage::open_with_sync(f.path(), false, counting_sync()).unwrap());
+        let chains = vec![BlkChain {
+            req_type: VIRTIO_BLK_T_FLUSH,
+            sector: 0,
+            data: Vec::new(),
+            status: true,
+        }];
+        let (avail, _used) = program_blk_queue(&mut d, 2, &chains);
+        d.mem.wr_u16(avail + 2, 1);
+        assert!(d.process_queue());
+        let status_addr = d.rd_u64(BLK_BASE + 0x1000 + 16);
+        assert_eq!(d.mem.read_bytes(status_addr, 1)[0], VIRTIO_BLK_S_OK);
+        assert_eq!(flush_counts(), (1, 0), "a guest flush is not a release");
+    }
+
+    #[test]
+    fn a_failed_guest_flush_reports_an_io_error() {
+        fn fail(_: &File) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected"))
+        }
+        let f = sized_file(512);
+        let mut d = DiskImage::open_with_sync(
+            f.path(),
+            false,
+            DiskSync {
+                guest_flush: fail,
+                release_flush: count_release_flush,
+            },
+        )
+        .unwrap();
+        assert!(!d.flush());
+    }
+
+    #[test]
+    fn releasing_a_written_disk_runs_the_full_flush_exactly_once() {
+        let f = sized_file(4096);
+        let mut d = DiskImage::open_with_sync(f.path(), false, counting_sync()).unwrap();
+        assert!(d.write_at(0, b"journal"));
+        assert!(d.flush());
+        assert!(d.flush());
+        assert_eq!(flush_counts(), (2, 0));
+        drop(d);
+        assert_eq!(flush_counts(), (2, 1));
+    }
+
+    #[test]
+    fn releasing_an_unwritten_writable_disk_skips_the_full_flush() {
+        let f = sized_file(4096);
+        let d = DiskImage::open_with_sync(f.path(), false, counting_sync()).unwrap();
+        drop(d);
+        assert_eq!(flush_counts(), (0, 0));
+    }
+
+    #[test]
+    fn a_discard_marks_the_disk_for_the_release_flush() {
+        let f = sized_file(1 << 20);
+        let mut d = DiskImage::open_with_sync(f.path(), false, counting_sync()).unwrap();
+        assert!(d.discard(&[DiscardRange {
+            offset: 0,
+            len: 1 << 16,
+        }]));
+        drop(d);
+        assert_eq!(flush_counts(), (0, 1));
+    }
+
+    #[test]
+    fn a_read_only_disk_never_syncs() {
+        let f = sized_file(4096);
+        let mut d = DiskImage::open_with_sync(f.path(), true, counting_sync()).unwrap();
+        assert!(!d.write_at(0, b"nope"));
+        assert!(d.flush());
+        drop(d);
+        assert_eq!(flush_counts(), (0, 0));
+    }
+
+    #[test]
+    fn the_guest_strength_sync_succeeds_on_a_real_file() {
+        let f = sized_file(4096);
+        f.as_file().write_at(b"bytes", 0).unwrap();
+        assert!(guest_flush_to_host_storage(f.as_file()).is_ok());
+    }
+
+    #[test]
+    fn data_written_through_the_device_survives_release_and_reopen() {
+        let f = sized_file(4096);
+        let mut d = blk_dev(DiskImage::open(f.path(), false).unwrap());
+        let chains = vec![
+            BlkChain {
+                req_type: VIRTIO_BLK_T_OUT,
+                sector: 1,
+                data: vec![512],
+                status: true,
+            },
+            BlkChain {
+                req_type: VIRTIO_BLK_T_FLUSH,
+                sector: 0,
+                data: Vec::new(),
+                status: true,
+            },
+        ];
+        let (avail, _used) = program_blk_queue(&mut d, 8, &chains);
+        d.mem.wr_u16(avail + 2, 2);
+        assert!(d.process_queue());
+        drop(d);
+
+        let reopened = DiskImage::open(f.path(), false).unwrap();
+        let mut sector = [0u8; 512];
+        reopened.read_at(512, &mut sector);
+        assert!(
+            sector.iter().all(|&b| b == 0xC0),
+            "the written sector is on disk"
+        );
+        let mut untouched = [1u8; 512];
+        reopened.read_at(0, &mut untouched);
+        assert!(untouched.iter().all(|&b| b == 0));
     }
 
     #[test]

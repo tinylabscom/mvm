@@ -37,6 +37,24 @@ or symlink traversal as portable volume features. Production inputs should be
 declared host-side and promoted into builds or artifacts explicitly; mutable dev
 state inside a persistent machine is not automatically a production input.
 
+## Guest fsync On macOS Volumes
+
+On the HVF backend, a guest fsync on a writable disk volume puts the data in
+the host's storage, but not past the drive's write cache. The drive cache is
+emptied once, when the VM stops cleanly; a VM process that is force-killed
+skips that step. A guest fsync therefore survives a crash of the guest or of
+the VM process, but a host power loss or kernel panic before the drive cache is
+emptied can lose writes the guest believed durable.
+
+That trade is deliberate. Emptying the drive cache on macOS costs milliseconds
+per call, and a guest that syncs after every small write ran about twice as
+slow when every guest fsync paid it. The apple-container backend runs on the
+same VMM and behaves the same way; other backends are unaffected.
+
+HVF full-VM checkpoints refuse a VM with any writable disk, because a snapshot
+does not carry disk contents. Use a volume for durable files, and stop the VM
+to make its last writes durable.
+
 ## No SSH, On Any Tier
 
 There is no SSH capability of any kind in a machine, on any profile —
