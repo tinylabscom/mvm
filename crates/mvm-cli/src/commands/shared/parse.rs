@@ -119,17 +119,7 @@ fn is_volume_keyword(tok: &str) -> bool {
     matches!(tok.to_ascii_lowercase().as_str(), "ro" | "rw" | "enc")
 }
 
-/// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
-/// directory tree the run binds by content identity without attaching it
-/// to the guest (unlike a `--mount`, nothing is materialized or shared —
-/// the asset's canonical hash is recorded in the signed plan and the
-/// chain-signed audit log).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetSpec {
-    pub kind: mvm_contract::plan::AssetKind,
-    /// Host file or directory to hash. Must exist at admission time.
-    pub host_path: String,
-}
+pub use mvm_client::admission::AssetSpec;
 
 const ASSET_GRAMMAR_HINT: &str = "expected KIND:HOST_PATH with KIND one of dataset, model, prompt, agent, policy, compute_environment, other";
 

@@ -14,12 +14,12 @@ use mvm_runtime::image;
 /// In-memory `BundleResolver` scoped to a single admission. Used
 /// when `mvmctl up --bundle-pin <path>` already has the archive
 /// bytes — no need to walk the filesystem registry again.
-pub(super) struct InMemoryBundleResolver {
+pub struct InMemoryBundleResolver {
     bytes: Vec<u8>,
 }
 
 impl InMemoryBundleResolver {
-    pub(super) fn new(bytes: Vec<u8>) -> Self {
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 }
@@ -37,7 +37,7 @@ impl mvm_core::plan::BundleResolver for InMemoryBundleResolver {
 /// Pulls the 64-byte signature out of the `manifest.sig` entry,
 /// hashes the archive for the bundle_sha256 field, and stamps the
 /// publisher's `key_id`.
-pub(super) fn bundle_pin_from_archive(
+pub fn bundle_pin_from_archive(
     archive: &[u8],
     key_id: mvm_core::plan::KeyId,
 ) -> Result<mvm_core::plan::PlanArtifact> {
@@ -83,9 +83,9 @@ pub(super) fn bundle_pin_from_archive(
 ///
 /// Matching is on the tuple `enforce_admitted_shares` matches on, so a grant
 /// that replaces another admits exactly the attachment it replaced.
-pub(crate) fn admitted_shares_for_boot(
+pub fn admitted_shares_for_boot(
     volumes: &[mvm_core::vm_backend::VmVolume],
-    sdk_sidecar: Option<&super::SdkSidecarAttachment>,
+    sdk_sidecar: Option<&mvm_runtime::sdk_sidecar::SdkSidecarAttachment>,
 ) -> Vec<mvm_core::plan::HostShareGrant> {
     let mut shares = mvm_hostd::run::shares_from_vm_volumes(volumes);
     let Some(grant) = sdk_sidecar.map(|a| a.grant.clone()) else {
@@ -110,7 +110,7 @@ fn same_attachment(a: &mvm_core::plan::HostShareGrant, b: &mvm_core::plan::HostS
         && a.encrypted == b.encrypted
 }
 
-pub(super) fn shares_from_volume_cfg(
+pub fn shares_from_volume_cfg(
     vols: &[image::RuntimeVolume],
 ) -> Vec<mvm_core::plan::HostShareGrant> {
     vols.iter()
@@ -148,7 +148,7 @@ fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
     Ok(format!("{tenant}:{vm_name}"))
 }
 
-pub(super) fn generated_policy_bundle_for_network_policy(
+pub fn generated_policy_bundle_for_network_policy(
     tenant: &str,
     vm_name: &str,
     policy: &mvm_core::network_policy::NetworkPolicy,

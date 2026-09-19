@@ -7,7 +7,7 @@ use mvm_core::plan::VerbId;
 /// rootfs. Absent or unreadable sidecar => `false` (treat as not sealed => no
 /// default grant), matching the `accessible: true` fallback convention for
 /// pre-sidecar artifacts.
-pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
+pub fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
     rootfs_path
         .parent()
         .and_then(|dir| {
@@ -30,7 +30,7 @@ pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
 /// the image made the tier a property of the artifact rather than of the run.
 /// One image now runs in either tier, and which one it gets is decided by the
 /// admitted profile.
-pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
+pub fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
     !pty && !has_ad_hoc_argv && !is_dev_profile
 }
 
@@ -55,7 +55,7 @@ const VOLUME_VERBS: [&str; 2] = ["mount-volume", "unmount-volume"];
 /// signed plan and so cannot be conferred locally; a default that handed every
 /// restricted workload a signed grant for the input verbs would move that
 /// decision back to the host gate alone.
-pub(crate) fn default_agent_verbs(
+pub fn default_agent_verbs(
     restrict_agent_verbs: bool,
     has_shares: bool,
     grants_input: bool,
@@ -75,7 +75,7 @@ pub(crate) fn default_agent_verbs(
 /// Validate CLI `--agent-verb` values into an override set. Empty ⇒ `None`
 /// (use the computed default). Any value that is not a known ProdSafe verb
 /// (unknown, DevOnly, or malformed) is a hard error.
-pub(crate) fn parse_agent_verb_override(raw: &[String]) -> Result<Option<Vec<VerbId>>> {
+pub fn parse_agent_verb_override(raw: &[String]) -> Result<Option<Vec<VerbId>>> {
     if raw.is_empty() {
         return Ok(None);
     }

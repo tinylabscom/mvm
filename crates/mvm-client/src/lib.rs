@@ -13,6 +13,7 @@
 //! surface consumers import. [`stream_tracing`] republishes that stream into
 //! a consumer's `tracing` setup, behind the `tracing-bridge` feature.
 
+pub mod admission;
 pub mod audit;
 pub mod boot;
 pub mod connect;

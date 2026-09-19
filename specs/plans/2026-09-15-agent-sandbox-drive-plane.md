@@ -299,6 +299,11 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       instead of reading a moved struct. Enforced rather than advisory:
       `mvm_hostlib_call` refuses with `MVM_HOSTLIB_ABI_NOT_NEGOTIATED` until a
       binding has negotiated.
+- [ ] One admission path for every launcher, so the library cannot admit an
+      SDK machine under a different plan than the CLI gives the same request.
+      The CLI's boot admission now lives in `mvm-client`
+      (`crates/mvm-client/src/admission/`); `mvm_client::launch` still admits
+      through `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.

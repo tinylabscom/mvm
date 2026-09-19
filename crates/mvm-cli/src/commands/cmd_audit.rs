@@ -28,10 +28,10 @@
 //! per-verb labels (success exit codes, duration) without touching
 //! `mod.rs`'s dispatch.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 use mvm_core::plan::TenantId;
+use mvm_hostd::audit::active_signer::{ActiveSignerGuard, register_active_signer};
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 
 use super::Commands;
@@ -39,44 +39,20 @@ use super::machine;
 use super::vm::audit_chain::default_audit_dir;
 use super::vm::host_signer;
 
-struct ActiveCmdSigner {
-    audit_dir: PathBuf,
-    signer: Weak<FileAuditSigner>,
-}
-
-static ACTIVE_CMD_SIGNER: Mutex<Option<ActiveCmdSigner>> = Mutex::new(None);
-
 /// Owns the command recorder and keeps its concrete file signer available to
 /// launch audit emitters for the duration of dispatch.
 pub(crate) struct CommandAudit {
     recorder: Recorder,
     _signer: Arc<FileAuditSigner>,
+    /// Launch admission in this process reuses this signer rather than
+    /// opening a second one on the same chain.
+    _registration: ActiveSignerGuard,
 }
 
 impl CommandAudit {
     pub(crate) fn recorder(&self) -> &Recorder {
         &self.recorder
     }
-}
-
-impl Drop for CommandAudit {
-    fn drop(&mut self) {
-        *ACTIVE_CMD_SIGNER
-            .lock()
-            .expect("active command signer poisoned") = None;
-    }
-}
-
-/// Reuse the command signer only when it targets this exact primary audit
-/// directory. Policy replicas continue to own their separate signers.
-pub(crate) fn active_signer_for(audit_dir: &Path) -> Option<Arc<FileAuditSigner>> {
-    let active = ACTIVE_CMD_SIGNER
-        .lock()
-        .expect("active command signer poisoned");
-    let active = active.as_ref()?;
-    (active.audit_dir == audit_dir)
-        .then(|| active.signer.upgrade())
-        .flatten()
 }
 
 /// Best-effort Recorder for `cmd.*` envelopes. Returns `None` (with
@@ -112,15 +88,11 @@ pub(crate) fn build_cmd_recorder() -> Option<CommandAudit> {
             return None;
         }
     };
-    *ACTIVE_CMD_SIGNER
-        .lock()
-        .expect("active command signer poisoned") = Some(ActiveCmdSigner {
-        audit_dir,
-        signer: Arc::downgrade(&file_signer),
-    });
+    let registration = register_active_signer(&audit_dir, &file_signer);
     Some(CommandAudit {
         recorder: Recorder::new(file_signer.clone(), TenantId("local".to_string())),
         _signer: file_signer,
+        _registration: registration,
     })
 }
 
@@ -330,23 +302,22 @@ mod tests {
         (rec, signer)
     }
 
+    /// The command's signer is what launch admission finds for the primary
+    /// audit directory, and only while the command runs.
     #[test]
     fn the_active_file_signer_is_scoped_to_the_command_and_directory() {
+        use mvm_hostd::audit::active_signer::active_signer_for;
+
         let dir = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let signer = Arc::new(
             FileAuditSigner::open(ed25519_dalek::SigningKey::from_bytes(&[41; 32]), dir.path())
                 .unwrap(),
         );
-        *ACTIVE_CMD_SIGNER
-            .lock()
-            .expect("active command signer poisoned") = Some(ActiveCmdSigner {
-            audit_dir: dir.path().to_path_buf(),
-            signer: Arc::downgrade(&signer),
-        });
         let audit = CommandAudit {
             recorder: Recorder::new(signer.clone(), TenantId("local".to_string())),
             _signer: signer.clone(),
+            _registration: register_active_signer(dir.path(), &signer),
         };
 
         let active = active_signer_for(dir.path()).expect("matching directory shares the signer");

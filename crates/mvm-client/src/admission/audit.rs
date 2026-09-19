@@ -5,11 +5,10 @@
 
 use anyhow::Result;
 
-use crate::commands::cmd_audit;
-use crate::commands::vm::audit_chain::{AuditEmitter, default_audit_dir};
-use crate::commands::vm::policy_resolver::ResolveError;
+use crate::admission::policy_resolver::ResolveError;
+use mvm_hostd::audit::emitter::{AuditEmitter, default_audit_dir};
 
-pub(super) fn build_default_audit_emitter(
+pub fn build_default_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
 ) -> Result<AuditEmitter> {
@@ -17,14 +16,14 @@ pub(super) fn build_default_audit_emitter(
         Some(dir) => dir.to_path_buf(),
         None => default_audit_dir()?,
     };
-    let emitter = match cmd_audit::active_signer_for(&dir) {
+    let emitter = match mvm_hostd::audit::active_signer::active_signer_for(&dir) {
         Some(signer) => AuditEmitter::with_primary_signer(signing_key, &dir, signer),
         None => AuditEmitter::with_dir(signing_key, &dir),
     }?;
     emitter.with_decisions()
 }
 
-pub(super) fn build_policy_audit_emitter(
+pub fn build_policy_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
     policy: Option<&mvm_core::policy::AuditPolicy>,
@@ -35,7 +34,7 @@ pub(super) fn build_policy_audit_emitter(
                 Some(dir) => dir.to_path_buf(),
                 None => default_audit_dir()?,
             };
-            match cmd_audit::active_signer_for(&dir) {
+            match mvm_hostd::audit::active_signer::active_signer_for(&dir) {
                 Some(signer) => {
                     AuditEmitter::with_policy_and_primary_signer(signing_key, &dir, policy, signer)
                 }
@@ -47,7 +46,7 @@ pub(super) fn build_policy_audit_emitter(
     emitter.with_decisions()
 }
 
-pub(super) fn emit_policy_resolved(
+pub fn emit_policy_resolved(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     slots_mode: &'static str,
@@ -57,7 +56,7 @@ pub(super) fn emit_policy_resolved(
     }
 }
 
-pub(super) fn emit_policy_resolve_failure(
+pub fn emit_policy_resolve_failure(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
@@ -81,7 +80,7 @@ pub(super) fn emit_policy_resolve_failure(
     }
 }
 
-pub(super) fn emit_policy_audit_invalid(
+pub fn emit_policy_audit_invalid(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
@@ -101,8 +100,8 @@ mod policy_audit_admission_tests {
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use std::io::Write;
 
-    use super::super::admission::resolve_policy_for_admission;
-    use crate::commands::vm::host_signer::load_or_init_at;
+    use super::super::resolve_policy_for_admission;
+    use mvm_hostd::audit::host_keypair::load_or_init_at;
 
     fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");

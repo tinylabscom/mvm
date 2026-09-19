@@ -100,13 +100,6 @@
       ]
     },
     {
-      "path": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "package": "mvm-cli",
-      "claims": [
-        10
-      ]
-    },
-    {
       "path": "crates/mvm-cli/src/commands/vm/console.rs",
       "package": "mvm-cli",
       "claims": [
@@ -119,10 +112,17 @@
       }
     },
     {
-      "path": "crates/mvm-cli/src/commands/vm/up/admission.rs",
-      "package": "mvm-cli",
+      "path": "crates/mvm-client/src/admission/mod.rs",
+      "package": "mvm-client",
       "claims": [
         17
+      ]
+    },
+    {
+      "path": "crates/mvm-client/src/admission/run_network.rs",
+      "package": "mvm-client",
+      "claims": [
+        10
       ]
     },
     {
@@ -903,26 +903,6 @@
       "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
       "mutant": "replace write_config_blob -> Result<Option<String>> with Ok(Some(String::new()))",
       "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "delete ! in resolve_running_vm",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace resolve_running_vm -> Result<String> with Ok(\"xyzzy\".into())",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace resolve_running_vm -> Result<String> with Ok(String::new())",
-      "reason": "resolves a VM state dir and then checks a live pid: needs a running VM, or a state dir plus a process the test controls for the whole call. The claim-10 witness in this file (the deny-all network default) is caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
-      "mutant": "replace || with && in resolve_manifest_arg",
-      "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
       "file": "crates/mvm-contract/src/plan/types.rs",

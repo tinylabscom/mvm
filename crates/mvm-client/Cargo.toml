@@ -41,6 +41,13 @@ mvm-runtime = { workspace = true, default-features = false }
 # to the default build; it does not form a cycle because mvm-sdk — which
 # mvm-hostd pulls in — carries no dependency back on this crate.
 mvm-hostd = { workspace = true }
+# Boot admission reads the deploy record a build left beside the rootfs and
+# verifies the booting artifact against it. Already in this crate's closure
+# through mvm-hostd, so the direct edge adds no crates.
+mvm-sdk.workspace = true
+# The guest-agent request type that agent-verb grants are keyed on. Already in
+# this crate's closure through mvm-hostd.
+mvm-agentd.workspace = true
 # Shared run-path orchestration (`run_image::inject_and_materialize`) — the same
 # pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-fs's
 # ext4 writer, already in the mvmctl closure via the CLI, so this adds no default crates.

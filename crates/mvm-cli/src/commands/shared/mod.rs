@@ -7,7 +7,6 @@ mod build_mode;
 mod drive;
 mod event;
 mod format;
-mod grants;
 mod hints;
 mod parse;
 mod resolve;
@@ -19,8 +18,14 @@ mod vsock;
 pub(super) use build_mode::BuildModeFlags;
 pub(super) use event::PhaseEvent;
 pub(super) use format::{human_age_secs, human_bytes};
-pub(in crate::commands) use grants::{GrantInputs, enforced_network_policy, resolve_run_grants};
 pub(super) use hints::with_hints;
+pub(in crate::commands) use mvm_client::admission::run_grants::{
+    GrantInputs, enforced_network_policy, resolve_run_grants,
+};
+pub(super) use mvm_client::admission::run_network::{
+    parse_run_network_preset, persisted_run_network, resolve_ai_policy, resolve_run_network_policy,
+    resolve_run_network_policy_with_preset_and_peers,
+};
 pub(crate) use parse::AssetSpec;
 pub(crate) use parse::materialize_disk_volume;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
@@ -30,10 +35,8 @@ pub(super) use parse::{
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, parse_peer_binding, parse_run_network_preset,
-    persisted_run_network, resolve_ai_policy, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg, resolve_run_network_policy,
-    resolve_run_network_policy_with_preset_and_peers,
+    ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
+    resolve_manifest_arg,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

@@ -42,7 +42,7 @@ why = """
 `ExecutionPlan::sdk_uses_sidecar` is a two-sided assertion — `true` makes \
 admission *require* the SDK sidecar, `false` makes it *forbid* one — but no \
 production path can produce `false`. Both construction sites hardcode `true` \
-(`plan/synthesis.rs`, `commands/vm/policy_resolver.rs`), there is no CLI flag, \
+(`plan/synthesis.rs`, `admission/policy_resolver.rs`), there is no CLI flag, \
 and no workload IR field feeds it, so the forbidding half is reachable only by \
 hand-building a plan in a test.
 
@@ -80,7 +80,7 @@ launch path — which no `mvmctl` invocation reaches — ever asked."""
 
 [[control]]
 symbol = "admitted_shares_for_boot"
-file = "crates/mvm-cli/src/commands/vm/up/policy.rs"
+file = "crates/mvm-client/src/admission/policy.rs"
 dormant = false
 why = """
 Builds the host-fs grants the signed plan admits, from the volume list the \
