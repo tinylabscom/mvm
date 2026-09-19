@@ -562,6 +562,8 @@ impl BoundCommand {
     /// so an unresponsive manager leaves no half-started launch behind.
     pub fn spawn(&mut self) -> Result<Child> {
         let program = self.command.get_program().to_string_lossy().into_owned();
+        let proc_root = Path::new(PROC_ROOT);
+        let mut names = LauncherComm::before_spawn(proc_root);
         let mut child = self
             .command
             .spawn()
@@ -574,7 +576,7 @@ impl BoundCommand {
             if child.try_wait()?.is_some() {
                 return Ok(LauncherProbe::Exited);
             }
-            probe_launcher_comm(Path::new(PROC_ROOT), pid)
+            probe_launcher_comm(proc_root, pid, &mut names)
         })
         .with_context(|| format!("watching the scope launcher for '{}'", self.machine_id))?;
         if outcome == LaunchWatch::TimedOut {
@@ -696,12 +698,17 @@ fn await_detached_launcher_within(
         )
     })?;
     let proc_root = Path::new(PROC_ROOT);
-    let outcome = watch_launcher(timeout, || probe_launcher_comm(proc_root, pid))
+    // Started by a shell that has since exited, so there is no spawning
+    // thread's name to recognise; only `systemd-run` reads as launching.
+    let mut names = LauncherComm::default();
+    let outcome = watch_launcher(timeout, || probe_launcher_comm(proc_root, pid, &mut names))
         .with_context(|| format!("watching the scope launcher for '{machine_id}'"))?;
     if outcome == LaunchWatch::TimedOut {
         // Re-checked immediately before the kill: once the launcher has exec'd,
         // this pid is the VMM, and it is not this function's to kill.
-        if probe_launcher_comm(proc_root, pid).ok() == Some(LauncherProbe::Launching) {
+        if probe_launcher_comm(proc_root, pid, &mut LauncherComm::default()).ok()
+            == Some(LauncherProbe::Launching)
+        {
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
                 .stdout(Stdio::null())
@@ -774,18 +781,66 @@ fn watch_launcher(
     }
 }
 
+/// Reads a launcher's command name as a stage of its launch.
+///
+/// `Command::spawn` returns once the child has switched address space, and the
+/// kernel sets the new command name a moment later. So the first read can
+/// still see the name the child inherited from the thread that spawned it.
+/// That name is not `systemd-run`, but it does not mean the payload is running
+/// either. Taking it for "exec'd" skipped the whole creation deadline.
+///
+/// So the name the spawning thread had is recorded before the spawn, and read
+/// as still launching until `systemd-run` has been seen. After that, any other
+/// name is the payload. One case stays ambiguous: a payload with the spawning
+/// thread's own name, exec'd before `systemd-run` is ever observed, waits out
+/// the deadline. No VMM this crate launches has the name of a thread that
+/// launches it.
+#[derive(Debug, Clone, Default)]
+struct LauncherComm {
+    pre_exec: Option<String>,
+    seen_launcher: bool,
+}
+
+impl LauncherComm {
+    /// For a child about to be spawned from the calling thread.
+    fn before_spawn(proc_root: &Path) -> Self {
+        let pre_exec = std::fs::read_to_string(proc_root.join("thread-self").join("comm"))
+            .ok()
+            .map(|comm| comm.trim().to_string())
+            .filter(|comm| !comm.is_empty() && comm != SYSTEMD_RUN);
+        Self {
+            pre_exec,
+            seen_launcher: false,
+        }
+    }
+
+    fn classify(&mut self, comm: &str) -> LauncherProbe {
+        if comm == SYSTEMD_RUN {
+            self.seen_launcher = true;
+            return LauncherProbe::Launching;
+        }
+        if !self.seen_launcher && self.pre_exec.as_deref() == Some(comm) {
+            return LauncherProbe::Launching;
+        }
+        LauncherProbe::Execed
+    }
+}
+
 /// Classify a launcher pid by its command name under `proc_root`.
 ///
 /// The name is the signal because it is the one thing that changes at exec and
 /// that any user may read: a launcher that execs `sudo` becomes a root process
 /// whose executable link this user cannot follow.
-fn probe_launcher_comm(proc_root: &Path, pid: u32) -> std::io::Result<LauncherProbe> {
+fn probe_launcher_comm(
+    proc_root: &Path,
+    pid: u32,
+    names: &mut LauncherComm,
+) -> std::io::Result<LauncherProbe> {
     if !proc_root.join("self").exists() {
         return Ok(LauncherProbe::Unobservable);
     }
     match std::fs::read_to_string(proc_root.join(pid.to_string()).join("comm")) {
-        Ok(comm) if comm.trim() == SYSTEMD_RUN => Ok(LauncherProbe::Launching),
-        Ok(_) => Ok(LauncherProbe::Execed),
+        Ok(comm) => Ok(names.classify(comm.trim())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LauncherProbe::Exited),
         Err(e) => Err(e),
     }
@@ -1859,25 +1914,65 @@ mod tests {
     #[test]
     fn a_launcher_is_classified_by_its_command_name() {
         let proc_root = tempfile::tempdir().expect("proc root");
-        let no_proc = probe_launcher_comm(proc_root.path(), 42).unwrap();
+        let names = &mut LauncherComm::default();
+        let no_proc = probe_launcher_comm(proc_root.path(), 42, names).unwrap();
         assert_eq!(no_proc, LauncherProbe::Unobservable);
 
         std::fs::create_dir_all(proc_root.path().join("self")).unwrap();
         std::fs::create_dir_all(proc_root.path().join("42")).unwrap();
         std::fs::write(proc_root.path().join("42/comm"), "systemd-run\n").unwrap();
         assert_eq!(
-            probe_launcher_comm(proc_root.path(), 42).unwrap(),
+            probe_launcher_comm(proc_root.path(), 42, names).unwrap(),
             LauncherProbe::Launching
         );
         std::fs::write(proc_root.path().join("42/comm"), "sudo\n").unwrap();
         assert_eq!(
-            probe_launcher_comm(proc_root.path(), 42).unwrap(),
+            probe_launcher_comm(proc_root.path(), 42, names).unwrap(),
             LauncherProbe::Execed
         );
         assert_eq!(
-            probe_launcher_comm(proc_root.path(), 43).unwrap(),
+            probe_launcher_comm(proc_root.path(), 43, names).unwrap(),
             LauncherProbe::Exited
         );
+    }
+
+    /// The flake this guards: the first read after `spawn` returns can still
+    /// see the name inherited from the spawning thread, and reading that as
+    /// "exec'd" skipped the creation deadline altogether.
+    #[test]
+    fn the_name_inherited_from_the_spawning_thread_is_still_launching() {
+        let proc_root = tempfile::tempdir().expect("proc root");
+        std::fs::create_dir_all(proc_root.path().join("self")).unwrap();
+        std::fs::create_dir_all(proc_root.path().join("thread-self")).unwrap();
+        std::fs::write(proc_root.path().join("thread-self/comm"), "mvmctl\n").unwrap();
+        std::fs::create_dir_all(proc_root.path().join("42")).unwrap();
+        let comm = proc_root.path().join("42/comm");
+        let mut names = LauncherComm::before_spawn(proc_root.path());
+
+        std::fs::write(&comm, "mvmctl\n").unwrap();
+        assert_eq!(
+            probe_launcher_comm(proc_root.path(), 42, &mut names).unwrap(),
+            LauncherProbe::Launching,
+            "not yet exec'd"
+        );
+        std::fs::write(&comm, "systemd-run\n").unwrap();
+        assert_eq!(
+            probe_launcher_comm(proc_root.path(), 42, &mut names).unwrap(),
+            LauncherProbe::Launching
+        );
+        std::fs::write(&comm, "mvmctl\n").unwrap();
+        assert_eq!(
+            probe_launcher_comm(proc_root.path(), 42, &mut names).unwrap(),
+            LauncherProbe::Execed,
+            "after systemd-run, the spawning thread's name is a payload"
+        );
+    }
+
+    #[test]
+    fn without_a_recorded_name_only_systemd_run_is_launching() {
+        let mut names = LauncherComm::default();
+        assert_eq!(names.classify("mvmctl"), LauncherProbe::Execed);
+        assert_eq!(names.classify(SYSTEMD_RUN), LauncherProbe::Launching);
     }
 
     #[test]
