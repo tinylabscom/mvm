@@ -71,12 +71,14 @@ refused; update the machine declaration and restart when the mapping changes.
 
 ## vsock Communication
 
-Port **5254** is reserved by the typed `Telemetry` service. Shared sender and
+Port **5254** is assigned to the typed `Telemetry` service. Shared sender and
 receiver libraries use authenticated encrypted sessions and a separate
 connection from control, workload exit, networking and audit. No telemetry
-listener/collector is provisioned by the runtime yet; the reserved service
-must not be interpreted as working detached tracing or an external guest
-export route. See [Guest Agent](/reference/guest-agent/) for its current
+guest listener or VM-lifetime collector is active yet. Workload specifications
+now include a dedicated host-dialed telemetry channel without requiring egress,
+broker or console grants, and backend connection paths recognize it. Endpoint
+wiring alone must not be interpreted as working detached tracing or an external
+guest export route. See [Guest Agent](/reference/guest-agent/) for its current
 implementation boundaries.
 
 MicroVMs don't use networking for host communication -- they use **vsock** with two distinct protocols:

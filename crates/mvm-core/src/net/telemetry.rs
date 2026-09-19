@@ -7,11 +7,17 @@
 
 use std::io::{Read, Write};
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use mvm_contract::policy::security::{
+    PROTOCOL_VERSION_AUTHENTICATED, SessionHello, SessionHelloAck,
+};
 
 use crate::protocol::telemetry::{MAX_RECORD_BYTES, RecordError, TelemetryRecord};
 
-use super::session::{Session, SessionError, read_sealed_frame, write_sealed_frame};
+use super::session::{
+    ReceiveOnly, Session, SessionError, read_sealed_frame, session_transcript, validate_host_ack,
+    write_sealed_frame,
+};
 
 pub mod outbox;
 
@@ -19,6 +25,34 @@ const SESSION_PREFIX: &str = "mvm.telemetry.v1.";
 // Binary metadata is length-bounded (three u8 strings, u16 signature), with a
 // fixed Ed25519 signature and GCM tag. This leaves room for the legal envelope.
 const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 1024;
+
+/// Validate a telemetry-only host confirmation before an external signer uses
+/// its key. Returns the existing protocol's canonical transcript, not a new wire
+/// format. Peer registration must still be checked by the collector beforehand.
+pub fn handshake_signing_bytes(
+    hello: &SessionHello,
+    ack: &SessionHelloAck,
+    host_key: &VerifyingKey,
+) -> Result<Vec<u8>, TelemetryError> {
+    if hello.version != PROTOCOL_VERSION_AUTHENTICATED
+        || hello.challenge.len() != 32
+        || hello.host_ephemeral_pubkey.len() != 32
+        || hello.host_pubkey != host_key.as_bytes()
+        || hello.session_id.len() != SESSION_PREFIX.len() + 36
+    {
+        return Err(TelemetryError::Authentication);
+    }
+    let id = hello
+        .session_id
+        .strip_prefix(SESSION_PREFIX)
+        .ok_or(TelemetryError::Authentication)?;
+    let uuid = uuid::Uuid::parse_str(id).map_err(|_| TelemetryError::Authentication)?;
+    if uuid.get_version_num() != 4 || uuid.to_string() != id {
+        return Err(TelemetryError::Authentication);
+    }
+    validate_host_ack(hello, ack, None).map_err(|_| TelemetryError::Authentication)?;
+    session_transcript(hello, ack).map_err(|_| TelemetryError::Authentication)
+}
 
 /// Payload-free failures; underlying parsers can quote hostile input so their
 /// error strings are deliberately not retained as sources.
@@ -118,7 +152,7 @@ impl TelemetrySender {
 /// Host worker receiver, bound to an externally registered guest key.
 /// No constructor accepts an already-open, potentially wrong-role session.
 pub struct TelemetryReceiver {
-    session: Option<Session>,
+    session: Option<Session<ReceiveOnly>>,
 }
 
 impl TelemetryReceiver {
@@ -129,12 +163,38 @@ impl TelemetryReceiver {
         host_key: SigningKey,
         expected_guest: &VerifyingKey,
     ) -> Result<Self, TelemetryError> {
+        Self::connect_with_signer(
+            stream,
+            &host_key.verifying_key(),
+            expected_guest,
+            |hello, ack| {
+                let transcript = session_transcript(hello, ack)?;
+                Ok(host_key.sign(&transcript))
+            },
+        )
+    }
+
+    /// Authenticate through an external signing owner. Only the public host key
+    /// and authenticated receive state are retained by the collector. The guest
+    /// must match runtime registration before the signer is called; returned
+    /// signatures are verified locally before confirming the handshake.
+    ///
+    /// The signer must sign the canonical JSON tuple `(hello, ack)` through a
+    /// dedicated handshake operation, never an unrelated signing verb. It runs
+    /// on the transport worker and must enforce its own bounded I/O deadline.
+    pub fn connect_with_signer<S, F>(
+        stream: &mut S,
+        host_key: &VerifyingKey,
+        expected_guest: &VerifyingKey,
+        sign: F,
+    ) -> Result<Self, TelemetryError>
+    where
+        S: Read + Write,
+        F: FnOnce(&SessionHello, &SessionHelloAck) -> Result<Signature, SessionError>,
+    {
         let id = format!("{SESSION_PREFIX}{}", uuid::Uuid::new_v4());
-        let (session, peer) =
-            Session::host(stream, &id, host_key).map_err(|_| TelemetryError::Authentication)?;
-        if &peer != expected_guest {
-            return Err(TelemetryError::Authentication);
-        }
+        let session = Session::host_receiver(stream, &id, host_key, expected_guest, sign)
+            .map_err(|_| TelemetryError::Authentication)?;
         Ok(Self {
             session: Some(session),
         })

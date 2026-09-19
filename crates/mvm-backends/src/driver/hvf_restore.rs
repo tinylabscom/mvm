@@ -194,7 +194,15 @@ pub fn hvf_child_restore_config(
         substitution_socket: None,
         egress_relay_socket: None,
         broker_socket: None,
-        console_data_sockets: Vec::new(),
+        // Observations use a fresh child-local endpoint, never the parent's
+        // inherited listener and never an interactive console grant.
+        console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::HostDialSocket {
+            guest_port: mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            host_socket: mvm_core::config::vm_hvf_vsock_port_socket_at(
+                req.state_dir,
+                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            ),
+        }],
         // A restored child is a workload fork, never the build engine.
         builder_control_sockets: Vec::new(),
         // A restored child is a workload fork; it owns no store image.
@@ -535,7 +543,17 @@ mod tests {
         assert_eq!(cfg.egress_relay_socket, None);
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.broker_socket, None);
-        assert!(cfg.console_data_sockets.is_empty());
+        assert_eq!(
+            cfg.console_data_sockets,
+            vec![mvm_vmm::host::hvf_supervisor::HostDialSocket {
+                guest_port: mvm_core::protocol::telemetry::TELEMETRY_PORT,
+                host_socket: mvm_core::config::vm_hvf_vsock_port_socket_at(
+                    dir,
+                    mvm_core::protocol::telemetry::TELEMETRY_PORT,
+                ),
+            }]
+        );
+        assert_ne!(cfg.console_data_sockets, parent.console_data_sockets);
         assert_eq!(cfg.handoff_socket, None);
         assert_eq!(cfg.handoff_root, None);
         assert_eq!(cfg.handoff_verify_key, None);

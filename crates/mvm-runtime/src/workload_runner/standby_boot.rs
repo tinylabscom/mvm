@@ -274,11 +274,16 @@ fn factory_parent_spec_inner(
         return workload_device_spec(config, &cmdline, &state_dir.join("console.log"));
     }
     let agent = mvm_core::config::vm_hvf_agent_socket_at(state_dir);
+    let telemetry = mvm_core::config::vm_hvf_vsock_port_socket_at(
+        state_dir,
+        mvm_net::channel::GuestService::Telemetry.port(),
+    );
     let egress = state_dir.join("standby-egress.sock");
     let exit = state_dir.join("workload.exit");
     let broker = state_dir.join("standby-broker.sock");
     let sockets = WorkloadSockets {
         agent: &agent,
+        telemetry: &telemetry,
         egress_gateway: Some(&egress),
         exit: &exit,
         broker: Some(&broker),
@@ -392,6 +397,7 @@ mod tests {
             config: launch,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
+                telemetry: Path::new("/run/telemetry.sock"),
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,

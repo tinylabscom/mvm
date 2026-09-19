@@ -174,8 +174,27 @@ fn child_has_no_relays(world: &mut CliWorld) {
     assert_eq!(child.substitution_socket, None, "substitution survived");
     assert_eq!(child.broker_socket, None, "broker survived");
     assert!(
-        child.console_data_sockets.is_empty(),
+        child
+            .console_data_sockets
+            .iter()
+            .all(|socket| socket.guest_port == mvm_core::protocol::telemetry::TELEMETRY_PORT),
         "console data sockets survived"
+    );
+}
+
+#[then(expr = "the restored config carries only a child-local telemetry listener")]
+fn child_has_telemetry(world: &mut CliWorld) {
+    let child = child_config(world);
+    let state_dir = child.pid_file.parent().expect("child state directory");
+    assert_eq!(
+        child.console_data_sockets,
+        vec![HostDialSocket {
+            guest_port: mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            host_socket: mvm_core::config::vm_hvf_vsock_port_socket_at(
+                state_dir,
+                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            ),
+        }]
     );
 }
 

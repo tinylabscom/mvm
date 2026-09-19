@@ -1480,10 +1480,13 @@ mod tests {
         }
         endpoint.join().unwrap();
         let err = result.unwrap_err();
+        // A peer that closes immediately may be observed while installing the
+        // socket timeout (macOS) or while reading. Either path must fail closed.
+        let message = err.to_string();
         assert!(
-            err.to_string()
-                .contains("waiting for the network endpoint's authenticated session"),
-            "unexpected: {err}"
+            message.contains("waiting for the network endpoint's authenticated session")
+                || message.contains("set network endpoint readiness timeout"),
+            "unexpected: {err:#}"
         );
     }
 

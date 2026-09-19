@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, dev_console_data_ports,
-    send_request_stream,
+    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -1249,13 +1248,13 @@ impl RunningVm for FcRunningVm {
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
         // Firecracker multiplexes every host→guest connection over the single
         // vsock UDS, selecting the destination port via the `CONNECT <port>\n`
-        // handshake. Restricted to the agent port and the dev-only console data
+        // handshake. Restricted to agent, telemetry and dev-only console data
         // ports (a sealed prod boot registers no console listeners), mirroring
         // the other drivers' allow-list.
-        if guest_port != GUEST_AGENT_PORT && !dev_console_data_ports().any(|p| p == guest_port) {
+        if !super::host_dialable_port(guest_port) {
             bail!(
                 "Firecracker driver vsock_connect supports only the agent port \
-                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                 ({GUEST_AGENT_PORT}), telemetry and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
@@ -2356,56 +2355,58 @@ mod tests {
         );
     }
     #[test]
-    fn vsock_connect_reaches_the_agent_over_the_connect_handshake_and_rejects_other_ports() {
+    fn vsock_connect_reaches_agent_and_telemetry_over_the_connect_handshake() {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{BufRead, BufReader, Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = dir.path().join("runtime");
-        std::fs::create_dir_all(&runtime).unwrap();
-        let vsock = runtime.join("v.sock");
-        let Some(listener) = bind_unix_listener(&vsock) else {
-            return;
-        };
-        // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
-        let server = std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
-                    let mut w = stream;
-                    let port = line.trim().trim_start_matches("CONNECT ").trim();
-                    let _ = writeln!(w, "OK {port}");
-                    let _ = w.flush();
-                    let mut b = [0u8; 1];
-                    if reader.read_exact(&mut b).is_ok() {
-                        let _ = w.write_all(&b);
+        for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = dir.path().join("runtime");
+            std::fs::create_dir_all(&runtime).unwrap();
+            let vsock = runtime.join("v.sock");
+            let Some(listener) = bind_unix_listener(&vsock) else {
+                return;
+            };
+            // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
+            let server = std::thread::spawn(move || {
+                if let Ok((stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() {
+                        assert_eq!(line, format!("CONNECT {port}\n"));
+                        let mut w = stream;
+                        let port = line.trim().trim_start_matches("CONNECT ").trim();
+                        let _ = writeln!(w, "OK {port}");
+                        let _ = w.flush();
+                        let mut b = [0u8; 1];
+                        if reader.read_exact(&mut b).is_ok() {
+                            let _ = w.write_all(&b);
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        let vm = FcRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join("fc.pid"),
-            pid: None,
-            vsock_uds: vsock.to_string_lossy().into_owned(),
-            flush_via_agent: true,
-        };
+            let vm = FcRunningVm {
+                id: VmId("agent-vm".into()),
+                state_dir: dir.path().to_path_buf(),
+                pid_file: dir.path().join("fc.pid"),
+                pid: None,
+                vsock_uds: vsock.to_string_lossy().into_owned(),
+                flush_via_agent: true,
+            };
 
-        // The agent port connects through the CONNECT handshake + round-trips.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
+            let mut s = vm.vsock_connect(port).unwrap();
+            s.write_all(b"x").unwrap();
+            let mut got = [0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"x");
+            server.join().unwrap();
 
-        // Ports outside the agent + console data range are not host-dialable
-        // (rejected before any connect attempt).
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
-        assert!(vm.vsock_connect(9999).is_err());
+            // Ports outside the agent + console data range are not host-dialable
+            // (rejected before any connect attempt).
+            assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+            assert!(vm.vsock_connect(9999).is_err());
+        }
     }
 }
 

@@ -57,13 +57,43 @@ pub struct SpawnedEndpoint {
 /// (claim-10 gate + claims 12/13 substitution).
 pub trait NetworkEndpointSpawner: Send + Sync {
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint>;
+    /// Provision authentication without starting an endpoint or granting egress.
+    fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>>;
 }
 
 /// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
 /// over the in-process-VMM UDS transport.
 pub struct RealNetworkEndpointSpawner;
 
+/// Provision a parent's guest key without tenant workload authority or egress.
+pub(super) fn prepare_standby_identity(
+    spawner: &dyn NetworkEndpointSpawner,
+    spec: &StandbySpec,
+) -> std::result::Result<Option<PathBuf>, StandbyError> {
+    spawner
+        .prepare_identity(&NetworkEndpointSpawnRequest {
+            vm_name: &spec.id,
+            state_dir: Path::new(&spec.vm_state_dir),
+            tenant: "local",
+            secrets: &[],
+            redaction: &RedactionPolicy::default(),
+            network_policy: &NetworkPolicy::deny_all(),
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
+            identity: FlowMuxIdentitySource::Mint,
+        })
+        .map_err(|error| {
+            StandbyError::SpawnFailed(format!("provision standby guest identity: {error:#}"))
+        })
+}
+
 impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
+    fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>> {
+        let anchor_path = mvm_core::config::mvm_keys_dir()
+            .join(mvm_vmm::host::broker_services_spawn::HOST_SIGNER_PUB);
+        prepare_observation_identity(req, &anchor_path)
+    }
+
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
         use mvm_vmm::host::flowmux_identity::{
             FlowMuxIdentityMaterial, IDENTITY_DRIVE_FILE, IdentityDriveContents,
@@ -135,6 +165,50 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             identity_drive,
         })
     }
+}
+
+fn prepare_observation_identity(
+    req: &NetworkEndpointSpawnRequest<'_>,
+    anchor_path: &Path,
+) -> Result<Option<PathBuf>> {
+    use base64::Engine as _;
+    use mvm_vmm::host::flowmux_identity::{
+        GuestIdentityMaterial, IDENTITY_DRIVE_FILE, IdentityDriveContents, InheritableIdentity,
+        load_inheritable_identity,
+    };
+
+    let (identity, drive) = match req.identity {
+        FlowMuxIdentitySource::Mint => {
+            let anchor = mvm_agentd::vsock::load_host_signer_verifying_key(anchor_path)?
+                .context("guest observations require the host signer public anchor")?;
+            let guest = GuestIdentityMaterial::mint(anchor)?;
+            let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
+            guest.write_drive_with(&drive, &IdentityDriveContents::default())?;
+            (
+                InheritableIdentity {
+                    session_id: req.vm_name.to_string(),
+                    guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                        .encode(guest.verifying_key().as_bytes()),
+                },
+                Some(drive),
+            )
+        }
+        FlowMuxIdentitySource::InheritFrom(parent) => {
+            let identity = load_inheritable_identity(parent)?
+                .context("restored guest has no registered observation identity")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&identity.guest_verifying_key_base64)
+                .context("invalid registered guest public key encoding")?;
+            let key: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid registered guest public key length"))?;
+            ed25519_dalek::VerifyingKey::from_bytes(&key)
+                .context("invalid registered guest public key")?;
+            (identity, None)
+        }
+    };
+    identity.persist(req.state_dir)?;
+    Ok(drive)
 }
 
 /// This boot's egress CA, in the two shapes its two consumers need.
@@ -259,6 +333,173 @@ fn host_signer_key_base64() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_vmm::host::flowmux_identity::{
+        IDENTITY_DRIVE_FILE, InheritableIdentity, PUBLIC_IDENTITY_FILE, load_inheritable_identity,
+    };
+
+    fn prepare_test_identity(
+        state: &Path,
+        anchor: &Path,
+        identity: FlowMuxIdentitySource<'_>,
+    ) -> Result<Option<PathBuf>> {
+        prepare_observation_identity(
+            &NetworkEndpointSpawnRequest {
+                vm_name: "isolated-guest",
+                state_dir: state,
+                tenant: "tenant",
+                secrets: &[],
+                redaction: &RedactionPolicy::default(),
+                network_policy: &NetworkPolicy::deny_all(),
+                network_limits: mvm_core::plan::NetworkLimits::default(),
+                ingress: &[],
+                identity,
+            },
+            anchor,
+        )
+    }
+
+    #[test]
+    fn observation_identity_needs_only_a_public_anchor_and_creates_no_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let anchor = root.path().join("host-signer.pub");
+        let host = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        std::fs::write(&anchor, host.verifying_key().as_bytes()).unwrap();
+        let state = root.path().join("guest");
+        let drive = prepare_test_identity(&state, &anchor, FlowMuxIdentitySource::Mint)
+            .unwrap()
+            .unwrap();
+        assert_eq!(drive, state.join(IDENTITY_DRIVE_FILE));
+        let image = std::fs::read(&drive).unwrap();
+        assert!(
+            image
+                .windows(32)
+                .any(|bytes| bytes == host.verifying_key().as_bytes())
+        );
+        assert!(!image.windows(32).any(|bytes| bytes == host.as_bytes()));
+        let identity = load_inheritable_identity(&state).unwrap().unwrap();
+        assert_eq!(identity.session_id, "isolated-guest");
+        let mut files: Vec<_> = std::fs::read_dir(&state)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                std::ffi::OsString::from(IDENTITY_DRIVE_FILE),
+                std::ffi::OsString::from(PUBLIC_IDENTITY_FILE)
+            ]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&drive).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let sibling = root.path().join("sibling");
+        prepare_test_identity(&sibling, &anchor, FlowMuxIdentitySource::Mint).unwrap();
+        assert_ne!(
+            identity.guest_verifying_key_base64,
+            load_inheritable_identity(&sibling)
+                .unwrap()
+                .unwrap()
+                .guest_verifying_key_base64
+        );
+    }
+
+    #[test]
+    fn restored_observation_identity_preserves_the_key_without_minting_a_drive() {
+        use base64::Engine as _;
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let child = root.path().join("child");
+        let identity = InheritableIdentity {
+            session_id: "parent-session".into(),
+            guest_verifying_key_base64: base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[38; 32])
+                    .verifying_key()
+                    .as_bytes(),
+            ),
+        };
+        identity.persist(&parent).unwrap();
+        assert_eq!(
+            prepare_test_identity(
+                &child,
+                &root.path().join("absent-anchor"),
+                FlowMuxIdentitySource::InheritFrom(&parent)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(load_inheritable_identity(&child).unwrap(), Some(identity));
+        assert!(!child.join(IDENTITY_DRIVE_FILE).exists());
+    }
+
+    #[test]
+    fn observation_identity_refuses_missing_or_malformed_anchors_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let anchor = root.path().join("anchor");
+        let state = root.path().join("guest");
+        assert!(prepare_test_identity(&state, &anchor, FlowMuxIdentitySource::Mint).is_err());
+        std::fs::write(&anchor, b"invalid-anchor").unwrap();
+        assert!(prepare_test_identity(&state, &anchor, FlowMuxIdentitySource::Mint).is_err());
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn observation_identity_refuses_missing_and_malformed_parent_registration() {
+        use base64::Engine as _;
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let child = root.path().join("child");
+        let anchor = root.path().join("unused-anchor");
+        assert!(
+            prepare_test_identity(&child, &anchor, FlowMuxIdentitySource::InheritFrom(&parent))
+                .is_err()
+        );
+        for encoded in [
+            "not-base64".to_string(),
+            base64::engine::general_purpose::STANDARD.encode([1; 31]),
+        ] {
+            InheritableIdentity {
+                session_id: "parent".into(),
+                guest_verifying_key_base64: encoded,
+            }
+            .persist(&parent)
+            .unwrap();
+            assert!(
+                prepare_test_identity(&child, &anchor, FlowMuxIdentitySource::InheritFrom(&parent))
+                    .is_err()
+            );
+        }
+        std::fs::write(parent.join(PUBLIC_IDENTITY_FILE), b"invalid-json").unwrap();
+        assert!(
+            prepare_test_identity(&child, &anchor, FlowMuxIdentitySource::InheritFrom(&parent))
+                .is_err()
+        );
+        assert!(!child.exists());
+    }
+
+    #[test]
+    fn observation_identity_propagates_drive_and_registration_write_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let anchor = root.path().join("anchor");
+        std::fs::write(
+            &anchor,
+            ed25519_dalek::SigningKey::from_bytes(&[39; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+        .unwrap();
+        let state = root.path().join("file-not-directory");
+        std::fs::write(&state, b"occupied").unwrap();
+        assert!(prepare_test_identity(&state, &anchor, FlowMuxIdentitySource::Mint).is_err());
+        let state = root.path().join("guest");
+        std::fs::create_dir_all(state.join(PUBLIC_IDENTITY_FILE)).unwrap();
+        assert!(prepare_test_identity(&state, &anchor, FlowMuxIdentitySource::Mint).is_err());
+    }
 
     fn hosts(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| (*n).to_string()).collect()

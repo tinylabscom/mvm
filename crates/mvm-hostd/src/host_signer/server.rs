@@ -6,6 +6,8 @@
 //! Max-frame-bytes cap enforced *before* parse (same pattern as the
 //! broker's gate 1).
 
+use std::borrow::Cow;
+
 use anyhow::{Context, Result};
 use mvm_core::protocol::host_signer::{HostSignerErrorCode, SignRequest, SignResponse};
 use tokio::io::AsyncWriteExt;
@@ -13,7 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 use crate::audit_signer::helper_client::SignerHelperClient;
-use crate::host_signer::keystore::SharedKeystore;
+use crate::host_signer::keystore::{Keystore, SharedKeystore};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
@@ -140,12 +142,28 @@ async fn dispatch(req: &SignRequest, backend: &SignBackend) -> SignResponse {
     }
 }
 
-fn dispatch_local(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
+pub(crate) fn dispatch_local(req: &SignRequest, keystore: &Keystore) -> SignResponse {
     let request_id = req.request_id().to_string();
-    let bytes_to_sign: &[u8] = match req {
-        SignRequest::SignPlan { bytes, .. } => bytes,
+    let bytes_to_sign: Cow<'_, [u8]> = match req {
+        SignRequest::SignPlan { bytes, .. } => Cow::Borrowed(bytes),
+        SignRequest::SignTelemetryHandshake { handshake, .. } => {
+            match mvm_core::net::telemetry::handshake_signing_bytes(
+                &handshake.hello,
+                &handshake.ack,
+                &keystore.verifying_key(),
+            ) {
+                Ok(bytes) => Cow::Owned(bytes),
+                Err(_) => {
+                    return err_response(
+                        request_id,
+                        HostSignerErrorCode::InvalidRequest,
+                        "invalid telemetry handshake",
+                    );
+                }
+            }
+        }
     };
-    let result = keystore.sign(bytes_to_sign);
+    let result = keystore.sign(&bytes_to_sign);
     SignResponse::Ok {
         request_id,
         sig_alg: result.sig_alg,

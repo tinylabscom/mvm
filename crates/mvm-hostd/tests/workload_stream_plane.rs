@@ -50,6 +50,17 @@ const ACCEPT_SETTLE: Duration = Duration::from_millis(250);
 struct StubNetworkEndpointSpawner;
 
 impl NetworkEndpointSpawner for StubNetworkEndpointSpawner {
+    fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>> {
+        Ok(matches!(
+            req.identity,
+            mvm_runtime::workload_runner::FlowMuxIdentitySource::Mint
+        )
+        .then(|| {
+            req.state_dir
+                .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
+        }))
+    }
+
     fn spawn(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
         Ok(SpawnedEndpoint {
             egress_uds: PathBuf::from("/run/mvm-test-endpoint.sock"),

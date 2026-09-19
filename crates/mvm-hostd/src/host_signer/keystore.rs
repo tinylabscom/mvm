@@ -82,6 +82,11 @@ impl Keystore {
     pub fn pub_key(&self) -> Vec<u8> {
         self.pub_key_bytes.clone()
     }
+
+    /// Typed public identity for protocol validation; no private bytes escape.
+    pub(crate) fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
+    }
 }
 
 /// Output of a software-path sign.

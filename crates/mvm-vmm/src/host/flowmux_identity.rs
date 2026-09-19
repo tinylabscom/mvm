@@ -78,8 +78,41 @@ pub struct IdentityDriveContents<'a> {
 /// a derived `Debug` would put it in any log line that formats a spawn request.
 pub struct FlowMuxIdentityMaterial {
     spawn: FlowMuxIdentitySpawnConfig,
-    guest_signing_key: [u8; 32],
+    guest: GuestIdentityMaterial,
+}
+
+/// Guest credentials pinned to a public host anchor. Minting and projecting
+/// these credentials does not require the host's private signing key or egress.
+pub struct GuestIdentityMaterial {
+    guest_signing_key: zeroize::Zeroizing<[u8; 32]>,
     host_signer_pub: [u8; 32],
+}
+
+impl std::fmt::Debug for GuestIdentityMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuestIdentityMaterial")
+            .field("guest_signing_key", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl GuestIdentityMaterial {
+    /// Draw a fresh guest key without accepting or retaining a host private key.
+    pub fn mint(host_anchor: VerifyingKey) -> Result<Self> {
+        let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+        rand::rngs::SysRng
+            .try_fill_bytes(seed.as_mut())
+            .context("drawing system entropy for the guest signing key")?;
+        Ok(Self {
+            guest_signing_key: seed,
+            host_signer_pub: host_anchor.to_bytes(),
+        })
+    }
+
+    /// The public key the host registers for the guest holding this drive.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        SigningKey::from_bytes(&self.guest_signing_key).verifying_key()
+    }
 }
 
 impl std::fmt::Debug for FlowMuxIdentityMaterial {
@@ -98,20 +131,15 @@ impl FlowMuxIdentityMaterial {
     /// together so they cannot drift: there is no path that hands the endpoint
     /// one key and the guest another.
     pub fn mint(session_id: impl Into<String>, host_signing_key: &SigningKey) -> Result<Self> {
-        let mut seed = [0u8; 32];
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut seed)
-            .context("drawing system entropy for the guest FlowMux signing key")?;
-        let guest_key = SigningKey::from_bytes(&seed);
+        let guest = GuestIdentityMaterial::mint(host_signing_key.verifying_key())?;
         let b64 = base64::engine::general_purpose::STANDARD;
         Ok(Self {
             spawn: FlowMuxIdentitySpawnConfig {
                 session_id: session_id.into(),
                 host_signing_key_base64: b64.encode(host_signing_key.to_bytes()),
-                guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+                guest_verifying_key_base64: b64.encode(guest.verifying_key().to_bytes()),
             },
-            guest_signing_key: seed,
-            host_signer_pub: host_signing_key.verifying_key().to_bytes(),
+            guest,
         })
     }
 
@@ -146,7 +174,7 @@ impl FlowMuxIdentityMaterial {
 
     /// The host-signer trust anchor the guest pins.
     pub fn host_signer_verifying_key(&self) -> Result<VerifyingKey> {
-        VerifyingKey::from_bytes(&self.host_signer_pub)
+        VerifyingKey::from_bytes(&self.guest.host_signer_pub)
             .context("host signer public key is not a valid Ed25519 point")
     }
 
@@ -168,6 +196,18 @@ impl FlowMuxIdentityMaterial {
     /// reason the signing key does — the drive is per-boot, already mounted, and
     /// has no length budget — with the difference that a certificate is public,
     /// so it is the only one of the two a guest may leave world-readable.
+    pub fn write_drive_with(
+        &self,
+        path: &Path,
+        contents: &IdentityDriveContents<'_>,
+    ) -> Result<()> {
+        self.guest.write_drive_with(path, contents)
+    }
+}
+
+impl GuestIdentityMaterial {
+    /// Project this guest's credentials and optional admitted content into the
+    /// existing private identity drive. No host private key enters the image.
     pub fn write_drive_with(
         &self,
         path: &Path,
@@ -282,10 +322,17 @@ impl FlowMuxIdentityMaterial {
     /// therefore pin the parent's verifying key, and this file is how the claim
     /// path learns it. The host's own signing key is not written here.
     pub fn persist_inheritable(&self, state_dir: &Path) -> Result<()> {
+        self.inheritable().persist(state_dir)
+    }
+}
+
+impl InheritableIdentity {
+    /// Persist only the public identity needed to authenticate a restored guest.
+    pub fn persist(&self, state_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(state_dir)
             .with_context(|| format!("creating {}", state_dir.display()))?;
         let path = state_dir.join(PUBLIC_IDENTITY_FILE);
-        let json = serde_json::to_vec_pretty(&self.inheritable())
+        let json = serde_json::to_vec_pretty(self)
             .context("serializing the inheritable FlowMux identity")?;
         std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
     }
@@ -293,9 +340,8 @@ impl FlowMuxIdentityMaterial {
 
 /// Load the inheritable identity a previous boot persisted in `state_dir`.
 ///
-/// `None` when the VM was booted without one — a workload with no admitted
-/// egress never gets an identity, and a claim from such a parent must not
-/// invent one.
+/// `None` for state predating identity provisioning. A claim must not invent
+/// a key that its already-running guest does not possess.
 pub fn load_inheritable_identity(state_dir: &Path) -> Result<Option<InheritableIdentity>> {
     let path = state_dir.join(PUBLIC_IDENTITY_FILE);
     match std::fs::read(&path) {
@@ -318,9 +364,7 @@ pub fn assert_identity_is_self_consistent(material: &FlowMuxIdentityMaterial) ->
     let published = b64
         .decode(&material.spawn.guest_verifying_key_base64)
         .context("decoding the published guest verifying key")?;
-    let derived = SigningKey::from_bytes(&material.guest_signing_key)
-        .verifying_key()
-        .to_bytes();
+    let derived = material.guest.verifying_key().to_bytes();
     if published != derived {
         bail!("minted FlowMux identity is inconsistent: published guest key is not the drive's");
     }
@@ -333,6 +377,32 @@ mod tests {
 
     fn host_key() -> SigningKey {
         SigningKey::from_bytes(&[3u8; 32])
+    }
+
+    #[test]
+    fn a_guest_identity_can_be_minted_with_only_the_public_host_anchor() {
+        let anchor = host_key().verifying_key();
+        let first = GuestIdentityMaterial::mint(anchor).unwrap();
+        let second = GuestIdentityMaterial::mint(anchor).unwrap();
+        assert_ne!(first.verifying_key(), second.verifying_key());
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path().join(IDENTITY_DRIVE_FILE);
+        first
+            .write_drive_with(&drive, &IdentityDriveContents::default())
+            .unwrap();
+        let image = std::fs::read(&drive).unwrap();
+        assert!(image.windows(32).any(|bytes| bytes == anchor.as_bytes()));
+        assert!(
+            !image
+                .windows(32)
+                .any(|bytes| bytes == host_key().to_bytes())
+        );
+        assert!(!format!("{first:?}").contains(&hex::encode(first.guest_signing_key.as_slice())));
+        assert!(
+            first
+                .write_drive_with(dir.path(), &IdentityDriveContents::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -372,7 +442,7 @@ mod tests {
         let material = FlowMuxIdentityMaterial::mint("s1", &host_key()).expect("mint");
         let rendered = format!("{material:?}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
-        let leaked = hex::encode(material.guest_signing_key);
+        let leaked = hex::encode(material.guest.guest_signing_key.as_slice());
         assert!(
             !rendered.contains(&leaked),
             "signing key leaked: {rendered}"
@@ -397,11 +467,13 @@ mod tests {
         assert!(
             image
                 .windows(32)
-                .any(|w| w == material.guest_signing_key.as_slice()),
+                .any(|w| w == material.guest.guest_signing_key.as_slice()),
             "the drive must carry the signing key"
         );
         assert!(
-            image.windows(32).any(|w| w == material.host_signer_pub),
+            image
+                .windows(32)
+                .any(|w| w == material.guest.host_signer_pub),
             "the drive must carry the trust anchor"
         );
     }
@@ -531,7 +603,7 @@ mod tests {
         let raw = std::fs::read(dir.path().join(PUBLIC_IDENTITY_FILE)).expect("read");
         assert!(
             !raw.windows(32)
-                .any(|w| w == material.guest_signing_key.as_slice()),
+                .any(|w| w == material.guest.guest_signing_key.as_slice()),
             "the guest signing key must never be persisted host-side"
         );
         let text = String::from_utf8(raw).expect("json is utf8");
@@ -552,13 +624,13 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_that_booted_without_egress_has_no_identity_to_inherit() {
+    fn absent_public_identity_is_reported_without_inventing_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(
             load_inheritable_identity(dir.path())
                 .expect("absence is not an error")
                 .is_none(),
-            "a claim from an egress-less parent must not invent an identity"
+            "a claim from a parent without credentials must not invent an identity"
         );
     }
 

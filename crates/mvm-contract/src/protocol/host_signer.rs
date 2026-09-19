@@ -10,16 +10,31 @@
 //! The wire envelope is intentionally **different** from the broker's
 //! `ServiceCall`. The host-signer is not a
 //! `ServiceHandler`-shaped multiplexer: it implements a small fixed verb
-//! set (`sign_plan`, `sign_credential`) and the supervisor calls it
+//! set (`sign_plan`, `sign_telemetry_handshake`) and the supervisor calls it
 //! directly. Keeping the wire shape distinct from `ServiceCall` makes the
 //! parser surface smaller and the audit-log boundary clearer (host-signer
 //! events have their own `EventCategory` — they're not `ServiceCall`
 //! entries).
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
+
+use crate::policy::security::{SessionHello, SessionHelloAck};
+
+/// The two public handshake messages whose canonical tuple the host confirms.
+/// The signer validates the telemetry namespace, its own host identity, bounded
+/// fields and the guest proof before signing. This is not an opaque-byte verb.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryHandshake {
+    /// Host challenge and ephemeral public key.
+    pub hello: SessionHello,
+    /// Guest challenge, ephemeral public key and proof of key possession.
+    pub ack: SessionHelloAck,
+}
 
 // ============================================================================
 // SignRequest — supervisor → mvm-host-signer
@@ -28,10 +43,9 @@ use serde::{Deserialize, Serialize};
 /// What the supervisor is asking the host-signer to sign.
 ///
 /// `SignPlan` carries `ExecutionPlan` bytes; the host-signer
-/// treats the input as opaque bytes and does not parse them. The
-/// `SignCredential` variant was dropped when `host.secrets.v1` was
-/// removed from v1 scope; future verbs (PQC, attestation) extend this
-/// enum via the algorithm-identifier byte in the response.
+/// treats the input as opaque bytes and does not parse them.
+/// `SignTelemetryHandshake` instead carries typed public messages whose
+/// service domain, field bounds and guest proof must pass validation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SignRequest {
@@ -45,12 +59,21 @@ pub enum SignRequest {
         /// supervisor can correlate async signs.
         request_id: String,
     },
+    /// Sign only a validated telemetry handshake, without releasing the host key
+    /// to the collector. Registration and endpoint ownership remain host duties.
+    SignTelemetryHandshake {
+        /// Closed, structurally validated handshake messages.
+        handshake: Box<TelemetryHandshake>,
+        /// Host-selected correlation id, echoed by the signer.
+        request_id: String,
+    },
 }
 
 impl SignRequest {
     pub fn request_id(&self) -> &str {
         match self {
-            SignRequest::SignPlan { request_id, .. } => request_id,
+            SignRequest::SignPlan { request_id, .. }
+            | SignRequest::SignTelemetryHandshake { request_id, .. } => request_id,
         }
     }
 }

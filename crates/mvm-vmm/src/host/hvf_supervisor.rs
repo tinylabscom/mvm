@@ -238,9 +238,9 @@ pub struct HvfSupervisorConfig {
     /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
     #[serde(default)]
     pub broker_socket: Option<PathBuf>,
-    /// Explicit host-dial sockets: dev-only console channels plus any declared
-    /// TCP ingress forward channels. An empty list binds no extra guest ports;
-    /// sealed production boots therefore expose only explicitly admitted ingress.
+    /// Additional host-dial sockets: telemetry, dev-only console channels and
+    /// declared TCP ingress forwards. Telemetry does not require console or
+    /// ingress grants. An empty list binds no extra guest ports.
     #[serde(default)]
     pub console_data_sockets: Vec<HostDialSocket>,
     /// Builder-tier control sockets: job dispatch and the resident daemon's

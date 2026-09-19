@@ -73,6 +73,21 @@ a contended queue lock. Preparation still allocates outside that admission path.
 Independent cumulative counters retain capacity, contention and unavailable
 losses, and failed writes mark transport delivery uncertain. The outbox is not
 yet connected to runtime source adapters or an event-driven worker supervisor.
+The receiver supports a receive-only session authenticated through an external
+signer, without retaining the host signing key. Guest identity is checked before
+requesting that signature. The resident signer accepts a typed telemetry handshake,
+validates its service domain and guest proof, and returns only a signature. Its
+async client bounds socket I/O with one deadline and verifies the response before
+use. VM-lifetime collection and authoritative generation registration are not yet
+connected to this interface.
+
+The workload runner provisions guest credentials even for a secret-free,
+deny-all network policy. That path uses only the host's public anchor, creates
+no network endpoint, and grants no egress. Cold boots receive a fresh guest key
+through the existing private identity drive; warm claims retain the registered
+key already held in restored memory. Missing or malformed required identity
+material refuses launch. This credential provisioning does not itself start
+telemetry capture or collection.
 Records are capped at 32 KiB encoded, with eight JSON nesting levels, 16
 primitive attributes, eight span links, 128-byte labels, 2 KiB text fields,
 and 4 KiB stdio chunks. Malformed input terminates the connection without
@@ -80,7 +95,7 @@ quoting payloads in its error. A partial write has unknown delivery, not a
 claim of successful collection.
 
 All-source subscriber wiring, source/host redaction policy, VM-generation
-registration, backend endpoint provisioning, lifetime collection, bounded
+registration, active guest service binding, lifetime collection, bounded
 retention, and detached retrieval remain under implementation. Structural
 validation alone does not make workload text safe to retain.
 

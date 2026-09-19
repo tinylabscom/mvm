@@ -63,6 +63,90 @@ fn encrypted_roundtrip_sends_without_any_application_ack() {
 }
 
 #[test]
+fn receiver_authenticates_with_a_signer_owned_outside_the_collector() {
+    use ed25519_dalek::Signer;
+    let (mut host, mut guest) = sockets();
+    let host_key = SigningKey::from_bytes(&[7; 32]);
+    let host_anchor = host_key.verifying_key();
+    let guest_key = SigningKey::from_bytes(&[9; 32]);
+    let guest_anchor = guest_key.verifying_key();
+    let (request, requests) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (response, responses) = std::sync::mpsc::channel();
+    let signer = thread::spawn(move || {
+        let transcript = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        response.send(host_key.sign(&transcript)).unwrap();
+    });
+    let producer = thread::spawn(move || {
+        let mut sender = TelemetrySender::connect(&mut guest, guest_key, &host_anchor).unwrap();
+        sender.send(&mut guest, &record()).unwrap();
+    });
+    let mut receiver = TelemetryReceiver::connect_with_signer(
+        &mut host,
+        &host_anchor,
+        &guest_anchor,
+        |hello, ack| {
+            request
+                .send(serde_json::to_vec(&(hello, ack)).unwrap())
+                .unwrap();
+            Ok(responses.recv_timeout(Duration::from_secs(5)).unwrap())
+        },
+    )
+    .unwrap();
+    assert_eq!(receiver.receive(&mut host).unwrap(), record());
+    producer.join().unwrap();
+    signer.join().unwrap();
+}
+
+#[test]
+fn external_signer_failure_or_wrong_signature_cannot_authenticate_a_collector() {
+    use ed25519_dalek::Signer;
+    for bad_signature in [false, true] {
+        let (mut host, mut guest) = sockets();
+        let host_anchor = SigningKey::from_bytes(&[7; 32]).verifying_key();
+        let guest_key = SigningKey::from_bytes(&[9; 32]);
+        let guest_anchor = guest_key.verifying_key();
+        let producer =
+            thread::spawn(move || TelemetrySender::connect(&mut guest, guest_key, &host_anchor));
+        let result = TelemetryReceiver::connect_with_signer(
+            &mut host,
+            &host_anchor,
+            &guest_anchor,
+            |hello, ack| {
+                if bad_signature {
+                    Ok(SigningKey::from_bytes(&[8; 32])
+                        .sign(&serde_json::to_vec(&(hello, ack)).unwrap()))
+                } else {
+                    Err(SessionError::Io(std::io::ErrorKind::BrokenPipe.into()))
+                }
+            },
+        );
+        assert!(matches!(result, Err(TelemetryError::Authentication)));
+        drop(host);
+        assert!(producer.join().unwrap().is_err());
+    }
+}
+
+#[test]
+fn an_unregistered_guest_never_reaches_the_external_signer() {
+    let (mut host, mut guest) = sockets();
+    let host_anchor = SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let expected_guest = SigningKey::from_bytes(&[9; 32]).verifying_key();
+    let stranger = SigningKey::from_bytes(&[8; 32]);
+    let producer =
+        thread::spawn(move || TelemetrySender::connect(&mut guest, stranger, &host_anchor));
+    let mut called = false;
+    let result =
+        TelemetryReceiver::connect_with_signer(&mut host, &host_anchor, &expected_guest, |_, _| {
+            called = true;
+            Err(SessionError::Io(std::io::ErrorKind::BrokenPipe.into()))
+        });
+    assert!(matches!(result, Err(TelemetryError::Authentication)));
+    assert!(!called);
+    drop(host);
+    assert!(producer.join().unwrap().is_err());
+}
+
+#[test]
 fn stalled_encrypted_worker_does_not_stall_offers_and_losses_remain_retrievable() {
     use super::outbox::{Offer, Outbox, PreparedRecord};
     use crate::protocol::telemetry::{GuestLossStage, LossReason, TailState};
@@ -270,7 +354,8 @@ fn expected_guest_key_is_required_even_for_a_valid_handshake() {
         TelemetryReceiver::connect(&mut h, host_key, &wrong_guest),
         Err(TelemetryError::Authentication)
     ));
-    assert!(guest.join().unwrap().is_ok());
+    drop(h);
+    assert!(guest.join().unwrap().is_err());
 }
 
 #[test]

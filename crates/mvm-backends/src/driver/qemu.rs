@@ -20,7 +20,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
@@ -264,7 +264,7 @@ fn qemu_log_tail(log_path: &Path, max_lines: usize) -> String {
 }
 
 /// Assemble the bridge wiring plan for a spec boot: every host-dialed
-/// channel (agent RPC, dev console data) binds the per-port UNIX socket
+/// channel (agent RPC, telemetry, dev console data) binds the per-port UNIX socket
 /// convention the shared client probes, every guest-dialed channel (egress,
 /// broker) splices to the runner-bound listener named in the spec, and the
 /// workload-exit port is captured under the state dir when the spec carries
@@ -601,14 +601,14 @@ impl RunningVm for QemuRunningVm {
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
         // The bridge binds every host-dialed channel on the flat
         // `<state_dir>/vsock-<port>.sock` convention — the same path the
-        // host-side resolver probes. Restricted to the agent port and the
+        // host-side resolver probes. Restricted to telemetry, the agent port and the
         // dev-only console data ports (claim 15: a sealed prod boot
         // registers no console listeners), mirroring the other drivers'
         // allow-list.
-        if guest_port != GUEST_AGENT_PORT && !dev_console_data_ports().any(|p| p == guest_port) {
+        if !super::host_dialable_port(guest_port) {
             bail!(
                 "qemu driver vsock_connect supports only the agent port \
-                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                 ({GUEST_AGENT_PORT}), telemetry and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
@@ -1022,6 +1022,7 @@ mod tests {
                 },
                 "/run/console-hint.sock",
             ),
+            host_dials(GuestService::Telemetry, "/run/telemetry-hint.sock"),
         ];
         let spec = bridge_spec_for_vsock(9, state_dir, &channels);
 
@@ -1030,13 +1031,21 @@ mod tests {
 
         // Host-dialed channels bind the re-derived per-port socket, never
         // the spec's backend-neutral hint.
-        assert_eq!(spec.host_dials.len(), 2);
+        assert_eq!(spec.host_dials.len(), 3);
         assert_eq!(spec.host_dials[0].guest_port, GUEST_AGENT_PORT);
         assert_eq!(
             spec.host_dials[0].listen_uds,
             vm_vsock_port_socket_at(state_dir, GUEST_AGENT_PORT)
         );
         assert_eq!(spec.host_dials[1].guest_port, CONSOLE_PORT_BASE + 1);
+        assert_eq!(
+            spec.host_dials[2].guest_port,
+            GuestService::Telemetry.port()
+        );
+        assert_eq!(
+            spec.host_dials[2].listen_uds,
+            vm_vsock_port_socket_at(state_dir, GuestService::Telemetry.port())
+        );
         assert_eq!(
             spec.host_dials[1].listen_uds,
             vm_vsock_port_socket_at(state_dir, CONSOLE_PORT_BASE + 1)
@@ -1129,43 +1138,42 @@ mod tests {
     }
 
     #[test]
-    fn vsock_connect_reaches_the_bridge_socket_and_rejects_other_ports() {
+    fn vsock_connect_reaches_agent_and_telemetry_bridges_and_rejects_other_ports() {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
-        // The bridge's agent listener: <state_dir>/vsock-<port>.sock.
-        let sock = vm_vsock_port_socket_at(dir.path(), GUEST_AGENT_PORT);
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
-        let server = std::thread::spawn(move || {
-            if let Ok((mut c, _)) = listener.accept() {
-                let mut b = [0u8; 1];
-                if c.read_exact(&mut b).is_ok() {
-                    let _ = c.write_all(&b);
+        for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
+            let dir = tempfile::tempdir().unwrap();
+            let sock = vm_vsock_port_socket_at(dir.path(), port);
+            let Some(listener) = bind_unix_listener(&sock) else {
+                return;
+            };
+            let server = std::thread::spawn(move || {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut b = [0u8; 1];
+                    if c.read_exact(&mut b).is_ok() {
+                        let _ = c.write_all(&b);
+                    }
                 }
-            }
-        });
+            });
 
-        let vm = QemuRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join(QEMU_PID_FILE),
-        };
+            let vm = QemuRunningVm {
+                id: VmId("agent-vm".into()),
+                state_dir: dir.path().to_path_buf(),
+                pid_file: dir.path().join(QEMU_PID_FILE),
+            };
 
-        // The agent port connects + round-trips through the bridge socket —
-        // the seam ActivateEnvironment rides.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
+            let mut s = vm.vsock_connect(port).unwrap();
+            s.write_all(b"x").unwrap();
+            let mut got = [0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"x");
+            server.join().unwrap();
 
-        // Ports outside the agent + console data range are not host-dialable.
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
-        assert!(vm.vsock_connect(9999).is_err());
+            // Ports outside the agent + console data range are not host-dialable.
+            assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+            assert!(vm.vsock_connect(9999).is_err());
+        }
     }
 
     /// qemu daemonizes, so nothing downstream of the spawn can be inspected for
