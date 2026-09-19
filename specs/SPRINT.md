@@ -32,7 +32,9 @@
       W2b backend channel and identity wiring passes 1,857 affected-crate tests (six ignored),
       workspace clippy and Linux all-target cross-check. Both restore BDD scenarios
       pass (ten steps, no skips). The host workspace passes 13,998 tests with zero failures,
-      31 existing ignores and three builder-only exclusions. Post-rebase validation remains open.
+      31 existing ignores and three builder-only exclusions. Post-rebase clippy, gated checks,
+      3,886 affected-library tests, seven signer tests and all 69 repository gates pass.
+      PR #3472 is published; CI and queued delivery remain open.
       Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
       Wiring includes HVF cold boot, live handoff and child-local saved restore. Guest listener activation,
       authoritative generation registration and real-VM witnesses remain open.

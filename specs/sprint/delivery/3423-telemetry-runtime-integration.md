@@ -85,7 +85,11 @@ On the macOS host, with isolated worktree state and Rust 1.97.1:
 - The implementation and merge-evidence commits rebased cleanly onto
   `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9`. Range comparison preserves the
   source patch; differences remove documentation already carried by the merged
-  foundations. Post-rebase clippy, gated checks and affected tests are running.
+  foundations. Post-rebase workspace all-target clippy, Linux all-target check
+  and BDD-feature clippy pass. The four affected libraries pass 3,886 tests:
+  core 2,037, backends 205, runtime 965 and VMM 679, with six existing runtime
+  ignores. The seven resident-signer integration tests pass again. The rebuilt
+  checker passes all 69 repository gates and declared backing.
 
 The refreshed dependency audit and `cargo deny check` pass with the existing
 allowed `proc-macro-error2` advisory RUSTSEC-2026-0173. `cargo machete` retains
@@ -103,7 +107,7 @@ includes the corrected diagnostic.
 
 ## Remaining acceptance
 
-Finish post-rebase validation and queued delivery of the integration.
+Finish queued delivery of integration PR #3472.
 Bind the collector's owned endpoint and fresh session to authoritative VM,
 boot and generation state. Wire bounded source capture, automatic loss summaries,
 VM-lifetime supervision, host retention and retrieval. Reset producer epochs and
@@ -111,5 +115,5 @@ discard inherited telemetry state on restore. Then run the real-backend witness:
 boot, detach the CLI, emit traces, stall collection, retrieve host records with
 explicit loss evidence, and prove the workload continued progressing.
 
-No related runtime issue is closed by this component validation. Public delivery
-and merge-queue verification for this integration are still pending.
+No related runtime issue is closed by this component validation. PR #3472 is
+published; required CI, actual merge-queue entry and merge remain pending.

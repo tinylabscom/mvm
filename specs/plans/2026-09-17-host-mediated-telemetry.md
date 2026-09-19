@@ -236,7 +236,10 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         suites above and the full host workspace.
         Standby capture now provisions its own identity too. The identity-stage
         policy pass clears all 69 repository gates and declared backing;
-        post-rebase checks and queued delivery remain open.
+        post-rebase clippy, gated checks, 3,886 affected-library tests and seven
+        signer integration tests pass, as do all 69 rebuilt repository gates
+        and declared backing. PR #3472 is published; CI and queued delivery
+        remain open.
 - [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export
