@@ -693,7 +693,12 @@ mod tests {
         );
 
         let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
-        assert_eq!(argv[0], "systemd-run");
+        assert_eq!(
+            Path::new(&argv[0])
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("systemd-run")
+        );
         assert!(argv.contains(&"CPUQuota=150%".to_string()), "{argv:?}");
         assert!(
             argv.contains(&format!(

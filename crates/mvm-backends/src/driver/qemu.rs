@@ -1198,11 +1198,12 @@ mod tests {
             "unit should be the machine name plus a per-boot suffix, got {}",
             rendered[5]
         );
+        rendered[0] = "<launcher>".to_string();
         rendered[5] = "<unit>".to_string();
         assert_eq!(
             rendered,
             vec![
-                "systemd-run",
+                "<launcher>",
                 "--user",
                 "--scope",
                 "--quiet",
