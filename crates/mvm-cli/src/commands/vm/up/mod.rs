@@ -8,12 +8,7 @@ use clap::Args as ClapArgs;
 
 use super::shared::{clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec};
 
-mod grants_report;
 mod kernel;
-// `pub(crate)` so the crate-root boot-policy facade can re-export the
-// effective-initrd decision; nothing else in the module is `pub`.
-pub(crate) mod oci_persist;
-mod runtime_source;
 
 pub(super) use mvm_client::admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
@@ -29,13 +24,15 @@ pub(super) use mvm_client::admission::SECURITY_POLICY_FILENAME;
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
-pub(in crate::commands) use oci_persist::load_workload_ir;
-pub(in crate::commands) use oci_persist::{
+pub(in crate::commands) use mvm_client::launch::persistent::load_workload_ir;
+pub(in crate::commands) use mvm_client::launch::persistent::{
     PersistentImageStartParams, start_persistent_oci_machine,
 };
-pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_before_start};
+pub(crate) use mvm_client::launch::persistent::{
+    persistent_oci_effective_initrd, persists_plan_before_start,
+};
 
-pub(crate) use runtime_source::{
+pub(crate) use mvm_client::launch::runtime_source::{
     SdkSidecarAttachment, attach_runtime_overlay_if_cached,
     attach_runtime_overlay_if_cached_version, attach_universal_initramfs_if_cached,
     emit_runtime_source_status, resolve_sdk_sidecar_attachment_for_host,

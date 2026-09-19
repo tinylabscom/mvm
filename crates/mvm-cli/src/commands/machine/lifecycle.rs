@@ -246,6 +246,16 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         Some(k) => Some(k),
         None => up::resolve_kernel_pin_path(args.kernel_pin.is_some())?,
     };
+    // Both resolved here rather than inside the start: merging registered
+    // volumes reaches the CLI's mount cache, and resolving the kernel may build
+    // one through the builder VM, which a library embedder must never do.
+    let prepared_volumes =
+        crate::commands::vm::volume::merge_registered_volumes_for_launch(&spec.name, &volume_cfg)
+            .context("resolving registered local volumes before admission")?;
+    let kernel_path = match kernel_path {
+        Some(kernel_path) => kernel_path,
+        None => crate::commands::env::builder_vm::ensure_workload_kernel()?,
+    };
     up::start_persistent_oci_machine(up::PersistentImageStartParams {
         name: &spec.name,
         image_label: &boot_label,
@@ -255,7 +265,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         cpus: spec.cpus,
         memory_mib,
         mem_initial_mib,
-        volumes: &volume_cfg,
+        prepared_volumes,
         network_policy,
         ports: &spec.ports,
         backend_name: &effective_hypervisor,

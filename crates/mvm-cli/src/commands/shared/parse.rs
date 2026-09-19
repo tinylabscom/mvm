@@ -43,24 +43,6 @@ pub fn clap_volume_spec(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-/// Parse a port spec like `3000` or `8080:3000` into `(local, guest)`.
-pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
-    if let Some((local, guest)) = spec.split_once(':') {
-        let local: u16 = local
-            .parse()
-            .with_context(|| format!("invalid local port '{}'", local))?;
-        let guest: u16 = guest
-            .parse()
-            .with_context(|| format!("invalid guest port '{}'", guest))?;
-        Ok((local, guest))
-    } else {
-        let port: u16 = spec
-            .parse()
-            .with_context(|| format!("invalid port '{}'", spec))?;
-        Ok((port, port))
-    }
-}
-
 /// Parsed mount specification from the `--mount` CLI flag, its compatibility
 /// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///

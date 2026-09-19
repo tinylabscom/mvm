@@ -306,8 +306,24 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 - [ ] One admission path for every launcher, so the library cannot admit an
       SDK machine under a different plan than the CLI gives the same request.
       The CLI's boot admission now lives in `mvm-client`
-      (`crates/mvm-client/src/admission/`); `mvm_client::launch` still admits
-      through `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
+      (`crates/mvm-client/src/admission/`), and so does the persistent start
+      path the SDK's invocations take (`crates/mvm-client/src/launch/`).
+      `mvm_client::launch` still admits through
+      `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
+  - [ ] Extract the lifecycle half of the CLI's `machine::lifecycle::start_machine`
+        (spec reconcile, deployment/manifest/image to rootfs, network policy,
+        memory, volume config, start) into `mvm-client`, leaving dry-run
+        output, JSON and prompts in the CLI. Kernel resolution and volume
+        preparation sit behind one trait with two implementations: the CLI's
+        may build a kernel through the builder VM and uses the mount cache;
+        the library's resolves only cached or fetched kernels.
+  - [ ] Merge `mvm_client::launch`'s persistent lifecycle (its own spec,
+        secret-reference sidecar, attachments and leases) with the CLI's, so
+        there is one persistent machine lifecycle. Fold fleet-signed plans and
+        assurance campaigns into the one admission rather than keeping
+        `mvm_hostd::run::admit_and_boot_local` as a second path for them.
+  - [ ] Witness: one request yields the same signed plan whether it enters
+        through `mvmctl machine run` or through `mvm_client::launch`.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.

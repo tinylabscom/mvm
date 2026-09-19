@@ -6,8 +6,8 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::commands::runtime_overlay::runtime_overlay_source_checkout_root;
 use crate::ui;
+use mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root;
 use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;

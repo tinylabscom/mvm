@@ -10,19 +10,17 @@ use mvm_core::naming::validate_vm_name;
 use mvm_hostd::plan_admission::{
     InMemoryNonceLedger, populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
 };
-use mvm_runtime::image;
 
-use crate::commands::env::builder_vm::ensure_workload_kernel;
-use crate::commands::vm::shared::VmStartParams;
+use crate::launch::start_params::VmStartParams;
 
-use crate::commands::vm::readiness::record_vm_readiness;
+use crate::record_readiness as record_vm_readiness;
 
 use super::runtime_source::{
     attach_runtime_overlay_if_cached, attach_universal_initramfs_if_cached,
     emit_runtime_source_status,
 };
-use mvm_client::admission::policy::shares_from_volume_cfg;
-use mvm_client::admission::{
+use crate::admission::policy::shares_from_volume_cfg;
+use crate::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
     emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
 };
@@ -43,14 +41,14 @@ fn preopen_console_for_profile(profile: &str) -> bool {
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
+pub fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(
         hypervisor,
         "firecracker" | "libkrun" | "hvf" | "apple-container"
     )
 }
 
-pub(in crate::commands) fn load_workload_ir(
+pub fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_contract::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {
@@ -63,7 +61,7 @@ pub(in crate::commands) fn load_workload_ir(
     Ok(Some(workload))
 }
 
-pub(in crate::commands) struct PersistentImageStartParams<'a> {
+pub struct PersistentImageStartParams<'a> {
     pub name: &'a str,
     pub image_label: &'a str,
     pub resolved_digest: &'a str,
@@ -72,14 +70,18 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub cpus: u32,
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
-    pub volumes: &'a [image::RuntimeVolume],
+    /// The machine's volumes, already merged with its registered ones and
+    /// leased for this launch. The leases are committed once the backend has
+    /// started and released if it does not.
+    pub prepared_volumes: crate::volume::LaunchPreparation,
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Loopback ingress mappings persisted with the machine.
     pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
-    /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
-    pub kernel_path: Option<String>,
+    /// The workload kernel to boot. Resolved by the caller: the CLI may build
+    /// one through the builder VM, and a library embedder never builds.
+    pub kernel_path: String,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
     pub agent_verb: Vec<String>,
@@ -98,12 +100,37 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub grants: Option<mvm_contract::grants::Grants>,
 }
 
+/// The network mode every newly admitted networked workload uses: the
+/// authenticated, host-mediated FlowMux endpoint. The raw-packet mode is
+/// retired.
+pub fn preflight_network() -> mvm_contract::plan::NetworkMode {
+    mvm_contract::plan::NetworkMode::HostVsockProxy
+}
+
+/// Parse a port mapping: `HOST:GUEST`, or a single port used on both sides.
+pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
+    if let Some((local, guest)) = spec.split_once(':') {
+        let local: u16 = local
+            .parse()
+            .with_context(|| format!("invalid local port '{}'", local))?;
+        let guest: u16 = guest
+            .parse()
+            .with_context(|| format!("invalid guest port '{}'", guest))?;
+        Ok((local, guest))
+    } else {
+        let port: u16 = spec
+            .parse()
+            .with_context(|| format!("invalid port '{}'", spec))?;
+        Ok((port, port))
+    }
+}
+
 fn machine_port_ingress(ports: &[String]) -> Result<Vec<mvm_core::plan::IngressMapping>> {
     ports
         .iter()
         .enumerate()
         .map(|(index, mapping)| {
-            let (host, guest) = crate::commands::shared::parse_port_spec(mapping)?;
+            let (host, guest) = parse_port_spec(mapping)?;
             let mapping_id = u16::try_from(index + 1)
                 .context("too many declared ingress mappings for the signed plan")?;
             mvm_core::plan::IngressMapping::builder()
@@ -138,15 +165,10 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
     // Through the client boundary: mvm-client owns the host name-registry reach
     // (load → deregister-stale → register → save), so the CLI stays off the
     // runtime crate's registry internals.
-    mvm_client::register_machine(&mvm_client::MachineRegistration::minimal(
-        vm_name,
-        network_name,
-    ));
+    crate::register_machine(&crate::MachineRegistration::minimal(vm_name, network_name));
 }
 
-pub(in crate::commands) fn start_persistent_oci_machine(
-    params: PersistentImageStartParams<'_>,
-) -> Result<()> {
+pub fn start_persistent_oci_machine(params: PersistentImageStartParams<'_>) -> Result<()> {
     let PersistentImageStartParams {
         name,
         image_label,
@@ -156,7 +178,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         mut cpus,
         memory_mib,
         mem_initial_mib,
-        volumes,
+        mut prepared_volumes,
         network_policy,
         ports,
         backend_name,
@@ -167,8 +189,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         grants,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    if let Some(granted) = mvm_client::clamp_vcpus_for_backend(backend_name, cpus) {
-        crate::ui::warn(&format!(
+    if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
+        mvm_runtime::ui::warn(&format!(
             "{backend_name} supports at most {granted} vCPU(s); {cpus} requested, booting with {granted}"
         ));
         tracing::info!(
@@ -179,26 +201,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         );
         cpus = granted;
     }
-    let mut prepared_volumes =
-        super::super::volume::merge_registered_volumes_for_launch(name, volumes)
-            .context("resolving registered local volumes before admission")?;
     let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
     let (verity_path, roothash) =
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    let kernel_path = if let Some(k) = kernel_path {
-        k
-    } else {
-        // Required-overlay OCI boots must stay on the workload/prod kernel lane
-        // even if the machine profile is `dev`, otherwise a runtime-lean sealed
-        // root can silently boot with a dev-tier kernel cache fallback.
-        //
-        // The rootfs is supplied (OCI image / manifest); we need only a kernel.
-        // Resolve just the workload kernel — same as the transient OCI path
-        // (`exec.rs`) — rather than building/downloading a whole default-microvm
-        // image whose rootfs we'd discard.
-        ensure_workload_kernel()?
-    };
     let initrd_path = persistent_oci_effective_initrd(rootfs_path)?;
 
     let admission_ledger = InMemoryNonceLedger::new();
@@ -206,7 +212,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
             outputs: Vec::new(),
-            network_mode: crate::commands::machine::preflight_network(),
+            network_mode: preflight_network(),
             tenant: "local",
             vm_name: name,
             backend_name,
@@ -234,7 +240,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
             // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
             // boots (no argv, non-dev profile) keep the grant.
-            restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
+            restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
                 false,
                 has_ad_hoc_argv,
                 profile == "dev",
@@ -244,8 +250,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             // The typed kind of the backend this start resolved, so the grant gate
             // measures a declared bound against the mechanisms that tier has rather
             // than refusing for want of an answer.
-            backend_kind: Some(mvm_client::backend_kind_for(backend_name)),
-            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            backend_kind: Some(crate::backend_kind_for(backend_name)),
+            entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "the persistent OCI start path resolves no entrypoint",
             ),
         },
@@ -306,7 +312,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     )?;
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
-    if let Err(err) = mvm_client::start_prepared(backend_name, &start_config) {
+    if let Err(err) = crate::start_prepared(backend_name, &start_config) {
         let err = anyhow::anyhow!("{err}");
         emit_failed(&admission, "backend-start", &err);
         return Err(err);
@@ -403,7 +409,7 @@ mod persistent_oci_boot_tests {
         // A warm cache in a source checkout has to say what built it, or the
         // fingerprint eviction treats it as stale and discards it.
         if let Some(workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+            crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
             && let Ok(fingerprint) =
                 mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
                     &workspace_root,
@@ -430,7 +436,7 @@ mod persistent_oci_boot_tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(cache.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
         );
         seed_warm_universal_initramfs(cache.path());
@@ -446,7 +452,7 @@ mod persistent_oci_boot_tests {
     fn persistent_oci_warm_universal_initramfs_skips_source_checkout_verity_build() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(_workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+            crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
         else {
             // The source-checkout branch only exists in a source checkout.
             return;
@@ -462,7 +468,7 @@ mod persistent_oci_boot_tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(cache.path());
         env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",
         );
         seed_warm_universal_initramfs(cache.path());
@@ -495,5 +501,32 @@ mod persists_plan_before_start_tests {
         }
         assert!(!persists_plan_before_start("qemu"));
         assert!(!persists_plan_before_start("mock"));
+    }
+}
+
+#[cfg(test)]
+mod port_spec_tests {
+    use super::parse_port_spec;
+
+    #[test]
+    fn test_parse_port_spec_single() {
+        let (local, guest) = parse_port_spec("3000").unwrap();
+        assert_eq!(local, 3000);
+        assert_eq!(guest, 3000);
+    }
+
+    #[test]
+    fn test_parse_port_spec_mapping() {
+        let (local, guest) = parse_port_spec("8080:3000").unwrap();
+        assert_eq!(local, 8080);
+        assert_eq!(guest, 3000);
+    }
+
+    #[test]
+    fn test_parse_port_spec_invalid() {
+        assert!(parse_port_spec("abc").is_err());
+        assert!(parse_port_spec("abc:3000").is_err());
+        assert!(parse_port_spec("3000:abc").is_err());
+        assert!(parse_port_spec("99999").is_err());
     }
 }

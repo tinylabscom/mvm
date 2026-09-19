@@ -41,7 +41,7 @@ pub mod launch_contract {
 /// Gherkin steps. Not a general-purpose API; other consumers must not take a
 /// dependency on it.
 pub mod boot_policy {
-    pub use crate::commands::vm::up::oci_persist::persistent_oci_effective_initrd;
+    pub use mvm_client::launch::persistent::persistent_oci_effective_initrd;
 }
 
 /// Plan synthesis for library consumers — building an

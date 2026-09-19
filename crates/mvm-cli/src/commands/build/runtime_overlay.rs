@@ -4,11 +4,11 @@
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
-use crate::commands::runtime_overlay::{
+use crate::ui;
+use mvm_client::launch::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
     runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
 };
-use crate::ui;
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 

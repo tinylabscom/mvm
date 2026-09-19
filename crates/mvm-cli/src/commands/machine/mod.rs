@@ -189,13 +189,7 @@ impl MachineAction {
     }
 }
 
-/// Settle and validate the networking configuration before anything boots.
-///
-/// The public raw-packet mode is retired. Every newly admitted networked
-/// workload uses the authenticated, host-mediated FlowMux endpoint.
-pub(in crate::commands) fn preflight_network() -> mvm_contract::plan::NetworkMode {
-    mvm_contract::plan::NetworkMode::HostVsockProxy
-}
+pub(in crate::commands) use mvm_client::launch::persistent::preflight_network;
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
 /// flags and translates into the same admitted execution path.

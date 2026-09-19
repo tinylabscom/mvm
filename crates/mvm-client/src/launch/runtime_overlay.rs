@@ -3,22 +3,22 @@ use mvm_core::arch::GuestArch;
 use mvm_fs::overlay::RuntimeOverlayArtifact;
 use std::path::{Path, PathBuf};
 
-pub(crate) struct RuntimeOverlayAcquireParams<'a> {
-    pub(crate) cache_root: &'a Path,
-    pub(crate) expected_version: &'a str,
-    pub(crate) arch: GuestArch,
-    pub(crate) source_checkout_root: Option<&'a Path>,
+pub struct RuntimeOverlayAcquireParams<'a> {
+    pub cache_root: &'a Path,
+    pub expected_version: &'a str,
+    pub arch: GuestArch,
+    pub source_checkout_root: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeOverlayAcquireMode {
+pub enum RuntimeOverlayAcquireMode {
     BuildFromSourceCheckout,
     DownloadPublishedArtifact,
 }
 
-pub(crate) const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
+pub const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
 
-pub(crate) fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
+pub fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
     if !mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds() {
         return None;
     }
@@ -45,7 +45,7 @@ pub(crate) fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
         .then(|| workspace_root.to_path_buf())
 }
 
-pub(crate) fn runtime_overlay_acquire_mode() -> RuntimeOverlayAcquireMode {
+pub fn runtime_overlay_acquire_mode() -> RuntimeOverlayAcquireMode {
     let channel = mvm_build::artifact_acquisition::compiled_channel();
     if let Ok(value) = std::env::var(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV) {
         match value.trim() {
@@ -71,7 +71,7 @@ fn default_runtime_overlay_mode(
     }
 }
 
-pub(crate) fn acquire_runtime_overlay(
+pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
     if let Some(workspace_root) = params.source_checkout_root {
@@ -108,7 +108,7 @@ pub(crate) fn acquire_runtime_overlay(
 /// Prepare the channel-appropriate OCI guest runtime before a command reaches
 /// materialization. Official binaries acquire published shims; contributor
 /// binaries perform a clearly named, source-keyed cold build.
-pub(crate) fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
+pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
     match mvm_build::guest_agent_build::guest_binary_source()? {
@@ -121,12 +121,12 @@ pub(crate) fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             {
                 return Ok(());
             }
-            crate::ui::notice(
+            mvm_runtime::ui::notice(
                 "Preparing guest runtime from local sources \
                  (cold build for this checkout; cached afterward; use -v for Cargo output)…",
             );
             let started = std::time::Instant::now();
-            let spinner = crate::ui::spinner("Compiling guest runtime from local sources…");
+            let spinner = mvm_runtime::ui::spinner("Compiling guest runtime from local sources…");
             let result = mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
                 oci_cache_root,
                 &cache_key,
@@ -135,7 +135,7 @@ pub(crate) fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             );
             spinner.finish_and_clear();
             result?;
-            crate::ui::notice(&format!(
+            mvm_runtime::ui::notice(&format!(
                 "Guest runtime ready ({:.1}s; cached for this checkout).",
                 started.elapsed().as_secs_f64()
             ));
@@ -157,7 +157,7 @@ pub(crate) fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
         )
     })?;
 
-    crate::ui::notice(
+    mvm_runtime::ui::notice(
         "Preparing published guest runtime (first use; downloaded and cached afterward)…",
     );
     acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
