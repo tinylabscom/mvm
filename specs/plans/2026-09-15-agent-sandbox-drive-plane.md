@@ -216,6 +216,10 @@ retires the second guest proxy (#3288).
       destination cannot be built (#3301, the last item of #3302). An endpoint
       config with no network policy now projects default-deny in every egress
       mode; `Wire` used to project no gate at all.
+- [x] T16. Record every claim-10 and peer refusal on the substitution path as a
+      chain-signed `secret.flow_refused { destination, reason }`, with a fixed
+      reason and no request content (#3300). This covers the terminated flow's
+      502 arm, which reaches the same check.
 
 ### Residual risk to record, not to hide
 

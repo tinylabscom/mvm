@@ -243,6 +243,162 @@ mod server_tests {
     use tempfile::tempdir;
     use tokio::net::{UnixListener, UnixStream};
 
+    /// A service with a chain-signed recorder, under `gate`, and the path of
+    /// the chain it writes. Its one secret is bound to `api.openai.com`.
+    fn recorded_service(
+        dir: &std::path::Path,
+        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    ) -> (Arc<SubstitutionService>, String, std::path::PathBuf) {
+        use crate::supervisor::audit_file::FileAuditSigner;
+        use crate::supervisor::audit_recorder::Recorder;
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::TenantId;
+
+        let store = FileSecretStore::with_dir(dir.join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let chain = dir.join("audit.jsonl");
+        let signer =
+            FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
+        let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, forwarder, gate)
+                .with_recorder(recorder),
+        );
+        (service, ph, chain)
+    }
+
+    /// A claim-10 refusal lands one chain-signed entry naming the refused
+    /// `host:port` and a fixed reason. Nothing else the request carried does:
+    /// not its path, not a header value, not its body. Without the entry a
+    /// workload probing destinations it was never admitted to leaves a clean
+    /// chain.
+    #[tokio::test]
+    async fn a_claim10_refusal_is_recorded_in_the_chain_signed_log() {
+        let dir = tempdir().unwrap();
+        let (service, ph, chain) =
+            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+
+        let resp = service
+            .process(WireRequest {
+                method: "POST".into(),
+                url: "http://93.184.216.34/probe-path-marker?q=query-marker".into(),
+                headers: vec![
+                    ("authorization".into(), format!("Bearer {ph}")),
+                    ("x-note".into(), "header-marker".into()),
+                ],
+                body_b64: B64.encode(b"body-marker"),
+            })
+            .await;
+        assert!(
+            matches!(&resp, WireResponse::Refused { message } if message.contains("claim-10")),
+            "{resp:?}"
+        );
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("secret.flow_refused"), "{logged}");
+        assert!(logged.contains("policy_denied"), "{logged}");
+        assert!(logged.contains("93.184.216.34:80"), "{logged}");
+        for marker in [
+            "probe-path-marker",
+            "query-marker",
+            "header-marker",
+            "body-marker",
+            ph.as_str(),
+            "sk-live-zzz",
+        ] {
+            assert!(
+                !logged.contains(marker),
+                "request content `{marker}` reached the chain: {logged}"
+            );
+        }
+    }
+
+    /// A URL naming no `host:port` is refused as malformed, and recorded as
+    /// such rather than silently.
+    #[tokio::test]
+    async fn a_malformed_destination_refusal_is_recorded_in_the_chain_signed_log() {
+        let dir = tempdir().unwrap();
+        let (service, _ph, chain) =
+            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+
+        let resp = service
+            .process(WireRequest {
+                method: "GET".into(),
+                url: "not a url".into(),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .await;
+        assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("secret.flow_refused"), "{logged}");
+        assert!(logged.contains("malformed"), "{logged}");
+        assert!(logged.contains("unparseable"), "{logged}");
+    }
+
+    /// The peer refusal is recorded too, under its own reason, so it cannot be
+    /// read as a policy denial.
+    #[tokio::test]
+    async fn a_peer_refusal_is_recorded_in_the_chain_signed_log() {
+        let dir = tempdir().unwrap();
+        let (service, _ph, chain) =
+            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+
+        let resp = service
+            .process(WireRequest {
+                method: "GET".into(),
+                url: "http://db.mvm.peer:5432/".into(),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .await;
+        assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("secret.flow_refused"), "{logged}");
+        assert!(logged.contains("peer_destination"), "{logged}");
+        assert!(logged.contains("db.mvm.peer"), "{logged}");
+        assert!(!logged.contains("policy_denied"), "{logged}");
+    }
+
+    /// An admitted request writes no refusal.
+    #[tokio::test]
+    async fn an_admitted_request_records_no_refusal() {
+        let dir = tempdir().unwrap();
+        let (service, ph, chain) =
+            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+
+        let resp = service
+            .process(WireRequest {
+                method: "POST".into(),
+                url: "https://api.openai.com/v1".into(),
+                headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                body_b64: String::new(),
+            })
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+
+        let logged = std::fs::read_to_string(&chain).unwrap_or_default();
+        assert!(!logged.contains("secret.flow_refused"), "{logged}");
+    }
+
     /// A fail-closed refusal (compressed/over-cap body to a redaction-opted-in
     /// destination) is observable: it lands one metadata-only audit entry naming
     /// the destination, and never the body bytes.
