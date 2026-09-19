@@ -234,6 +234,17 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         Validated by 81 stream unit tests, authenticated encrypted mock streams
         and a hermetic workload-completion BDD witness. See
         [validation record](../sprint/delivery/3422-bounded-capture-handoff.md).
+  - [x] W3b — Prepared-record transport handoff: fixed preallocated storage,
+        single-attempt admission, independent count/byte loss evidence, and
+        transport writes outside the queue lock. Nine new component tests pass,
+        including a deterministically stalled encrypted writer and atomic close.
+        Two additional allocation regressions pass natively and under Miri,
+        including cold admission and fresh producer threads.
+        Host workspace/core tests, clippy, Linux cross-check and all 69 repository
+        gates pass; delivery remains pending. Record preparation still allocates outside
+        admission. Source callbacks, event-driven worker ownership and automatic
+        wire loss summaries remain required; this is not complete guest capture.
+        See [validation record](../sprint/delivery/3422-telemetry-outbox.md).
 - [ ] Add independent loss accounting, bounded summaries and cancellation/reaping;
       prove a stopped peer/full queue does not stall workload or pipe draining.
 
