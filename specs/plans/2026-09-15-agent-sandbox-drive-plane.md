@@ -330,6 +330,10 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
         `mvm_hostd::run::admit_and_boot_local` as a second path for them.
   - [ ] Witness: one request yields the same signed plan whether it enters
         through `mvmctl machine run` or through `mvm_client::launch`.
+- [x] Guest process and file operations have one implementation,
+      `mvm_client::guest`, which `mvmctl machine proc`/`fs`/`cp` and the
+      library both call, with the same audit entries. They stay off
+      `MvmClient`, which must remain answerable by a remote backend.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.
