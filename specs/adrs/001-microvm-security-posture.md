@@ -1014,9 +1014,12 @@ Two things remain outside the claim, and it must not be paraphrased to cover the
 - **An `mvmctl` built without `manifest-verify` cannot self-update.** It refuses
   rather than installing unverified, and the refusal names the feature and the
   `MVM_SKIP_COSIGN_VERIFY` escape. Release builds carry the feature.
-- **`install.sh` is best-effort.** It runs before any `mvmctl` exists on the
-  host, so it verifies with `cosign` when present and otherwise warns and relies
-  on the SHA-256 pin. That is the bootstrap, not one of the three paths above.
+- **`install.sh` is best-effort on a first install.** An upgrade verifies with
+  the `mvmctl` already installed (`mvmctl env verify-release`, the same
+  in-process verifier), and a host with `cosign` uses it; either way a missing
+  bundle then refuses. A first install on a host with neither has nothing to
+  verify with, so it warns and relies on the SHA-256 pin. That is the
+  bootstrap, not one of the three paths above.
 
 **Provenance is emitted, and it is L2.** The release job attests the binary
 tarballs with `actions/attest-build-provenance`, recorded in the GitHub

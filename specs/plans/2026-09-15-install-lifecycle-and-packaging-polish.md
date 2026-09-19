@@ -110,9 +110,10 @@ Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
       (`crates/mvm-cli/src/update.rs`), so the self-update path stops being
       best-effort. It calls `mvm_build::release_signature` with the CLI release
       train and refuses a missing or invalid bundle.
-- [ ] Have `install.sh` prefer `mvmctl verify-release` once a binary exists on
-      disk, falling back to `cosign` and then to the current warning. There is
-      no `verify-release` verb yet; it is the next step.
+- [x] Have `install.sh` prefer `mvmctl env verify-release` once a binary exists
+      on disk, falling back to `cosign` and then to the current warning. With a
+      verifier present, a missing bundle refuses; the cosign fallback now pins
+      the exact tag rather than any tag.
 - [x] Rewrite the "Claim 20 limits" note in
       `specs/adrs/001-microvm-security-posture.md` now that the third path
       refuses: the claim names all three paths, and the note keeps the two

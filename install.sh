@@ -114,6 +114,20 @@ sha256_of() {
   fi
 }
 
+# An installed mvmctl that can verify a release offline, if there is one. The
+# install directory's own copy wins over whatever PATH finds first.
+release_verifier() {
+  for candidate in "$INSTALL_DIR/mvmctl" "$(command -v mvmctl 2>/dev/null)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    # Match the help text, not the exit status: an mvmctl older than the verb
+    # may still exit 0 for a subcommand it does not know.
+    if "$candidate" env verify-release --help 2>/dev/null | grep -q -- '--tag'; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+}
+
 # --- Versioned install -------------------------------------------------------
 
 SUDO=""
@@ -692,23 +706,30 @@ else
   say "Checksum verified."
 fi
 
-# Optional cosign provenance — non-fatal if cosign is absent.
-if command -v cosign >/dev/null 2>&1; then
-  if curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null; then
-    if cosign verify-blob \
-        --bundle "$TMP/$ARCHIVE.bundle" \
-        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        --certificate-identity-regexp "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/.*" \
-        "$TMP/$ARCHIVE" >/dev/null 2>&1; then
-      say "Signature verified."
-    else
-      die "cosign signature verification failed for $ARCHIVE"
-    fi
+# Signature. An mvmctl already on the host verifies offline against its
+# embedded trust root, so it is preferred to cosign; with neither, the SHA-256
+# above is all that holds. Once a verifier is present, a missing bundle refuses.
+VERIFIER="$(release_verifier)"
+if [ -n "$VERIFIER" ] || command -v cosign >/dev/null 2>&1; then
+  curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null \
+    || die "no signature bundle published for $ARCHIVE"
+fi
+if [ -n "$VERIFIER" ]; then
+  "$VERIFIER" env verify-release "$TMP/$ARCHIVE" --tag "$VERSION" >/dev/null \
+    || die "signature verification failed for $ARCHIVE"
+  say "Signature verified."
+elif command -v cosign >/dev/null 2>&1; then
+  if cosign verify-blob \
+      --bundle "$TMP/$ARCHIVE.bundle" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
+      "$TMP/$ARCHIVE" >/dev/null 2>&1; then
+    say "Signature verified."
   else
-    warn "no cosign bundle published for this release — skipping signature check"
+    die "cosign signature verification failed for $ARCHIVE"
   fi
 else
-  warn "cosign not installed — skipping signature verification"
+  warn "no mvmctl or cosign on this host — skipping signature verification"
 fi
 
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"

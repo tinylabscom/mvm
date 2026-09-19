@@ -49,6 +49,22 @@ apt install cosign
 
 ---
 
+## Verifying with an installed mvmctl
+
+If an `mvmctl` is already installed, it can check a downloaded archive without
+cosign. The check runs offline against the Sigstore trust root built into the
+binary, and accepts only the release workflow at the tag you name:
+
+```bash
+mvmctl env verify-release mvmctl-aarch64-apple-darwin.tar.gz --tag v0.18.0-rc.1
+```
+
+The bundle is read from `<archive>.bundle` beside the archive unless you pass
+`--bundle`. `install.sh` uses this on an upgrade, and `mvmctl env update` runs
+the same check before it replaces itself.
+
+---
+
 ## Verifying a Release Binary
 
 1. Download the archive and its bundle from the [GitHub releases page](https://github.com/tinylabscom/mvm/releases):
