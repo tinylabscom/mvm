@@ -71,6 +71,9 @@ pub struct SdkError {
     pub doc: String,
     /// Broker status code this type is raised for, if any.
     pub status: Option<i32>,
+    /// Host-library error code this type is raised for, if any.
+    #[serde(default)]
+    pub code: Option<String>,
     /// Surfaces that carry this type.
     pub surfaces: Vec<String>,
     /// Structured fields the type carries.
@@ -800,12 +803,28 @@ pub fn render_python_errors(manifest: &ErrorManifest) -> String {
     }
     out.push_str("}\n");
 
+    let coded: Vec<_> = rows.iter().filter(|e| e.code.is_some()).collect();
+    if !coded.is_empty() {
+        out.push_str("\n#: Host-library error code -> error type. Keyed by the `code` an\n");
+        out.push_str("#: error body carries, from `mvm_core::error_codes`.\n");
+        out.push_str("CODE_ERRORS = {\n");
+        for e in &coded {
+            if let Some(code) = &e.code {
+                out.push_str(&format!("    {code:?}: {},\n", e.name));
+            }
+        }
+        out.push_str("}\n");
+    }
+
     out.push_str("\n__all__ = [\n");
     for e in &rows {
         out.push_str(&format!("    {:?},\n", e.name));
     }
     out.push_str("    \"STATUS_OK\",\n");
     out.push_str("    \"STATUS_ERRORS\",\n");
+    if !coded.is_empty() {
+        out.push_str("    \"CODE_ERRORS\",\n");
+    }
     out.push_str("]\n");
     out
 }
@@ -891,12 +910,69 @@ pub fn render_typescript_errors(manifest: &ErrorManifest) -> String {
         }
     }
     out.push_str("};\n");
+    let coded: Vec<_> = rows.iter().filter(|e| e.code.is_some()).collect();
+    if !coded.is_empty() {
+        out.push_str("\n/** Host-library error code -> error type. */\n");
+        out.push_str("export const CODE_ERRORS: Record<string, new (msg: string) => Error> = {\n");
+        for e in &coded {
+            if let Some(code) = &e.code {
+                out.push_str(&format!("  {code:?}: {},\n", e.name));
+            }
+        }
+        out.push_str("};\n");
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn error_manifest() -> ErrorManifest {
+        ErrorManifest::parse(
+            br#"{"status_ok":0,"errors":[
+                {"name":"HostServiceError","base_python":"Exception","base_typescript":"Error",
+                 "doc":"Base.","status":null,"surfaces":["python","typescript"],"fields":[],"message_format":null},
+                {"name":"BadRequestError","base_python":"HostServiceError","base_typescript":"HostServiceError",
+                 "doc":"Bad.","status":1,"surfaces":["python","typescript"],"fields":[],"message_format":null},
+                {"name":"HostLibraryError","base_python":"Exception","base_typescript":"Error",
+                 "doc":"Base.","status":null,"code":null,"surfaces":["python"],"fields":[],"message_format":null},
+                {"name":"MachineNotFoundError","base_python":"HostLibraryError","base_typescript":"HostLibraryError",
+                 "doc":"Missing.","status":null,"code":"NOT_FOUND","surfaces":["python"],"fields":[],"message_format":null}
+            ]}"#,
+        )
+        .expect("manifest parses")
+    }
+
+    /// A surface carrying code-keyed types gets a `CODE_ERRORS` map beside the
+    /// status map; one that carries none gets no map, rather than an empty
+    /// export nothing reads.
+    #[test]
+    fn code_keyed_errors_get_their_own_map_only_where_they_exist() {
+        let python = render_python_errors(&error_manifest());
+        assert!(
+            python.contains("CODE_ERRORS = {\n    \"NOT_FOUND\": MachineNotFoundError,\n}"),
+            "{python}"
+        );
+        assert!(python.contains("\"CODE_ERRORS\","), "exported: {python}");
+        assert!(
+            python.contains("1: BadRequestError"),
+            "status map unchanged: {python}"
+        );
+
+        let typescript = render_typescript_errors(&error_manifest());
+        assert!(!typescript.contains("CODE_ERRORS"), "{typescript}");
+    }
+
+    /// A manifest written before codes existed still parses.
+    #[test]
+    fn a_manifest_without_codes_still_parses() {
+        let manifest = ErrorManifest::parse(
+            br#"{"status_ok":0,"errors":[{"name":"E","base_python":"Exception","base_typescript":"Error","doc":"d","status":1,"surfaces":["python"],"fields":[],"message_format":null}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.errors[0].code, None);
+    }
 
     fn manifest() -> EnvManifest {
         EnvManifest::parse(
