@@ -187,6 +187,7 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
     ("status", AuditPosture::ReadOnly),
     ("check", AuditPosture::ReadOnly),
     ("update", AuditPosture::Emits("ImageFetch")),
+    ("verify", AuditPosture::ReadOnly),
 ];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[

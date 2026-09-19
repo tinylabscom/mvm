@@ -1430,6 +1430,7 @@ mod verification {
             matches!(err, ImageSetError::ManifestDigestMismatch { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::ManifestDigest);
     }
 
     /// The digest is taken over the raw bytes before anything parses them, so
@@ -1466,6 +1467,7 @@ mod verification {
             matches!(err, ImageSetError::UnparseableManifest { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Parse);
     }
 
     #[test]
@@ -1483,6 +1485,7 @@ mod verification {
             matches!(err, ImageSetError::MemberHasNoArtifacts { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Structure);
     }
 
     #[test]
@@ -1499,6 +1502,7 @@ mod verification {
             matches!(err, ImageSetError::RepositoryMismatch { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::LockMatch);
     }
 
     #[test]
@@ -1520,6 +1524,7 @@ mod verification {
             matches!(err, ImageSetError::Incomplete { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Completeness);
     }
 
     #[test]
@@ -1543,6 +1548,7 @@ mod verification {
             matches!(err, ImageSetError::GuestAgentProtocolDisjoint { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::ProtocolCompatibility);
     }
 
     #[test]
@@ -1592,6 +1598,7 @@ mod verification {
             matches!(&err, ImageSetError::ArtifactMissing { name: refused, .. } if refused.as_str() == name),
             "the refusal must name the artifact: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Artifacts);
     }
 
     #[test]
@@ -1628,6 +1635,7 @@ mod verification {
             matches!(err, ImageSetError::SetRevoked { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Revocation);
     }
 
     #[test]
@@ -1677,6 +1685,7 @@ mod verification {
             matches!(err, ImageSetError::SignatureInvalid { .. }),
             "got: {err}"
         );
+        assert_eq!(err.stage(), ImageSetStage::Signature);
     }
 
     /// A build compiled without the verifier must refuse rather than admit an
