@@ -98,6 +98,13 @@ Last updated: 2026-09-19
         descriptor-closing hook, shared vsock sockets are close-on-exec, and
         real Linux cold-entrypoint and process-RPC witnesses pass. Public
         release remains gated on clearance.
+  - [ ] W5 — issue #3382: W5.1–W5.6 done. HVF restores map guest RAM
+        copy-on-write from an unlinked, read-only clone verified against the
+        checkpoint's digest (against other users and later checkpoint edits,
+        not same-user processes); restored guests share no pages; a restore is
+        reported only once the supervisor has applied it. RAM is no longer
+        held in the supervisor during a restore, and stopping a restored guest
+        no longer copies its image. W5.7 (sandbox supervisors) is open.
   - [x] W9 — signed bundles push to and fetch from image registries
         (`mvmctl bundle push`, `oci://` sources, `--prod` digest pin).
         W9.6 media-type alignment with #3365 stays open.
