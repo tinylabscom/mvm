@@ -52,7 +52,8 @@ The fixture now mirrors production identity delivery, and both standby parity
 tests require distinct identity paths while preserving the shared disk stack.
 Their final affected-crate rerun passes. Both restore BDD scenarios pass (ten
 steps, no skipped scenarios) using a rebuilt CLI. The final Linux all-target
-cross-check passes; full workspace validation remains pending.
+cross-check passes. The full host-workspace run subsequently passed with 13,998
+tests, zero failures and 31 existing ignores, including doctests.
 
 ## Validation observed
 
@@ -73,7 +74,18 @@ On the macOS host, with isolated worktree state and Rust 1.97.1:
 - Restore BDD assertions require a child-local telemetry endpoint and still
   refuse inherited console/egress/broker authority. Both scenarios pass (ten
   steps, none skipped). BDD-feature all-target clippy and the final Linux
-  all-target cross-check pass. The full workspace rerun remains pending.
+  all-target cross-check pass.
+- The full host-workspace run at implementation commit `14e34fb5a9` passed:
+  13,998 tests, zero failures and 31 existing ignores. It excludes
+  `run_build_surfaces_environment_gaps` (two builder-boot probes) and
+  `mk_guest_eval_assertions_all_pass_when_nix_available` (one Nix probe), which
+  require the builder boundary. All seven resident-signer integration tests
+  passed again in this run. Linux cross-compilation does not execute those
+  excluded probes.
+- The implementation and merge-evidence commits rebased cleanly onto
+  `22f1ea9a102734b7c706f4ec4657b2ff9c3534a9`. Range comparison preserves the
+  source patch; differences remove documentation already carried by the merged
+  foundations. Post-rebase clippy, gated checks and affected tests are running.
 
 The refreshed dependency audit and `cargo deny check` pass with the existing
 allowed `proc-macro-error2` advisory RUSTSEC-2026-0173. `cargo machete` retains
@@ -91,7 +103,7 @@ includes the corrected diagnostic.
 
 ## Remaining acceptance
 
-Finish broad validation of no-egress and standby identity provisioning.
+Finish post-rebase validation and queued delivery of the integration.
 Bind the collector's owned endpoint and fresh session to authoritative VM,
 boot and generation state. Wire bounded source capture, automatic loss summaries,
 VM-lifetime supervision, host retention and retrieval. Reset producer epochs and

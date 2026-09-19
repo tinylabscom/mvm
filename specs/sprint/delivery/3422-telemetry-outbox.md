@@ -35,10 +35,10 @@ Transport failure counts describe failed attempts, not proof of non-receipt.
 Automatic delta summaries and reserved summary bandwidth are not implemented by
 this component and remain part of the supervised worker integration.
 
-## Local component validation complete; delivery queued
+## Component merged; runtime capture remains open
 
-PR #3464 carries this handoff, rebased onto the merged transport foundation
-after #3449 landed. Final PR and merge-group checks remain required.
+PR #3464 delivered this handoff through the merge queue, on top of the merged
+transport foundation from #3449. Its PR and merge-group checks passed.
 
 The six new queue tests initially failed to compile before implementation. They
 now pass, along with a seventh queue test for atomic close, two new encrypted

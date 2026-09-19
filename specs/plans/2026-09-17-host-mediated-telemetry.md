@@ -223,7 +223,8 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         fresh child-local saved-restore endpoint. Affected-crate tests pass
         (1,857 passed, six ignored), as does workspace clippy. Linux all-target
         cross-compilation passes after the final fixture changes;
-        full-suite validation remains in progress. Both restore BDD scenarios
+        the host workspace passes 13,998 tests with zero failures (31 existing
+        ignores and three builder-only exclusions). Both restore BDD scenarios
         pass (ten steps, no skips), including the child-local telemetry path;
         no guest listener, generation registration or real-VM
         tracing witness is claimed by these channel changes.
@@ -232,10 +233,10 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         secret-free boots: mint from the host's public anchor without an egress
         process, and preserve the restored guest's registered key on warm claim.
         Its positive/refusal and disk-isolation regressions pass in the affected
-        suites above; full workspace validation remains in progress.
+        suites above and the full host workspace.
         Standby capture now provisions its own identity too. The identity-stage
         policy pass clears all 69 repository gates and declared backing;
-        full workspace tests remain open.
+        post-rebase checks and queued delivery remain open.
 - [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export

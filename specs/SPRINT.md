@@ -31,15 +31,16 @@
       Runtime endpoint provisioning and the VM-lifetime collector remain open.
       W2b backend channel and identity wiring passes 1,857 affected-crate tests (six ignored),
       workspace clippy and Linux all-target cross-check. Both restore BDD scenarios
-      pass (ten steps, no skips). The final Linux rerun passes; full-suite validation
-      remains open. Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
+      pass (ten steps, no skips). The host workspace passes 13,998 tests with zero failures,
+      31 existing ignores and three builder-only exclusions. Post-rebase validation remains open.
+      Evidence: `specs/sprint/delivery/3423-telemetry-runtime-integration.md`.
       Wiring includes HVF cold boot, live handoff and child-local saved restore. Guest listener activation,
       authoritative generation registration and real-VM witnesses remain open.
       No-egress identity provisioning is implemented locally without granting
       network access or loading the host private key. Identity/refusal and disk-isolation
-      regressions pass; full workspace validation remains in progress.
+      regressions and the full host workspace pass.
       Standby capture also provisions its own identity. Identity-stage policy
-      gates (69), declared backing, BDD and Linux cross-check pass; full workspace validation is open.
+      gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
       W3b prepared-record handoff is tested: fixed queue storage, non-waiting
       admission/close and independent loss evidence pass nine new component tests.
       Two allocation regressions also pass natively and under Miri; native mutex
