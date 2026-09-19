@@ -52,7 +52,7 @@ impl Outcome {
             },
             Err(e) => Self::failure(
                 MVM_HOSTLIB_INTERNAL,
-                "INTERNAL",
+                mvm_core::error_codes::INTERNAL,
                 &format!("reply did not encode: {e}"),
                 false,
             ),
@@ -69,7 +69,12 @@ impl Outcome {
 
     /// The request could not be understood.
     pub(crate) fn invalid_input(message: &str) -> Self {
-        Self::failure(MVM_HOSTLIB_INVALID_INPUT, "INVALID_INPUT", message, false)
+        Self::failure(
+            MVM_HOSTLIB_INVALID_INPUT,
+            mvm_core::error_codes::INVALID_INPUT,
+            message,
+            false,
+        )
     }
 }
 

@@ -334,6 +334,12 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       `mvm_client::guest`, which `mvmctl machine proc`/`fs`/`cp` and the
       library both call, with the same audit entries. They stay off
       `MvmClient`, which must remain answerable by a remote backend.
+- [x] Error codes have one definition (`mvm_core::error_codes`), and the SDK
+      error taxonomy generates the host library's error classes from them,
+      keyed by code (`CODE_ERRORS`).
+- [x] The Python loader (`mvm/_hostlib.py`): `MVM_HOSTLIB_PATH`, then beside
+      `mvmctl` on `PATH`, then a typed error; ABI negotiated once; no process
+      API in the module.
 - [ ] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
       for it.

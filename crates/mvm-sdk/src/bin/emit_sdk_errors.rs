@@ -31,6 +31,7 @@ fn main() {
                 "base_typescript": e.base.typescript(),
                 "doc": e.doc.trim(),
                 "status": e.status,
+                "code": e.code,
                 "surfaces": surfaces,
                 "fields": e.fields.iter().map(|f| json!({
                     "name": f.name, "doc": f.doc,
