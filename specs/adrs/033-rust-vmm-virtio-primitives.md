@@ -9,8 +9,8 @@ landed with Slice 2 (`vm-memory` behind the `GuestMem` seam); Slices 3–4
 adopted `virtio-queue` for the vsock TX then RX ring walk; Slice 5 adopted
 `virtio-vsock`'s typed packet for the 44-byte header parse/format
 (`VsockHdr::{to_bytes,from_bytes}` now frame through `VsockPacket`, and
-`HDR_LEN` is anchored to `PKT_HEADER_SIZE`). The migration is now complete:
-F1/F3/F4 are eliminated by construction, and F5's writable-descriptor
+`HDR_LEN` is anchored to `PKT_HEADER_SIZE`). The vsock migration is now complete:
+F1/F3/F4 are eliminated by construction on that device, and F5's writable-descriptor
 validation / "no RX buffer → leave queued" handling (Slice 4) is preserved
 unchanged by the header swap — the packet round-trips byte-identically to
 the hand-rolled encode/decode across every op and boundary value. The
@@ -22,9 +22,9 @@ The block/fs device migrations (which reuse the same `vm-memory` seam and
 
 ## Context
 
-The in-house VMM (the HVF path on macOS 26+ Apple Silicon, the KVM path
-on Linux — the "no VMM lock-in" device model in `mvm-runtime`'s `vmm`
-module) hand-rolls its virtio-mmio stack: the split-virtqueue ring walk,
+The in-house VMM (the HVF path on macOS 26+ Apple Silicon — the
+"no VMM lock-in" device model in `mvm-vmm`, re-exported by `mvm-runtime`)
+hand-rolls its virtio-mmio stack: the split-virtqueue ring walk,
 the guest-memory boundary (`vmm/guest_mem.rs`), and the 44-byte
 virtio-vsock header parse (`vmm/vsock_transport.rs`). In the vsock-only
 security model this device is the top trust boundary — guest-programmed
@@ -73,7 +73,7 @@ remove wholesale."
 
 - **`vm-memory`** (0.18 line) — `GuestMemory`/`GuestMemoryMmap`, the
   checked `Bytes` trait, and `VolatileSlice`. The audited equivalent of
-  the in-repo `GuestMem`; wraps the externally-owned HVF/KVM RAM mapping
+  the in-repo `GuestMem`; wraps the externally-owned hypervisor RAM mapping
   via `MmapRegion`'s raw-pointer constructor (the RAM is owned by the
   hypervisor mapping, not allocated by vm-memory).
 - **`virtio-queue`** (0.18 line) — the validated `Queue` plus the
@@ -89,8 +89,8 @@ remove wholesale."
 
 ### Boundary — host VMM path only, never the sealed guest or `no_std` core
 
-These crates land **only** in `mvm-runtime`'s `vmm` device model (driven
-by the cfg-gated `hvf` and `kvm` backends). They are host-side, std-only
+These crates land **only** in `mvm-vmm`'s `vmm` device model (re-exported by
+`mvm-runtime` and driven by the host backends). They are host-side, std-only
 code that sits behind the `VmBackend` seam, consistent with the standing
 "isolate VMM specifics behind the trait, never lock into one VMM" rule.
 
@@ -105,7 +105,7 @@ They are forbidden in:
   `mvm-egress-proxy`), built static `aarch64-unknown-linux-musl` in
   `mvm-build`; they do not touch this code and must stay unaffected.
 
-### Feature-gated during migration; behavior-preserving; staged
+### Behavior-preserving, staged migration
 
 The migration is behavior-preserving and lands in the plan's bounded,
 individually-revertible slices — Slice 2 (`vm-memory` behind the
@@ -119,12 +119,11 @@ fail closed instead of panicking/OOMing. F2 (connection-table caps) and
 F5–F7 are device-policy/quality items carried alongside, not rust-vmm
 primitives.
 
-Gate the crates behind a Cargo feature (e.g. `vmm-rustvmm-queue`) for the
-duration of the migration, so the default-binary closure delta stays
-**zero** while both paths coexist and the differential tests run. Flip the
-feature on by default — and delete the hand-rolled path — only once
-Slice 5 lands and the old code is dead. This decouples the closure-budget
-step below from every intermediate slice.
+The dependencies are unconditional host-side dependencies. The migration did
+not carry a parallel Cargo-feature path: each bounded slice replaced its old
+implementation after its equivalence and hostile-input tests passed. The
+closure-budget measurement below therefore applies to the landed path rather
+than to a never-created transition feature.
 
 ### Used-index ownership across drains, and ring-cursor lifecycle
 
@@ -167,11 +166,11 @@ scribbled `used.idx` between two drains does not move the next completion)
 plus tests for both rewind transitions and for the redundant-activation
 no-op.
 
-## Supply chain and closure (ADR-002 / ADR-031 compliance)
+## Supply chain and closure (ADR-001 / ADR-031 compliance)
 
 Every workspace dependency clears the supply-chain bar — `cargo-deny`
 (`deny.toml`) + `cargo-audit`, ADR-001 §W5.2 — and the repo holds the
-limit-dependencies line (ADR-031; ADR-002's "audit in-house rather than
+limit-dependencies line (ADR-031; ADR-001's "audit in-house rather than
 vet a third-party surface" posture). This is the crux of the sign-off, so
 the closure delta was **measured**, not estimated.
 
@@ -251,7 +250,7 @@ cost measured and the one unavoidable skip named.
 The migration must not regress the HVF path:
 
 - **Startup latency — O(1) device construction.** `Queue::new(max_size)`
-  and wrapping the existing HVF/KVM mapping in a `GuestRegionMmap` are
+  and wrapping the existing hypervisor mapping in a `GuestRegionMmap` are
   O(1) with no allocation of guest RAM; per-VM device construction stays
   as cheap as today. No warm-path or boot-latency budget moves.
 - **IRQ / SPI semantics untouched.** `virtio-queue` raises no interrupts.
@@ -290,17 +289,19 @@ The migration must not regress the HVF path:
 
 ## Consequences
 
-**Positive.** F1, F3, and F4 are eliminated by construction across vsock,
-blk, and fs from a single validated primitive; the guest-memory boundary
+**Positive.** F1, F3, and F4 are eliminated by construction on vsock; the
+guest-memory boundary
 moves onto the audited `vm-memory`; the hand-rolled ring walk and 44-byte
-header parse leave the hand-audited surface. Block/fs reuse the same
-`vm-memory` seam and `Queue` gate directly. A queue-geometry/descriptor
+header parse leave the hand-audited surface. Block/fs can reuse the same
+`vm-memory` seam and `Queue` gate when their migrations land; until then they
+retain their existing walkers, with the shared `QueueGeometry` validation
+closing F1. A queue-geometry/descriptor
 fuzz target (landed before Slice 1) and a differential queue fuzzer
 (Slices 3–4) extend the existing frozen fuzz lane.
 
-**Negative.** +5 distinct crates on the default binary and one recorded
-`deny.toml` `vmm-sys-util` skip until `kvm-bindings` catches up (removed
-with the KVM backend, see above); a second
+**Negative.** +5 distinct crates on the default binary; the former
+`vmm-sys-util` duplicate-major skip was removed with the unused KVM backend,
+as recorded above. This remains a second
 std-only dependency family to watch in the advisory gate; the migration
 must carry byte-identical behavior, which the per-slice golden-replay and
 differential tests enforce.

@@ -3,8 +3,8 @@
 ## Status
 
 Accepted — boundary ratified; scoped as the **claim-free portability / demo /
-browser tier** (host `wasmtime`, opt-in, honest capabilities, zero numbered
-claims). The seam design of record is
+browser tier** (host `wasmtime`, opt-in, honest capabilities, no numbered
+isolation claims). The seam design of record is
 [specs/refactor/11-wasm-backend.md](../refactor/11-wasm-backend.md).
 
 A browser-hosted Linux backend is now in implementation under
@@ -42,12 +42,16 @@ later:**
    networking, no virtio, no vsock. A request for any of those fails
    closed with a typed error naming the supported alternative; it never
    silently drops a requirement and proceeds.
-3. **It carries none of the numbered security claims, and this ADR does
+3. **It carries none of the numbered isolation claims, and this ADR does
    not request claim-table promotion for it.** The security posture's
    threat model and per-backend tier matrix cover backends that provide a
    hardware isolation boundary; a WASM/browser tier is a portability and
    demo tier, not an isolation tier, and must never be documented or
-   marketed as one.
+   marketed as one. This does not exempt it from enforcing an admitted
+   resource bound: the direct-WASI implementation wires fuel and epoch
+   interruption when those bounds are present. That mechanism contributes
+   to the cross-backend resource-bounding posture without turning WASM into
+   a hardware-isolated tier.
 
 **If the backend is ever used to execute a workload as more than a
 demo/preview — i.e. if it becomes a production execution path rather than
@@ -70,7 +74,7 @@ service is.
 
 ## Consequences
 
-- mvm has two claim-free portability tiers: the direct-WASI tier governed by
+- mvm has two isolation-claim-free portability tiers: the direct-WASI tier governed by
   this ADR and the browser-hosted Linux tier governed by ADR-049. Both are
   opt-in and never auto-selected. The hardware-isolated microVM backends remain
   the only path that carries the numbered security claims.

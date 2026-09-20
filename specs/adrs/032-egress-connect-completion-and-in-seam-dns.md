@@ -40,8 +40,8 @@ had masked it.
 **Root cause** (two compounding defects):
 
 - **Optimistic CONNECT handshake.** The guest egress client
-  (`crates/mvm-agentd/src/egress_client.rs`, `serve_http_connect` ~332-342,
-  `serve_socks` ~320-330) writes `HTTP/1.1 200 Connection established` (or SOCKS
+  (`crates/mvm-agentd/src/flowmux_egress.rs`, `serve_http_connect` and
+  `serve_socks`) writes `HTTP/1.1 200 Connection established` (or SOCKS
   `REP_SUCCESS`) *before* the host confirms the outbound connect — it only opens
   the vsock and writes the target line, then replies OK and splices. A failed
   admitted connect therefore cannot surface as an error: the client has already
@@ -51,16 +51,16 @@ had masked it.
   (A + AAAA) via `to_socket_addrs()`
   (`crates/mvm-core/src/policy/dns_pin.rs`, `resolve_network_policy_pins`
   ~47-67), but `EgressGate::decide_hostname_request`
-  (`crates/mvm-runtime/src/vsock_egress_bridge/egress_gate.rs` ~122-151) returns
-  only the *first* admitted IP, and `raw_egress::splice`
-  (`crates/mvm-hostd/src/supervisor/raw_egress.rs` ~143-155) does a single
+  (`crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs`; re-exported by
+  `mvm-runtime`) returns only the *first* admitted IP, and the FlowMux TCP relay
+  (`crates/mvm-hostd/src/supervisor/flowmux/tcp_relay.rs`) does a single
   `TcpStream::connect` with no iteration. On a dual-stack host whose first
   pinned IP (typically IPv6) has no working egress — the common dev-Mac case —
   the connect stalls the full 30s timeout.
 - **Why enforcement stays fast:** a disallowed `http://` request is classified
-  `HttpForward` and answered inline by a *different* host component
-  (`crates/mvm-hostd/src/supervisor/http_forward.rs`), which synthesizes the
-  `403` with no outbound socket. The admitted-CONNECT path is the raw TCP splice
+  `HttpForward` and answered through the FlowMux open-flow path
+  (`crates/mvm-hostd/src/supervisor/flowmux/open_flow.rs`), which synthesizes the
+  refusal with no outbound socket. The admitted-CONNECT path is the TCP relay
   above. That asymmetry — plus the optimistic `200` — is exactly why enforcement
   looks instant while an admitted connect hangs. Byte-pumping is correct in both
   directions (the `403` round-trip proves it), and the host endpoint is spawned
@@ -75,7 +75,8 @@ correct client error instead of a hang.
 
 **Decision 1b — try every admitted pinned IP.**
 `EgressGate::decide_hostname_request` returns all admitted IPs (not just the
-first); `raw_egress::splice` iterates them happy-eyeballs style — prefer IPv4, a
+first); `flowmux::tcp_relay::connect_first_admitted` iterates them
+happy-eyeballs style — prefer IPv4, a
 short per-IP connect budget, first success wins. An unreachable AAAA pin no
 longer stalls the request. 1b is what makes an admitted connection actually
 *succeed* on a dual-stack host; 1a makes any residual failure fail fast instead
@@ -112,12 +113,15 @@ owns the gate, not added next to it.
    loopback, ULA, and the metadata address `169.254.169.254` unless explicitly
    allowed; re-check the IP at connect time (Part 1b already dials by admitted
    IP), so a short-TTL rebind to a private IP is caught before dialing.
-3. **Parser safety across the vsock trust boundary.** A minimal, in-house
-   `forbid(unsafe)` DNS codec (question section + A/AAAA answers only — the wire
-   format we need is small), bounded message size, fail-closed on malformed,
-   plus a `cargo-fuzz` target sibling to the existing vsock-framing fuzzers
-   (claim 5). We do **not** pull `hickory-proto`: the surface we need is tiny
-   and a large parser dep works against the limit-dependencies norm (ADR-002).
+3. **Parser safety across the vsock trust boundary.** Use `hickory-proto` for
+   the bounded DNS message parser/encoder and keep the policy surface narrow:
+   question records and A/AAAA answers only, a bounded message size, fail
+   closed on malformed input, plus a `cargo-fuzz` target sibling to the
+   existing vsock-framing fuzzers (claim 5). The dependency is deliberate: DNS
+   compression and message validation are mature, adversarial parser work, so
+   reusing the already-audited protocol crate is a smaller security budget than
+   maintaining a second hand-written codec. `hickory-resolver` remains optional
+   behind `custom-dns`; the default upstream path does not pull that resolver.
 4. **Resource bounds.** Per-workload token-bucket on queries, a concurrency cap
    on in-flight upstream lookups, and a response-size bound.
 5. **No confused deputy.** The handler is scoped to the *workload's* admitted

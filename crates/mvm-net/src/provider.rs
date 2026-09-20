@@ -60,7 +60,7 @@ impl std::error::Error for NetworkError {}
 ///
 /// Impls: the mvm-backend TAP/bridge provider (per-OS), mvmd's
 /// WireGuard/Tailscale mesh provider. The provider hides the per-OS gateway
-/// choice (`MVM_NETWORKING`) from callers.
+/// choice from callers.
 pub trait NetworkProvider: Send + Sync {
     /// Stable kind string — `"bridge"` |
     /// `"wireguard"` | … . Matched against a `NetworkMode`'s kind by the

@@ -3,8 +3,8 @@
 ## Status
 
 Proposed. Formalizes a posture the codebase already half-implements — the
-agent runs as an unprivileged uid under `setpriv --no-new-privs
---bounding-set=-all`, each service runs under its own uid, and
+agent runs as an unprivileged uid through the first-party static
+`/sbin/mvm-setpriv --no-new-privs` helper, each service runs under its own uid, and
 `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts — and pins
 down the stronger property the product overview asserts: the runtime
 itself never runs as root, and there is no usable root account inside the
@@ -55,8 +55,10 @@ uid 0 exists in the guest only within a fixed, audited boot shim (the
 the dev-console mount — and runs no workload code, no entrypoint, no
 agent request handling, and no other guest-controlled input while
 privileged. Before any guest-reachable surface starts, the shim drops
-irrevocably to a fixed unprivileged uid via
-`setpriv --no-new-privs --bounding-set=-all`. The transition is one-way:
+irrevocably to a fixed unprivileged uid via the first-party static helper
+`/sbin/mvm-setpriv` (`--reuid`, `--regid`, `--clear-groups`, and
+`--no-new-privs`). The agent separately narrows the Linux capability bounding
+set before workload exec. The transition is one-way:
 no setuid path, capability, or stored credential lets a dropped process
 return to uid 0. The exact, honest shape of the guarantee is "transiently
 uid 0 during fixed early boot, never uid 0 once anything

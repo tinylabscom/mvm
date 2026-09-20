@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-19
+Last updated: 2026-09-20
 
 ## In progress
 
@@ -67,6 +67,13 @@ Last updated: 2026-09-19
       only caller was its own test. Deleted with that test. A3.3/F2 ride along:
       the `#[ignore]`d `unimplemented!()` live-attach test in
       `prelaunch_live.rs` is deleted too.
+
+- [x] **Architecture records match the shipped tree.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.1 + G2, issue #3309.
+      ADRs 022, 024–028 and 030–033 now describe current crate ownership, CLI,
+      bundle verification, guest identity, warm-snapshot, egress and virtio
+      behavior. Stale tree-side comments and the obsolete enum lint allowance
+      are removed; ADR-032 records the retained bounded DNS codec rationale.
 
 - [ ] **`#[allow(dead_code)]` sweep.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A3.6 / D6, issue #3310.

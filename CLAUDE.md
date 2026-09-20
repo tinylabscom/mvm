@@ -671,8 +671,9 @@ by the per-VM supervisor on libkrun and HVF: the process that owns the guest
 for its whole life arms a timer from the admitted plan, and a workload that
 outruns its bound is killed with exit `124` and a chain-signed entry. A bound
 whose kill could not be audited refuses to boot rather than running unbounded.
-Firecracker has no such supervisor process and is not covered. wasm
-fuel/epoch is declared and unwired, and a restored or warm-claimed child is
+Firecracker has no such supervisor process and is not covered. The wasm
+backend wires admitted fuel and wall-clock bounds into wasmtime fuel
+consumption and epoch interruption. A restored or warm-claimed child is
 admission-bounded without its host-side CPU control **or its wall-clock
 timer** being re-armed — a restore deliberately does not inherit the parent's
 plan, since auditing a child's kill under its parent's identity would write a

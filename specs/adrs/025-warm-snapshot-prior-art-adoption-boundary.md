@@ -160,9 +160,10 @@ that owns it, not this one.
 
 ## Consequences
 
-Page-cache priming at freeze time, the same-page-merging constraint, and
-the warm snapshot-fork restore path are implemented and sequenced in Plan
-265, which lands the restore-path security witnesses. No existing security
+The same-page-merging constraint and warm snapshot-fork restore path are
+implemented. Page-cache priming at freeze time remains a planned refinement;
+no current freeze path touches a declared working set into cache. The work is
+sequenced with the warm-path security witnesses. No existing security
 claim is relaxed: the constraints above gate the warm path more tightly
 than cold boot, extending claims 1, 3, 8, 10, and 13 into the restore path
 rather than weakening them. The full surface-by-surface enumeration lives

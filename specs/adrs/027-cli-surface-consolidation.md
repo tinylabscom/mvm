@@ -27,15 +27,16 @@ Every workload lifecycle and operate-on-running-VM verb hangs off
 `reconfigure`, `rm`, `ls`/`ps`, `inspect`, `shell`, `exec`, `set-timeout`,
 `logs`, `console`, `check-artifact` — plus every advanced single-VM
 operation (pause, resume, snapshot, cp, fs, proc, session, volume,
-sandbox, and the rest) flattened directly into the same subcommand list.
-There is no separate `vm` noun; its verbs are `machine`'s verbs. There is
+sandbox, and the rest) under the hidden-by-default `machine vm` sub-noun
+(`rekernel` is the visible exception). There is no top-level `vm` noun;
+its verbs stay scoped below `machine`. There is
 no `up`, `down`, `console`, or `invoke` command — those names do not
 exist at the top level.
 
 `run` is the exception, and it is a deliberate one: see
-"`run` is a first-class transient verb" below. `dev` (host build
-substrate, not a workload) is the other top-level surface that exists
-alongside `machine` because it is a different object.
+"`run` is a first-class transient verb" below. Builder-host operations are
+grouped under their owning visible commands rather than exposed as a top-level
+`dev` command.
 
 ### One listing, over every store
 
@@ -123,11 +124,12 @@ they do not have.
 Verbs sort into three buckets:
 
 - **Visible.** Anything a user is expected to invoke: `machine`, `run`,
-  `build`, `kernel`, `deploy`, `generate`, `template`, `init`, `doctor`,
+  `build`, `kernel`, `deploy`, `deployments`, `generate`, `template`, `init`, `doctor`,
   `bootstrap`, the reporting verbs (`explain`, `prepare`, `watch`,
-  `pack`), and the object groups `env`, `manifest`, `image`, `catalog`,
+  `pack`, `bench`), integration helpers (`plugin`, `completions`), and the
+  object groups `env`, `manifest`, `image`, `catalog`,
   `cache`, `network`, `pool`, `secret`, `trust`, `bundle`, `artifact`,
-  `deps`, `ops`, `shell-init`. Grouped by `display_order` so `--help`
+  `agent-session`, `capture`, `deps`, `ops`, `shell-init`. Grouped by `display_order` so `--help`
   reads in tiers rather than alphabetically.
 - **Dev tooling.** Real commands that a user is not expected to reach
   for, and whose absence from `--help` costs them nothing:
@@ -138,7 +140,8 @@ Verbs sort into three buckets:
   `__builder-vm-bootstrap`, `__builder-egress-supervisor`,
   `__builder-shell-job`, `__qemu-vsock-bridge`.
 
-`xtask check-cli-help-matches-docs` holds the visible bucket and
+This enumeration is explanatory; the normative set is generated from the
+command tree. `xtask check-cli-help-matches-docs` holds the visible bucket and
 `public/src/content/docs/reference/cli-commands.md` to each other in both
 directions: a documented verb must be visible, and a visible verb must be
 documented. Hiding a verb to avoid writing its reference row therefore
