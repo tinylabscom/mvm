@@ -19,7 +19,7 @@ version fail mysteriously once its peer moved ahead.
 
 ```rust
 // crates/mvm-core/src/protocol/protocol.rs
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 ```
 
 `u32`: large enough that a long-lived project bumping every few months
@@ -59,33 +59,31 @@ docstrings, internal helpers, and test-only changes.
   so old payloads still deserialize; the bump exists because the byte
   output changes (JSON keys appear once defaults are present), which is
   exactly the kind of drift the downstream fixture pin needs to catch.
+- `3` — fenced block-volume start, lease renewal, ciphertext transfer,
+  and atomic restore request/response variants. These coordinated operations
+  have no safe fallback to a version-2 hostd.
 
-### The cross-repo gate
+### The current gate
 
-The mvmd repo's `tests/mvmd_compat.rs` reads `PROTOCOL_VERSION` from its
-linked mvm dependency and compares canonical envelope instances —
-`HostdRequest::StartInstance` and `HostdResponse::Ok` — against its own
-frozen-byte fixtures under `tests/fixtures/v{N}/`. When the constant
-bumps, the test refuses to run until the matching fixture set is added,
-forcing the bump and the wire-shape recapture into the same commit. The
-fixture set stays deliberately minimal — one canonical instance per
-top-level envelope — so it stays sensitive to real wire changes without
-becoming brittle to unrelated refactors.
+The mvm-side `protocol_version_is_three` test pins the constant directly, so
+a PR cannot silently change it without updating the test. Canonical
+serialization tests also pin representative version-1 and version-2 request
+shapes.
 
-mvm-side, `protocol_version_is_two` pins the constant directly, so a PR
-can't silently change it without the test failing and prompting the
-mvmd-side fixture regeneration.
+There is no matching fixture consumer in the current mvmd tree. Cross-repo
+wire compatibility is therefore not mechanically enforced today; adding a
+consumer-side fixture set is required before mvm and mvmd can be released or
+upgraded independently.
 
 ## Consequences
 
-Wire drift gets caught at PR review: a diff that changes `HostdRequest`
-or `HostdResponse` shape without bumping the constant fails mvmd's CI in
-one place, with a fixture diff a reviewer can read directly.
+The constant and mvm-side fixtures make deliberate version changes visible at
+PR review. They do not detect every request or response shape change, and no
+mvmd-side fixture currently fails when the two repositories drift.
 
-The bump policy is enforced by convention plus test, not by the type
-system — a maintainer could still forget to bump on a subtler
-compatibility break, and the fixture tests are the backstop, not a
-guarantee.
+The bump policy is enforced by convention plus focused tests, not by the type
+system — a maintainer could still forget to bump on a subtler compatibility
+break.
 
 There is no graceful cross-version negotiation. A peer at a different
 version refuses to talk rather than partially interoperating — correct
@@ -93,7 +91,7 @@ for the current single-deploy-unit posture, and revisited only if mvmd
 needs to support a heterogeneous fleet of hostd versions at once.
 
 This constant versions the hostd Unix-socket IPC protocol only. The
-guest-agent vsock protocol (`mvm_guest::vsock::PROTOCOL_VERSION`) and the
+guest-agent vsock protocol (`mvm_agentd::vsock::PROTOCOL_VERSION`) and the
 builder daemon's protocol (`mvm_build::builderd_protocol::PROTOCOL_VERSION`)
 are separate wire protocols with their own version constants and their
 own compatibility rules — each is versioned independently because each

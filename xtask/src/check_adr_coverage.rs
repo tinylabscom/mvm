@@ -7,7 +7,9 @@
 //! reversed and the doc was forgotten), unimplemented (decision
 //! was made but the code never landed), or genuinely
 //! reference-free (e.g. a process ADR that doesn't touch code).
-//! All three are worth surfacing for review.
+//! All three are worth surfacing for review. ADR bodies do not increment that
+//! coverage count, but their ADR-number and section-qualified references are
+//! still checked for existence.
 //!
 //! Output format mirrors `cargo deny` for grep-ability and CI
 //! integration. (Example shapes; this comment deliberately splits
@@ -97,6 +99,42 @@ fn scan_for_refs(root: &Path) -> Result<BTreeMap<u32, usize>> {
 
     visit(&root.to_path_buf(), &mut counts, &skip_dirs, &adrs_dir)?;
     Ok(counts)
+}
+
+/// Scan only ADR bodies for references used by other ADRs.
+///
+/// These references participate in the existence check but deliberately do
+/// not count as implementation coverage: an ADR citing itself or another ADR
+/// is documentation, not evidence that the decision is present in code.
+fn scan_adr_refs(root: &Path) -> Result<BTreeMap<u32, usize>> {
+    let dir = root.join("specs/adrs");
+    let mut refs = BTreeMap::new();
+    if !dir.exists() {
+        return Ok(refs);
+    }
+    for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("md")
+        {
+            continue;
+        }
+        let body = fs::read_to_string(&path)
+            .with_context(|| format!("reading ADR references from {}", path.display()))?;
+        let own_number = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(parse_adr_filename)
+            .map(|(number, _)| number);
+        for number in extract_adr_refs(&body) {
+            if own_number == Some(number) {
+                continue;
+            }
+            *refs.entry(number).or_insert(0) += 1;
+        }
+    }
+    Ok(refs)
 }
 
 fn visit(
@@ -209,6 +247,122 @@ fn discover_adrs(root: &Path) -> Result<BTreeMap<u32, String>> {
     Ok(out)
 }
 
+fn discover_adr_paths(root: &Path) -> Result<BTreeMap<u32, PathBuf>> {
+    let dirs = [
+        root.join("specs/adrs"),
+        root.join("public/src/content/docs/contributing/adr"),
+    ];
+    let mut out = BTreeMap::new();
+    for dir in &dirs {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some((number, _)) = parse_adr_filename(&name) {
+                out.entry(number).or_insert_with(|| entry.path());
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AdrSectionRef {
+    source: String,
+    number: u32,
+    section: String,
+}
+
+fn extract_adr_section_refs(source: &str, body: &str) -> Vec<AdrSectionRef> {
+    let mut refs = Vec::new();
+    let mut offset = 0usize;
+    while let Some(found) = body[offset..].find("ADR-") {
+        let digits_start = offset + found + 4;
+        let digits_end = body[digits_start..]
+            .find(|character: char| !character.is_ascii_digit())
+            .map_or(body.len(), |relative| digits_start + relative);
+        let width = digits_end.saturating_sub(digits_start);
+        if !(1..=3).contains(&width) {
+            offset = digits_end.max(digits_start + 1);
+            continue;
+        }
+        let Ok(number) = body[digits_start..digits_end].parse::<u32>() else {
+            offset = digits_end.max(digits_start + 1);
+            continue;
+        };
+        let after_number = body[digits_end..].trim_start();
+        let Some(after_marker) = after_number.strip_prefix('§') else {
+            offset = digits_end;
+            continue;
+        };
+        let after_marker = after_marker.trim_start();
+        let section = if let Some(quoted) = after_marker.strip_prefix('"') {
+            quoted.find('"').map(|end| quoted[..end].trim().to_string())
+        } else {
+            let end = after_marker
+                .find(|character: char| {
+                    !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+                })
+                .unwrap_or(after_marker.len());
+            let value = after_marker[..end].trim_end_matches(['.', '_', '-']);
+            (!value.is_empty()).then(|| value.to_string())
+        };
+        if let Some(section) = section
+            && !section.is_empty()
+        {
+            refs.push(AdrSectionRef {
+                source: source.to_string(),
+                number,
+                section,
+            });
+        }
+        offset = digits_end;
+    }
+    refs
+}
+
+fn scan_adr_section_refs(root: &Path) -> Result<Vec<AdrSectionRef>> {
+    let dir = root.join("specs/adrs");
+    let mut refs = Vec::new();
+    if !dir.exists() {
+        return Ok(refs);
+    }
+    for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("md")
+        {
+            continue;
+        }
+        let body = fs::read_to_string(&path)
+            .with_context(|| format!("reading ADR section references from {}", path.display()))?;
+        let source = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+        refs.extend(extract_adr_section_refs(&source, &body));
+    }
+    Ok(refs)
+}
+
+fn normalized_heading(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn section_resolves(body: &str, section: &str) -> bool {
+    let needle = normalized_heading(section);
+    !needle.is_empty()
+        && body.lines().any(|line| {
+            let trimmed = line.trim_start();
+            let heading = trimmed.trim_start_matches('#').trim_start();
+            trimmed.starts_with('#') && normalized_heading(heading).starts_with(&needle)
+        })
+}
+
 /// Numbers whose ADR file doesn't (yet) exist but whose in-code
 /// references are intentional. Each entry pairs the ADR number with a
 /// one-line rationale that appears in the lint output, so future
@@ -284,18 +438,71 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
 ];
 
+const KNOWN_MISSING_ADR_SECTIONS: &[(u32, &str, &str)] = &[
+    (
+        1,
+        "w2",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w22",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w3",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w41",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w43",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w5",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w51",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+    (
+        1,
+        "w52",
+        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
+    ),
+];
+
 /// Run the check; print findings; return Err on any `[error]` line.
 pub fn run(workspace: &Path) -> Result<()> {
     let adrs = discover_adrs(workspace)?;
+    let adr_paths = discover_adr_paths(workspace)?;
     let refs = scan_for_refs(workspace)?;
+    let mut existence_refs = refs.clone();
+    for (number, count) in scan_adr_refs(workspace)? {
+        *existence_refs.entry(number).or_insert(0) += count;
+    }
 
     let mut errors = 0usize;
     let known_missing: BTreeMap<u32, &'static str> = KNOWN_MISSING_ADRS.iter().copied().collect();
+    let known_missing_sections: BTreeMap<(u32, &'static str), &'static str> =
+        KNOWN_MISSING_ADR_SECTIONS
+            .iter()
+            .map(|(number, section, reason)| ((*number, *section), *reason))
+            .collect();
 
     // 1. References to non-existent ADRs (typos or stale refs).
     //    Allowlisted numbers emit `[warn]` with the rationale; the
     //    rest are hard errors.
-    for (&n, &count) in refs.iter() {
+    for (&n, &count) in &existence_refs {
         if adrs.contains_key(&n) {
             continue;
         }
@@ -312,7 +519,35 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
-    // 2. ADRs with zero in-code references. Soft warning — process
+    // 2. Section-qualified ADR references must name a heading in the target
+    //    document. A valid ADR number with a fabricated section is still a
+    //    broken citation.
+    for reference in scan_adr_section_refs(workspace)? {
+        let Some(path) = adr_paths.get(&reference.number) else {
+            continue;
+        };
+        let body = fs::read_to_string(path)
+            .with_context(|| format!("reading ADR headings from {}", path.display()))?;
+        if !section_resolves(&body, &reference.section) {
+            let normalized = normalized_heading(&reference.section);
+            if let Some(reason) =
+                known_missing_sections.get(&(reference.number, normalized.as_str()))
+            {
+                println!(
+                    "[warn]  {} cites ADR-{:03} §{}; allowlisted as known-missing: {}",
+                    reference.source, reference.number, reference.section, reason
+                );
+                continue;
+            }
+            println!(
+                "[error] {} cites ADR-{:03} §{}, but that ADR has no matching heading",
+                reference.source, reference.number, reference.section
+            );
+            errors += 1;
+        }
+    }
+
+    // 3. ADRs with zero in-code references. Soft warning — process
     //    ADRs may legitimately have zero code mentions.
     for (&n, slug) in adrs.iter() {
         match refs.get(&n).copied().unwrap_or(0) {
@@ -329,7 +564,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     if errors > 0 {
         anyhow::bail!(
-            "check-adr-coverage: {errors} reference{} to non-existent ADRs",
+            "check-adr-coverage: {errors} broken ADR reference{}",
             if errors == 1 { "" } else { "s" }
         );
     }
@@ -433,6 +668,90 @@ mod tests {
 
         let result = run(root);
         assert!(result.is_err(), "broken ref must surface as Err");
+    }
+
+    #[test]
+    fn a_missing_adr_referenced_only_by_an_adr_is_still_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        let adr_missing = adr_token(998);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nThis decision depends on {adr_missing}.\n"),
+        )
+        .unwrap();
+
+        assert!(
+            run(root).is_err(),
+            "an ADR must not be allowed to cite a missing ADR"
+        );
+    }
+
+    #[test]
+    fn adr_references_are_existence_evidence_not_implementation_coverage() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        let adr2 = adr_token(2);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nThis decision depends on {adr2}.\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/adrs/002-fixture.md"),
+            format!("# {adr2}\n"),
+        )
+        .unwrap();
+
+        assert!(scan_for_refs(root).unwrap().is_empty());
+        assert_eq!(scan_adr_refs(root).unwrap().get(&2), Some(&1));
+        run(root).expect("an ADR-to-ADR reference to an existing ADR is valid");
+    }
+
+    #[test]
+    fn an_adr_section_reference_must_name_a_real_heading() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        let adr2 = adr_token(2);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nSee {adr2} §Missing.\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/adrs/002-fixture.md"),
+            format!("# {adr2}\n\n## Present\n"),
+        )
+        .unwrap();
+
+        assert!(run(root).is_err(), "a missing section must fail the gate");
+    }
+
+    #[test]
+    fn quoted_and_symbolic_adr_sections_resolve() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        let adr2 = adr_token(2);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nSee {adr2} §P1 and {adr2} §\"Named boundary\".\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/adrs/002-fixture.md"),
+            format!("# {adr2}\n\n## P1 — First property\n\n## Named boundary\n"),
+        )
+        .unwrap();
+
+        run(root).expect("real ADR section headings resolve");
     }
 
     /// A changelog is generated from commit subjects. One naming an ADR that

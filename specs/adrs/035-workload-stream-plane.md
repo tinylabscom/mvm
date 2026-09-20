@@ -9,7 +9,7 @@ attach, `mvm-client`/SDK readers).
 
 Accepted for the input half, with its cost recorded in §"Claim 15 becomes a
 policy, and what that bought". Implemented by plan 295 phase 2: the input frame
-DTOs and the plan grant (`mvm-protocol::stream::input`), the gate
+DTOs and the plan grant (`mvm_contract::stream::input`), the gate
 (`mvm-hostd::stream::input_gate`), the route to the guest sink, agent-side
 delivery with explicit EOF (`mvm-agentd::stream_input`), and the sealed-tier
 refusal of the grant for a shell-shaped entrypoint.

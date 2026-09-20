@@ -23,15 +23,16 @@ talking to its real backend:
 
 - **Base VM lifecycle** (start/stop/set-ttl) routes through
   `--hypervisor mock`, which selects `MockBackend`
-  (`crates/mvm-backend/src/mock.rs`) — an in-memory, in-process
+  (`crates/mvm-runtime/src/mock.rs`) — an in-memory, in-process
   `VmBackend` implementation that records lifecycle calls and touches no
   host state.
-- **Pause/resume** route through the `SnapshotIO` trait; `--hypervisor
-  mock` swaps in `CannedIO`, which writes deterministic stub
+- **Pause/resume** route through the `SnapshotIO` trait
+  (`crates/mvm-vmm/src/snapshot.rs`); `--hypervisor mock` swaps in
+  `CannedIO`, which writes deterministic stub
   vmstate/mem files instead of talking to a real Firecracker control
   socket.
 - **Guest-agent-bound verbs** (filesystem and process RPCs) go through
-  `MockGuestAgent` (`crates/mvm-backend/src/mock_guest_agent.rs`), an
+  `MockGuestAgent` (`crates/mvm-runtime/src/mock_guest_agent.rs`), an
   in-process stand-in that speaks the same vsock protocol shape as the
   real in-guest agent.
 - **Network-bound verbs** (self-update) redirect via an env-var override

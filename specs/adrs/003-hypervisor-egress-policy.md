@@ -26,7 +26,7 @@ end-to-end TLS for every other destination the guest talks to.
 **Every workload backend uses the uniform vsock runner.** Its guest has no
 workload NIC surface. Default-deny admission is enforced before launch; an
 admitted raw host/port flow crosses vsock to the host's
-`RealEndpointSpawner`, while secret-bearing flows use the broker and the
+`RealNetworkEndpointSpawner`, while secret-bearing flows use the broker and the
 supervisor's live L4 gate. Firecracker, HVF, and libkrun therefore share the
 same host seam and cannot silently fall back to a routable guest NIC or a
 userspace L3 tunnel.

@@ -1,8 +1,8 @@
 # ADR-041 — The node-control API, and where the cross-node trust root belongs
 
-**Status: Accepted — the mvm half is implemented (`mvm_hostd::nodectl`).
-The issuer half is a control-plane responsibility and is deliberately not
-built here. Tracked as issue #2120.**
+**Status: Proposed — neither the node-control module nor its verifier and
+registry types are present in the current tree. The issuer half remains a
+control-plane responsibility. Tracked as issue #2120.**
 **Date: 2026-08-04**
 **Answers the question ADR-040 §P1 left open, and is the ADR that
 unblocks — or, as it turns out, only half-unblocks — the node-to-node

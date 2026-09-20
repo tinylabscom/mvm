@@ -186,16 +186,11 @@ discover captures by scanning tenants, which a VM-keyed path would defeat.
 `a_forensic_capture_is_tenant_then_capture_id_with_no_vm_component` pins the
 shape so the two ends cannot drift again.
 
-## Prerequisite for `--with-transcripts`: the anchor is not wired
+## Transcript anchors are wired in production
 
-Choosing the store does not unblock embedding. `emit_transcript_sealed` has
-**no production caller** — all three call sites are tests (`emitter.rs` unit,
-`transcript.rs`'s `#[cfg(test)] mod tests`, and a conformance step). So
-`gateway.transcript_sealed` never reaches a real audit chain, `collect_transcripts`
-returns an empty list on any real host, and an embedder would have nothing to
-find.
-
-Wiring the sealing verb to emit its anchor in production is the prerequisite,
-and it is a transcript-subsystem defect rather than an archive one. Until it
-lands, an archive honestly reports zero transcripts because there are zero
-anchored transcripts, and `--with-transcripts` stays unadvertised.
+Sealing through the operator transcript command emits
+`gateway.transcript_sealed`, and the stream plane's
+`anchor_sealed_transcript` records the same event for completed and replayed
+captures. Evidence collection can therefore discover production transcript
+anchors; whether a caller requests their inclusion remains an archive policy
+choice rather than a missing transcript-subsystem prerequisite.

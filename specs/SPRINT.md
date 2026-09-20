@@ -142,6 +142,14 @@
       witnesses must resolve to exactly one definition; claims 13 and 18 use
       unique production-control or backend-specific witnesses.
 
+- [x] **Make accepted ADR citations mechanically honest — issue #3317.**
+      Accepted ADR witnesses, workspace paths, module paths, ADR references,
+      and quoted section headings now resolve in repository gates. Stale
+      implementation citations and protocol-version claims point at the live
+      tree, while absent IPv6 and node-control implementations are marked
+      Proposed instead of described as shipped. Delivery evidence:
+      `specs/sprint/delivery/3317-adr-citation-gates.md`.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.

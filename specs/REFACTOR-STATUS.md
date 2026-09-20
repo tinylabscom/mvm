@@ -97,6 +97,13 @@ Last updated: 2026-09-20
       The dormant CVE severity gate is explicit, and function witnesses must
       identify exactly one definition.
 
+- [x] **Accepted ADR citations resolve to the shipped tree.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.3, issue #3317.
+      Repository gates resolve accepted-ADR witnesses, workspace paths, module
+      paths, ADR references and quoted headings. Stale implementation and
+      protocol citations are corrected, and unbuilt IPv6 and node-control
+      designs are Proposed rather than claimed as shipped.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is

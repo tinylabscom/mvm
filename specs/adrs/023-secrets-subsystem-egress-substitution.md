@@ -91,7 +91,7 @@ process ever sees.
 
 ### IR contract, placeholder, audit
 
-- A workload's secret reference (`mvm-sdk::ir::workload`) carries
+- A workload's secret reference (`mvm_contract::ir::Workload`) carries
   `auth_type` (`Sigv4 | Hmac | Bearer | Basic`) and `allowed_hosts`
   (exact host or `*.suffix` wildcard) alongside its name and mount shape
   — never bytes. IR validation refuses a secret reference with no

@@ -1,8 +1,7 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Accepted — implemented end to end 2026-08-04. Host admission,
-guest kernel, in-guest configuration, and host-side v6 address allocation
-have all landed. IPv6 is opt-in per plan; it is not on by default.**
+**Status: Proposed — the implementation described below is not present in the
+current tree. IPv6 remains an architectural direction, not shipped behavior.**
 **Date: 2026-08-02**
 
 **What shipped.** The admission guard admits IPv6; `embedded_v4` extracts

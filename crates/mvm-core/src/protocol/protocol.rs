@@ -37,12 +37,9 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 /// variants that older clients refuse cleanly with a typed error,
 /// or comments / docstrings / internal helpers.
 ///
-/// The mvmd repo's `tests/mvmd_compat.rs` pins this against
-/// frozen-byte fixtures for `AgentRequest::Reconcile`,
-/// `HostdRequest::Start`, and `HostdResponse::Started`, so a PR
-/// that shifts the wire format without bumping this constant fails
-/// CI on the mvmd side. The fixtures live next to the test;
-/// regenerate them in the same commit that bumps the version.
+/// Focused mvm tests pin this constant and representative historical
+/// request shapes. The current mvmd tree has no matching fixture consumer,
+/// so cross-repository wire compatibility is not mechanically enforced.
 ///
 /// **History:**
 /// - `1`: initial shape.
@@ -50,12 +47,11 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 ///   every instance-scoped `HostdRequest` variant and `volumes:
 ///   Vec<VolumeAttach>` added to `StartInstance`. All new fields are
 ///   `#[serde(default)]` so old payloads still deserialize; the bump
-///   forces mvmd-side fixture refresh because byte output changes
-///   when defaults are present (JSON keys appear with default values).
+///   records that byte output changes when defaults are present (JSON keys
+///   appear with default values).
 /// - `2` (unchanged): `MountVolume` / `UnmountVolume` added
 ///   variant-additively for the distributed-volume mount contract. No
-///   existing-variant bytes change, so mvmd's frozen
-///   fixtures stay valid. An older hostd refuses the new frames at
+///   existing-variant bytes change. An older hostd refuses the new frames at
 ///   deserialization (unknown variant), which the agent surfaces as a
 ///   clean error; the coordinator gates sending these verbs on node
 ///   capability, so no bump was taken.
@@ -346,13 +342,8 @@ mod tests {
     use super::*;
     use crate::tenant::TenantNet;
 
-    /// Pin the protocol version constant. mvmd's
-    /// `tests/mvmd_compat.rs` reads `PROTOCOL_VERSION` and compares
-    /// against its own frozen-byte fixtures; if this binary
-    /// disagrees with the mvmd snapshot, the fixture-set has
-    /// drifted and one side needs a refresh. Locking the value
-    /// here means a PR can't silently bump the const without also
-    /// updating this test (and prompting the fixture re-gen).
+    /// Pin the protocol version constant so a change cannot land without an
+    /// explicit test update and review of the compatibility consequences.
     #[test]
     fn protocol_version_is_three() {
         assert_eq!(PROTOCOL_VERSION, 3);
@@ -360,11 +351,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_u32() {
-        // Compile-check the declared type. mvmd's wire-format test
-        // serialises `PROTOCOL_VERSION` as a 4-byte little-endian
-        // value; if this ever became u8 or u64, mvmd's pin would
-        // break in a confusing way. Pin the type here so the
-        // breakage is obvious.
+        // Compile-check the declared type so a width change is explicit.
         let _: u32 = PROTOCOL_VERSION;
     }
 
@@ -650,10 +637,9 @@ mod tests {
         }
     }
 
-    /// PROTOCOL_VERSION 2 canonical fixture for StartInstance with the
-    /// new fields populated. mvmd-side `tests/mvmd_compat.rs` mirrors
-    /// this shape; if the serialized bytes drift, both sides need a
-    /// refresh in the same commit.
+    /// PROTOCOL_VERSION 2 canonical fixture for StartInstance with the new
+    /// fields populated. If these bytes drift, the compatibility impact must
+    /// be reviewed explicitly.
     #[test]
     fn test_hostd_request_start_v2_fixture() {
         use crate::instance::{VolumeAttach, VolumeMode};

@@ -28,7 +28,7 @@ that holds a signing key), not per VM.
 
 ```
 guest workload
-  │ vsock BROKER_PORT (5300)           [crates/mvm-guest/src/broker_client.rs]
+  │ vsock BROKER_PORT (5300)           [crates/mvm-agentd/src/broker_client.rs]
   ▼
 per-VM Unix socket                     (bound on Register, one per VM)
   │
@@ -66,7 +66,7 @@ which the backend relays to a Unix socket bound for that one VM; the host
 already knows which workload is calling from which socket accepted the
 connection, before it parses a single byte of the frame. The channel itself
 carries no per-frame signature and asks the guest to hold no key
-(`crates/mvm-guest/src/broker_client.rs`) — a compromised guest can write
+(`crates/mvm-agentd/src/broker_client.rs`) — a compromised guest can write
 raw frames to the port, but every gate that matters (which service is
 reachable, what category an audit entry lands under, the size and rate
 caps) is enforced host-side regardless of what the guest sends.
@@ -94,7 +94,7 @@ untrusted-parser/key-holder split scales with tenant count, not VM count.
 ### VM lifecycle is registration, not process spawn
 
 Starting a VM does not spawn a host-services process. The backend that
-starts the VM (`crates/mvm-backend/src/host_agent_spawn.rs`) lazily ensures
+starts the VM (`crates/mvm-vmm/src/host/host_agent_spawn.rs`) lazily ensures
 the tenant's daemon is running, then signs and sends a `RegisterVm` control
 message (`crates/mvm-contract/src/protocol/broker_control.rs`) carrying the
 VM's id, its broker socket path, its workload audit-chain path, and the set
@@ -153,7 +153,7 @@ A new service is one `ServiceHandler` impl (`crates/mvm-core/src/protocol/handle
 the correlation-id/audit substrate are all shared and untouched by adding
 one. Two service ids already have a typed guest-side client and wire shape
 with no host handler behind them yet (`host.time.v1`, `host.cost.v1` in
-`crates/mvm-guest/src`); calling either today returns `NotBound`,
+`crates/mvm-agentd/src`); calling either today returns `NotBound`,
 identically to any other unregistered service.
 
 ## Consequences
