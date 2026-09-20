@@ -8,3 +8,5 @@ pub mod driver;
 pub mod fc;
 
 pub mod mock;
+/// Clearing one run's leftover sidecars before the next boot.
+pub mod run_sidecars;

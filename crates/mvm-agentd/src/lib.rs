@@ -114,6 +114,8 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+/// Shared SOCKS5 UDP datagram wire codec for the guest proxy and relay.
+pub mod socks5_udp;
 /// Shared bounded pipe-reader and consumer handoff.
 mod stream_handoff;
 /// Delivery of admitted input bytes into a running workload's stdin, plus the

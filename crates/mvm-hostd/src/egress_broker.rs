@@ -7,7 +7,7 @@
 //! [`NetworkPolicy`] so the broker and the rest of the system share one policy
 //! definition; this module only adds the per-request verdict.
 
-use crate::policy::network_policy::{HostPort, NetworkPolicy};
+use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
 
 /// A guest's brokered egress request, as the host egress broker sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]

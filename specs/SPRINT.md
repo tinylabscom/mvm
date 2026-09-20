@@ -350,6 +350,16 @@
       exceptions can only shrink, and 15 focused checker tests cover the parser,
       root discovery, external modules, and ratchet behavior.
 
+- [x] **Put `mvm-core` code with its actual owners — issue #3314.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` C3 + C5. Delete nine public
+      modules with no live consumer and move eight single-consumer modules to
+      their owning crates. Retain two modules that gained live consumers after
+      the original measurement. The pack subsystem and remaining foundation
+      stay together because the current dependency graph would make a pack-only
+      extraction cyclic. `check-core-module-ownership` prevents the retired and
+      consumer-owned modules from drifting back into the foundation crate, and
+      contributor guidance now records `mvm-agentd`'s real mid-graph role.
+
 - [x] **Dormant-control caller gate repair — issue #3334.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A0.1. Ensure plain and
       visibility-restricted `use` items, including multiline import trees,

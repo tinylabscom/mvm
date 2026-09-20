@@ -18,6 +18,7 @@ pub mod audit;
 pub mod boot;
 pub mod connect;
 pub mod grants;
+pub mod grants_resolve;
 pub mod guest;
 pub mod inventory;
 pub mod launch;

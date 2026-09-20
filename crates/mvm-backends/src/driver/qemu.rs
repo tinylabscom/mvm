@@ -416,7 +416,7 @@ impl VmmDriver for QemuDriver {
         // and the exit report read only this launch's, and pre-create the
         // write-only console sink so the invariant + truncate-on-boot match
         // the other backends.
-        mvm_core::run_sidecars::clear_prior_run(&state_dir);
+        crate::run_sidecars::clear_prior_run(&state_dir);
         drop(
             mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(
                 |e| anyhow!("open console sink {}: {e}", spec.console.log_path.display()),

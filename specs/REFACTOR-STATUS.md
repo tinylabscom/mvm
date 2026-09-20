@@ -273,6 +273,15 @@ Last updated: 2026-09-20
       1,633 files scanned with 19 exact shrinking-only exceptions and 15 focused
       checker tests.
 
+- [x] **`mvm-core` contains shared foundation code, not dead or consumer-owned modules.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` C3 + C5, issue #3314. Nine
+      unreferenced public modules are deleted and eight single-consumer modules
+      live with their consumers. The current pack graph is cyclic as a standalone
+      extraction and the overlapping remainder stays whole; a repository gate
+      pins those ownership decisions. Contributor guidance also records
+      `mvm-agentd` as a mid-graph library rather than an unconsumed top-level
+      crate.
+
 - [x] **Dormant-control caller gate repair.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A0.1, issue #3334.
       Exclude import and re-export declarations from production-caller

@@ -420,7 +420,7 @@ fn spawn_workload_exit_capture(runtime_dir: &Path, state_dir: &Path) {
 /// reader observes this launch's exit status and this launch's consumption,
 /// never a stale one.
 fn arm_host_channels(channels: &[VsockPort], state_dir: &Path, runtime_dir: &Path) -> Result<()> {
-    mvm_core::run_sidecars::clear_prior_run(state_dir);
+    crate::run_sidecars::clear_prior_run(state_dir);
     wire_guest_dial_bridges(channels, runtime_dir)?;
     spawn_workload_exit_capture(runtime_dir, state_dir);
     Ok(())

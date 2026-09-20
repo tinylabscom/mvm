@@ -79,7 +79,6 @@ const HOST_ROOTS: &[&str] = &[
 /// cannot hide among them.
 const MARKER_DECLARATION_SITES: &[&str] = &[
     "crates/mvm-core/src/guest_netd.rs",
-    "crates/mvm-core/src/socks5_udp.rs",
     "crates/mvm-hostd/src/supervisor/icmp_handler.rs",
 ];
 

@@ -60,7 +60,9 @@ pub mod image_source;
 /// Universal initramfs build + cache resolution.
 pub mod initramfs;
 pub mod intoto;
-/// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
+/// Content identity for fetched kernel artifacts.
+pub mod kernel_artifact;
+/// Hash-verify a fetched kernel image against its [`kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
 /// rootfs + verity sidecars + cmdline, with an Ed25519-signed manifest

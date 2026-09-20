@@ -214,14 +214,9 @@ pub enum LocalAuditKind {
     /// behavioural change.)
     VmVolumeAdd,
     VmVolumeRemove,
-    // --- metering API ---
-    /// One per-minute metering bucket sealed and chained into the
-    /// audit log. Auditing-grade resource attribution. The
-    /// `detail` field carries a JSON-encoded `MeteringBucket`
-    /// (`mvm_core::metering::MeteringBucket`) so a forensic pass can
-    /// reconstruct per-tenant resource consumption end-to-end without
-    /// trusting the per-tenant JSONL rollup file (which the audit
-    /// chain authenticates by sealing each bucket here).
+    // --- retired resource-metering compatibility ---
+    /// Legacy resource-metering event kind retained so persisted audit logs
+    /// remain readable after the unused producer and bucket model were removed.
     MeteringEpoch,
     // --- bundle trust store mutations ---
     //

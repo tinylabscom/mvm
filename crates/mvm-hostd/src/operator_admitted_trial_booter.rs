@@ -11,6 +11,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::extension_admission::{ExtensionAdmissionPolicy, ExtensionAuthority, admit_extension};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use mvm_contract::assurance::{
@@ -20,9 +21,6 @@ use mvm_contract::assurance::{
 use mvm_contract::plan::{AttestationMode, VerbId};
 use mvm_contract::protocol::extension_pack::{
     ExtensionBudgets, ExtensionId, ExtensionPlacement, ExtensionVersion,
-};
-use mvm_core::extension_admission::{
-    ExtensionAdmissionPolicy, ExtensionAuthority, admit_extension,
 };
 use mvm_core::pack_cache::{PackVerifyCtx, promote_at};
 use mvm_core::pack_trust::PackTrustConfig;

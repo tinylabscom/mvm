@@ -14,7 +14,7 @@ use mvm_contract::protocol::extension_pack::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::packs::{PackKind, PackManifest, VerifiedPack};
+use mvm_core::packs::{PackKind, PackManifest, VerifiedPack};
 
 /// The four host/operator authority sources intersected with the pack maximum.
 pub struct ExtensionAuthority<'a> {
@@ -175,13 +175,13 @@ mod tests {
         ExtensionVersion,
     };
 
-    use crate::arch::GuestArch;
-    use crate::packs::{
+    use mvm_core::arch::GuestArch;
+    use mvm_core::packs::{
         EMPTY_PACK_HASH, HostCapability, PackBackend, PackFile, PackInputs, PackOutputs,
         PackProvenance, PolicyCompatibility, ReproducibilityStatus, SbomReference, Sha256Hex,
         SignatureBundle, SignatureFormat, SignaturePayload, TrustMetadata,
     };
-    use crate::plan::bundle::KeyId;
+    use mvm_core::plan::bundle::KeyId;
 
     fn descriptor() -> CapabilityDescriptor {
         CapabilityDescriptor::builder()

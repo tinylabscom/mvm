@@ -20,7 +20,7 @@
 
 use std::sync::Mutex;
 
-use mvm_core::rate_limit::TokenBucket;
+use crate::rate_limit::TokenBucket;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// Default sustained request rate for one workload endpoint.

@@ -340,15 +340,21 @@ next oversized file arrives unnoticed.
       facade plus twelve responsibility modules under
       `network_endpoint_proxy/`, the largest at about 500 production lines;
       external paths are unchanged and its grandfathered size allowance is gone.
-- [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
-      nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
-      to exactly one crate each. The remaining five core modules have
-      *overlapping* consumer sets — `plan` and `crypto` have identical ones —
-      so there is no clean split and the rest stays whole. #3314.
+- [x] **C3** `mvm-core`: delete the nine modules still unreferenced on current
+      main and move eight true single-consumer modules into `mvm-hostd`,
+      `mvm-client`, `mvm-conformance`, `mvm-build`, `mvm-backends`, and
+      `mvm-agentd`. Retain `trace_context` and `pack_revocation`, which gained
+      production/workflow consumers after the original measurement. Retain the
+      pack subsystem after remeasurement: it now depends on core architecture,
+      plan-key, digest and image-verification code while core image-set and
+      trust/cache modules consume pack types, so extracting it alone would
+      create a cycle. The overlapping remainder stays whole. A repository gate
+      pins the retired and single-consumer ownership boundaries. #3314.
 - [ ] **C4** Three byte-identical hex-encode implementations, one owner.
-- [ ] **C5** `CLAUDE.md` says nothing depends on `mvm-agentd` as a library.
-      Nine crates do, and at 31,436 LOC it sits mid-graph. Fix the
-      dependency-direction paragraph. Folded into #3314.
+- [x] **C5** Correct `CLAUDE.md`'s dependency direction: `mvm-agentd` is a
+      mid-graph library with ten current shipped direct consumers, plus
+      development-only consumers; only its binary entries sit at the top.
+      Folded into #3314.
 - [ ] **C2** `mvm-contract/src/ir/hash.rs:22-32` and
       `mvm-sdk/src/compile/source.rs:368-377` are byte-identical `nibble` +
       hex-encode implementations. There is a third at

@@ -329,7 +329,7 @@ fn boot_with_handoff(
     let paths = SupervisorPaths::resolve(state_dir, timeout_secs);
     // Clear any prior run's captured exit code and usage record so `wait` and
     // the exit report read only this launch's.
-    mvm_core::run_sidecars::clear_prior_run(&paths.state_dir);
+    crate::run_sidecars::clear_prior_run(&paths.state_dir);
     let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     let config_path = paths.state_dir.join("supervisor.json");
     std::fs::write(

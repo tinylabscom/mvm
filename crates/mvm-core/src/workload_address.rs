@@ -40,12 +40,10 @@
 //! from any of those — passing one where an exact-byte digest, key id, or
 //! nonce is expected does not compile.
 //!
-//! That taxonomy separates *what* is identified. [`crate::at_rest`] adds the
-//! orthogonal axis: given exact bytes, *which* bytes — the plaintext a protocol
-//! names (σ) or the representation on disk (κ). They coincide only under the
-//! identity transform, and mvm already has cases where they do not: an OCI
-//! layer is `tar+gzip`, so the verified layer digest is κ while `diff_id` is σ,
-//! and a sealed transcript records the digest of its ciphertext.
+//! That taxonomy separates *what* is identified. Storage representations add
+//! an orthogonal axis: an OCI layer is `tar+gzip`, so its verified layer digest
+//! identifies stored bytes while `diff_id` identifies the unpacked content;
+//! similarly, a sealed transcript records the digest of its ciphertext.
 
 use mvm_contract::ir::{VersionError, Workload, validate_schema_version};
 use serde::{Deserialize, Serialize};

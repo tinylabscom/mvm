@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use mvm_core::kernel_artifact::KernelArtifactId;
+use crate::kernel_artifact::KernelArtifactId;
 use thiserror::Error;
 
 use crate::runtime_overlay::SKIP_HASH_VERIFY_ENV;
@@ -302,7 +302,8 @@ pub fn resolve_kernel(
 mod tests {
     use super::*;
 
-    use mvm_core::{kernel_artifact::compute_artifact_hash, util::test_env::TestEnv};
+    use crate::kernel_artifact::compute_artifact_hash;
+    use mvm_core::util::test_env::TestEnv;
     use tempfile::NamedTempFile;
 
     #[test]

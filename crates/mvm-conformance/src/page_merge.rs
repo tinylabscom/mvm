@@ -19,8 +19,8 @@
 //! coincide (which should not otherwise occur, but the check does not assume
 //! it).
 
-use crate::checkpoint::CheckpointId;
-use crate::plan::{SignedImageRef, TenantId};
+use mvm_core::checkpoint::CheckpointId;
+use mvm_core::plan::{SignedImageRef, TenantId};
 
 /// Identity of one merge candidate: the tenant it belongs to, the sealed
 /// image it runs, and the fork family it descends from.

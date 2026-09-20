@@ -386,9 +386,9 @@ pub struct CliWorld {
     pub cold_launch_lane_result: Option<Result<(), String>>,
 
     /// Page-merge scopes staged for the most recent merge-decision step.
-    pub warm_merge_scopes: Vec<(String, mvm_core::page_merge::PageMergeScope)>,
+    pub warm_merge_scopes: Vec<(String, mvm_conformance::page_merge::PageMergeScope)>,
     /// The most recent page-merge decision.
-    pub warm_merge_decision: Option<mvm_core::page_merge::MergeDecision>,
+    pub warm_merge_decision: Option<mvm_conformance::page_merge::MergeDecision>,
     /// Signer id that produced the plan under test.
     pub warm_restore_plan_signer: Option<String>,
     /// JSON of the most recently signed execution plan under test.

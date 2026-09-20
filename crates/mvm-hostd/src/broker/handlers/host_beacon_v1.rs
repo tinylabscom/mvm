@@ -33,6 +33,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::rate_limit::TokenBucket;
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::audit_signer::AppendEntryRequest;
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};
@@ -40,7 +41,6 @@ use mvm_core::protocol::handler::{
     ServiceCallCtx, ServiceDispatchResult, ServiceError, ServiceHandler,
 };
 use mvm_core::protocol::host_beacon::{BEACON_REPORTED_EVENT, BeaconAck, BeaconReport};
-use mvm_core::rate_limit::TokenBucket;
 use tokio::sync::Mutex;
 
 use crate::broker::audit_client::{AuditClient, AuditClientError};

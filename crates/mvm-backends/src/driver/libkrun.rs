@@ -383,7 +383,7 @@ impl VmmDriver for LibkrunDriver {
         // Clear any prior run's captured exit code and usage record so `wait`
         // and the exit report read only this launch's, and the console capture
         // so a stale panic isn't mistaken for this boot's.
-        mvm_core::run_sidecars::clear_prior_run(&state_dir);
+        crate::run_sidecars::clear_prior_run(&state_dir);
         let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
