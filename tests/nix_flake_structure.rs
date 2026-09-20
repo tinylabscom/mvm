@@ -578,6 +578,7 @@ fn mk_guest_rejects_ssh_template_inputs_structurally() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("mk-guest.nix must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
 
     for needle in [
         "assertNoSshTemplateInputs",
@@ -598,10 +599,10 @@ fn mk_guest_rejects_ssh_template_inputs_structurally() {
         );
     }
 
-    let extra_files_arg = content
-        .find(", extraFiles     ? { }")
+    let extra_files_arg = normalized
+        .find("extraFiles ? { },")
         .expect("mkGuest must bind the extraFiles argument");
-    let extra_file_label = content
+    let extra_file_label = normalized
         .find("extraFileLabel = path:")
         .expect("mkGuest must inspect extraFiles for SSH material");
     assert!(
@@ -2023,10 +2024,12 @@ fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
     let path = nix_dir().join("lib/mk-guest.nix");
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let normalized = normalized_whitespace(&content);
 
     assert!(
-        content.contains("rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots")
-            && !content.contains(
+        normalized
+            .contains("rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots")
+            && !normalized.contains(
                 "rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots"
             ),
         "mkGuest's registered runtime closure must not retain the copied cacert source"
