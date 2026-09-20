@@ -16,9 +16,9 @@
 //! 1. **Clone, then drop the name.** The source is opened without following a
 //!    symlink and cloned (a copy-on-write filesystem clone, or a byte copy where
 //!    the filesystem has none) into an owner-only directory on a local
-//!    filesystem, opened read-only, and unlinked before a byte of it is hashed.
-//!    A clone is a separate file, so later edits to the checkpoint do not reach
-//!    it.
+//!    filesystem, narrowed to mode `0600`, opened read-only, and unlinked
+//!    before a byte of it is hashed. A clone is a separate file, so later edits
+//!    to the checkpoint do not reach it.
 //! 2. **Verify the clone, not the source.** The digest is computed over the
 //!    descriptor that will be mapped, after the unlink, so the bytes checked and
 //!    the bytes mapped are the same bytes of the same file.
@@ -119,7 +119,8 @@ impl fmt::Display for RestoreImageError {
             ),
             Self::UntrustedDirectory(path) => write!(
                 f,
-                "restore directory {} is writable by another user or not owned by this one",
+                "restore directory {} is not private to this user: it must be owned by this \
+                 user, carry no group or other permissions, and have no ACL granting access",
                 path.display()
             ),
             Self::NotLocal(path) => write!(
@@ -326,6 +327,31 @@ fn open_regular_nofollow(path: &Path) -> Result<File, RestoreImageError> {
 }
 
 fn open_trusted_dir(path: &Path) -> Result<File, RestoreImageError> {
+    open_trusted_dir_with(path, &host_dir_facts)
+}
+
+/// What the host reports about a restore directory beyond its owner and mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirFacts {
+    /// The directory is on a filesystem this host serves itself.
+    local: bool,
+    /// An access-control list on the directory grants some access, on top of
+    /// what the mode bits say.
+    acl_grants_access: bool,
+}
+
+/// [`open_trusted_dir`] with the host probe injected, so each refusal is
+/// testable on any machine.
+///
+/// The directory must be private in every sense that lets another user reach
+/// a file inside it: owned by this user, no group or other permission bits at
+/// all (not even search, which is enough to open a file by name), no ACL entry
+/// that grants access, and on a local filesystem. A clone is created in it
+/// under a temporary name, so anyone who can reach that name can open it.
+fn open_trusted_dir_with(
+    path: &Path,
+    probe: &dyn Fn(&File) -> io::Result<DirFacts>,
+) -> Result<File, RestoreImageError> {
     let dir = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -336,55 +362,161 @@ fn open_trusted_dir(path: &Path) -> Result<File, RestoreImageError> {
         .map_err(|e| io_err("stat directory", path, e))?;
     // SAFETY: `geteuid` has no preconditions and cannot fail.
     let euid = unsafe { libc::geteuid() };
-    if meta.uid() != euid || meta.mode() & 0o022 != 0 {
+    if meta.uid() != euid || meta.mode() & 0o077 != 0 {
         return Err(RestoreImageError::UntrustedDirectory(path.to_path_buf()));
     }
-    if !is_local_filesystem(&dir).map_err(|e| io_err("statfs directory", path, e))? {
+    let facts = probe(&dir).map_err(|e| io_err("inspect directory", path, e))?;
+    if facts.acl_grants_access {
+        return Err(RestoreImageError::UntrustedDirectory(path.to_path_buf()));
+    }
+    if !facts.local {
         return Err(RestoreImageError::NotLocal(path.to_path_buf()));
     }
     Ok(dir)
 }
 
-/// Whether `file` lives on a filesystem this host serves itself.
+/// The host's answer for [`DirFacts`].
 ///
 /// On a network filesystem the server can change a file's bytes after they
 /// were hashed, and a private mapping may read them back for any page the
 /// guest has not written, so neither the clone nor its digest would mean much.
 #[cfg(target_os = "macos")]
-fn is_local_filesystem(file: &File) -> io::Result<bool> {
+fn host_dir_facts(dir: &File) -> io::Result<DirFacts> {
     // SAFETY: `statfs` is plain old data, fully initialised by a successful
     // `fstatfs`, and not read on failure.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `file` is an open descriptor and `st` a valid out-pointer.
-    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) } != 0 {
+    // SAFETY: `dir` is an open descriptor and `st` a valid out-pointer.
+    if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(st.f_flags & libc::MNT_LOCAL as u32 != 0)
+    Ok(DirFacts {
+        local: st.f_flags & libc::MNT_LOCAL as u32 != 0,
+        acl_grants_access: macos_acl::grants_access(dir)?,
+    })
 }
 
-/// Linux has no `MNT_LOCAL`; the filesystem type decides instead. Network and
-/// cluster filesystems the host does not serve itself are refused.
+/// HVF restores run only on macOS; this branch exists so the module's checks
+/// are exercised on Linux too, and it fails closed. The filesystem type must
+/// be one of a short list of local filesystems — anything else, including
+/// every network and cluster filesystem, is refused — and any POSIX access
+/// ACL on the directory counts as granting access.
 #[cfg(not(target_os = "macos"))]
-fn is_local_filesystem(file: &File) -> io::Result<bool> {
-    const REMOTE: &[u64] = &[
-        0x6969,      // NFS
-        0xff53_4d42, // CIFS
-        0xfe53_4d42, // SMB2
-        0x517b,      // SMB
-        0x6573_5546, // FUSE
-        0x0102_1997, // 9P / v9fs
-    ];
+fn host_dir_facts(dir: &File) -> io::Result<DirFacts> {
     // SAFETY: `statfs` is plain old data, fully initialised by a successful
     // `fstatfs`, and not read on failure.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `file` is an open descriptor and `st` a valid out-pointer.
-    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) } != 0 {
+    // SAFETY: `dir` is an open descriptor and `st` a valid out-pointer.
+    if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // `f_type` is a signed long on glibc and unsigned on musl; every magic
-    // number above is positive either way.
-    let kind = st.f_type as u64;
-    Ok(!REMOTE.contains(&kind))
+    // number in the list is positive either way.
+    let local = linux_fs_is_local(st.f_type as u64);
+    const ACL_XATTR: &[u8] = b"system.posix_acl_access\0";
+    // SAFETY: `dir` is an open descriptor, the name is NUL-terminated, and a
+    // zero-sized query writes nothing.
+    let size = unsafe {
+        libc::fgetxattr(
+            dir.as_raw_fd(),
+            ACL_XATTR.as_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let acl_grants_access = if size >= 0 {
+        true
+    } else {
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENODATA) | Some(libc::ENOTSUP) => false,
+            _ => return Err(error),
+        }
+    };
+    Ok(DirFacts {
+        local,
+        acl_grants_access,
+    })
+}
+
+/// Whether a Linux `statfs` magic number names a filesystem this host serves
+/// itself. An allowlist, so an unrecognised filesystem is treated as remote.
+#[cfg(any(test, not(target_os = "macos")))]
+fn linux_fs_is_local(magic: u64) -> bool {
+    const LOCAL: &[u64] = &[
+        0xef53,      // ext2/3/4
+        0x5846_5342, // XFS
+        0x9123_683e, // Btrfs
+        0x0102_1994, // tmpfs
+        0x794c_7630, // overlayfs
+        0xf2f5_2010, // F2FS
+        0x2fc1_2fc1, // ZFS
+    ];
+    LOCAL.contains(&magic)
+}
+
+/// Extended ACLs on macOS, through the platform's `acl(3)` API, which the
+/// `libc` crate does not bind.
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::AsRawFd;
+
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: libc::c_int = 0;
+    const ACL_NEXT_ENTRY: libc::c_int = -1;
+    const ACL_EXTENDED_DENY: libc::c_int = 2;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+        fn acl_get_entry(
+            acl: *mut c_void,
+            entry_id: libc::c_int,
+            entry: *mut *mut c_void,
+        ) -> libc::c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut libc::c_int) -> libc::c_int;
+        fn acl_free(obj: *mut c_void) -> libc::c_int;
+    }
+
+    /// Whether `file` carries an ACL with any entry other than a deny.
+    ///
+    /// A deny entry can only take access away, so an ACL made only of those
+    /// (the kind macOS puts on a home directory) is harmless; any other entry
+    /// may grant access the mode bits do not show.
+    pub(super) fn grants_access(file: &File) -> io::Result<bool> {
+        // SAFETY: `file` is an open descriptor; a null result means no ACL
+        // (errno ENOENT) or a failure.
+        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) => Ok(false),
+                _ => Err(error),
+            };
+        }
+        let mut grants = false;
+        let mut which = ACL_FIRST_ENTRY;
+        loop {
+            let mut entry: *mut c_void = std::ptr::null_mut();
+            // SAFETY: `acl` is a live ACL from `acl_get_fd_np` and `entry` a
+            // valid out-pointer.
+            if unsafe { acl_get_entry(acl, which, &mut entry) } != 0 {
+                break;
+            }
+            which = ACL_NEXT_ENTRY;
+            let mut tag: libc::c_int = 0;
+            // SAFETY: `entry` was just returned for this live ACL, and `tag`
+            // is a valid out-pointer.
+            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != ACL_EXTENDED_DENY {
+                grants = true;
+                break;
+            }
+        }
+        // SAFETY: `acl` came from `acl_get_fd_np` and is freed exactly once.
+        unsafe { acl_free(acl) };
+        Ok(grants)
+    }
 }
 
 /// A name no concurrent restore in this or any other process will pick.
@@ -408,6 +540,18 @@ fn private_unlinked_copy(
     dir: &File,
     dir_path: &Path,
 ) -> Result<(File, PrivateCopy), RestoreImageError> {
+    private_unlinked_copy_with(src, source, dir, dir_path, &openat_readonly)
+}
+
+/// [`private_unlinked_copy`] with the read-only open injected, so the path
+/// where the copy exists but cannot be opened is testable.
+fn private_unlinked_copy_with(
+    src: &File,
+    source: &Path,
+    dir: &File,
+    dir_path: &Path,
+    open: &dyn Fn(&File, &CString) -> io::Result<File>,
+) -> Result<(File, PrivateCopy), RestoreImageError> {
     let name = private_name().map_err(|e| io_err("name private copy in", dir_path, e))?;
     let copy = match clone_into(src, dir, &name) {
         Ok(()) => PrivateCopy::Cloned,
@@ -417,31 +561,77 @@ fn private_unlinked_copy(
         }
         Err(e) => return Err(io_err("clone", source, e)),
     };
-    // From here the copy has a name, and the guard removes it on every path
-    // out of this function, including an early error return.
+    // From here the copy has a name. The guard removes it on every path out
+    // of this function, and a removal that fails is reported, not ignored.
     let named = NamedCopy { dir, name: &name };
-    let file = openat_readonly(dir, &name).map_err(|e| io_err("open private copy in", dir_path, e));
+    // A clone keeps its source's mode. Narrow it before anything else, so
+    // even a source left readable or writable by others yields a copy only
+    // this user can open; the directory being owner-only already keeps other
+    // users from reaching the name.
+    if let Err(e) = restrict_to_owner(dir, &name) {
+        return Err(named.remove_after(io_err("restrict private copy in", dir_path, e), dir_path));
+    }
+    let opened = open(dir, &name);
     named
         .unlink()
         .map_err(|e| io_err("unlink private copy in", dir_path, e))?;
-    Ok((file?, copy))
+    let file = opened.map_err(|e| io_err("open private copy in", dir_path, e))?;
+    Ok((file, copy))
+}
+
+/// Set `name` in `dir` to mode `0600` without following a symlink.
+fn restrict_to_owner(dir: &File, name: &CString) -> io::Result<()> {
+    // SAFETY: `dir` is an open directory descriptor and `name` a
+    // NUL-terminated single component that lives across the call.
+    let rc = unsafe {
+        libc::fchmodat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            0o600,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// A private copy that still has its temporary name.
 ///
-/// [`NamedCopy::unlink`] removes the name and reports failure; dropping the
-/// guard without that removes it best-effort, so no error path leaves a named
-/// copy behind for anyone to open later.
+/// [`NamedCopy::unlink`] removes the name and returns any failure to remove
+/// it; dropping the guard without calling it removes the name best-effort.
+/// Either way no path out of [`private_unlinked_copy`] leaves a named copy
+/// behind silently: a name that could not be removed is an error the caller
+/// sees, naming the directory it is in.
 struct NamedCopy<'a> {
     dir: &'a File,
     name: &'a CString,
 }
 
 impl NamedCopy<'_> {
+    /// Remove the name, reporting failure. A failed removal is tried once
+    /// more when the guard drops.
     fn unlink(self) -> io::Result<()> {
         let result = unlink_name(self.dir, self.name);
-        std::mem::forget(self);
+        if result.is_ok() {
+            std::mem::forget(self);
+        }
         result
+    }
+
+    /// Remove the name after `error` ended the copy, and report the removal
+    /// failing too rather than dropping it.
+    fn remove_after(self, error: RestoreImageError, dir_path: &Path) -> RestoreImageError {
+        match self.unlink() {
+            Ok(()) => error,
+            Err(unlink) => RestoreImageError::Io {
+                step: "unlink private copy (after an earlier failure) in",
+                path: dir_path.to_path_buf(),
+                source: io::Error::new(unlink.kind(), format!("{unlink}; earlier: {error}")),
+            },
+        }
     }
 }
 
@@ -672,12 +862,135 @@ mod tests {
     #[test]
     fn the_restore_directory_must_be_on_a_local_filesystem() {
         let (_root, private, _source) = fixture(b"saved guest memory");
-        let dir = File::open(&private).unwrap();
-        assert!(is_local_filesystem(&dir).unwrap());
-        assert!(open_trusted_dir(&private).is_ok());
-        let refusal = RestoreImageError::NotLocal(private.clone()).to_string();
+        assert!(
+            open_trusted_dir(&private).is_ok(),
+            "a local tempdir is accepted"
+        );
+        let remote = |_: &File| {
+            Ok(DirFacts {
+                local: false,
+                acl_grants_access: false,
+            })
+        };
+        let error = open_trusted_dir_with(&private, &remote).unwrap_err();
+        assert!(matches!(error, RestoreImageError::NotLocal(_)), "{error}");
+        let refusal = error.to_string();
         assert!(refusal.contains("not on a local filesystem"), "{refusal}");
         assert!(refusal.contains(&private.display().to_string()));
+    }
+
+    /// An ACL that grants access is refused even when the mode bits are
+    /// owner-only, because the ACL is what another user would open through.
+    #[test]
+    fn a_directory_whose_acl_grants_access_is_refused() {
+        let (_root, private, _source) = fixture(b"saved guest memory");
+        let shared = |_: &File| {
+            Ok(DirFacts {
+                local: true,
+                acl_grants_access: true,
+            })
+        };
+        let error = open_trusted_dir_with(&private, &shared).unwrap_err();
+        assert!(
+            matches!(error, RestoreImageError::UntrustedDirectory(_)),
+            "{error}"
+        );
+    }
+
+    /// The real ACL probe: an allow entry is refused, a deny-only ACL (the
+    /// kind macOS puts on home directories) is accepted.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_host_acl_probe_refuses_an_allow_entry_and_accepts_deny_only() {
+        let (_root, private, _source) = fixture(b"saved guest memory");
+        let chmod = |args: &[&str]| {
+            let status = Command::new("/bin/chmod")
+                .args(args)
+                .arg(&private)
+                .status()
+                .unwrap();
+            assert!(status.success(), "chmod {args:?}");
+        };
+
+        chmod(&["+a", "everyone deny delete"]);
+        assert!(
+            open_trusted_dir(&private).is_ok(),
+            "deny-only ACL grants nothing"
+        );
+
+        chmod(&["+a", "everyone allow read,write,execute"]);
+        let error = open_trusted_dir(&private).unwrap_err();
+        assert!(
+            matches!(error, RestoreImageError::UntrustedDirectory(_)),
+            "{error}"
+        );
+        chmod(&["-N"]);
+        assert!(open_trusted_dir(&private).is_ok());
+    }
+
+    #[test]
+    fn only_known_local_linux_filesystems_count_as_local() {
+        assert!(linux_fs_is_local(0xef53), "ext4");
+        assert!(linux_fs_is_local(0x0102_1994), "tmpfs");
+        for remote in [
+            0x6969_u64,  // NFS
+            0xff53_4d42, // CIFS
+            0x00c3_6400, // Ceph
+            0x5346_414f, // AFS
+            0x0bd0_0bd0, // Lustre
+            0x0116_1970, // GFS2
+            0x7461_636f, // OCFS2
+            0x7375_6245, // Coda
+            0x564c,      // NCP
+            0x6573_5546, // FUSE
+        ] {
+            assert!(!linux_fs_is_local(remote), "{remote:#x} is refused");
+        }
+    }
+
+    /// A source left open to everyone still yields a copy only this user can
+    /// open: the clone keeps its source's mode until it is narrowed.
+    #[test]
+    fn a_world_writable_source_still_yields_an_owner_only_copy() {
+        let bytes = b"saved guest memory".to_vec();
+        let (_root, private, source) = fixture(&bytes);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let verified =
+            VerifiedRestoreFile::prepare(&source, &private, &sha256_hex(&bytes)).unwrap();
+        assert_eq!(verified.file().metadata().unwrap().mode() & 0o777, 0o600);
+    }
+
+    /// The copy exists but cannot be opened: the error is the open's, and the
+    /// name is gone.
+    #[test]
+    fn a_copy_that_cannot_be_opened_is_refused_and_leaves_no_name() {
+        let (_root, private, source) = fixture(b"saved guest memory");
+        let src = open_regular_nofollow(&source).unwrap();
+        let dir = open_trusted_dir(&private).unwrap();
+        let fail = |_: &File, _: &CString| -> io::Result<File> {
+            Err(io::Error::from_raw_os_error(libc::EACCES))
+        };
+        let error = private_unlinked_copy_with(&src, &source, &dir, &private, &fail).unwrap_err();
+        assert!(error.to_string().contains("open private copy"), "{error}");
+        assert!(leftover_names(&private).is_empty());
+    }
+
+    /// A name that cannot be removed is reported, not swallowed.
+    #[test]
+    fn a_copy_whose_name_cannot_be_removed_is_reported() {
+        let (_root, private, source) = fixture(b"saved guest memory");
+        let src = open_regular_nofollow(&source).unwrap();
+        let dir = open_trusted_dir(&private).unwrap();
+        // Opens the copy and then removes its name behind the guard's back,
+        // so the guard's own removal fails.
+        let open_then_unlink = |dir: &File, name: &CString| -> io::Result<File> {
+            let file = openat_readonly(dir, name)?;
+            unlink_name(dir, name)?;
+            Ok(file)
+        };
+        let error = private_unlinked_copy_with(&src, &source, &dir, &private, &open_then_unlink)
+            .unwrap_err();
+        assert!(error.to_string().contains("unlink private copy"), "{error}");
     }
 
     /// A copy that still has its temporary name loses it on every way out,
@@ -719,6 +1032,23 @@ mod tests {
             io::ErrorKind::NotFound,
             "a failed unlink is reported"
         );
+    }
+
+    /// Search permission alone is enough to open a file by name, so a
+    /// directory others can only list and enter is refused too.
+    #[test]
+    fn a_directory_others_can_enter_is_refused() {
+        let (_root, private, source) = fixture(b"saved guest memory");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error =
+            VerifiedRestoreFile::prepare(&source, &private, &sha256_hex(b"saved guest memory"))
+                .unwrap_err();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(error, RestoreImageError::UntrustedDirectory(_)),
+            "{error}"
+        );
+        assert!(leftover_names(&private).is_empty());
     }
 
     #[test]

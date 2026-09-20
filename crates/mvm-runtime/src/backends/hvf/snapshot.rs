@@ -1215,9 +1215,14 @@ mod tests {
     #[test]
     fn a_captured_image_round_trips_through_verification_into_a_private_mapping() {
         use mvm_vmm::host::restore_image::VerifiedRestoreFile;
-        use std::os::unix::fs::{FileExt, MetadataExt};
+        use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 
         let dir = tempfile::tempdir().unwrap();
+        // The verification requires a directory no other user can reach, and
+        // a bare tempdir is not guaranteed to be owner-only.
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut captured = GuestRam::new(TEST_RAM_LEN).unwrap();
         captured.copy_at(0, b"first page").unwrap();
         captured.copy_at(HVF_PAGE_SIZE, b"second page").unwrap();
@@ -1241,7 +1246,7 @@ mod tests {
 
         let verified = |path: &std::path::Path| {
             let digest = mvm_core::crypto::image_verify::sha256_file(path).unwrap();
-            VerifiedRestoreFile::prepare(path, dir.path(), &digest)
+            VerifiedRestoreFile::prepare(path, &state, &digest)
                 .unwrap()
                 .into_file()
         };

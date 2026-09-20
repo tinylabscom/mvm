@@ -369,6 +369,11 @@ already mapped `MAP_PRIVATE | MAP_FIXED` from its file in the same module.
       and is handed the path of the host signing key, so a compromised
       supervisor can already rewrite checkpoints and forge chain entries. Until
       this lands, W5.3's guarantee excludes same-user processes.
+- [ ] W5.8 Return memory a restored guest frees. Its RAM is a private file
+      mapping, which free page reporting skips (`RamBacking::PrivateFile`), so
+      pages the guest wrote and then freed stay charged to the host until the
+      guest stops. Releasing them needs a remap to anonymous memory that keeps
+      the guest's view of the span consistent.
 
 ## W6 — Memory and task limits at spawn (#3383)
 

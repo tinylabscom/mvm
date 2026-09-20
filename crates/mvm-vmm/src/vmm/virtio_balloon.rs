@@ -130,11 +130,16 @@ pub enum RamBacking {
     /// guest reads zeros if it touches the span again.
     Anonymous,
     /// A private copy-on-write mapping of a file (a kernel image, or a
-    /// snapshot's RAM). Never released: the pages the guest has not written
-    /// are shared with the file's page cache, and with every sibling restored
-    /// from the same snapshot, so dropping the mapping frees nothing for them.
-    /// Reclaiming the pages the guest did write is left to whoever owns that
-    /// mapping's lifecycle.
+    /// restored guest's RAM, mapped from that restore's own private clone of
+    /// the snapshot). Never released: the pages the guest has not written are
+    /// the file's page cache, so dropping them frees nothing the host can keep.
+    ///
+    /// Known limit: nothing reclaims the pages the guest *did* write either.
+    /// Those are private anonymous copies, but releasing one here would make
+    /// the span read back as the file's bytes rather than zeros, and no
+    /// component owns that mapping's lifecycle to remap it safely. So a
+    /// restored guest's freed memory is not returned to the host until the
+    /// guest stops.
     PrivateFile,
 }
 
