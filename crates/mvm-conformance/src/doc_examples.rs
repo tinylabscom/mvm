@@ -1352,6 +1352,32 @@ mod tests {
     }
 
     #[test]
+    fn mk_guest_parameters_accept_canonical_multiline_nix_formatting() {
+        let source = concat!(
+            "{\n",
+            "  nixpkgs,\n",
+            "}:\n",
+            "{ system }:\n",
+            "let pkgs = import nixpkgs { inherit system; }; in\n",
+            "{\n",
+            "  name,\n",
+            "  entrypoint,\n",
+            "  packages ? [ ],\n",
+            "}:\n",
+            "name\n",
+        );
+        let names = mk_guest_parameters(source);
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "entrypoint".to_string(),
+                "name".to_string(),
+                "packages".to_string(),
+            ])
+        );
+    }
+
+    #[test]
     fn mk_guest_call_attributes_collapse_dotted_paths() {
         let body = concat!(
             "packages.default = mvm.lib.mkGuest {\n",
@@ -1547,14 +1573,26 @@ pub fn is_elided(body: &str) -> bool {
 pub fn mk_guest_parameters(source: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut started = false;
+    let mut possible_multiline_header = false;
 
     for line in source.lines() {
         let trimmed = line.trim_start();
-        // The header opens with `{ name` and closes with `}:`.
+        // The header may open with `{ name` or with `{` followed by `name,`.
+        // The latter is canonical formatting for a multiline Nix argument set.
         if !started {
             if trimmed.starts_with("{ name") {
                 started = true;
+            } else if trimmed == "{" {
+                possible_multiline_header = true;
+                continue;
+            } else if possible_multiline_header
+                && (trimmed.starts_with("name,") || trimmed.starts_with("name ?"))
+            {
+                started = true;
             } else {
+                if possible_multiline_header && !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    possible_multiline_header = false;
+                }
                 continue;
             }
         } else if trimmed.starts_with("}:") {

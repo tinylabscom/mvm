@@ -380,12 +380,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         )?;
         trace.mark("endpoint_spawn");
 
+        let mut boot_cmdline = inputs.cmdline.clone();
+        if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
+            if !boot_cmdline.is_empty() {
+                boot_cmdline.push(' ');
+            }
+            boot_cmdline.push_str(&token);
+        }
+        if let Some(problem) = cmdline::cmdline_overflow(&boot_cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
+        }
+
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             identity_drive: endpoint.identity_drive(),
             sockets: socks.with_egress(endpoint.egress_uds()),
-            cmdline: inputs.cmdline.clone(),
+            cmdline: boot_cmdline,
             console_log: socks.console_log.clone(),
         });
 
@@ -1702,6 +1713,53 @@ mod tests {
         assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
         // The write-only console capture path is set under the state dir.
         assert!(spec.console.log_path.ends_with("console.log"));
+    }
+
+    #[test]
+    fn start_workload_threads_minted_placeholders_to_pid1_without_raw_secrets() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let cfg = config("w-secret-env");
+        let env_path = mvm_core::config::vm_substitution_env_path(&cfg.name);
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &env_path,
+            serde_json::to_vec(&vec![(
+                "API_KEY".to_string(),
+                "mvm-secret://opaque-placeholder".to_string(),
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+        let policy = egress_allowing_policy();
+        let redaction = RedactionPolicy::default();
+        let secrets = vec![keystore_secret()];
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &secrets,
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "root=/dev/vda".into(),
+            })
+            .expect("secret-bearing workload boots");
+
+        let specs = runner.driver.booted_specs();
+        let cmdline = &specs[0].cmdline;
+        assert!(cmdline.contains("mvm.secret_env="), "{cmdline}");
+        assert!(cmdline.contains("4150495f4b45593d"), "{cmdline}");
+        assert!(!cmdline.contains("opaque-placeholder"), "{cmdline}");
     }
 
     #[test]

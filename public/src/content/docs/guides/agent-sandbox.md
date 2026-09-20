@@ -139,35 +139,30 @@ A call that outlives it exits with status 124.
 
 ## Which runs receive the placeholder
 
-Only one invocation shape puts secrets into the signed plan and the
-placeholders into the workload's environment:
+`--from-workload-ir PATH` resolves the same plan-bound secret metadata on every
+launch shape. The substitution endpoint mints opaque environment placeholders
+before boot, and PID 1 exports them before it starts the image workload. Raw
+secret values remain host-only. `--manifest PATH` works in place of `--flake
+PATH`.
 
 ```sh
 mvmctl machine run --flake PATH --entrypoint --from-workload-ir PATH
 ```
 
-`--manifest PATH` works in place of `--flake PATH`.
-
-Everything else runs **without** placeholders and without the proxy variables:
-
 | Invocation | Placeholder injected |
 | --- | --- |
-| `machine run --entrypoint --from-workload-ir PATH` | Yes |
+| `machine run --flake PATH --entrypoint --from-workload-ir PATH` | Yes |
 | `machine run --entrypoint` without `--from-workload-ir` | No: the plan carries no secrets |
-| `machine run --flake PATH` or `--manifest PATH` with no `--entrypoint` | No |
-| `machine run --image REF -- argv` | No |
-| `machine exec` into a running machine | No |
-| PID 1 of any image | No: the boot-time injection path is not wired |
-| `machine run --entrypoint --attach --name NAME` | Only when `NAME` is the generated `invoke-…` name of a machine booted with secrets |
+| `machine run --flake PATH --from-workload-ir PATH -- argv` | Yes |
+| `machine run --name NAME -d --from-workload-ir PATH` | Yes; references persist beside the machine spec and are revalidated on restart |
+| `machine run` without `--from-workload-ir` | No |
+| `machine session start TEMPLATE --from-workload-ir PATH` | Yes |
 | `machine session attach SESSION_ID` | Yes, if the session was booted with secrets |
+| In-process `mvm-client` launch with typed secret references | Yes |
 
-You cannot choose the name of a machine that has secrets. A machine started
-with `machine run --name NAME -d` and no `--entrypoint --from-workload-ir` was
-admitted without secrets, so attaching to it by name injects no placeholder. A
-secret-bearing entrypoint run that is kept alive (for example with `-d`)
-ignores `--name`: its VM gets a generated `invoke-…` name, and `--attach` can
-reach it only by that name. Prefer the session id that run prints on stderr as
-`Session kept alive: <id>`:
+An explicit `--name` is preserved for a kept-alive secret-bearing entrypoint
+run. Attach by that name or use the session id printed on stderr as `Session
+kept alive: <id>`:
 
 ```sh
 echo '[["Next question."], {}]' | mvmctl machine session attach <id> --stdin - --timeout 120

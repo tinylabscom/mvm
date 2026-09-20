@@ -2,7 +2,7 @@
 //! `start_persistent_oci_machine`, `admit_plan_for_boot`, `AdmitPlanForBootParams`,
 //! `AdmissionContext`, `emit_launched`, `emit_failed`,
 //! `persists_plan_before_start`, `resolve_workload_kernel`, and
-//! `load_workload_ir`.
+//! workload runtime-source resolution.
 
 use clap::Args as ClapArgs;
 
@@ -24,7 +24,6 @@ pub(super) use mvm_client::admission::SECURITY_POLICY_FILENAME;
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
-pub(in crate::commands) use mvm_client::launch::persistent::load_workload_ir;
 pub(crate) use mvm_client::launch::persistent::{
     persistent_oci_effective_initrd, persists_plan_before_start,
 };

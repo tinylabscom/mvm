@@ -160,15 +160,10 @@ pub fn decode_host_epoch_cmdline(cmdline: &str) -> Option<u64> {
 /// boot has to a sealed guest (no secrets drive attached), and the placeholder
 /// must be minted **before** boot so it can ride here.
 ///
-/// **Unwired.** Nothing calls this and no guest parses `mvm.secret_env`; the
-/// `/init` decode the paragraph above describes was never built. What ships
-/// instead injects placeholders on the invoke path, from the env file the
-/// per-VM substitution endpoint mints — which does not reach the fresh sealed
-/// boot this was meant for, so the gap the design names is real and open.
-///
-/// Kept rather than deleted for that reason. It is not evidence of anything
-/// today — the security ledger cited its round-trip test as a witness until
-/// that was found to prove only that an encoder is self-consistent.
+/// The shared workload runner appends this token after the substitution
+/// endpoint has minted the per-boot placeholders. Guest PID 1 decodes it into
+/// tmpfs and exports only identifier-shaped environment entries before
+/// launching the workload; raw secret bytes never cross this boundary.
 pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     if pairs.is_empty() {
         return None;
@@ -180,6 +175,15 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
         .join("\n");
     let hex: String = blob.bytes().map(|b| format!("{b:02x}")).collect();
     Some(format!("mvm.secret_env={hex}"))
+}
+
+/// Whether `name` can cross the PID 1 environment handoff as one assignment.
+/// Kept beside the encoder so persistent-reference validation and boot-time
+/// filtering cannot drift on what counts as an environment target.
+pub fn is_secret_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('A'..='Z' | 'a'..='z' | '_'))
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// A file to inject into the guest (config or secret).
@@ -1918,6 +1922,16 @@ mod tests {
     #[test]
     fn encode_secret_env_cmdline_empty_is_none() {
         assert!(encode_secret_env_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn secret_environment_names_are_shell_identifiers() {
+        for valid in ["API_KEY", "_TOKEN", "lowercase9"] {
+            assert!(is_secret_env_name(valid), "{valid}");
+        }
+        for invalid in ["", "9TOKEN", "API-KEY", "/run/secrets/key", "A=B"] {
+            assert!(!is_secret_env_name(invalid), "{invalid}");
+        }
     }
 
     #[test]

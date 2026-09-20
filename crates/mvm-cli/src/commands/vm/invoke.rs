@@ -463,10 +463,8 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     ui::info(&format!(
         "entrypoint: booting {lifecycle_label} for template '{template_id}'"
     ));
-    let lowered_secrets = super::up::load_workload_ir(call.from_workload_ir.as_deref())?
-        .map(|w| super::managed_secrets::lower_workload_secrets(&w))
-        .filter(|lowered| !lowered.secrets.is_empty())
-        .unwrap_or_default();
+    let lowered_secrets =
+        mvm_client::admission::secrets::resolve_workload_secrets(call.from_workload_ir.as_deref())?;
     let backend_name = if let Some(name) = call.hypervisor.as_deref() {
         mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(name)?;
         mvm_runtime::backend::AnyBackend::from_hypervisor(name)

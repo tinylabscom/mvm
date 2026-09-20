@@ -1369,22 +1369,46 @@ fn machine_run_entrypoint_flags_require_entrypoint() {
     // `--from-workload-ir`/`--attach` only make sense for the entrypoint
     // action — clap refuses them without `--entrypoint`. (`--stdin` was
     // removed; stdin is auto-detected from the host pipe at dispatch.)
-    for flag in [
-        &[
-            "--manifest",
-            "tmpl",
-            "--from-workload-ir",
-            "/w/workload.json",
-        ][..],
-        &["--name", "n", "--attach"][..],
-    ] {
-        let err = parse_machine_run(flag).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument,
-            "{flag:?} must require --entrypoint"
-        );
-    }
+    let flag = &["--name", "n", "--attach"][..];
+    let err = parse_machine_run(flag).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument,
+        "{flag:?} must require --entrypoint"
+    );
+}
+
+#[test]
+fn machine_run_transient_from_workload_ir_parses_without_entrypoint() {
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--from-workload-ir",
+        "/w/workload.json",
+        "--",
+        "true",
+    ])
+    .unwrap();
+    assert_eq!(
+        args.run.from_workload_ir.as_deref(),
+        Some(std::path::Path::new("/w/workload.json"))
+    );
+}
+
+#[test]
+fn machine_run_persistent_from_workload_ir_parses_without_entrypoint() {
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "-d",
+        "--from-workload-ir",
+        "/w/workload.json",
+    ])
+    .unwrap();
+    assert_eq!(
+        args.run.from_workload_ir.as_deref(),
+        Some(std::path::Path::new("/w/workload.json"))
+    );
 }
 
 #[test]
@@ -1401,7 +1425,7 @@ fn machine_run_entrypoint_from_workload_ir_parses() {
     ])
     .unwrap();
     assert_eq!(
-        args.from_workload_ir.as_deref(),
+        args.run.from_workload_ir.as_deref(),
         Some(std::path::Path::new("/w/workload.json"))
     );
 }
@@ -4988,6 +5012,35 @@ fn test_session_start_agent_verbs_parse() {
         group::VmCmd::Session(session::Args {
             command: session::Cmd::Start(a),
         }) => assert_eq!(a.agent_verb, vec!["ping", "run-entrypoint"]),
+        _ => panic!("expected session start"),
+    }
+}
+
+#[test]
+fn test_session_start_workload_secrets_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "session",
+        "start",
+        "tmpl",
+        "--from-workload-ir",
+        "/w/workload.json",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    let machine::MachineAction::Vm(vmg) = mg.action else {
+        panic!("expected Vm action under machine")
+    };
+    match vmg {
+        group::VmCmd::Session(session::Args {
+            command: session::Cmd::Start(a),
+        }) => assert_eq!(
+            a.from_workload_ir.as_deref(),
+            Some(std::path::Path::new("/w/workload.json"))
+        ),
         _ => panic!("expected session start"),
     }
 }

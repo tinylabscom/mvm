@@ -1121,6 +1121,7 @@ mod tests {
                     tenant: "local".into(),
                     name: "openai".into(),
                     placeholder_var: Some("OPENAI_API_KEY".into()),
+                    guest_path: None,
                     destinations: vec!["api.openai.com".into()],
                 }],
             )

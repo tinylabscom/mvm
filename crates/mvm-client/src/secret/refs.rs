@@ -34,6 +34,11 @@ pub struct MachineSecretRef {
     /// Guest-facing env var that receives the opaque placeholder at boot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder_var: Option<String>,
+    /// Guest path for a file-mounted secret. File references still belong in
+    /// the admitted plan, but are deliberately omitted from PID 1's
+    /// environment placeholder handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_path: Option<String>,
     /// Destinations the workload intends to reach with the substituted
     /// credential. Validated against the binding allow-list at admission.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -73,6 +78,17 @@ pub fn record_refs(machines_root: &Path, machine: &str, refs: &[MachineSecretRef
             .with_context(|| format!("invalid secret scope in reference: {:?}", r.tenant))?;
         validate_shell_id(&r.name)
             .with_context(|| format!("invalid secret name in reference: {:?}", r.name))?;
+        if let Some(var) = r.placeholder_var.as_deref() {
+            anyhow::ensure!(
+                mvm_contract::protocol::vm_backend::is_secret_env_name(var),
+                "invalid secret placeholder environment name {var:?}"
+            );
+        }
+        if let Some(path) = r.guest_path.as_deref() {
+            mvm_core::crypto::policy::MountPathPolicy::with_allow_roots(["/"])
+                .validate(path)
+                .with_context(|| format!("invalid secret guest path {path:?}"))?;
+        }
     }
     let path = sidecar_path(machines_root, machine)?;
     let record = MachineSecretRefSet {
@@ -163,6 +179,7 @@ mod tests {
             tenant: tenant.into(),
             name: name.into(),
             placeholder_var: Some("OPENAI_API_KEY".into()),
+            guest_path: None,
             destinations: vec!["api.openai.com".into()],
         }
     }
@@ -183,6 +200,32 @@ mod tests {
         assert_eq!(record.schema_version, MACHINE_SECRET_REFS_SCHEMA_VERSION);
         assert_eq!(record.references, vec![oref("local", "openai")]);
         assert!(!record.recorded_at.is_empty());
+    }
+
+    #[test]
+    fn file_target_roundtrips_without_becoming_an_env_placeholder() {
+        let tmp = tempdir().unwrap();
+        create_machine(tmp.path(), "worker");
+        let reference = MachineSecretRef {
+            tenant: "local".into(),
+            name: "certificate".into(),
+            placeholder_var: None,
+            guest_path: Some("/run/secrets/certificate".into()),
+            destinations: Vec::new(),
+        };
+        record_refs(tmp.path(), "worker", std::slice::from_ref(&reference)).unwrap();
+
+        let record = load_refs(tmp.path(), "worker").unwrap().unwrap();
+        assert_eq!(record.references, vec![reference]);
+    }
+
+    #[test]
+    fn older_reference_without_guest_path_defaults_to_none() {
+        let decoded: MachineSecretRef = serde_json::from_str(
+            r#"{"tenant":"local","name":"openai","placeholder_var":"API_KEY"}"#,
+        )
+        .unwrap();
+        assert_eq!(decoded.guest_path, None);
     }
 
     #[test]
@@ -278,6 +321,19 @@ mod tests {
         assert!(record_refs(tmp.path(), "web", &[oref("../etc", "k")]).is_err());
         assert!(record_refs(tmp.path(), "web", &[oref("local", "../escape")]).is_err());
         assert!(record_refs(tmp.path(), "../web", &[oref("local", "k")]).is_err());
+    }
+
+    #[test]
+    fn record_refs_rejects_unsafe_file_targets() {
+        let tmp = tempdir().unwrap();
+        create_machine(tmp.path(), "web");
+        let mut reference = oref("local", "certificate");
+        reference.placeholder_var = None;
+        reference.guest_path = Some("/run/secrets/../../etc/passwd".into());
+        assert!(record_refs(tmp.path(), "web", &[reference.clone()]).is_err());
+
+        reference.guest_path = Some("/etc/passwd".into());
+        assert!(record_refs(tmp.path(), "web", &[reference]).is_err());
     }
 
     #[test]

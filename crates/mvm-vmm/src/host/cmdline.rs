@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use mvm_core::vm_backend::VmStartConfig;
 
 #[cfg(test)]
@@ -48,6 +49,29 @@ pub fn cmdline_overflow(cmdline: &str) -> Option<String> {
             cmdline.len()
         )
     })
+}
+
+/// Read the opaque placeholders minted by this VM's substitution endpoint and
+/// encode the environment-shaped entries for PID 1. Missing state means the
+/// admitted plan declared no environment secrets. Malformed state refuses the
+/// boot: silently dropping a declared binding would make admission and guest
+/// state disagree.
+pub fn secret_env_cmdline_token(vm_name: &str) -> Result<Option<String>> {
+    let path = mvm_core::config::vm_substitution_env_path(vm_name);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", path.display()));
+        }
+    };
+    let pairs: Vec<(String, String)> = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing substitution env at {}", path.display()))?;
+    let env_pairs = pairs
+        .into_iter()
+        .filter(|(name, _)| mvm_core::vm_backend::is_secret_env_name(name))
+        .collect::<Vec<_>>();
+    Ok(mvm_core::vm_backend::encode_secret_env_cmdline(&env_pairs))
 }
 
 /// Kernel cmdline token that turns on the authenticated in-guest vsock client.
@@ -410,6 +434,46 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains(&over.len().to_string()), "{reason}");
+    }
+
+    #[test]
+    fn secret_env_token_carries_only_environment_placeholders() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let path = mvm_core::config::vm_substitution_env_path("secret-env-test");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&vec![
+                ("API_KEY".to_string(), "mvm-secret://opaque".to_string()),
+                (
+                    "/run/secrets/key".to_string(),
+                    "mvm-secret://file".to_string(),
+                ),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let token = secret_env_cmdline_token("secret-env-test")
+            .unwrap()
+            .expect("env placeholder token");
+        assert!(token.starts_with("mvm.secret_env="));
+        assert!(token.contains("4150495f4b45593d"));
+        assert!(!token.contains("2f72756e2f736563726574732f6b6579"));
+    }
+
+    #[test]
+    fn malformed_secret_env_sidecar_refuses_boot_token() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let path = mvm_core::config::vm_substitution_env_path("bad-secret-env");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"not-json").unwrap();
+
+        assert!(secret_env_cmdline_token("bad-secret-env").is_err());
     }
 
     #[test]

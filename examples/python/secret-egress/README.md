@@ -27,10 +27,11 @@ Demonstrates:
 1. **Host stores it** — `mvmctl secret set echo-key --host httpbin.org
    --type bearer --value -` writes the encrypted value + its binding into
    `~/.mvm` (never the guest).
-2. **Boot** — `mvmctl machine run --entrypoint --from-workload-ir` admits the
+2. **Boot** — `mvmctl machine run --from-workload-ir` admits the
    secret and spawns the per-VM substitution endpoint (the only process
    holding the value in the clear), which mints the placeholder.
-3. **Invoke** — the host injects `HTTP_PROXY` + the placeholder env var; the
+3. **Invoke** — PID 1 receives the placeholder env var and the host injects
+   the proxy configuration; the
    workload's request carries the placeholder; the endpoint substitutes the
    real credential on egress.
 
@@ -56,10 +57,11 @@ mvmctl machine run --flake /tmp/secret-egress --entrypoint \
 `mvmctl build compile` strips the managed `SecretRef` out of the baked image — the
 rootfs is secret-free by construction — and writes the binding into
 `workload.json`, the admission input. Nothing discovers that file on its own:
-`--from-workload-ir` (which requires `--entrypoint`) lowers its `SecretRef`
-into a signed `ExecutionPlan.secrets` and admits it, which is what gives the
-per-call entrypoint its placeholder and proxy env. A plain
-`mvmctl machine run --flake /tmp/secret-egress` runs with no placeholder.
+`--from-workload-ir` lowers its `SecretRef` into a signed
+`ExecutionPlan.secrets` on entrypoint, transient, persistent, and session
+launches. PID 1 receives only the host-minted placeholder; raw values stay
+behind the substitution endpoint. A plain `mvmctl machine run --flake
+/tmp/secret-egress` runs with no placeholder.
 `--allow-host httpbin.org:80` admits the destination; egress is denied by
 default, and the example calls plain `http://`. Deploying to a multi-tenant
 fleet is a separate `mvmd` concern; this is the local dev/test path. The

@@ -16,3 +16,8 @@ Feature: Secrets and PII never enter the guest
     Then the redacted body does not contain the original PII
     And the redacted body contains the redaction mask
     And the PII redactor reports the categories it masked
+
+  Scenario: Every launch path resolves the same workload secret binding
+    Given workload IR declaring environment secret "api-key" as "API_KEY"
+    When shared secret resolution runs for transient, persistent, and session launch
+    Then every launch resolves the same plan-bound "API_KEY" binding

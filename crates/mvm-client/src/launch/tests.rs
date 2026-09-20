@@ -94,6 +94,7 @@ fn seeded_secret_ref(service: &SecretService) -> MachineSecretRef {
         tenant: "local".into(),
         name: "openai".into(),
         placeholder_var: Some("API_KEY".into()),
+        guest_path: None,
         destinations: vec!["api.openai.com".into()],
     }
 }
@@ -213,7 +214,6 @@ async fn transient_exit_reports_code_and_cleanup_is_idempotent() {
             .join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME)
             .exists()
     );
-
     // Simulate run-to-completion: the guest reports exit 7, then powers off.
     let state_dir = vm_state_dir("t-exit");
     std::fs::create_dir_all(&state_dir).unwrap();
@@ -686,6 +686,7 @@ async fn launch_refuses_secret_ref_without_binding_and_boots_nothing() {
             tenant: "local".into(),
             name: "unbound".into(),
             placeholder_var: None,
+            guest_path: None,
             destinations: vec![],
         })
         .build()
@@ -717,6 +718,7 @@ async fn launch_refuses_cross_scope_secret_reference() {
             tenant: "acme".into(),
             name: "openai".into(),
             placeholder_var: None,
+            guest_path: None,
             destinations: vec![],
         })
         .build()

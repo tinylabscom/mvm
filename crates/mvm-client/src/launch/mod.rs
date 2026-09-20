@@ -213,6 +213,7 @@ pub(crate) struct BootParams {
     /// for. Read and validated here, so a malformed declaration refuses the
     /// launch instead of producing a boot with no campaign on it.
     pub(crate) assurance_campaign: Option<std::path::PathBuf>,
+    pub(crate) secrets: crate::admission::secrets::ResolvedPlanSecrets,
 }
 
 impl LocalBackend {
@@ -281,6 +282,8 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            secret_release: params.secrets.secret_release,
+            secrets: params.secrets.secrets,
             signed_plan: params.signed_plan.clone(),
         };
 
@@ -754,6 +757,15 @@ impl LocalBackend {
                 grants: request.grants.clone(),
                 signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
+                secrets: if transient {
+                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(
+                        &request.secret_refs,
+                    )
+                } else {
+                    let references = crate::admission::secrets::load_machine_secret_refs(name)
+                        .map_err(crate::local::backend_err)?;
+                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(&references)
+                },
             })
             .await?;
         preparation.commit();

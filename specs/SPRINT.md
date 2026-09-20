@@ -24,6 +24,17 @@
       workload environment without exposing secret values. The four named
       refusal/substitution/audit witnesses pass alongside the affected agent,
       host, backend and build suites, workspace check and zero-warning clippy.
+      WS-S T10 (#3284) is complete: every launch surface uses the shared
+      metadata-only secret resolver, persistent machines retain validated
+      references across restarts, and the shared runner hands PID 1 only
+      endpoint-minted environment placeholders through the bounded kernel
+      cmdline. File bindings are admitted without being exported, malformed
+      sidecars fail closed, and secret-bearing launches avoid warm restore.
+      Workspace check, zero-warning clippy, gated-target compilation and the
+      256-scenario BDD suite pass; builder-VM all-target clippy and canonical
+      Nix formatting pass, with 741 of 743 `mvm-vmm` tests passing (the two
+      remaining failures are pre-existing minimal-builder assumptions about
+      GNU `sleep` identity and same-timestamp file replacement).
       The PR carries the implementation through queued delivery; the other epic
       workstreams remain in progress.
 

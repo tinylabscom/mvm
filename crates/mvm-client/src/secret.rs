@@ -553,6 +553,7 @@ mod tests {
                     tenant: tenant.into(),
                     name: name.into(),
                     placeholder_var: Some("API_KEY".into()),
+                    guest_path: None,
                     destinations: vec!["api.openai.com".into()],
                 }],
             )
@@ -941,6 +942,7 @@ mod tests {
             tenant: tenant.into(),
             name: name.into(),
             placeholder_var: Some("API_KEY".into()),
+            guest_path: None,
             destinations: destinations.iter().map(|d| d.to_string()).collect(),
         }
     }

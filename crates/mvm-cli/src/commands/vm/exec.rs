@@ -378,6 +378,9 @@ pub(in crate::commands) struct RunArgs {
     /// Path to a launch document (excludes trailing argv).
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
+    /// Load admitted secret bindings from Workload IR.
+    #[arg(long, value_name = "PATH")]
+    pub from_workload_ir: Option<PathBuf>,
     /// Require production policy (digest-pinned, verified images).
     #[arg(long = "prod")]
     pub prod: bool,
@@ -499,6 +502,7 @@ impl Default for RunArgs {
             json: false,
             dry_run: false,
             launch_plan: None,
+            from_workload_ir: None,
             prod: false,
             argv: Vec::new(),
             agent_verb: Vec::new(),
@@ -631,7 +635,7 @@ pub(in crate::commands) fn run_transient(
 /// mutable template pointer would boot the wrong revision.
 pub(in crate::commands) fn run_secure_with_source(
     cli: &Cli,
-    args: RunArgs,
+    mut args: RunArgs,
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
 ) -> Result<()> {
@@ -672,6 +676,14 @@ pub(in crate::commands) fn run_secure_with_source(
         ai: ai_policy.as_ref(),
     })?;
     let network_policy = resolved_grants.network_policy.clone();
+    let admit_secrets =
+        mvm_client::admission::secrets::resolve_workload_secrets(args.from_workload_ir.as_deref())?;
+    if !admit_secrets.secrets.is_empty() {
+        // A restored warm parent has already run PID 1, so it cannot receive a
+        // per-boot placeholder token. Secret-bearing launches cold-boot until
+        // warm claims grow an equivalent post-restore handoff.
+        args.warm_pool_size = 0;
+    }
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
@@ -740,9 +752,8 @@ pub(in crate::commands) fn run_secure_with_source(
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            // No secrets on the plain transient path; deny secret release.
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
+            secret_release: admit_secrets.secret_release,
+            secrets: admit_secrets.secrets.clone(),
             caller_commitment: admit_caller_commitment.clone(),
             ledger: &ledger,
             keys_dir: None,
