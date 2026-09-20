@@ -16,8 +16,9 @@ installed, and otherwise warned. Now:
   not know. If there is no such `mvmctl`, it falls back to `cosign`.
 - A later epic #3277 closure removed the remaining fresh-host warning path. If
   neither verifier exists, the installer authenticates the archive against an
-  installer-carried or independently supplied SHA-256 before using only its
-  `mvmctl` as a temporary verifier. Every path requires the bundle.
+  installer-carried or independently supplied SHA-256 before using its
+  `mvmctl` as a temporary verifier when capable. A legacy archive instead uses
+  a separately hash-pinned temporary cosign. Every path requires the bundle.
 - The `cosign` fallback now pins `refs/tags/$VERSION` exactly, instead of
   matching any tag.
 

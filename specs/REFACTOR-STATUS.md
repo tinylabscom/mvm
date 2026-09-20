@@ -364,8 +364,8 @@ Last updated: 2026-09-20
       the full host-binary set, the uninstaller, and the installer, distro and
       install-page compat lanes. A fresh host now authenticates the archive
       against the stable installer's target-specific hash before using its
-      bundled verifier for the mandatory tag-pinned signature check; no
-      unsigned first-install fallback remains.
+      bundled verifier when capable or a separately pinned temporary verifier
+      for legacy releases; no unsigned first-install fallback remains.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and

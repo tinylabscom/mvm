@@ -1304,6 +1304,32 @@ fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
 }
 
 #[test]
+fn installer_pins_a_legacy_bootstrap_verifier_for_every_target() {
+    let installer = fs::read_to_string("install.sh").expect("read install.sh");
+
+    assert!(
+        installer.contains("COSIGN_VERSION=\"v3.1.3\""),
+        "the temporary verifier version must be explicit and reviewable"
+    );
+    for variable in [
+        "COSIGN_SHA256_AARCH64_APPLE_DARWIN",
+        "COSIGN_SHA256_X86_64_UNKNOWN_LINUX_GNU",
+        "COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU",
+    ] {
+        let prefix = format!("{variable}=\"");
+        let value = installer
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("install.sh has no {variable}"));
+        assert_eq!(value.len(), 64, "{variable} must be a SHA-256");
+        assert!(
+            value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{variable} must contain only hexadecimal digits"
+        );
+    }
+}
+
+#[test]
 fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
     let workflow = website_workflow();
     for path in ["web/mvm-demo-guest/**", ".github/workflows/workers.yml"] {

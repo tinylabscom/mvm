@@ -4350,8 +4350,9 @@ writes the plan:
 
 ## 2026-09-20 fresh-install release authentication
 
-- [x] Authenticate a fresh install's temporary in-archive verifier against a
-      target-specific SHA-256 trust anchor before executing it.
+- [x] Authenticate a fresh install's archive against a target-specific SHA-256
+      trust anchor before probing its verifier, with a separately hash-pinned
+      temporary verifier for legacy releases.
 - [x] Require a tag-pinned release bundle and refuse a missing trust anchor,
       mismatched archive hash, missing bundle, or invalid signature without an
       unsigned fallback.

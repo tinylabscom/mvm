@@ -21,9 +21,10 @@ was wrong.
 
 Claim 20 originally named these three paths. The later epic #3277 closure added
 the install path: a fresh host authenticates the selected archive against an
-installer-carried or independently supplied SHA-256 before using only its
-`mvmctl` as a temporary verifier. A build without `manifest-verify` remains a
-refusing implementation boundary.
+installer-carried or independently supplied SHA-256 before using its `mvmctl`
+when capable, or a separately hash-pinned temporary cosign for a legacy
+release. A build without `manifest-verify` remains a refusing implementation
+boundary.
 
 The `manifest-verify` tests on these paths never ran in CI: every use of the
 feature there was `cargo run --example`. A step in `Lint feature coverage` runs

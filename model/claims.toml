@@ -401,9 +401,10 @@ statement = "Every published release artifact is authenticated under the release
 # The self-update path now calls the same in-process verifier with the CLI
 # release train. The installer prefers that verifier or host cosign. With
 # neither available, it authenticates the archive against the target hash
-# carried by the installer (or independently supplied for a non-default tag)
-# before using only its mvmctl to require the tag-pinned bundle. All four
-# consuming paths refuse a missing or invalid signature.
+# carried by the installer (or independently supplied for a non-default tag),
+# then uses its mvmctl when capable or a separately hash-pinned temporary
+# cosign for legacy releases. All four consuming paths require the tag-pinned
+# bundle and refuse a missing or invalid signature.
 #
 # The `manifest-verify`-gated tests on these paths now run in the `Lint feature
 # coverage` job of ci.yml. `a_real_release_bundle_verifies_under_its_tag` is one

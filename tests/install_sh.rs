@@ -139,6 +139,20 @@ fn stub_mvmctl(version: &str) -> String {
     )
 }
 
+fn stub_cosign() -> Vec<u8> {
+    b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${MVM_TEST_INVOCATION_LOG:-/dev/null}\"\nexit 0\n"
+        .to_vec()
+}
+
+fn cosign_asset() -> &'static str {
+    match host_target() {
+        "aarch64-apple-darwin" => "cosign-darwin-arm64",
+        "x86_64-unknown-linux-gnu" => "cosign-linux-amd64",
+        "aarch64-unknown-linux-gnu" => "cosign-linux-arm64",
+        target => panic!("no bootstrap cosign fixture for {target}"),
+    }
+}
+
 /// Where a fake release places its entitlement profiles. Real releases through
 /// v0.17.0 shipped `Resources`; install.sh has always written `Assets` itself.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -377,6 +391,13 @@ impl Release {
         if self.publish_bundle {
             routes.push((format!("{base}/{archive}.bundle"), b"bundle".to_vec()));
         }
+        routes.push((
+            format!(
+                "/sigstore/cosign/releases/download/v3.1.3/{}",
+                cosign_asset()
+            ),
+            stub_cosign(),
+        ));
         routes
     }
 }
@@ -546,6 +567,11 @@ impl Host {
         let mut command = self.script("install.sh");
         command
             .env("MVM_UPDATE_DOWNLOAD_URL", base)
+            .env(
+                "MVM_COSIGN_DOWNLOAD_URL",
+                format!("{base}/sigstore/cosign/releases/download"),
+            )
+            .env("MVM_TRUSTED_COSIGN_SHA256", sha256_hex(&stub_cosign()))
             .env("MVM_VERSION", version)
             .env(
                 "MVM_TRUSTED_ARCHIVE_SHA256",
@@ -773,6 +799,49 @@ fn fresh_install_bootstraps_signature_verification_from_a_trusted_archive_hash()
             && invocations.contains("--tag v9.9.9"),
         "the archive-authenticated temporary mvmctl must verify the bundle: {invocations}"
     );
+}
+
+#[test]
+fn fresh_install_bootstraps_pinned_cosign_for_a_legacy_release() {
+    let legacy = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${MVM_TEST_INVOCATION_LOG:-/dev/null}\"\necho 'mvmctl v0.17.0'\n";
+    let release = Release::new("v0.17.0").with_mvmctl(legacy.to_owned());
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+    let log = host.root.join("bootstrap-verifier.log");
+
+    let output = host
+        .installer(&base, "v0.17.0")
+        .env("MVM_TEST_INVOCATION_LOG", &log)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let invocations = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        invocations.contains("env verify-release --help")
+            && invocations.contains("verify-blob")
+            && invocations.contains(&Release::archive_name())
+            && invocations.contains("release.yml@refs/tags/v0.17.0"),
+        "a legacy archive must fall back to the pinned cosign verifier: {invocations}"
+    );
+}
+
+#[test]
+fn fresh_install_refuses_a_mismatched_bootstrap_cosign_hash() {
+    let legacy = "#!/bin/sh\necho 'mvmctl v0.17.0'\n";
+    let release = Release::new("v0.17.0").with_mvmctl(legacy.to_owned());
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host
+        .installer(&base, "v0.17.0")
+        .env("MVM_TRUSTED_COSIGN_SHA256", "0".repeat(64))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("trusted cosign SHA-256 mismatch"));
+    assert!(!host.bin().join("mvmctl").exists());
 }
 
 #[test]

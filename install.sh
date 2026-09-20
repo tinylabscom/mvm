@@ -29,11 +29,13 @@
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
 #   MVM_TRUSTED_ARCHIVE_SHA256 trusted archive hash for a non-default fresh install
+#   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
 #   MVM_SKIP_BOOTSTRAP     set to 1 to skip preparing the builder VM
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
+#   MVM_COSIGN_DOWNLOAD_URL override the pinned cosign release base (tests)
 set -eu
 
 REPO="tinylabscom/mvm"
@@ -41,8 +43,13 @@ DEFAULT_VERSION="v0.17.0"
 DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN="5fdf95929a90820af6ab4c22cc1a31e5ae6bc5eae2f3b6a795a06986797d0bce"
 DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU="8fe4115197a3c467465f4b40401e8f01fed1a837dfdf32985336975dab99213f"
 DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU="74d1077e6e3b6f5aa2a477f582f7de9bf69dfc48668289c501fd747450515b59"
+COSIGN_VERSION="v3.1.3"
+COSIGN_SHA256_AARCH64_APPLE_DARWIN="5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76"
+COSIGN_SHA256_X86_64_UNKNOWN_LINUX_GNU="4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU="c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a"
 API_BASE="${MVM_UPDATE_API_URL:-https://api.github.com}"
 DL_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
+COSIGN_BASE="${MVM_COSIGN_DOWNLOAD_URL:-https://github.com/sigstore/cosign/releases/download}"
 INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
 LIB_DIR="${MVM_INSTALL_LIB_DIR:-$(dirname "$INSTALL_DIR")/lib/mvm}"
 KEEP="${MVM_INSTALL_KEEP:-3}"
@@ -152,6 +159,41 @@ trusted_archive_sha256() {
   printf '%s\n' "$hash" | grep -Eq '^[0-9A-Fa-f]{64}$' \
     || die "trusted archive SHA-256 must be exactly 64 hexadecimal characters"
   printf '%s\n' "$hash" | tr 'A-F' 'a-f'
+}
+
+cosign_asset() {
+  case "$TARGET" in
+    aarch64-apple-darwin) printf '%s\n' "cosign-darwin-arm64" ;;
+    x86_64-unknown-linux-gnu) printf '%s\n' "cosign-linux-amd64" ;;
+    aarch64-unknown-linux-gnu) printf '%s\n' "cosign-linux-arm64" ;;
+  esac
+}
+
+trusted_cosign_sha256() {
+  hash="${MVM_TRUSTED_COSIGN_SHA256:-}"
+  if [ -z "$hash" ]; then
+    case "$TARGET" in
+      aarch64-apple-darwin) hash="$COSIGN_SHA256_AARCH64_APPLE_DARWIN" ;;
+      x86_64-unknown-linux-gnu) hash="$COSIGN_SHA256_X86_64_UNKNOWN_LINUX_GNU" ;;
+      aarch64-unknown-linux-gnu) hash="$COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU" ;;
+    esac
+  fi
+  printf '%s\n' "$hash" | grep -Eq '^[0-9A-Fa-f]{64}$' \
+    || die "trusted cosign SHA-256 must be exactly 64 hexadecimal characters"
+  printf '%s\n' "$hash" | tr 'A-F' 'a-f'
+}
+
+bootstrap_cosign() {
+  asset="$(cosign_asset)"
+  path="$TMP/cosign"
+  curl -fsSL "$COSIGN_BASE/$COSIGN_VERSION/$asset" -o "$path" \
+    || die "could not download the pinned signature verifier"
+  want_cosign="$(trusted_cosign_sha256)"
+  got_cosign="$(sha256_of "$path")"
+  [ "$got_cosign" = "$want_cosign" ] \
+    || die "trusted cosign SHA-256 mismatch (want $want_cosign, got $got_cosign)"
+  chmod 0700 "$path"
+  printf '%s\n' "$path"
 }
 
 # --- Versioned install -------------------------------------------------------
@@ -734,10 +776,15 @@ fi
 
 # Signature. An installed mvmctl verifies offline against its embedded trust
 # root and is preferred to cosign. A fresh host authenticates the archive
-# against the installer-baked hash before running only its mvmctl as a temporary
-# verifier. Every path requires the bundle; there is no unsigned fallback.
+# against the installer-baked hash before trying its mvmctl as a temporary
+# verifier. Legacy archives predate that verb, so the installer can instead
+# fetch a separately pinned cosign binary. Every path requires the bundle.
 VERIFIER="$(release_verifier)"
-if [ -z "$VERIFIER" ] && ! command -v cosign >/dev/null 2>&1; then
+COSIGN=""
+if command -v cosign >/dev/null 2>&1; then
+  COSIGN="$(command -v cosign)"
+fi
+if [ -z "$VERIFIER" ] && [ -z "$COSIGN" ]; then
   trusted_hash="$(trusted_archive_sha256)"
   [ -n "$trusted_hash" ] \
     || die "fresh install requires a trusted archive SHA-256; use the baked default, install cosign, or set MVM_TRUSTED_ARCHIVE_SHA256 from an independent trusted source"
@@ -750,8 +797,10 @@ if [ -z "$VERIFIER" ] && ! command -v cosign >/dev/null 2>&1; then
     || die "could not extract the authenticated bootstrap verifier"
   VERIFIER="$bootstrap_dir/mvmctl-${TARGET}/mvmctl"
   [ -x "$VERIFIER" ] || die "authenticated archive contains no executable mvmctl verifier"
-  "$VERIFIER" env verify-release --help 2>/dev/null | grep -q -- '--tag' \
-    || die "authenticated archive's mvmctl cannot verify release signatures"
+  if ! "$VERIFIER" env verify-release --help 2>/dev/null | grep -q -- '--tag'; then
+    VERIFIER=""
+    COSIGN="$(bootstrap_cosign)"
+  fi
 fi
 
 curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null \
@@ -761,8 +810,8 @@ if [ -n "$VERIFIER" ]; then
   "$VERIFIER" env verify-release "$TMP/$ARCHIVE" --tag "$VERSION" >/dev/null \
     || die "signature verification failed for $ARCHIVE"
   say "Signature verified."
-elif command -v cosign >/dev/null 2>&1; then
-  if cosign verify-blob \
+elif [ -n "$COSIGN" ]; then
+  if "$COSIGN" verify-blob \
       --bundle "$TMP/$ARCHIVE.bundle" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \

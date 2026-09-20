@@ -12,9 +12,11 @@ baked release. The release deployment step verifies the published checksum
 manifest's bundle under the exact release-workflow tag identity, then replaces
 all three anchors before deploying `install.sh`. A fresh install checks that
 anchor before extracting or executing only the archive's `mvmctl` as a
-temporary verifier. That authenticated verifier must support
-`env verify-release`, and it must accept the downloaded bundle under the exact
-selected tag before the full payload is extracted or installed.
+temporary verifier. If that legacy archive predates `env verify-release`, the
+installer downloads a temporary cosign with a code-reviewed version and
+target-specific SHA-256, verifies its bytes before execution, and uses it for
+the same exact-tag check. The full payload is extracted or installed only
+after signature verification succeeds.
 
 An explicit non-default version cannot reuse the baked release's trust anchor.
 It needs `MVM_TRUSTED_ARCHIVE_SHA256` from an independent trusted source, an
@@ -28,14 +30,16 @@ bundle, or invalid signature refuses without installing the payload.
 - `fresh_install_refuses_without_a_verifier_or_trusted_archive_hash`
 - `fresh_install_refuses_a_wrong_trusted_hash_before_executing_the_payload`
 - `fresh_install_refuses_a_missing_signature_bundle`
+- `fresh_install_bootstraps_pinned_cosign_for_a_legacy_release`
+- `fresh_install_refuses_a_mismatched_bootstrap_cosign_hash`
 - `workers_bakes_a_trusted_archive_hash_for_every_installer_target`
 - `features/suites/s34_install_lifecycle/fresh_install_integrity.feature`
 - `scripts/installer-compat/installer-compat.test.sh`
 
 ## Validation
 
-- `cargo test --test install_sh`: 55 passed.
-- `cargo test --test release_assets`: 50 passed.
+- `cargo test --test install_sh`: 57 passed.
+- `cargo test --test release_assets`: 51 passed.
 - `sh scripts/installer-compat/installer-compat.test.sh`: passed.
 - `just check-gated`: passed.
 - `cargo run -p xtask -- check-all`: 74 gates passed.

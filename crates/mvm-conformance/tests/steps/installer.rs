@@ -26,13 +26,13 @@ fn fresh_install_trust_precedes_verifier_execution(_world: &mut CliWorld) {
     let extract = script
         .find("could not extract the authenticated bootstrap verifier")
         .expect("installer must extract only an authenticated bootstrap verifier");
-    let execute = script
-        .find("authenticated archive's mvmctl cannot verify release signatures")
-        .expect("installer must probe the authenticated verifier before use");
+    let fallback = script
+        .find("COSIGN=\"$(bootstrap_cosign)\"")
+        .expect("a legacy archive must fall back to a pinned signature verifier");
 
     assert!(
-        compare < extract && extract < execute,
-        "archive authentication must precede extraction and execution"
+        compare < extract && extract < fallback,
+        "archive authentication must precede verifier probing and fallback"
     );
 }
 
@@ -51,7 +51,21 @@ fn fresh_install_has_no_unsigned_fallback(_world: &mut CliWorld) {
     let script = installer();
     assert!(
         !script.contains("skipping signature verification")
-            && script.contains("fresh install requires a trusted archive SHA-256"),
+            && script.contains("fresh install requires a trusted archive SHA-256")
+            && script.contains("trusted cosign SHA-256 mismatch"),
         "a host without a verifier must authenticate one or refuse the install"
+    );
+}
+
+#[then("a legacy archive uses a hash-pinned temporary verifier")]
+fn legacy_install_uses_pinned_temporary_verifier(_world: &mut CliWorld) {
+    let script = installer();
+    assert!(
+        script.contains("COSIGN_VERSION=\"v")
+            && script.contains("COSIGN_SHA256_AARCH64_APPLE_DARWIN=\"")
+            && script.contains("COSIGN_SHA256_X86_64_UNKNOWN_LINUX_GNU=\"")
+            && script.contains("COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU=\"")
+            && script.contains("COSIGN=\"$(bootstrap_cosign)\""),
+        "legacy releases must use one versioned, target-hash-pinned verifier"
     );
 }

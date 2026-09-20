@@ -7,4 +7,5 @@ Feature: Fresh install release authentication
     When the installer selects a verifier for the baked release
     Then the archive trust anchor is checked before its mvmctl executes
     And the tag-pinned signature bundle is mandatory
+    And a legacy archive uses a hash-pinned temporary verifier
     And there is no unsigned fresh-install fallback
