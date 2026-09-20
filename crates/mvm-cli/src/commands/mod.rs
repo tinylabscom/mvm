@@ -56,6 +56,7 @@ mod tests;
 use anyhow::Result;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::io::Write as _;
 use std::sync::Arc;
 
 use crate::logging::{self, LogFormat};
@@ -761,15 +762,44 @@ fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
 }
 
 fn install_signal_handler() {
-    let pids = Arc::clone(&CHILD_PIDS);
-    if let Err(e) = crate::signal::set_ctrlc_handler(move |signal| {
+    let handler = termination_handler(Arc::clone(&CHILD_PIDS), |code| {
+        mvm_observability::exit_after_interrupt(code)
+    });
+    if let Err(e) = crate::signal::set_ctrlc_handler(handler) {
+        tracing::warn!("failed to install signal handler: {e}");
+    }
+}
+
+/// The closure the signal servicer runs on SIGINT, SIGTERM or SIGHUP: report
+/// the interrupt, run every registered interrupt cleanup (a resume's refusal of
+/// its unadmitted guest, a restore's decrypted staging), signal tracked child
+/// processes, and exit through `exit` with `128 + signal`.
+///
+/// The exit runs no destructors, so the cleanups must run here or not at all.
+/// Output is written without `eprintln!`: after SIGHUP from a closed terminal
+/// stderr can fail with EIO, and a panic here would skip every cleanup.
+fn termination_handler(
+    pids: Arc<std::sync::Mutex<Vec<u32>>>,
+    exit: impl Fn(i32) + Send + 'static,
+) -> impl FnMut(libc::c_int) + Send + 'static {
+    move |signal| {
         // The console forwards Ctrl-C to the guest; a request to terminate
         // still terminates.
         if signal == libc::SIGINT && IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         let stage0_active = env::builder_vm::stage0_active_in_process();
-        eprintln!("\n{}", interrupt_cleanup_message(stage0_active));
+        let _ = writeln!(
+            std::io::stderr(),
+            "\n{}",
+            interrupt_cleanup_message(stage0_active)
+        );
+        let ran = mvm_runtime::interrupt_cleanup::run_all();
+        if !ran.is_empty() {
+            // A cleanup that could not settle its work (an unkillable VMM, a
+            // failed registry write) leaves only this line behind.
+            tracing::warn!(cleanups = ?ran, "ran interrupt cleanups before exiting");
+        }
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
                 unsafe {
@@ -777,9 +807,7 @@ fn install_signal_handler() {
                 }
             }
         }
-        mvm_observability::exit_after_interrupt(128 + signal);
-    }) {
-        tracing::warn!("failed to install signal handler: {e}");
+        exit(128 + signal);
     }
 }
 
@@ -852,6 +880,35 @@ mod image_source_gate_tests {
         .unwrap();
         refuse_local_image_source_in_release_build(DistributionChannel::Release, &cmd, None)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod termination_handler_tests {
+    use super::termination_handler;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// The handler the CLI installs runs the registered interrupt cleanups
+    /// before it exits, and exits with 128 plus the signal. Driven through
+    /// the same closure `install_signal_handler` hands the signal servicer.
+    #[test]
+    fn a_termination_signal_runs_the_interrupt_cleanups_then_exits() {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            let cleaned = Arc::new(AtomicI32::new(0));
+            let observed = Arc::clone(&cleaned);
+            let _armed = mvm_runtime::interrupt_cleanup::on_interrupt("test cleanup", move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            });
+            let exit_code = Arc::new(AtomicI32::new(0));
+            let exited = Arc::clone(&exit_code);
+            let mut handler = termination_handler(Arc::new(Mutex::new(Vec::new())), move |code| {
+                exited.store(code, Ordering::SeqCst);
+            });
+            handler(signal);
+            assert_eq!(cleaned.load(Ordering::SeqCst), 1, "signal {signal}");
+            assert_eq!(exit_code.load(Ordering::SeqCst), 128 + signal);
+        }
     }
 }
 

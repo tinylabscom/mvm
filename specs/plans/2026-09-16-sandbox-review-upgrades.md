@@ -155,22 +155,25 @@ snapshot can be resumed more than once.
 - [x] W1b.9 A resumed guest ends admitted or stopped however the resume
       ends, except for a kill that cannot be caught: the exchange is held to
       a 15-second deadline; SIGINT, SIGTERM and SIGHUP run a cleanup
-      registered with `handle_registry::on_interrupt` that stops the
-      restored VMM and records the refusal, settled against the admission
-      so exactly one of them acts; a SIGKILL or out-of-memory kill leaves
-      the guest running until the next state-touching command, whose
-      reconcile stops a paused machine's Firecracker that neither
-      `fc.paused` nor `fc.admitted` accounts for, re-checking under the
-      machine's resume lock; resumes of one machine are serialized by that
-      lock; the registry is written under its lock and a failed write is an
-      error; and a resume request that errors tears the VMM down.
+      registered with `interrupt_cleanup::on_interrupt`, which the CLI's
+      signal handler runs, that stops the restored VMM and records the
+      refusal, settled against the admission so exactly one of them acts; a
+      SIGKILL or out-of-memory kill leaves the guest running until the next
+      state-touching command, whose reconcile stops a paused machine's
+      Firecracker that neither `fc.paused` nor `fc.admitted` accounts for,
+      re-checking under the machine's resume lock; only a machine the
+      registry records as paused is restored; resumes and pauses of one
+      machine are serialized by that lock; the registry is written under its
+      lock and a failed write is an error; and a resume request that errors
+      tears the VMM down.
 - [x] W1b.10 An encrypted snapshot is decrypted into a private staging
       directory that is removed after the load, so the sealed ciphertext is
       never modified, a refused resume can be retried, and no decrypted
       guest memory stays on disk; abandoned staging directories are removed.
 - [x] W1b.11 The Firecracker restore teardown, and the restore's stop of a
       previous VMM, signal a recorded pid only if it is the Firecracker
-      serving this VM's API socket.
+      serving this VM's API socket, comparing resolved paths; an identity
+      that cannot be confirmed is an error, never "already stopped".
 - [x] W1b.12 Decrypted restore staging is removed by the interrupt cleanup,
       and abandoned staging by every restore and by reconcile.
 - [ ] W1b.7 Live witness on Firecracker/KVM: resuming a sealed snapshot of an

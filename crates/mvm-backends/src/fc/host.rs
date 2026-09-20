@@ -310,52 +310,164 @@ pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
 /// another VM's Firecracker. Every Firecracker mvm starts is given its own
 /// socket with `--api-sock`, so the socket on its command line identifies
 /// which VM it serves. Callers that are about to signal a recorded pid use this.
+///
+/// `Ok(false)` only when the answer is positively "not ours": the process is
+/// gone, is not Firecracker, or is a Firecracker serving a different socket.
+/// A live process whose identity cannot be confirmed — its `/proc` entry
+/// hidden, its command line unreadable, no `--api-sock` on it — is an error,
+/// because a caller treats "not ours" as "already stopped".
 pub fn is_firecracker_for_socket(pid: u32, api_socket: &Path) -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        let proc_dir = PathBuf::from(format!("/proc/{pid}"));
-        if !comm_path_is_firecracker(&proc_dir.join("comm"))? {
-            return Ok(false);
-        }
-        let cmdline = match std::fs::read(proc_dir.join("cmdline")) {
-            Ok(cmdline) => cmdline,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(error).with_context(|| format!("read /proc/{pid}/cmdline"));
-            }
-        };
-        let args: Vec<String> = cmdline
-            .split(|byte| *byte == 0)
-            .map(|arg| String::from_utf8_lossy(arg).into_owned())
-            .collect();
-        Ok(args_serve_api_socket(&args, api_socket))
-    }
+    identity_from(observe_process(pid)?, api_socket)
+        .with_context(|| format!("confirming which VM pid {pid} serves"))
+}
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        let listing = run_in_vm_stdout(&format!(
-            r#"[ "$(cat /proc/{pid}/comm 2>/dev/null)" = "firecracker" ] && tr '\0' '\n' < /proc/{pid}/cmdline || true"#,
-        ))?;
-        let args: Vec<String> = listing.lines().map(str::to_string).collect();
-        Ok(args_serve_api_socket(&args, api_socket))
+/// What the process table says about one pid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProcessView {
+    /// No such process.
+    Gone,
+    /// The process exists but its `/proc` entry cannot be read.
+    Hidden,
+    /// A process that is not Firecracker.
+    NotFirecracker,
+    /// A Firecracker, with its command line (`None` if unreadable) and working
+    /// directory (`None` if unreadable), which resolves a relative socket.
+    Firecracker {
+        args: Option<Vec<String>>,
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+fn observe_process(pid: u32) -> Result<ProcessView> {
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    match std::fs::read_to_string(proc_dir.join("comm")) {
+        Ok(comm) if comm.trim() != "firecracker" => Ok(ProcessView::NotFirecracker),
+        Ok(_) => Ok(ProcessView::Firecracker {
+            args: std::fs::read(proc_dir.join("cmdline"))
+                .ok()
+                .map(|cmdline| split_cmdline(&cmdline)),
+            cwd: std::fs::read_link(proc_dir.join("cwd")).ok(),
+        }),
+        Err(_) if !mvm_vmm::host::process_liveness::pid_is_alive(pid as i32) => {
+            Ok(ProcessView::Gone)
+        }
+        // The process exists but its entry is unreadable: `hidepid`, or a
+        // permission this user lacks.
+        Err(_) => Ok(ProcessView::Hidden),
     }
 }
 
-/// Whether a Firecracker command line passes `api_socket` to `--api-sock`,
-/// either as the next argument or as `--api-sock=<path>`.
-fn args_serve_api_socket(args: &[String], api_socket: &Path) -> bool {
+#[cfg(target_os = "linux")]
+fn split_cmdline(cmdline: &[u8]) -> Vec<String> {
+    cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observe_process(pid: u32) -> Result<ProcessView> {
+    let listing = run_in_vm_stdout(&format!(
+        r#"if [ ! -e /proc/{pid} ]; then
+  if kill -0 {pid} 2>/dev/null || sudo -n kill -0 {pid} 2>/dev/null; then echo hidden; else echo gone; fi
+elif [ ! -r /proc/{pid}/comm ]; then echo hidden
+elif [ "$(cat /proc/{pid}/comm)" != firecracker ]; then echo other
+else
+  echo firecracker
+  echo "cwd:$(readlink /proc/{pid}/cwd 2>/dev/null)"
+  if [ -r /proc/{pid}/cmdline ]; then tr '\0' '\n' < /proc/{pid}/cmdline; else echo '!unreadable'; fi
+fi"#,
+    ))?;
+    parse_process_listing(&listing)
+}
+
+/// Parse the listing the non-Linux probe prints. Anything unexpected is an
+/// error, never a "not ours".
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_process_listing(listing: &str) -> Result<ProcessView> {
+    let mut lines = listing.lines();
+    match lines.next().map(str::trim) {
+        Some("gone") => Ok(ProcessView::Gone),
+        Some("hidden") => Ok(ProcessView::Hidden),
+        Some("other") => Ok(ProcessView::NotFirecracker),
+        Some("firecracker") => {
+            let cwd = lines
+                .next()
+                .and_then(|line| line.strip_prefix("cwd:"))
+                .filter(|cwd| !cwd.is_empty())
+                .map(PathBuf::from);
+            let rest: Vec<String> = lines
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            let args = (rest.first().map(String::as_str) != Some("!unreadable")).then_some(rest);
+            Ok(ProcessView::Firecracker { args, cwd })
+        }
+        other => anyhow::bail!("unexpected process probe output: {other:?}"),
+    }
+}
+
+/// Decide from a [`ProcessView`] whether the process serves `api_socket`.
+fn identity_from(view: ProcessView, api_socket: &Path) -> Result<bool> {
+    match view {
+        ProcessView::Gone | ProcessView::NotFirecracker => Ok(false),
+        ProcessView::Hidden => {
+            anyhow::bail!("the process exists but its /proc entry cannot be read")
+        }
+        ProcessView::Firecracker { args: None, .. } => {
+            anyhow::bail!("it is Firecracker but its command line cannot be read")
+        }
+        ProcessView::Firecracker {
+            args: Some(args),
+            cwd,
+        } => {
+            let socket = api_socket_arg(&args)
+                .context("it is Firecracker but its command line names no --api-sock")?;
+            let socket = Path::new(socket);
+            let resolved = if socket.is_absolute() {
+                socket.to_path_buf()
+            } else {
+                cwd.context("its --api-sock is relative and its working directory is unreadable")?
+                    .join(socket)
+            };
+            Ok(same_file_path(&resolved, api_socket))
+        }
+    }
+}
+
+/// The value a Firecracker command line passes to `--api-sock`, either as the
+/// next argument or as `--api-sock=<path>`.
+fn api_socket_arg(args: &[String]) -> Option<&str> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--api-sock" {
-            return args
-                .next()
-                .is_some_and(|value| Path::new(value) == api_socket);
+            return args.next().map(String::as_str);
         }
         if let Some(value) = arg.strip_prefix("--api-sock=") {
-            return Path::new(value) == api_socket;
+            return Some(value);
         }
     }
-    false
+    None
+}
+
+/// Whether two paths name the same file, comparing their parent directories
+/// after resolving symlinks (`/tmp` and `/private/tmp` are one directory) and
+/// relative components. A socket file may be gone, so only the directories are
+/// resolved; a directory that cannot be resolved is compared as written.
+fn same_file_path(a: &Path, b: &Path) -> bool {
+    fn resolved(path: &Path) -> PathBuf {
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        match (absolute.parent(), absolute.file_name()) {
+            (Some(parent), Some(name)) => parent
+                .canonicalize()
+                .map(|parent| parent.join(name))
+                .unwrap_or(absolute.clone()),
+            _ => absolute,
+        }
+    }
+    resolved(a) == resolved(b)
 }
 
 #[cfg(target_os = "linux")]
@@ -655,36 +767,114 @@ mod tests {
         list.iter().map(|arg| arg.to_string()).collect()
     }
 
+    fn firecracker(list: &[&str]) -> ProcessView {
+        ProcessView::Firecracker {
+            args: Some(args(list)),
+            cwd: None,
+        }
+    }
+
     #[test]
     fn the_api_socket_on_the_command_line_identifies_the_vm() {
         let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
-        let spawned = args(&[
+        let spawned = firecracker(&[
             "firecracker",
             "--api-sock",
             "/state/vms/vm-a/fc.socket",
             "--enable-pci",
         ]);
-        assert!(args_serve_api_socket(&spawned, mine));
-        let equals = args(&["firecracker", "--api-sock=/state/vms/vm-a/fc.socket"]);
-        assert!(args_serve_api_socket(&equals, mine));
+        assert!(identity_from(spawned, mine).unwrap());
+        let equals = firecracker(&["firecracker", "--api-sock=/state/vms/vm-a/fc.socket"]);
+        assert!(identity_from(equals, mine).unwrap());
     }
 
-    /// A recycled pid that now names another VM's Firecracker is not this VM's.
+    /// Only a positively different answer is "not ours": a process that is
+    /// gone, is not Firecracker, or serves another VM's socket.
     #[test]
     fn another_vms_firecracker_is_not_this_vms() {
         let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
-        let other = args(&["firecracker", "--api-sock", "/state/vms/vm-b/fc.socket"]);
-        assert!(!args_serve_api_socket(&other, mine));
-        assert!(!args_serve_api_socket(
-            &args(&["firecracker", "--api-sock"]),
-            mine
-        ));
-        assert!(!args_serve_api_socket(&args(&["firecracker"]), mine));
-        assert!(!args_serve_api_socket(&args(&[]), mine));
+        let other = firecracker(&["firecracker", "--api-sock", "/state/vms/vm-b/fc.socket"]);
+        assert!(!identity_from(other, mine).unwrap());
+        assert!(!identity_from(ProcessView::Gone, mine).unwrap());
+        assert!(!identity_from(ProcessView::NotFirecracker, mine).unwrap());
     }
 
-    /// The real process-table read: this test process is not Firecracker, so
-    /// it serves no socket, whatever its pid.
+    /// A live process whose identity cannot be confirmed is an error, never
+    /// "not ours": a caller would report it stopped while it runs.
+    #[test]
+    fn an_unconfirmable_identity_is_an_error() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        // `hidepid`: the process exists, its /proc entry is not readable.
+        identity_from(ProcessView::Hidden, mine).expect_err("hidden");
+        // Firecracker whose command line cannot be read.
+        let unreadable = ProcessView::Firecracker {
+            args: None,
+            cwd: None,
+        };
+        identity_from(unreadable, mine).expect_err("unreadable cmdline");
+        // Firecracker with no --api-sock on its command line.
+        identity_from(firecracker(&["firecracker"]), mine).expect_err("no socket");
+        identity_from(firecracker(&["firecracker", "--api-sock"]), mine).expect_err("no value");
+        // A relative socket and no readable working directory to resolve it.
+        let relative = firecracker(&["firecracker", "--api-sock", "vms/vm-a/fc.socket"]);
+        identity_from(relative, mine).expect_err("unresolvable relative socket");
+    }
+
+    /// Paths are compared after resolving symlinks and relative components,
+    /// so `/tmp` against `/private/tmp`, or a relative `MVM_HOME`, is not a
+    /// false "not ours".
+    #[test]
+    fn a_socket_path_through_a_symlink_or_relative_to_cwd_is_the_same_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("vm-a")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mine = real.join("vm-a/fc.socket");
+
+        let through_link = firecracker(&[
+            "firecracker",
+            "--api-sock",
+            link.join("vm-a/fc.socket").to_str().unwrap(),
+        ]);
+        assert!(identity_from(through_link, &mine).unwrap());
+
+        let relative = ProcessView::Firecracker {
+            args: Some(args(&["firecracker", "--api-sock", "vm-a/fc.socket"])),
+            cwd: Some(link.clone()),
+        };
+        assert!(identity_from(relative, &mine).unwrap());
+    }
+
+    #[test]
+    fn the_remote_probe_listing_parses_and_never_guesses() {
+        assert_eq!(parse_process_listing("gone\n").unwrap(), ProcessView::Gone);
+        assert_eq!(
+            parse_process_listing("hidden\n").unwrap(),
+            ProcessView::Hidden
+        );
+        assert_eq!(
+            parse_process_listing("other\n").unwrap(),
+            ProcessView::NotFirecracker
+        );
+        assert_eq!(
+            parse_process_listing("firecracker\ncwd:/w\nfirecracker\n--api-sock\n/s\n").unwrap(),
+            ProcessView::Firecracker {
+                args: Some(args(&["firecracker", "--api-sock", "/s"])),
+                cwd: Some(PathBuf::from("/w")),
+            }
+        );
+        assert_eq!(
+            parse_process_listing("firecracker\ncwd:\n!unreadable\n").unwrap(),
+            ProcessView::Firecracker {
+                args: None,
+                cwd: None
+            }
+        );
+        parse_process_listing("").expect_err("empty output is not an answer");
+        parse_process_listing("yes\n").expect_err("unknown output is not an answer");
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn a_process_that_is_not_firecracker_serves_no_socket() {

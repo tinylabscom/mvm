@@ -246,7 +246,7 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
     // directory would outlive it; remove it from the interrupt path too.
     let _remove_on_interrupt = staged.as_ref().map(|staged| {
         let path = staged.path().to_path_buf();
-        crate::handle_registry::on_interrupt("restore staging", move || {
+        crate::interrupt_cleanup::on_interrupt("restore staging", move || {
             let _ = std::fs::remove_dir_all(&path);
         })
     });
@@ -1083,7 +1083,7 @@ mod tests {
         }
         fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
             assert!(dir.exists(), "the staging directory exists during the load");
-            crate::handle_registry::stop_all_attached();
+            crate::interrupt_cleanup::run_all();
             assert!(!dir.exists(), "the interrupt removed the decrypted copies");
             bail!("interrupted")
         }
