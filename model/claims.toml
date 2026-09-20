@@ -386,7 +386,7 @@ id = "MVM-SEC-20"
 level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "supply_chain"
-statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, and self-update paths refuse an artifact whose required signature is missing or invalid"
+statement = "Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, install, and self-update paths refuse an artifact whose required signature is missing or invalid"
 # `release.yml` signs archives and manifests keyless through GitHub OIDC and
 # publishes bundles carrying the Fulcio certificate and Rekor inclusion proof.
 # Raw kernels, root filesystems, and metadata are covered by those signed
@@ -398,12 +398,13 @@ statement = "Every published release artifact is authenticated under the release
 # manifest before parsing it, with the hash-skip hatch explicitly not waiving
 # the signature.
 #
-# The self-update path used to be the exception: `verify_signature` shelled out
-# to cosign and returned Ok with a warning when it was absent. It now calls the
-# same in-process verifier with the CLI release train, so all three consuming
-# paths refuse. `install.sh` is outside the claim: it verifies an upgrade with
-# the installed `mvmctl env verify-release` or with cosign, and is best-effort
-# only on a first install to a host with neither.
+# The self-update path now calls the same in-process verifier with the CLI
+# release train. The installer prefers that verifier or host cosign. With
+# neither available, it authenticates the baked archive against its carried
+# target hash, then uses its mvmctl when capable or a separately hash-pinned
+# temporary cosign for legacy releases. A non-default archive with no
+# independent hash is never executed before that pinned cosign authenticates
+# its bundle. All four consuming paths refuse a missing or invalid signature.
 #
 # The `manifest-verify`-gated tests on these paths now run in the `Lint feature
 # coverage` job of ci.yml. `a_real_release_bundle_verifies_under_its_tag` is one
@@ -426,4 +427,7 @@ witnesses = [
     "fn:skip_hash_verify_does_not_waive_the_manifest_signature",
     "fn:an_archive_without_a_bundle_is_refused",
     "fn:a_real_release_bundle_verifies_under_its_tag",
+    "fn:fresh_install_trust_precedes_verifier_execution",
+    "fn:fresh_install_requires_tag_pinned_bundle",
+    "fn:fresh_install_has_no_unsigned_fallback",
 ]

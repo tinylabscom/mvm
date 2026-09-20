@@ -4347,3 +4347,17 @@ writes the plan:
       `mvm-core` Clippy with warnings denied.
 - [ ] Pass the Linux process-table witness in CI, merge through the queue, and
       close #3477 from landed evidence.
+
+## 2026-09-20 fresh-install release authentication
+
+- [x] Authenticate a fresh install's archive against a target-specific SHA-256
+      trust anchor before probing its verifier, with a separately hash-pinned
+      temporary verifier for legacy releases.
+- [x] Require a tag-pinned release bundle and refuse a missing trust anchor,
+      mismatched archive hash, missing bundle, or invalid signature without an
+      unsigned fallback.
+- [x] Bake all three published target hashes into the stable installer during
+      Worker deployment.
+- [x] Complete focused installer, release-workflow, compatibility, workspace,
+      gated-target, Clippy, repository-gate, and BDD validation.
+- [ ] Merge the repair through the queue and close epic #3277.

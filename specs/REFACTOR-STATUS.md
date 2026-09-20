@@ -356,20 +356,23 @@ Last updated: 2026-09-20
       Firecracker has no display device and the workload kernel force-disables
       `DRM`/`FB`/`INPUT`/`HID`.
 
-- [ ] **Install lifecycle and packaging polish.**
+- [x] **Install lifecycle and packaging polish.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`.
-      Epic #3277. Execution started. The stable install URL and its daily live
+      Epic #3277. The stable install URL and its daily live
       monitor, production-host deploy check, and API-free normal install path
       are complete, as are versioned installs with atomic upgrade and rollback,
       the full host-binary set, the uninstaller, and the installer, distro and
-      install-page compat lanes; remaining work adds in-process signature
-      verification to close the claim 20 limits note.
+      install-page compat lanes. A fresh host now authenticates the archive
+      against the stable installer's target-specific hash before using its
+      bundled verifier when capable or a separately pinned temporary verifier
+      for legacy releases; no unsigned first-install fallback remains.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
         every host binary the release carries (#3270, #3342)
   - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
-  - [ ] WS5 — verification (#3272)
+  - [x] WS5 — in-process update verification plus authenticated fresh-install
+        verifier bootstrap with a mandatory tag-pinned bundle (#3272, #3277)
   - [x] WS6 — installer back-compat, distro glibc, and install-page smoke lanes
         in `installer-compat.yml` (#3273); Linux release payloads are now
         static-musl while retaining compatible asset names (#3371), and the

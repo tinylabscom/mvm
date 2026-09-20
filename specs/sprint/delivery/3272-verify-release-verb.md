@@ -13,16 +13,18 @@ installed, and otherwise warned. Now:
 - `install.sh` prefers an installed `mvmctl` that has the verb: first the one
   in the install directory, then whatever is on `PATH`. It detects the verb from
   the help text, because an older `mvmctl` can exit 0 on a subcommand it does
-  not know. If there is no such `mvmctl`, it falls back to `cosign`, and if
-  there is neither, it warns as before.
-- Once either verifier is present, a missing bundle refuses the install. It
-  used to warn and carry on.
+  not know. If there is no such `mvmctl`, it falls back to `cosign`.
+- A later epic #3277 closure removed the remaining fresh-host warning path. If
+  neither verifier exists, the installer authenticates its baked archive
+  against an installer-carried SHA-256 before using its `mvmctl` as a temporary
+  verifier when capable. A legacy or unpinned archive instead uses a separately
+  hash-pinned temporary cosign without executing archive bytes first. Every
+  path requires the bundle.
 - The `cosign` fallback now pins `refs/tags/$VERSION` exactly, instead of
   matching any tag.
 
-So an upgrade (the only way an `install.sh` install is upgraded, since
-`env update` refuses one) is verified on every host. A first install on a host
-with neither `mvmctl` nor `cosign` still has nothing to verify with.
+So both upgrades and first installs are verified on every host. A fresh host
+with no verifier must authenticate the temporary one or refuse.
 
 ## Witnesses
 
@@ -33,3 +35,5 @@ with neither `mvmctl` nor `cosign` still has nothing to verify with.
 - `install_sh_verifies_the_signature_with_the_installed_mvmctl`
 - `install_sh_refuses_an_archive_the_installed_mvmctl_rejects`
 - `install_sh_refuses_a_missing_bundle_once_it_can_verify`
+- `fresh_install_bootstraps_signature_verification_from_a_trusted_archive_hash`
+- `fresh_install_without_an_archive_hash_never_executes_the_payload_before_verification`

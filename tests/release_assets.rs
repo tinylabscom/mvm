@@ -1265,6 +1265,71 @@ fn workers_deploys_website_updates_merged_to_main() {
 }
 
 #[test]
+fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
+    let workflow = website_deploy_workflow();
+    let installer = fs::read_to_string("install.sh").expect("read install.sh");
+
+    assert!(
+        workflow.contains("gh release download \"${INSTALL_VERSION}\"")
+            && workflow.contains("--pattern 'checksums-sha256.txt*'")
+            && workflow.contains("checksums-sha256.txt.bundle")
+            && workflow.contains("cosign verify-blob")
+            && workflow.contains("release.yml@refs/tags/${INSTALL_VERSION}"),
+        "the stable-site deployment must authenticate the published release's checksum manifest under the exact release-workflow tag identity"
+    );
+
+    for (target, variable) in [
+        (
+            "aarch64-apple-darwin",
+            "DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN",
+        ),
+        (
+            "x86_64-unknown-linux-gnu",
+            "DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU",
+        ),
+        (
+            "aarch64-unknown-linux-gnu",
+            "DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU",
+        ),
+    ] {
+        assert!(
+            installer.contains(&format!("{variable}=\"")),
+            "install.sh must carry the {target} trust-anchor sentinel"
+        );
+        assert!(
+            workflow.contains(target) && workflow.contains(variable),
+            "workers.yml must bake the {target} archive hash into {variable}"
+        );
+    }
+}
+
+#[test]
+fn installer_pins_a_legacy_bootstrap_verifier_for_every_target() {
+    let installer = fs::read_to_string("install.sh").expect("read install.sh");
+
+    assert!(
+        installer.contains("COSIGN_VERSION=\"v3.1.3\""),
+        "the temporary verifier version must be explicit and reviewable"
+    );
+    for variable in [
+        "COSIGN_SHA256_AARCH64_APPLE_DARWIN",
+        "COSIGN_SHA256_X86_64_UNKNOWN_LINUX_GNU",
+        "COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU",
+    ] {
+        let prefix = format!("{variable}=\"");
+        let value = installer
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("install.sh has no {variable}"));
+        assert_eq!(value.len(), 64, "{variable} must be a SHA-256");
+        assert!(
+            value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{variable} must contain only hexadecimal digits"
+        );
+    }
+}
+
+#[test]
 fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
     let workflow = website_workflow();
     for path in ["web/mvm-demo-guest/**", ".github/workflows/workers.yml"] {

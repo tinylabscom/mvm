@@ -3,6 +3,8 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
+**Status: COMPLETE**
+
 **Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274), [#3331](https://github.com/tinylabscom/mvm/issues/3331), [#3371](https://github.com/tinylabscom/mvm/issues/3371)
 
 ## Outcome
@@ -30,7 +32,7 @@ releases and across distros.
 | I2 | Every install makes an unauthenticated `api.github.com` call to resolve the latest tag — rate-limited, and a hard failure behind a proxy | `install.sh:48-58` |
 | I3 | Binaries are installed straight over the previous set, so a failed upgrade leaves `mvmctl` and its adjacent host binaries torn apart — worse for us than for a single-binary tool, because adjacency is a requirement | `install.sh` install step |
 | I4 | No uninstaller exists anywhere | — |
-| I5 | Signature verification warns and continues when `cosign` is absent, on both the install and self-update paths — this is exactly the "Claim 20 limits" carve-out | `install.sh:95-119`, `crates/mvm-cli/src/update.rs` |
+| I5 | Resolved: self-update verifies in-process, and a fresh install authenticates the baked archive against an installer-carried SHA-256 before probing its `mvmctl`; legacy or unpinned archives use a separately hash-pinned temporary cosign and execute no archive byte before the mandatory tag-pinned bundle verifies | `install.sh`, `crates/mvm-cli/src/update.rs` |
 | I6 | `tests/install_sh.rs` tests the current script against synthetic assets only; nothing runs the current installer against older published releases, and nothing runs the released Linux binary across distros, though we ship `-unknown-linux-gnu` and glibc drift is unmeasured | `tests/install_sh.rs` |
 | I7 | The Nix package hardcodes `version = "0.18.0-rc.1"`, so it drifts from `Cargo.toml` silently | `nix/packages/mvmctl.nix:54` |
 | I8 | No written boundary between what a Nix check asserts and what the Rust harness asserts, against ~4000 lines of `nix/lib` | `nix/tests/` |
@@ -111,17 +113,25 @@ Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
       best-effort. It calls `mvm_build::release_signature` with the CLI release
       train and refuses a missing or invalid bundle.
 - [x] Have `install.sh` prefer `mvmctl env verify-release` once a binary exists
-      on disk, falling back to `cosign` and then to the current warning. With a
-      verifier present, a missing bundle refuses; the cosign fallback now pins
-      the exact tag rather than any tag.
-- [x] Rewrite the "Claim 20 limits" note in
-      `specs/adrs/001-microvm-security-posture.md` now that the third path
-      refuses: the claim names all three paths, and the note keeps the two
-      things still outside it (a build without `manifest-verify`, and
-      `install.sh`).
+      on disk and fall back to `cosign`. On a fresh host with neither, require
+      an installer-carried archive hash, check it before executing only the
+      downloaded `mvmctl` as a temporary verifier, and require its tag-pinned
+      bundle. A legacy archive that predates the verb, or an explicit version
+      with no independently supplied hash, uses a separately hash-pinned
+      temporary cosign without executing archive bytes first. There is no
+      unsigned fallback.
+- [x] Rewrite the claim 20 boundary in
+      `specs/adrs/001-microvm-security-posture.md`: the claim names all four
+      refusing paths and records the installer script plus its baked archive
+      hashes as the fresh-host trust root.
 - [x] Weigh the closure cost first. There was none to weigh: the verifier
       already ships in every release build for the fetch path and the runtime
       overlay, so the self-update path adds no dependency.
+- [x] Close the fresh-install residual without requiring a preinstalled
+      dependency: the release deploy step bakes each published target
+      archive's SHA-256 into the stable installer. A capable archive verifies
+      in-process; a legacy archive uses a temporary cosign whose version and
+      target hash are pinned in the installer.
 
 ## WS6 — Compat CI
 
@@ -181,10 +191,10 @@ Issue: [#3274](https://github.com/tinylabscom/mvm/issues/3274).
 
 ## Acceptance
 
-- [ ] A new macOS user and a new Linux user each run one command from a
+- [x] A new macOS user and a new Linux user each run one command from a
       monitored URL, with mandatory checksum verification and signature
       verification that no longer depends on a host `cosign`.
-- [ ] A failed upgrade leaves a working previous install.
-- [ ] `uninstall.sh` exists, is tested, and refuses ambiguity.
+- [x] A failed upgrade leaves a working previous install.
+- [x] `uninstall.sh` exists, is tested, and refuses ambiguity.
 - [x] `nix/packages/mvmctl.nix` cannot drift from `Cargo.toml`.
-- [ ] `just ci` and every xtask gate green.
+- [x] `just ci` and every xtask gate green.
