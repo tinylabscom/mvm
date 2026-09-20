@@ -9,9 +9,10 @@
 //! # Production-safe
 //!
 //! Unlike `Exec` (dev-only), every FS verb here is
-//! prod-safe. The agent runs as uid 901 with `--bounding-set=-all
-//! --no-new-privs`; `/etc/{passwd,group,nsswitch.conf}` are bind-mounted
-//! read-only, and `mvm_core::crypto::policy::PathPolicy` denies
+//! prod-safe. The agent starts as uid 901 through
+//! `mvm-setpriv --no-new-privs` and narrows its Linux capability bounding set
+//! through `PR_CAPBSET_DROP`; `/etc/{passwd,group,nsswitch.conf}` are
+//! bind-mounted read-only, and `mvm_core::crypto::policy::PathPolicy` denies
 //! `/etc/mvm/*` and `/run/mvm-secrets/*` even when canonicalization
 //! resolves a guest-side symlink into them.
 //!

@@ -112,9 +112,9 @@ zero, so there is nothing to escape from. `/proc/1/root` is refused.
 
 **Claim 2's outcome holds on both, but for weaker reasons than the claim names.** Nothing escalates: no
 setuid binaries exist, the rootfs is read-only, and `CapEff` is empty. But `NoNewPrivs` is `0` and the
-capability bounding set is *full*, so the mechanism ADR-001 names for claims 1/2 —
-`setpriv --bounding-set=-all --no-new-privs` (W2.3) — is not applied to the OCI workload process. It is
-wired from the nix-built guest path, not this one. The outcome currently rests on the image shipping zero
+capability bounding set is *full*, so the mechanisms ADR-001 names for claims 1/2 —
+`mvm-setpriv --no-new-privs` and agent-side `PR_CAPBSET_DROP` — are not applied to the OCI workload process.
+They are wired from the nix-built guest path, not this one. The outcome currently rests on the image shipping zero
 setuid binaries rather than on the named control.
 
 **One genuine per-backend divergence.** `unshare -r` yields uid 0 in a user namespace on HVF and is

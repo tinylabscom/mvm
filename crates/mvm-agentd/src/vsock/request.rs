@@ -349,8 +349,8 @@ pub enum GuestRequest {
     /// the token is opaque to the host so a buggy or malicious
     /// caller can never address a process it didn't start.
     ///
-    /// Children spawned this way inherit the agent's bounding-set
-    /// (`--bounding-set=-all --no-new-privs`);
+    /// Children spawned this way inherit the agent's already-narrowed
+    /// capability bounding set and kernel-enforced no-new-privileges state;
     /// the handler additionally `process_group(0)`s and sets
     /// `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated
     /// against an allowlist before exec.

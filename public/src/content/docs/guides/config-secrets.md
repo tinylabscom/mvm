@@ -145,7 +145,7 @@ Each `--mount` flag shares a host directory into the guest, read-only by
 default. Material placed on the *secrets drive* (`/mnt/secrets/`, mode 0440
 root:mvm by the init script) is additionally re-staged to
 `/run/mvm-secrets/<svc>/` with mode 0400 owned by the per-service uid
-(ADR-001 §W2.1) so sibling services on the same microVM can't cross-read.
+(ADR-001 claim 1) so sibling services on the same microVM can't cross-read.
 That re-staging applies to the drive, not to a `--mount` share.
 
 ### Custom config + API keys at runtime

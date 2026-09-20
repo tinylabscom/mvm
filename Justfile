@@ -1129,20 +1129,20 @@ audit:
 deny:
     cargo deny check
 
-# Combined supply-chain gate (ADR-001 §W5.2)
+# Combined supply-chain gate (ADR-001 claim 7)
 supply-chain: audit deny
 
-# Verify production guest agent has no dev-only Exec symbols (ADR-001 §W4.3)
+# Verify production guest agent has no dev-only Exec symbols (ADR-001 claim 4)
 security-gate-prod-agent:
     ./scripts/check-prod-agent-no-exec.sh
 
-# Run the GuestRequest deserializer fuzzer (ADR-001 §W4.2). Default 5min.
+# Run the GuestRequest deserializer fuzzer (ADR-001 claim 5). Default 5min.
 
 # Override with: just fuzz-guest-request 3600
 fuzz-guest-request SECONDS="300":
     cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{ SECONDS }}
 
-# Run the AuthenticatedFrame envelope fuzzer (ADR-001 §W4.2). Default 5min.
+# Run the AuthenticatedFrame envelope fuzzer (ADR-001 claim 5). Default 5min.
 fuzz-authenticated-frame SECONDS="300":
     cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{ SECONDS }}
 

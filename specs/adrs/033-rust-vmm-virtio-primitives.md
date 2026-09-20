@@ -169,7 +169,7 @@ no-op.
 ## Supply chain and closure (ADR-001 / ADR-031 compliance)
 
 Every workspace dependency clears the supply-chain bar — `cargo-deny`
-(`deny.toml`) + `cargo-audit`, ADR-001 §W5.2 — and the repo holds the
+(`deny.toml`) + `cargo-audit`, ADR-001 §"Claims ledger (claim → witness)" — and the repo holds the
 limit-dependencies line (ADR-031; ADR-001's "audit in-house rather than
 vet a third-party surface" posture). This is the crux of the sign-off, so
 the closure delta was **measured**, not estimated.

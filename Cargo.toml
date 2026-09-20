@@ -100,7 +100,7 @@ members = [
 # they depend on libfuzzer-sys, which only builds under cargo-fuzz's
 # wrapper (it injects the right linker flags + sanitizer toolchain).
 # Plain `cargo build --workspace` would otherwise fail with linker
-# errors. ADR-001 §W4.2.
+# errors. See ADR-001's claims ledger.
 exclude = [
     "crates/mvm-agentd/fuzz",
     # FlowMux wire-contract fuzz harnesses: the frame decoder and the

@@ -85,8 +85,9 @@ pub const GUEST_CID: u32 = 3;
 ///
 /// **Why 5252 (and why not <1024).** Linux gates `bind(2)` on AF_VSOCK
 /// ports ≤ 1023 behind `CAP_NET_BIND_SERVICE` — the same way it gates
-/// AF_INET. The agent runs as uid 901 with `--bounding-set=-all`,
-/// so it has no caps to spend on a privileged port.
+/// AF_INET. The agent runs as uid 901 after narrowing its capability
+/// bounding set through `PR_CAPBSET_DROP`, so it has no caps to spend on a
+/// privileged port.
 /// Any port < 1024 would force us to either grant the agent
 /// `CAP_NET_BIND_SERVICE` (weakening the no-caps posture to work around
 /// port choice) or bind in init and pass the fd in (extra surface for no

@@ -8,7 +8,7 @@
 [[authority]]
 id = "linux-seccomp"
 name = "Linux seccomp"
-citation = "https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html and ADR-001 §W2"
+citation = "https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html and ADR-001 §\"The claims\""
 checksum = "none"
 checksum_reason = "Authority is the upstream Linux kernel documentation plus project ADR text committed in this repo"
 statement = "seccomp syscall filtering can deny arbitrary syscalls by a process"
@@ -17,7 +17,7 @@ realized_by = ["MVM-SEC-01"]
 [[authority]]
 id = "linux-setpriv"
 name = "util-linux setpriv"
-citation = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/ and ADR-001 §W2.2"
+citation = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/ and ADR-001 §\"The claims\""
 checksum = "none"
 checksum_reason = "Authority is the upstream util-linux tool and project ADR text committed in this repo"
 statement = "setpriv --no-new-privs prevents privilege elevation via setuid/setcap binaries"

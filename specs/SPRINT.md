@@ -150,6 +150,14 @@
       Proposed instead of described as shipped. Delivery evidence:
       `specs/sprint/delivery/3317-adr-citation-gates.md`.
 
+- [x] **Make ADR-001's security authority match the shipped guest — issue
+      #3318.** The sealed guest is documented as using
+      `mvm-setpriv --no-new-privs` plus the agent's `PR_CAPBSET_DROP` sweep,
+      claim 3 owns its backend-scoping rationale directly, contributor guidance
+      recognizes every live ADR, and the temporary citation-gate exceptions are
+      removed. Delivery evidence:
+      `specs/sprint/delivery/3318-adr001-authority.md`.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
