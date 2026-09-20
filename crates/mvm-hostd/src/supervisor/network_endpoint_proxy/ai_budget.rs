@@ -318,7 +318,7 @@ mod ai_metering_tests {
     async fn process_allows_request_that_exceeds_budget_then_refuses_the_next() {
         let (service, _metrics) = metered_service(
             Arc::new(TestForwarder::ok(openai_response())),
-            AiPolicy::metered_with_total_budget(5),
+            AiPolicy::metered().with_total_budget(5),
         );
 
         let first = service
@@ -386,7 +386,7 @@ mod ai_metering_tests {
     async fn budget_refusal_only_blocks_known_ai_providers() {
         let (service, _metrics) = metered_service(
             Arc::new(TestForwarder::ok(openai_response())),
-            AiPolicy::metered_with_total_budget(5),
+            AiPolicy::metered().with_total_budget(5),
         );
 
         // First OpenAI call pushes the VM over budget.

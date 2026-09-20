@@ -255,16 +255,16 @@ impl AiPolicy {
         }
     }
 
-    /// A policy with metering on and a total-token budget.
-    pub fn metered_with_total_budget(max_total_tokens: u64) -> Self {
-        Self {
-            metering: true,
-            budget: Some(AiBudget {
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_total_tokens: Some(max_total_tokens),
-            }),
-        }
+    /// Return this policy with metering enabled and a total-token budget.
+    #[must_use]
+    pub fn with_total_budget(mut self, max_total_tokens: u64) -> Self {
+        self.metering = true;
+        self.budget = Some(AiBudget {
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_total_tokens: Some(max_total_tokens),
+        });
+        self
     }
 }
 
@@ -391,18 +391,6 @@ impl NetworkPolicy {
         }
     }
 
-    /// Construct a preset policy with an explicit `egress_mode`. Used
-    /// by callers that want to bake an L7 tier into a template's
-    /// `default_network_policy`.
-    pub fn preset_with_mode(preset: NetworkPreset, mode: EgressMode) -> Self {
-        Self::Preset {
-            preset,
-            egress_mode: Some(mode),
-            ai: None,
-            peers: Vec::new(),
-        }
-    }
-
     pub fn allow_list(rules: Vec<HostPort>) -> Self {
         Self::AllowList {
             rules,
@@ -412,37 +400,8 @@ impl NetworkPolicy {
         }
     }
 
-    /// Construct an allow-list policy with an explicit `egress_mode`.
-    pub fn allow_list_with_mode(rules: Vec<HostPort>, mode: EgressMode) -> Self {
-        Self::AllowList {
-            rules,
-            egress_mode: Some(mode),
-            ai: None,
-            peers: Vec::new(),
-        }
-    }
-
-    /// Construct a preset policy with an AI metering/budget attachment.
-    pub fn preset_with_ai(preset: NetworkPreset, ai: Option<AiPolicy>) -> Self {
-        Self::Preset {
-            preset,
-            egress_mode: None,
-            ai,
-            peers: Vec::new(),
-        }
-    }
-
-    /// Construct an allow-list policy with an AI metering/budget attachment.
-    pub fn allow_list_with_ai(rules: Vec<HostPort>, ai: Option<AiPolicy>) -> Self {
-        Self::AllowList {
-            rules,
-            egress_mode: None,
-            ai,
-            peers: Vec::new(),
-        }
-    }
-
     /// Return this policy with the AI attachment replaced.
+    #[must_use]
     pub fn with_ai(self, ai: Option<AiPolicy>) -> Self {
         match self {
             Self::Preset {
@@ -464,6 +423,29 @@ impl NetworkPolicy {
             } => Self::AllowList {
                 rules,
                 egress_mode,
+                ai,
+                peers,
+            },
+        }
+    }
+
+    /// Return this policy with a baked-in egress-mode override.
+    #[must_use]
+    pub fn with_egress_mode(self, mode: EgressMode) -> Self {
+        match self {
+            Self::Preset {
+                preset, ai, peers, ..
+            } => Self::Preset {
+                preset,
+                egress_mode: Some(mode),
+                ai,
+                peers,
+            },
+            Self::AllowList {
+                rules, ai, peers, ..
+            } => Self::AllowList {
+                rules,
+                egress_mode: Some(mode),
                 ai,
                 peers,
             },
@@ -1182,20 +1164,19 @@ mod tests {
     }
 
     #[test]
-    fn egress_mode_with_explicit_mode_constructors() {
-        let p = NetworkPolicy::preset_with_mode(NetworkPreset::Agent, EgressMode::L3PlusL7);
+    fn egress_mode_builder_sets_mode_for_each_policy_shape() {
+        let p = NetworkPolicy::preset(NetworkPreset::Agent).with_egress_mode(EgressMode::L3PlusL7);
         assert_eq!(p.egress_mode(), Some(EgressMode::L3PlusL7));
 
-        let a = NetworkPolicy::allow_list_with_mode(
-            vec![HostPort::new("api.anthropic.com", 443)],
-            EgressMode::L3Only,
-        );
+        let a = NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)])
+            .with_egress_mode(EgressMode::L3Only);
         assert_eq!(a.egress_mode(), Some(EgressMode::L3Only));
     }
 
     #[test]
     fn egress_mode_serde_roundtrip_with_mode() {
-        let original = NetworkPolicy::preset_with_mode(NetworkPreset::Agent, EgressMode::L3PlusL7);
+        let original =
+            NetworkPolicy::preset(NetworkPreset::Agent).with_egress_mode(EgressMode::L3PlusL7);
         let json = serde_json::to_string(&original).unwrap();
         // Field must be present on the wire when set.
         assert!(json.contains("egress_mode"));
@@ -1465,7 +1446,7 @@ mod tests {
         let policy = NetworkPolicy::AllowList {
             rules: vec![HostPort::new("api.openai.com", 443)],
             egress_mode: None,
-            ai: Some(AiPolicy::metered_with_total_budget(1_000_000)),
+            ai: Some(AiPolicy::metered().with_total_budget(1_000_000)),
             peers: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
@@ -1489,7 +1470,7 @@ mod tests {
         };
         let policy = NetworkPolicy::preset(NetworkPreset::Agent)
             .with_peers(vec![peer.clone()])
-            .with_ai(Some(AiPolicy::metered_with_total_budget(12_000)));
+            .with_ai(Some(AiPolicy::metered().with_total_budget(12_000)));
 
         assert_eq!(policy.peers(), core::slice::from_ref(&peer));
         assert_eq!(

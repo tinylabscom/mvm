@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn ai_policy_from_input_is_attached_to_network_policy() {
         let cfg = MvmConfig::default();
-        let ai = AiPolicy::metered_with_total_budget(100_000);
+        let ai = AiPolicy::metered().with_total_budget(100_000);
         let resolved = resolve_run_grants(GrantInputs {
             ai: Some(&ai),
             ..inputs(&cfg, &[])

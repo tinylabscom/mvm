@@ -4,6 +4,13 @@ Last updated: 2026-09-20
 
 ## In progress
 
+- [ ] **Public function naming cleanup — issue #3315.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
+      70 lexical public `f` / `f_with_*` sibling pairs. The first per-module
+      slice clears all five pairs from `network_policy.rs`; a repository gate
+      ratchets the remaining count at 65 and prevents cleared modules from
+      regressing. The other modules plus D1/D2 remain open.
+
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.
       Epic #3419; workstreams #3420–#3426.

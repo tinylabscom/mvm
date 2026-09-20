@@ -41,7 +41,9 @@ pub fn parse_run_network_preset(
 }
 
 pub fn resolve_ai_policy(token_budget: Option<u64>) -> Option<mvm_core::network_policy::AiPolicy> {
-    token_budget.map(mvm_core::network_policy::AiPolicy::metered_with_total_budget)
+    token_budget.map(|max_total_tokens| {
+        mvm_core::network_policy::AiPolicy::metered().with_total_budget(max_total_tokens)
+    })
 }
 
 pub fn persisted_run_network(
@@ -231,6 +233,18 @@ mod tests {
         assert_eq!(
             policy.resolve_rules(),
             Some(mvm_core::network_policy::NetworkPreset::Agent.rules())
+        );
+    }
+
+    #[test]
+    fn token_budget_resolves_to_a_metered_ai_policy() {
+        assert!(resolve_ai_policy(None).is_none());
+
+        let policy = resolve_ai_policy(Some(12_000)).expect("budget creates an AI policy");
+        assert!(policy.metering);
+        assert_eq!(
+            policy.budget.expect("budget is attached").max_total_tokens,
+            Some(12_000)
         );
     }
 
