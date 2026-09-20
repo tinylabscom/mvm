@@ -704,6 +704,7 @@ pub(super) fn local_pair_cache_ready(dir: &std::path::Path, expected_fingerprint
     cache_ready(dir, expected_fingerprint, LOCAL_PAIR_SOURCE_KIND)
 }
 
+#[cfg(any(feature = "builder-vm", test))]
 fn cache_ready(dir: &std::path::Path, expected_fingerprint: &str, source_kind: &str) -> bool {
     cache_status(dir, expected_fingerprint, source_kind).is_ready()
 }
@@ -783,6 +784,7 @@ struct BuilderVmSourceCacheProvenance {
 pub(super) const STAGE0_SOURCE_KIND: &str = "source_checkout_stage0";
 /// Provenance `source_kind` for a cache installed from a local image pair's
 /// `builder-vm` target; the fingerprint names both checkout identities.
+#[cfg(any(feature = "builder-vm", test))]
 pub(super) const LOCAL_PAIR_SOURCE_KIND: &str = "local_pair";
 
 fn builder_vm_source_cache_provenance(
@@ -921,6 +923,7 @@ pub(super) fn promote_local_pair_cache(
     )
 }
 
+#[cfg(any(feature = "builder-vm", test))]
 fn promote_source_cache(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,
