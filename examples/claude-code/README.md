@@ -107,5 +107,6 @@ mvmctl machine run --runtime node --memory 2G \
 
 ## Updating the pinned binary
 
-Bump `version` in `flake.nix` and refresh both platform checksums from
+Bump `version` in `nix/images/examples/llm-agent/default.nix` and refresh both
+platform checksums from
 `https://downloads.claude.ai/claude-code-releases/<version>/manifest.json`.

@@ -12,6 +12,11 @@
 
 - [ ] **Agent sandbox drive plane.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`; epic #3275.
+      WS0's executable example (#3258) is complete: one pinned native-agent
+      recipe feeds both examples, the new `mkGuest` flake keeps the secret
+      binding in signed Workload IR and exact egress in `mvm.toml`, and the
+      documented-surface suite owns a live offline smoke witness plus audit
+      verification. No raw credential is mounted into the guest.
       WS1 (#3260) is complete in PR #3505: signed plans carry a validated,
       monotonic `DriveGrant`; `DriveOpen` and `DriveFile` reuse the existing
       stream and file planes; host and guest both enforce workspace roots,

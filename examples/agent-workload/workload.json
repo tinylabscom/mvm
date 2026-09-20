@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "id": "agent-workload",
+  "apps": [
+    {
+      "name": "agent-workload",
+      "source": { "kind": "local_path", "path": "." },
+      "image": { "kind": "nix_packages", "packages": [] },
+      "entrypoints": [
+        {
+          "kind": "command",
+          "command": ["/etc/mvm/entrypoint"],
+          "working_dir": "/tmp",
+          "env": {}
+        }
+      ],
+      "resources": {
+        "cpu_cores": 2,
+        "memory_mb": 2048,
+        "rootfs_size_mb": 4096
+      },
+      "env": {
+        "ANTHROPIC_API_KEY": {
+          "kind": "secret_ref",
+          "ref": {
+            "name": "anthropic",
+            "mount": { "kind": "env", "var": "ANTHROPIC_API_KEY" },
+            "auth_type": "bearer",
+            "allowed_hosts": ["api.anthropic.com"]
+          }
+        }
+      }
+    }
+  ]
+}

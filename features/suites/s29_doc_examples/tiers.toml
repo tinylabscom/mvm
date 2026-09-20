@@ -466,6 +466,10 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
+path = "secret rm"
+tier = "live"
+
+[[command]]
 path = "bench"
 tier = "parse"
 reason = "boots VMs in a measurement loop; the runtime is a benchmark budget, not a test budget"

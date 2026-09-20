@@ -3,6 +3,7 @@
 mod admission_audit;
 mod agent_capability;
 mod agent_session;
+mod agent_workload;
 mod apple_container;
 mod asset_identity;
 mod claim;
