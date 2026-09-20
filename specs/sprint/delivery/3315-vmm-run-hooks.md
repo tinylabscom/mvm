@@ -1,6 +1,6 @@
 # Issue #3315 — composable VMM run hooks
 
-Status: implementation complete; validation in progress
+Status: validated; queued delivery pending
 
 ## Outcome
 
@@ -24,5 +24,15 @@ device-ownership model rather than adding an optional behavior to `run`.
 ## Validation
 
 - `cargo test -p mvm-vmm run_accepts_one_composable_hook_set` — passed;
-- full crate, workspace, gated-target, repository-gate, and BDD validation is
-  recorded before merge.
+- `cargo test -p mvm-vmm` — passed (760 tests);
+- `cargo test -p xtask check_public_function_names` — passed (4 focused gate
+  tests);
+- `cargo run -p xtask -- check-public-function-names` — passed (62 remaining
+  sibling pairs; 3 cleared modules);
+- `cargo check --workspace` — passed;
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed;
+- `just check-gated` — passed;
+- `cargo run -p xtask -- check-all` — passed (74 gates);
+- `just bdd` — passed (255 scenarios and 981 steps, with one intentional skip
+  and the optional/live exclusions reported separately);
+- `cargo test --workspace -- --test-threads=1` — passed, including doctests.
