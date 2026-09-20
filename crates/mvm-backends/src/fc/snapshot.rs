@@ -59,6 +59,9 @@ pub fn warm_restore_instance_from_path(
 
     let abs_vms = abs_vms_dir();
     let vm_dir = format!("{}/{name}", abs_vms.trim());
+    // The restore finds the state dir as the socket's parent, so it needs the
+    // socket there rather than in the short fallback namespace.
+    super::ensure_fc_sockets_in_state_dir(&vm_dir, "a Firecracker warm restore")?;
     let socket = std::path::PathBuf::from(format!("{vm_dir}/fc.socket"));
     let io = FirecrackerIO::new(socket);
 
@@ -113,7 +116,7 @@ pub fn create_snapshot_files(
 
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
     let q_socket = shell_quote(&socket);
 
     let vmstate_str = vmstate_path.to_string_lossy();

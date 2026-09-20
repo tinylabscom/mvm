@@ -24,7 +24,7 @@ pub fn pause_vm(name: &str) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
 
     if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
@@ -50,7 +50,7 @@ pub fn resume_vm(name: &str) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
 
     if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
@@ -83,7 +83,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
 
     if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
@@ -116,7 +116,7 @@ pub fn balloon_state(name: &str) -> Result<u32> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
 
     if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
@@ -182,7 +182,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
     let pid_file = format!("{}/fc.pid", abs_dir);
-    let socket = format!("{}/fc.socket", abs_dir);
+    let socket = super::fc_api_socket_path(&abs_dir);
 
     // Tear down this VM's egress substitution moat BEFORE the
     // not-running early return. The endpoint is a live host process holding the

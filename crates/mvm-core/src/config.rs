@@ -609,10 +609,11 @@ pub fn vsock_socket_filename(port: u32) -> String {
 }
 
 /// Conservative per-path byte budget for Unix-domain sockets. macOS caps
-/// `sockaddr_un.sun_path` at roughly 104 bytes including the trailing NUL, so
+/// `sockaddr_un.sun_path` at roughly 104 bytes including the trailing NUL and
+/// Linux at 108, so
 /// keep generated paths at or below 103 bytes and fall back to a short `/tmp`
 /// namespace when a worktree-local `MVM_HOME` would overflow it.
-const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
+pub const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SHORT_VM_SOCKET_ROOT: &str = "/tmp/mvm-sock";
 
 fn unix_socket_path_len(path: &std::path::Path) -> usize {
@@ -627,7 +628,10 @@ fn unix_socket_path_len(path: &std::path::Path) -> usize {
     }
 }
 
-fn fits_unix_socket_path(path: &std::path::Path) -> bool {
+/// Whether `path` fits the Unix-domain socket byte budget. A socket path that
+/// does not cannot be bound or dialled at all: the kernel refuses it before any
+/// file is created, so the only symptom is a socket that never appears.
+pub fn fits_unix_socket_path(path: &std::path::Path) -> bool {
     unix_socket_path_len(path) <= UNIX_SOCKET_PATH_MAX_BYTES
 }
 

@@ -130,8 +130,8 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     // Layer 2: FC API responsive?
     if result.fc_alive {
         let api_output = run_in_vm_stdout(&format!(
-            "sudo curl -sf --unix-socket '{dir}/fc.socket' 'http://localhost/machine-config' 2>/dev/null || echo FAIL",
-            dir = abs_dir,
+            "sudo curl -sf --unix-socket '{socket}' 'http://localhost/machine-config' 2>/dev/null || echo FAIL",
+            socket = super::fc_api_socket_path(&abs_dir),
         ))?;
         let api_output = api_output.trim();
         if api_output != "FAIL" {

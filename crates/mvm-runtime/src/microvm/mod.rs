@@ -29,7 +29,9 @@ pub use snapshot::*;
 // mechanics that read it. Re-exported so `crate::microvm::<name>` and the
 // external `mvm_runtime::microvm::<name>` paths keep resolving.
 pub(crate) use mvm_backends::fc::abs_vms_dir;
-pub use mvm_backends::fc::{fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir};
+pub use mvm_backends::fc::{
+    ensure_fc_sockets_in_state_dir, fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir,
+};
 
 #[cfg(test)]
 mod tests {
