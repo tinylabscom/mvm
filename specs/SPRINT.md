@@ -116,6 +116,15 @@
       environments. Workspace check, zero-warning clippy, Linux cross-target
       and feature-gated checks, and all 68 repository gates pass.
 
+- [x] **Preserve libkrunfw kernel addresses in x86_64 Stage 0 — issue #3532.**
+      Mark bundled-kernel contexts explicitly and wrap the x86_64 libkrunfw
+      payload in an ELF segment carrying the firmware's declared load and entry
+      addresses; aarch64 remains raw. Architecture-specific regressions pin the
+      decision, and a cold Ubuntu 24.04 KVM run with libkrun v1.19.4 and
+      libkrunfw v5.6.1 reached `stage0-init: done; halting` after producing the
+      builder image instead of immediately triple-faulting; the complete cold
+      bootstrap command exited 0.
+
 - [x] **Make claim-control gaps mechanically honest — issue #3316.**
       Claim 11 now states the shipped seal-time CVE/SBOM and admission-integrity
       contract, while the unused severity gate is pinned as dormant. Function

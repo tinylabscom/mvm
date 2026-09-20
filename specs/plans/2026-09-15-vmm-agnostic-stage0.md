@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: W1–W8 COMPLETE** (HVF Stage 0 and x86_64 Firecracker Stage 0 + builds live-proven — see Validation).
+**Status: W1–W9 COMPLETE** (HVF, x86_64 Firecracker, and x86_64 libkrun Stage 0 live-proven — see Validation).
 
 Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
 last builder path that talked to a VMM directly instead of through the
@@ -143,6 +143,12 @@ appends the token unconditionally, fixes it for every backend.
   so Linux auto-detection can select Firecracker instead of being overwritten
   with QEMU. Regression coverage verifies both an unset backend and an explicit
   Firecracker choice.
+- [x] **W9 — preserve libkrunfw's x86 kernel addresses (issue #3532).**
+  Bundled-kernel contexts now identify their source explicitly. On x86_64 the
+  extracted libkrunfw payload is wrapped in a minimal ELF whose load segment
+  and entry point carry the addresses returned by libkrunfw; aarch64 keeps the
+  raw Image path. Exact cache comparison replaces stale raw artifacts, and
+  architecture-specific tests pin the format and addresses.
 
 ## Deliberately out of scope
 - **Deleting the libkrun Stage 0 body.** It stays as the second working
@@ -182,9 +188,14 @@ cache.nixos.org through the guest's egress channel. The first attempt hung at
 Stage 0's halt; that is the W7 halt fix. aarch64 Firecracker is untested.
 `specs/sprint/delivery/3324-firecracker-builder-image.md` carries the evidence.
 
-The libkrun Stage 0 body is
-untouched and reachable by name, but it is no longer a fallback — nothing lowers
-onto it.
+**libkrun Stage 0 is live-proven on x86_64** (W9). On an Ubuntu 24.04 KVM host
+with libkrun v1.19.4 built with `BLK=1`, libkrunfw v5.6.1, and a cold
+`MVM_HOME`, the guest entered `stage0-init`, mounted the Stage 0 store, built
+the x86_64 builder image, stayed within the 24 GiB store cap, and printed
+`stage0-init: done; halting`; the complete cold bootstrap command exited 0.
+The old path stopped at an immediate
+`KVM_EXIT_SHUTDOWN` with a zero-byte console. The explicit libkrun body remains
+reachable by name but is not a fallback — nothing lowers onto it.
 
 ## Follow-ups
 

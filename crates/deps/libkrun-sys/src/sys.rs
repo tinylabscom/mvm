@@ -23,6 +23,7 @@ use std::ffi::CString;
 use std::path::Path;
 
 use crate::Error;
+use crate::bundled_kernel::artifact_for_host;
 use mvm_core::kernel_format::KernelFormat;
 
 mod bindings {
@@ -330,11 +331,13 @@ impl Drop for Context {
 // library (`libkrunfw.5.dylib` on macOS, `libkrunfw.so.5` on Linux).
 // The symbol `krunfw_get_kernel` returns a pointer to those kernel
 // bytes plus the load + entry addresses libkrun expects when booting
-// against them.
+// them.
 //
-// We extract the kernel exactly once per `mvmctl` process at runtime
-// and write it to a stable cache path, then hand that path to
-// libkrun's `KrunContext.kernel_path`. The bundled kernel is the
+// We extract the kernel at runtime and write it to a stable cache path,
+// then hand that path to libkrun's `KrunContext.kernel_path`. On x86_64,
+// the flat bytes are wrapped in an ELF segment carrying libkrunfw's load
+// and entry addresses because libkrun's raw loader substitutes incompatible
+// hard-coded addresses. On aarch64 the payload remains raw. The bundled kernel is the
 // only kernel where libkrun's TSI mode (Transparent Socket
 // Impersonation — the AF_INET-over-vsock path) is known to work
 // correctly. Stock nixpkgs kernels lack the patches; our in-repo
@@ -350,19 +353,20 @@ unsafe extern "C" {
 }
 
 /// Result of [`extract_bundled_kernel`]: a path to the kernel bytes on
-/// disk plus the load + entry addresses libkrun's `set_kernel` call
-/// will pair with that path.
+/// disk plus the load + entry addresses declared by libkrunfw and the
+/// format to pass to libkrun's `set_kernel` call.
 #[derive(Debug, Clone)]
 pub struct BundledKernel {
     pub path: std::path::PathBuf,
     pub load_addr: u64,
     pub entry_addr: u64,
     pub size: usize,
+    pub format: KernelFormat,
 }
 
 /// Extract the TSI-patched kernel bundled in `libkrunfw` and write it
-/// to `target_path`. Idempotent — if `target_path` already exists with
-/// the same byte length the call short-circuits and returns the cached
+/// to `target_path`. Idempotent — if `target_path` already contains the
+/// expected host-format artifact the call preserves it and returns the
 /// load/entry addresses.
 ///
 /// `target_path` SHOULD be a stable per-host location (e.g.
@@ -391,6 +395,7 @@ pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error
     // bytes inside libkrunfw's `.rodata` (lifetime = process). Treating
     // the slice as read-only is correct.
     let bytes = unsafe { std::slice::from_raw_parts(bytes_ptr, size) };
+    let artifact = artifact_for_host(bytes, load_addr, entry_addr)?;
 
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::Io {
@@ -401,15 +406,14 @@ pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error
         })?;
     }
 
-    let needs_write = match std::fs::metadata(target_path) {
-        Ok(meta) => meta.len() != size as u64,
-        Err(_) => true,
-    };
+    let needs_write = std::fs::read(target_path)
+        .map(|cached| cached != artifact.bytes)
+        .unwrap_or(true);
     if needs_write {
         // Write atomically — staging file + rename so a concurrent
         // mvmctl process can't observe a torn write.
         let staging = target_path.with_extension("staging");
-        std::fs::write(&staging, bytes).map_err(|e| Error::Io {
+        std::fs::write(&staging, &artifact.bytes).map_err(|e| Error::Io {
             context: format!("writing libkrunfw kernel to {}: {e}", staging.display()),
         })?;
         std::fs::rename(&staging, target_path).map_err(|e| Error::Io {
@@ -426,6 +430,7 @@ pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error
         load_addr,
         entry_addr,
         size,
+        format: artifact.format,
     })
 }
 

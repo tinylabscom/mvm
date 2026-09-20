@@ -341,8 +341,12 @@ Last updated: 2026-09-19
       bootstrap kernel moved to a source pin. W7 (#3324) gives Firecracker a
       builder-image resolver and stops guests that halt instead of powering
       off; **x86_64 Firecracker Stage 0 and builder shell jobs are
-      live-proven** on a KVM host. Its persistent builder still refuses by
-      name, and aarch64 Firecracker is untested.
+      live-proven** on a KVM host. W8 (#3390) preserves the caller's backend
+      selection across bootstrap helpers. W9 (#3532) preserves libkrunfw's
+      declared load and entry addresses in an x86_64 ELF wrapper; **x86_64
+      libkrun Stage 0 is live-proven** through the clean halt marker on a cold
+      KVM host. Its persistent builder still refuses Firecracker by name, and
+      aarch64 Firecracker is untested.
 
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
