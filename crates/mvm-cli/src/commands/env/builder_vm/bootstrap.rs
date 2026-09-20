@@ -172,7 +172,7 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
 /// source. A configured path that does not resolve is an error here, never a
 /// quiet fall-through to the in-tree flake.
 #[cfg(feature = "builder-vm")]
-pub(super) fn selected_local_checkout()
+pub(crate) fn selected_local_checkout()
 -> Result<Option<mvm_build::image_source::LocalImageCheckout>> {
     use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
     Ok(

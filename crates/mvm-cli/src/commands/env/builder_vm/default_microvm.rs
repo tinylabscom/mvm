@@ -237,6 +237,30 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
         format!("{cache_dir}/rootfs.verity"),
         format!("{cache_dir}/rootfs.roothash"),
     ];
+    // A selected checkout is the source for the default image: an existing
+    // cache only answers when its stamped pair identity is the pair on disk
+    // now, and the fetch arm is refused rather than silently overriding the
+    // selector. An invalid configured path is an error here, never a quiet
+    // fall-through to the published set.
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
+        if boot_image_select::resolve_env_override() == Some(BootImageAcquisition::Fetch) {
+            anyhow::bail!(
+                "{}=fetch asks for the published image set while {} names a local image                  checkout; the selector is explicit in both directions — unset {} for                  this run to compare against a signed release",
+                boot_image_select::MVM_BOOT_IMAGE_ENV,
+                mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+                mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            );
+        }
+        return ensure_pair_default_image(&checkout, cache_dir, DefaultMicrovmVariant::Prod);
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    if mvm_build::image_source::configured_images_dir().is_some() {
+        anyhow::bail!(
+            "{} names a local image checkout, but this mvmctl was built without the              `builder-vm` feature and cannot build the default image from it",
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+        );
+    }
     if required.iter().all(|p| std::path::Path::new(p).exists()) {
         return Ok((kernel_path, rootfs_path));
     }
@@ -264,13 +288,14 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     }
 }
 
-/// Whether this binary can build an image from an in-repo flake.
+/// Whether this binary can build an image from source: the in-repo flake, or
+/// a local image checkout the selector names.
 ///
 /// The same predicate the acquisition path has always used, named so the
 /// selector reads as policy applied to a fact rather than re-deriving the fact.
 #[cfg(feature = "builder-vm")]
 fn source_checkout_available() -> bool {
-    find_builder_vm_flake().is_ok()
+    super::images_built_from_source()
 }
 
 #[cfg(not(feature = "builder-vm"))]
@@ -325,6 +350,82 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
     }
     ui::info("Building the dev default microVM image locally (dev mode)...");
     build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
+}
+
+/// Serve the default image from the pair's `default-tenant` target: install
+/// the verified set into the variant's cache, stamped with the pair identity,
+/// and answer an unchanged pair from the install without a cache lookup.
+///
+/// Only the prod variant has a pair contract: the sibling image repository
+/// publishes the `default` attribute, and the dev variant's writable image
+/// is an in-tree convenience with no counterpart there — it keeps building
+/// from the in-tree flake.
+#[cfg(feature = "builder-vm")]
+fn ensure_pair_default_image(
+    checkout: &mvm_build::image_source::LocalImageCheckout,
+    cache_dir: &str,
+    variant: DefaultMicrovmVariant,
+) -> Result<(String, String)> {
+    use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget};
+    let target = ImageBuildTarget {
+        role: ImageBuildRole::DefaultTenant,
+        attr: FlakeAttr::new("default").expect("default is a valid flake attribute"),
+    };
+    let fingerprint = super::local_pair::pair_fingerprint(&super::local_pair::derive_pair_key(
+        checkout, &target,
+    )?);
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+    if variant
+        .required_outputs()
+        .iter()
+        .all(|label| std::path::Path::new(&format!("{cache_dir}/{label}")).exists())
+        && installed_pair_fingerprint(std::path::Path::new(cache_dir)).as_deref()
+            == Some(fingerprint.as_str())
+    {
+        return Ok((kernel_path, rootfs_path));
+    }
+
+    let build = super::local_pair::ensure_pair_built(checkout, target)?;
+    let fingerprint = super::local_pair::pair_fingerprint(&build.key);
+    std::fs::create_dir_all(cache_dir)
+        .with_context(|| format!("creating default-image cache dir {cache_dir}"))?;
+    for label in variant.required_outputs() {
+        let from = build.entry.dir.join(label);
+        std::fs::copy(&from, format!("{cache_dir}/{label}"))
+            .with_context(|| format!("copying {} into {cache_dir}", from.display()))?;
+    }
+    // Cache entries are sealed read-only; the install owns its copies and
+    // the sidecar is about to be rewritten with the pair identity.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            format!("{cache_dir}/{}", mvm_build::builder_vm::SIDECAR_FILENAME),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .with_context(|| format!("lifting the sidecar permissions in {cache_dir}"))?;
+    }
+    // The sidecar names the pair identity; the next run compares it before
+    // deciding the install answers, so a changed pair reinstalls and a
+    // fetched or in-tree image is never mistaken for a pair build.
+    crate::commands::image::boot::cache::stamp_provenance(
+        std::path::Path::new(cache_dir),
+        &crate::commands::image::boot::cache::AcquiredProvenance {
+            image_tag: fingerprint,
+            source: "local-pair",
+            acquired_at: mvm_core::util::time::utc_now(),
+        },
+    )?;
+    Ok((kernel_path, rootfs_path))
+}
+
+/// The pair fingerprint a cache dir was installed under, when it was
+/// installed from a pair. Anything else — an in-tree build, a fetched
+/// prebuilt — is not a pair answer and returns `None`.
+fn installed_pair_fingerprint(cache_dir: &std::path::Path) -> Option<String> {
+    let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(cache_dir).ok()??;
+    (sidecar.source == "local-pair").then_some(sidecar.image_tag)
 }
 
 /// The two boot-image variants the cache can hold.
@@ -536,4 +637,205 @@ fn download_default_microvm_image(
 
     ui::success("Default microVM image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod pair_default_image_tests {
+    use super::*;
+    use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact, produced_sidecar};
+    use mvm_build::image_source::ImageBuildRole;
+    use mvm_core::util::test_env::TestEnv;
+
+    /// The five default-tenant artifacts, with the sizes and ext4 magic the
+    /// artifact validator requires, and a producer-shaped sidecar.
+    fn default_tenant_files() -> Vec<TestArtifact> {
+        const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
+        let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
+        vmlinux.extend_from_slice(b"\n");
+        let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
+        rootfs[EXT4_MAGIC_OFFSET] = 0x53;
+        rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
+        vec![
+            TestArtifact {
+                name: "vmlinux",
+                bytes: vmlinux,
+                format: "kernel:image",
+            },
+            TestArtifact {
+                name: "rootfs.ext4",
+                bytes: rootfs,
+                format: "ext4",
+            },
+            TestArtifact {
+                name: "rootfs.verity",
+                bytes: b"verity tree\n".to_vec(),
+                format: "verity_hash_tree",
+            },
+            TestArtifact {
+                name: "rootfs.roothash",
+                bytes: b"root hash\n".to_vec(),
+                format: "verity_root_hash",
+            },
+            TestArtifact {
+                name: "mvm-meta.json",
+                bytes: produced_sidecar().as_bytes().to_vec(),
+                format: "json",
+            },
+        ]
+    }
+
+    /// Publish the pair's default-tenant set into the current MVM_HOME's
+    /// local image cache (set `MVM_HOME` before calling). The set is keyed on
+    /// the mvm checkout this test binary was compiled from, the same input
+    /// the build path derives, so the later lookup hits.
+    fn publish_default_tenant(pair: &Pair) -> mvm_build::image_source::CachedImageSet {
+        use mvm_core::arch::GuestArch;
+        let target = Pair::target(ImageBuildRole::DefaultTenant, "default");
+        let mvm_root = mvm_build::image_source::mvm_source_checkout(
+            mvm_build::artifact_acquisition::compiled_channel(),
+        )
+        .expect("the compiled-from mvm checkout is on disk");
+        let key = mvm_build::image_source::LocalImageCacheKey::derive(
+            &mvm_build::image_source::KeyInputs {
+                images: &pair.images,
+                mvm_checkout: &mvm_root,
+                target: &target,
+                arch: GuestArch::host(),
+            },
+        )
+        .expect("key derives");
+        let cache = mvm_build::image_source::LocalImageCache::open_default();
+        let contract =
+            mvm_build::image_source::contract_for(&target).expect("default-tenant contract");
+        let ctx = mvm_build::image_source::EntryContext {
+            images: &pair.images,
+            mvm_checkout: &mvm_root,
+            roles: contract.set_roles,
+        };
+        let staged = cache.stage(&key).expect("stage");
+        Pair::emit_set(
+            staged.dir(),
+            &key.checkouts,
+            key.arch,
+            &[
+                (
+                    "workload_kernel",
+                    Some("linux_direct"),
+                    vec![default_tenant_files().remove(0)],
+                    &["virtio_vsock"],
+                ),
+                (
+                    "workload_rootfs",
+                    None,
+                    default_tenant_files().split_off(1),
+                    &["virtio_blk", "dm_verity"],
+                ),
+            ],
+        );
+        cache
+            .publish(staged, &ctx)
+            .expect("publish")
+            .entry()
+            .clone()
+    }
+
+    #[test]
+    fn the_probe_reads_only_a_pair_installed_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(installed_pair_fingerprint(dir.path()), None);
+
+        std::fs::write(
+            dir.path().join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            produced_sidecar(),
+        )
+        .unwrap();
+        assert_eq!(installed_pair_fingerprint(dir.path()), None);
+
+        crate::commands::image::boot::cache::stamp_provenance(
+            dir.path(),
+            &crate::commands::image::boot::cache::AcquiredProvenance {
+                image_tag: "fingerprint".to_string(),
+                source: "local-pair",
+                acquired_at: "now".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            installed_pair_fingerprint(dir.path()).as_deref(),
+            Some("fingerprint")
+        );
+    }
+
+    #[test]
+    fn a_pair_default_image_installs_and_an_unchanged_pair_reanswers() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        let _entry = publish_default_tenant(&pair);
+        let cache_dir = pair.tmp.path().join("default-image");
+
+        let (kernel, rootfs) = ensure_pair_default_image(
+            &pair.images,
+            &cache_dir.display().to_string(),
+            DefaultMicrovmVariant::Prod,
+        )
+        .expect("install the pair default image");
+        assert!(std::path::Path::new(&kernel).is_file());
+        assert!(std::path::Path::new(&rootfs).is_file());
+        for label in DefaultMicrovmVariant::Prod.required_outputs() {
+            assert!(
+                cache_dir.join(label).is_file(),
+                "installed default image must carry {label}"
+            );
+        }
+        let fingerprint = crate::commands::env::builder_vm::local_pair::pair_fingerprint(
+            &crate::commands::env::builder_vm::local_pair::derive_pair_key(
+                &pair.images,
+                &Pair::target(ImageBuildRole::DefaultTenant, "default"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            installed_pair_fingerprint(&cache_dir).as_deref(),
+            Some(fingerprint.as_str()),
+            "the install must stamp the pair identity"
+        );
+
+        // Remove the cache entry backing the install: a re-answer that only
+        // consults the install must still succeed.
+        std::fs::remove_dir_all(mvm_build::image_source::LocalImageCache::open_default().root())
+            .unwrap();
+        let (again_kernel, again_rootfs) = ensure_pair_default_image(
+            &pair.images,
+            &cache_dir.display().to_string(),
+            DefaultMicrovmVariant::Prod,
+        )
+        .expect("an unchanged pair answers from the install");
+        assert_eq!(kernel, again_kernel);
+        assert_eq!(rootfs, again_rootfs);
+    }
+
+    #[test]
+    fn fetching_the_published_set_is_refused_while_a_checkout_is_selected() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            pair.images.root(),
+        );
+        env.set(mvm_build::boot_image_select::MVM_BOOT_IMAGE_ENV, "fetch");
+        let cache_dir = pair.tmp.path().join("default-image");
+        let err = ensure_default_microvm_prod_image(&cache_dir.display().to_string())
+            .expect_err("fetch under a selected checkout must refuse");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(mvm_build::image_source::MVM_IMAGES_DIR_ENV),
+            "{rendered}"
+        );
+        assert!(
+            !cache_dir.join("vmlinux").exists(),
+            "a refusal must not produce image artifacts"
+        );
+    }
 }

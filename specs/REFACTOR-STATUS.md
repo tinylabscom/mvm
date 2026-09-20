@@ -258,7 +258,10 @@ Last updated: 2026-09-20
             checkout's `builder-vm` target, built once by the shared
             local-image-set build and installed under a `local_pair`
             provenance fingerprint; the tool bootstrap is exempt.
-      - [ ] W5g–W5m #3364: each remaining in-tree image consumer moved onto
+      - [x] W5g #3364: the prod default workload image reads the selector —
+            the pair's `default-tenant` target installs under a stamped pair
+            identity; fetch under a selected checkout is refused.
+      - [ ] W5h–W5m #3364: each remaining in-tree image consumer moved onto
             the selector.
 
 - [x] **Hermetic published-documentation link gate.**

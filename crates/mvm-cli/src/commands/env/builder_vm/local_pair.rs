@@ -28,6 +28,27 @@ pub(crate) fn pair_fingerprint(key: &LocalImageCacheKey) -> String {
     digest.as_str().to_string()
 }
 
+/// Derive the cache key for `target` under the pair as it is now. Used by
+/// consumers that need the pair's identity before deciding whether a build
+/// is needed; refuses a checkout that moved since it was selected.
+pub(crate) fn derive_pair_key(
+    checkout: &LocalImageCheckout,
+    target: &ImageBuildTarget,
+) -> Result<LocalImageCacheKey> {
+    let channel = mvm_build::artifact_acquisition::compiled_channel();
+    let mvm_root =
+        mvm_build::image_source::mvm_source_checkout(channel).context(
+            "a local image set is built against the mvm checkout this binary was compiled              from, and that checkout is no longer on disk",
+        )?;
+    LocalImageCacheKey::derive(&mvm_build::image_source::KeyInputs {
+        images: checkout,
+        mvm_checkout: &mvm_root,
+        target,
+        arch: GuestArch::host(),
+    })
+    .context("reading the pair's cache key inputs")
+}
+
 /// Build `target` for the pair (answering a cache hit without booting
 /// anything) and return the entry and the key it answers.
 ///
@@ -99,184 +120,41 @@ pub(crate) fn install_pair_builder_vm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_build::image_source::{
-        ImageBuildRole, ImageBuildTarget, KeyInputs, LocalImageCache, LocalImageCacheKey,
-    };
-    use mvm_core::image_set::LOCAL_SET_MANIFEST_NAME;
+    use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact, write};
+    use mvm_build::image_source::ImageBuildRole;
     use mvm_core::util::test_env::TestEnv;
-    use std::path::PathBuf;
 
-    const MVM_CARGO_TOML: &str = r#"[workspace]
-
-[workspace.metadata.mvm.toolchain]
-rust = "nightly-2026-08-25"
-zig = "0.14.1"
-cargo-zigbuild = "0.20.1"
-
-[workspace.metadata.mvm.toolchain.targets]
-aarch64 = "aarch64-unknown-linux-musl"
-x86_64 = "x86-unknown-linux-musl"
-"#;
-
-    fn write(path: &Path, bytes: &[u8]) {
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, bytes).expect("write");
-    }
-
-    fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-    }
-
-    /// A synthetic mvm-images checkout: the layout markers as regular files,
-    /// plus any `image.nix` edit, committed before the selection records the
-    /// identity.
-    fn images_checkout(dir: &Path, builder_vm_image: &str) {
-        std::fs::create_dir_all(dir).expect("mkdir images");
-        for marker in mvm_build::image_source::IMAGES_CHECKOUT_MARKERS {
-            write(&dir.join(marker), format!("# {marker}\n").as_bytes());
-        }
-        write(
-            &dir.join("images/builder-vm/image.nix"),
-            builder_vm_image.as_bytes(),
-        );
-        git(dir, &["init", "-q"]);
-        git(dir, &["add", "-A"]);
-        git(dir, &["commit", "-q", "-m", "images"]);
-    }
-
-    /// A synthetic mvm checkout with the toolchain tables key derivation reads.
-    fn mvm_checkout(dir: &Path) {
-        write(&dir.join("Cargo.toml"), MVM_CARGO_TOML.as_bytes());
-        write(
-            &dir.join("rust-toolchain.toml"),
-            b"[toolchain]\nchannel = \"nightly-2026-08-25\"\n",
-        );
-        git(dir, &["init", "-q"]);
-        git(dir, &["add", "-A"]);
-        git(dir, &["commit", "-q", "-m", "mvm"]);
-    }
-
-    fn builder_vm_target() -> ImageBuildTarget {
-        ImageBuildTarget {
-            role: ImageBuildRole::BuilderVm,
-            attr: mvm_build::image_source::FlakeAttr::new("default").unwrap(),
-        }
-    }
-
-    /// The builder-vm member manifest the image repository's emitter writes,
-    /// over the four contract artifacts.
-    fn emit_builder_vm_set(
-        dir: &Path,
-        checkouts: &mvm_core::image_set::LocalCheckouts,
-        arch: GuestArch,
-    ) {
-        use mvm_core::packs::Sha256Hex;
-        // The sizes and the ext4 magic satisfy the same artifact validator the
-        // Stage 0 cache promotion runs.
+    /// Builder-vm artifacts with the sizes and ext4 magic the Stage 0 cache
+    /// validator requires.
+    fn builder_vm_files() -> Vec<TestArtifact> {
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
         vmlinux.extend_from_slice(b"\n");
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let files: Vec<(&str, Vec<u8>, &str)> = vec![
-            ("vmlinux", vmlinux, "kernel:image"),
-            ("rootfs.ext4", rootfs, "ext4"),
-            ("cmdline.txt", b"console=hvc0\n".to_vec(), "text"),
-            ("manifest.json", b"{}\n".to_vec(), "json"),
-        ];
-        let mut artifacts = Vec::new();
-        for (name, bytes, format) in &files {
-            write(&dir.join(name), bytes);
-            let (kind, fmt) = format.split_once(':').unwrap_or(("file", format));
-            artifacts.push(serde_json::json!({
-                "name": name,
-                "format": if kind == "kernel" { serde_json::json!({"kernel": fmt}) } else { serde_json::json!(fmt) },
-                "sha256": Sha256Hex::from_bytes(bytes).as_str(),
-                "size": bytes.len(),
-            }));
-        }
-        let manifest = serde_json::json!({
-            "schema_version": 1,
-            "set_version": "0.0.0-local",
-            "issued_at": "2026-01-01T00:00:00Z",
-            "producer": {"local_checkouts": checkouts},
-            "mvm_source_commit": checkouts.mvm.commit,
-            "compatibility": {
-                "guest_agent_protocol": {"min": 2, "max": 2},
-                "builder_cache_contract": 1
+        vec![
+            TestArtifact {
+                name: "vmlinux",
+                bytes: vmlinux,
+                format: "kernel:image",
             },
-            "nix_inputs": {
-                "flake_locks": [{
-                    "reference": "mvm-images:flake.lock",
-                    "lock_hash": Sha256Hex::from_bytes(b"lock").as_str()
-                }],
-                "source_revisions": []
+            TestArtifact {
+                name: "rootfs.ext4",
+                bytes: rootfs,
+                format: "ext4",
             },
-            "members": [{
-                "role": "builder_vm",
-                "target": {"arch": arch.to_string()},
-                "boot_protocol": "linux_direct",
-                "artifacts": artifacts,
-                "required_capabilities": ["virtio_vsock", "virtio_blk"]
-            }]
-        });
-        write(
-            &dir.join(LOCAL_SET_MANIFEST_NAME),
-            &serde_json::to_vec_pretty(&manifest).expect("manifest json"),
-        );
-    }
-
-    struct Pair {
-        _tmp: tempfile::TempDir,
-        images: mvm_build::image_source::LocalImageCheckout,
-        mvm: PathBuf,
-    }
-
-    impl Pair {
-        fn new() -> Self {
-            Self::new_with_image("# builder-vm image\n")
-        }
-
-        fn new_with_image(builder_vm_image: &str) -> Self {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let images_dir = tmp.path().join("mvm-images");
-            images_checkout(&images_dir, builder_vm_image);
-            let mvm = tmp.path().join("mvm");
-            mvm_checkout(&mvm);
-            let images = mvm_build::image_source::LocalImageCheckout::open(&images_dir)
-                .expect("synthetic images checkout opens");
-            Self {
-                _tmp: tmp,
-                images,
-                mvm,
-            }
-        }
-
-        fn key(&self, cache_arch: GuestArch) -> LocalImageCacheKey {
-            LocalImageCacheKey::derive(&KeyInputs {
-                images: &self.images,
-                mvm_checkout: &self.mvm,
-                target: &builder_vm_target(),
-                arch: cache_arch,
-            })
-            .expect("key derives from the synthetic pair")
-        }
+            TestArtifact {
+                name: "cmdline.txt",
+                bytes: b"console=hvc0\n".to_vec(),
+                format: "text",
+            },
+            TestArtifact {
+                name: "manifest.json",
+                bytes: b"{}\n".to_vec(),
+                format: "json",
+            },
+        ]
     }
 
     #[test]
@@ -316,7 +194,7 @@ x86_64 = "x86-unknown-linux-musl"
     #[test]
     fn the_pair_fingerprint_is_the_key_digest_and_moves_with_a_checkout_edit() {
         let pair = Pair::new();
-        let key = pair.key(GuestArch::host());
+        let key = pair.key(ImageBuildRole::BuilderVm, "default");
         let first = pair_fingerprint(&key);
         assert_eq!(first, pair_fingerprint(&key));
 
@@ -330,14 +208,14 @@ x86_64 = "x86-unknown-linux-musl"
         );
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pair.key(GuestArch::host());
+                pair.key(ImageBuildRole::BuilderVm, "default");
             }))
             .is_err(),
             "deriving a key from an edited selection must refuse"
         );
 
         let edited = Pair::new_with_image("# builder-vm image, edited\n");
-        let second = pair_fingerprint(&edited.key(GuestArch::host()));
+        let second = pair_fingerprint(&edited.key(ImageBuildRole::BuilderVm, "default"));
         assert_ne!(
             first, second,
             "an image edit must change the pair fingerprint"
@@ -348,18 +226,29 @@ x86_64 = "x86-unknown-linux-musl"
     fn installing_a_pair_entry_writes_a_ready_local_pair_cache() {
         let mut env = TestEnv::new();
         let pair = Pair::new();
-        let arch = GuestArch::host();
-        let key = pair.key(arch);
-        let cache = LocalImageCache::at(pair.mvm.parent().expect("tmp").join("cache"));
-        let contract = mvm_build::image_source::contract_for(&builder_vm_target())
-            .expect("builder-vm has a contract");
+        let target = Pair::target(ImageBuildRole::BuilderVm, "default");
+        let key = pair.key(ImageBuildRole::BuilderVm, "default");
+        let cache = mvm_build::image_source::LocalImageCache::at(
+            pair.mvm.parent().expect("tmp").join("cache"),
+        );
+        let contract = mvm_build::image_source::contract_for(&target).expect("builder-vm contract");
         let ctx = mvm_build::image_source::EntryContext {
             images: &pair.images,
             mvm_checkout: &pair.mvm,
             roles: contract.set_roles,
         };
         let staged = cache.stage(&key).expect("stage");
-        emit_builder_vm_set(staged.dir(), &key.checkouts, arch);
+        Pair::emit_set(
+            staged.dir(),
+            &key.checkouts,
+            key.arch,
+            &[(
+                "builder_vm",
+                Some("linux_direct"),
+                builder_vm_files(),
+                &["virtio_vsock", "virtio_blk"],
+            )],
+        );
         let published = cache.publish(staged, &ctx).expect("publish");
         let entry = published.entry().clone();
 
@@ -369,9 +258,9 @@ x86_64 = "x86-unknown-linux-musl"
         std::fs::create_dir_all(&home).expect("mkdir home");
         env.set("MVM_HOME", &home);
         let fingerprint = pair_fingerprint(&key);
-        install_pair_builder_vm(&entry, &arch.to_string(), &fingerprint).expect("install");
+        install_pair_builder_vm(&entry, &key.arch.to_string(), &fingerprint).expect("install");
 
-        let out_dir = home.join("cache/builder-vm").join(arch.to_string());
+        let out_dir = home.join("cache/builder-vm").join(key.arch.to_string());
         assert!(
             super::stage0_cache::local_pair_cache_ready(&out_dir, &fingerprint),
             "the installed cache must be ready under the pair fingerprint"

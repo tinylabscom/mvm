@@ -710,8 +710,15 @@ Delivery slices, one PR each:
       under a `local_pair` provenance fingerprint; the in-tree/published tool
       bootstrap is exempt so image builds never recurse; `stage0-init` reads
       its flake namespace from the build conf.
-- [ ] W5g (`mvm`) — the default workload image (`default_microvm.rs`) and the
+- [x] W5g (`mvm`) — the default workload image (`default_microvm.rs`) and the
       `MVM_BOOT_IMAGE=build|fetch` resolver.
+      Landed as a pair-routed prod default image: the pair's
+      `default-tenant.default` installs under a stamped pair identity that an
+      unchanged pair re-answers and a changed pair reinstalls; fetch under a
+      selected checkout is refused with the way out named; the resolver's
+      auto-detect input is "images buildable from source" through one shared
+      predicate. The dev variant keeps the in-tree build: the sibling
+      repository publishes no dev attribute yet.
 - [ ] W5h (`mvm`) — kernel acquisition and the initramfs.
 - [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
       the duplicate checkout detection in `commands/runtime_overlay.rs` and

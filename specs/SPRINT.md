@@ -321,6 +321,15 @@
       checkout; the in-tree/published tool bootstrap is exempt, so building a
       local image set never routes through the image it builds; `stage0-init`
       takes its flake namespace from the build conf instead of a hard-code.
+      W5 (#3364) slice W5g: the prod default workload image routes through
+      the selector — the pair's `default-tenant` target installs under a
+      sidecar stamped with the pair identity, which an unchanged pair
+      re-answers and a changed pair reinstalls; `MVM_BOOT_IMAGE=fetch` under
+      a selected checkout refuses with the way out named, and the
+      resolver's auto-detect reads one shared "images buildable from source"
+      predicate that `image boot update` also uses. The dev variant keeps
+      the in-tree build until the sibling repository publishes a dev
+      attribute.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
