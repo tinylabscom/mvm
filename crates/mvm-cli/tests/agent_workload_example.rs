@@ -72,7 +72,11 @@ fn agent_workload_documents_and_live_tests_the_secure_run() {
     assert!(readme.contains("--from-workload-ir examples/agent-workload/workload.json"));
     assert!(readme.contains("secret.substituted"));
     assert!(readme.contains("trust audit verify"));
-    assert!(!readme.contains("--mount \"$HOME/.mvm/config/secrets"));
+    assert!(
+        !readme
+            .lines()
+            .any(|line| line.contains("--mount") && line.contains(":/data/secrets:ro"))
+    );
 
     let feature = read(
         &workspace_root().join("features/suites/s32_documented_surface/agent_workload.feature"),
