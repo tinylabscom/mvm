@@ -80,10 +80,11 @@ Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https:/
       `printf 'sk-ant-…' > …` + `--mount` recipe. The manual file-mount pattern
       may stay documented only as an explicitly-labelled escape for
       non-HTTP credentials, and must not be the agent example.
-- [ ] Add `examples/agent-workload/` — a `mkGuest` flake booting an agent CLI,
-      a `mvm.toml` declaring the secret binding and egress preset, and a README
-      showing the full `machine run` invocation and the audit entries it emits.
-- [ ] Create `nix/images/examples/llm-agent/` so
+- [x] Add `examples/agent-workload/` — a `mkGuest` flake booting an agent CLI,
+      a `mvm.toml` declaring exact egress and AI metering, a signed Workload IR
+      carrying the `SecretRef`, and a README showing the full `machine run`
+      invocation and the audit entries it emits.
+- [x] Create `nix/images/examples/llm-agent/` so
       `crates/mvm-contract/src/policy/network_policy.rs:111` resolves, or delete
       the reference. Do not leave a doc comment pointing at an absent path.
 - [x] Write `public/src/content/docs/guides/agent-sandbox.md`: what the guest
@@ -94,8 +95,9 @@ Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https:/
       make true.
 - [x] Correct the framing in `public/src/content/docs/guides/agent-tool-contract.mdx:93-160`
       so an unshipped surface is not presented as shipped.
-- [ ] Add the example to `just e2e-docs` so the documented commands are
-      executed, not just written.
+- [x] Add the example to `just e2e-docs` so the documented commands are
+      executed, not just written. Its `@live` documented-surface scenario boots
+      the real flake with a test-only secret address and makes no outbound call.
 
 ## WS-S — Make substitution work for a real agent
 

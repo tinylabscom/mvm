@@ -264,9 +264,12 @@ Last updated: 2026-09-19
       is complete in PR #3505:
       the signed grant, dual host/guest workspace checks, bounded stream reuse,
       substituted workload environment and chain-signed refusal witnesses all
-      pass; PR #3505 carries the implementation through queued delivery. Open: the
-      example (#3258), the SDK's argv
-      transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
+      pass; PR #3505 carries the implementation through queued delivery. WS0's
+      executable example (#3258) is complete: one pinned native-agent recipe
+      feeds both example flakes, signed Workload IR carries the `SecretRef`,
+      `mvm.toml` admits only the model API, and the documented-surface suite
+      owns an offline live smoke witness and audit verification. Open: the
+      SDK's argv transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
       with its versioned ABI and read-only machine methods; the bindings that
       replace the argv transport are next), MCP (#3262) — whose existing tool surface is now pinned
       by a checked-in contract fixture, so the new tools land as reviewed
