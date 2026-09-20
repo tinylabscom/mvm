@@ -19,10 +19,11 @@ self-update and says why, rather than installing unverified.
 its help text now says that; it used to say "Skip checksum verification", which
 was wrong.
 
-Claim 20 now names all three paths. ADR-001's limits note keeps the two things
-still outside it: a build without `manifest-verify`, and `install.sh`, which
-runs before any `mvmctl` exists. Giving the installer a verifier
-(`mvmctl verify-release`) is the remaining half of the issue.
+Claim 20 originally named these three paths. The later epic #3277 closure added
+the install path: a fresh host authenticates the selected archive against an
+installer-carried or independently supplied SHA-256 before using only its
+`mvmctl` as a temporary verifier. A build without `manifest-verify` remains a
+refusing implementation boundary.
 
 The `manifest-verify` tests on these paths never ran in CI: every use of the
 feature there was `cargo run --example`. A step in `Lint feature coverage` runs

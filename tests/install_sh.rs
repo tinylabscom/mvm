@@ -135,7 +135,7 @@ fn required_hostbins(target: &str) -> Vec<String> {
 /// commands install.sh ran.
 fn stub_mvmctl(version: &str) -> String {
     format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{MVM_TEST_INVOCATION_LOG:-/dev/null}}\"\necho 'mvmctl {version}'\n"
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{MVM_TEST_INVOCATION_LOG:-/dev/null}}\"\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) exit 0 ;;\nesac\necho 'mvmctl {version}'\n"
     )
 }
 
@@ -184,6 +184,7 @@ struct Release {
     mvmctl: String,
     hostbins: Vec<String>,
     entitlements: EntitlementsLayout,
+    publish_bundle: bool,
     /// Raw bytes for a named hostbin, overriding the auto-generated shell
     /// script stub — so a test can ship a real, already-signed Mach-O.
     hostbin_bytes: Vec<(String, Vec<u8>)>,
@@ -199,8 +200,14 @@ impl Release {
                 "mvm-libkrun-supervisor".to_owned(),
             ],
             entitlements: EntitlementsLayout::Assets,
+            publish_bundle: true,
             hostbin_bytes: Vec::new(),
         }
+    }
+
+    fn without_bundle(mut self) -> Self {
+        self.publish_bundle = false;
+        self
     }
 
     /// Only signing reads the profiles, and only macOS signs.
@@ -353,16 +360,24 @@ impl Release {
         gz.finish().unwrap()
     }
 
+    fn archive_sha256(&self) -> String {
+        sha256_hex(&self.tarball())
+    }
+
     /// The archive and its checksum manifest, at the release download paths.
     fn routes(&self) -> Vec<(String, Vec<u8>)> {
         let tarball = self.tarball();
         let archive = Self::archive_name();
         let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
         let base = format!("/tinylabscom/mvm/releases/download/{}", self.version);
-        vec![
+        let mut routes = vec![
             (format!("{base}/{archive}"), tarball),
             (format!("{base}/checksums-sha256.txt"), checks.into_bytes()),
-        ]
+        ];
+        if self.publish_bundle {
+            routes.push((format!("{base}/{archive}.bundle"), b"bundle".to_vec()));
+        }
+        routes
     }
 }
 
@@ -420,6 +435,25 @@ fn serve_releases(releases: &[&Release]) -> (String, mpsc::Sender<()>) {
             .flat_map(|release| release.routes())
             .collect(),
     )
+}
+
+fn published_archive_sha256(base: &str, version: &str) -> String {
+    let url = format!("{base}/tinylabscom/mvm/releases/download/{version}/checksums-sha256.txt");
+    let output = Command::new("curl").args(["-fsSL", &url]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "could not read the fixture checksum manifest at {url}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let archive = Release::archive_name();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let (hash, name) = line.split_once("  ")?;
+            (name == archive).then(|| hash.to_owned())
+        })
+        .unwrap_or_else(|| panic!("fixture manifest at {url} has no checksum for {archive}"))
 }
 
 /// A throwaway host: install dir, library dir, `HOME` and `MVM_HOME`, all
@@ -512,7 +546,11 @@ impl Host {
         let mut command = self.script("install.sh");
         command
             .env("MVM_UPDATE_DOWNLOAD_URL", base)
-            .env("MVM_VERSION", version);
+            .env("MVM_VERSION", version)
+            .env(
+                "MVM_TRUSTED_ARCHIVE_SHA256",
+                published_archive_sha256(base, version),
+            );
         command
     }
 
@@ -665,6 +703,7 @@ fn install_sh_uses_baked_version_without_calling_api() {
     let status = host
         .script("install.sh")
         .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_TRUSTED_ARCHIVE_SHA256", release.archive_sha256())
         .status()
         .unwrap();
     assert!(
@@ -675,7 +714,7 @@ fn install_sh_uses_baked_version_without_calling_api() {
 }
 
 #[test]
-fn install_sh_falls_back_to_api_after_baked_version_404() {
+fn install_sh_refuses_api_fallback_without_an_out_of_band_archive_hash() {
     let release = Release::new("v9.9.9");
     let mut routes = release.routes();
     routes.push((
@@ -685,14 +724,18 @@ fn install_sh_falls_back_to_api_after_baked_version_404() {
     let (base, _stop) = serve(routes);
 
     let host = Host::new();
-    let status = host
+    let output = host
         .script("install.sh")
         .env("MVM_UPDATE_API_URL", &base)
         .env("MVM_UPDATE_DOWNLOAD_URL", &base)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "404 should fall back to the API release");
-    assert_eq!(host.mvmctl_version(), "mvmctl v9.9.9");
+    assert!(
+        !output.status.success(),
+        "an API-selected archive has no installer-baked trust anchor"
+    );
+    assert!(stderr(&output).contains("trusted archive SHA-256"));
+    assert!(!host.bin().join("mvmctl").exists());
 }
 
 #[test]
@@ -707,6 +750,84 @@ fn install_sh_honors_explicit_version_without_calling_api() {
         "explicit version should succeed without reaching the API: {}",
         stderr(&output)
     );
+}
+
+#[test]
+fn fresh_install_bootstraps_signature_verification_from_a_trusted_archive_hash() {
+    let release = Release::new("v9.9.9").with_mvmctl(verifying_mvmctl("v9.9.9"));
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+    let log = host.root.join("bootstrap-verifier.log");
+
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env("MVM_TEST_INVOCATION_LOG", &log)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let invocations = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        invocations.contains("env verify-release")
+            && invocations.contains(&Release::archive_name())
+            && invocations.contains("--tag v9.9.9"),
+        "the archive-authenticated temporary mvmctl must verify the bundle: {invocations}"
+    );
+}
+
+#[test]
+fn fresh_install_refuses_without_a_verifier_or_trusted_archive_hash() {
+    let release = Release::new("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host
+        .script("install.sh")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_VERSION", "v9.9.9")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("trusted archive SHA-256"));
+    assert!(!host.bin().join("mvmctl").exists());
+}
+
+#[test]
+fn fresh_install_refuses_a_wrong_trusted_hash_before_executing_the_payload() {
+    let release = Release::new("v9.9.9").with_mvmctl(verifying_mvmctl("v9.9.9"));
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+    let log = host.root.join("bootstrap-verifier.log");
+
+    let output = host
+        .script("install.sh")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_VERSION", "v9.9.9")
+        .env("MVM_TRUSTED_ARCHIVE_SHA256", "0".repeat(64))
+        .env("MVM_TEST_INVOCATION_LOG", &log)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("trusted archive SHA-256 mismatch"));
+    assert!(
+        !log.exists(),
+        "the downloaded mvmctl must not run before its archive matches the trust anchor"
+    );
+}
+
+#[test]
+fn fresh_install_refuses_a_missing_signature_bundle() {
+    let release = Release::new("v9.9.9").without_bundle();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("no signature bundle"));
+    assert!(!host.bin().join("mvmctl").exists());
 }
 
 #[test]
@@ -916,18 +1037,13 @@ fn verifying_mvmctl(version: &str) -> String {
 /// install v1 so the upgrade to v2 has an mvmctl to verify with.
 fn host_with_verifier(publish_bundle: bool) -> (Host, String, mpsc::Sender<()>) {
     let v1 = Release::new("v1.0.0").with_mvmctl(verifying_mvmctl("v1.0.0"));
-    let v2 = Release::new("v2.0.0");
+    let v2 = if publish_bundle {
+        Release::new("v2.0.0")
+    } else {
+        Release::new("v2.0.0").without_bundle()
+    };
     let mut routes = v1.routes();
     routes.extend(v2.routes());
-    if publish_bundle {
-        routes.push((
-            format!(
-                "/tinylabscom/mvm/releases/download/v2.0.0/{}.bundle",
-                Release::archive_name()
-            ),
-            b"bundle".to_vec(),
-        ));
-    }
     let (base, stop) = serve(routes);
     let host = Host::new();
     host.install_ok(&base, "v1.0.0");
@@ -1679,8 +1795,9 @@ fn install_sh_builtin_entitlement_matches_the_checked_in_profile() {
 /// so the uninstaller's running-machine and daemon checks run the shipped code.
 fn release_running_real_mvmctl(version: &str) -> Release {
     let real = env!("CARGO_BIN_EXE_mvmctl");
-    Release::new(version)
-        .with_mvmctl(format!("#!/bin/sh\nexec '{real}' \"$@\"\n"))
+    Release::new(version).with_mvmctl(format!(
+        "#!/bin/sh\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) exit 0 ;;\nesac\nexec '{real}' \"$@\"\n"
+    ))
         .with_hostbins(vec![
             "mvm-hvf-supervisor".to_owned(),
             "mvm-network-endpoint".to_owned(),
@@ -1689,7 +1806,7 @@ fn release_running_real_mvmctl(version: &str) -> Release {
 
 /// An mvmctl from before `env uninstall --quiesce`: clap rejects the flag and
 /// exits 2.
-const PRE_QUIESCE_MVMCTL: &str = "#!/bin/sh\ncase \"$1\" in\n  env) echo \"error: unexpected argument '--quiesce' found\" >&2; exit 2 ;;\nesac\necho 'mvmctl v0.17.0'\n";
+const PRE_QUIESCE_MVMCTL: &str = "#!/bin/sh\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) exit 0 ;;\nesac\ncase \"$1\" in\n  env) echo \"error: unexpected argument '--quiesce' found\" >&2; exit 2 ;;\nesac\necho 'mvmctl v0.17.0'\n";
 
 /// A child process killed and reaped when the test ends, however it ends.
 struct Spawned(Option<Child>);

@@ -210,6 +210,7 @@ publish() {
     fi
   fi
   tar czf "$out/mvmctl-$target.tar.gz" -C "$work/stage/$tag" "mvmctl-$target"
+  printf 'synthetic signature bundle\n' > "$out/mvmctl-$target.tar.gz.bundle"
   printf '%s  %s\n' "$(sha256 "$out/mvmctl-$target.tar.gz")" "mvmctl-$target.tar.gz" > "$out/checksums-sha256.txt"
 }
 
@@ -390,6 +391,14 @@ key="\$(physical "\$1")"
 if [ -n "\$profile" ]; then cp "\$profile" "\$store/\$key"; else : > "\$store/\$key"; fi
 EOF
 chmod 0755 "$work/fakebin/codesign"
+cat > "$work/fakebin/cosign" <<'EOF'
+#!/bin/sh
+# The installer tests exercise trust and signature failures. This compatibility
+# harness only needs a verifier so its synthetic payloads reach the lifecycle
+# assertions they were built to cover.
+exit 0
+EOF
+chmod 0755 "$work/fakebin/cosign"
 export PATH="$work/fakebin:$PATH"
 export TMPDIR="$work/tmp"
 mkdir -p "$TMPDIR"

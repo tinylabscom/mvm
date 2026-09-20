@@ -51,9 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Bake the published installer version
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Bake the published installer version and trust anchors
         if: ${{ inputs.install_version != '' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           INSTALL_VERSION: ${{ inputs.install_version }}
         run: |
           set -euo pipefail
@@ -65,6 +69,35 @@ jobs:
             "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"${INSTALL_VERSION}\"/" \
             install.sh
           grep -qxF "DEFAULT_VERSION=\"${INSTALL_VERSION}\"" install.sh
+
+          trust_dir="$(mktemp -d)"
+          trap 'rm -rf "${trust_dir}"' EXIT
+          gh release download "${INSTALL_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'checksums-sha256.txt*' \
+            --dir "${trust_dir}"
+          cosign verify-blob \
+            --bundle "${trust_dir}/checksums-sha256.txt.bundle" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${INSTALL_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${trust_dir}/checksums-sha256.txt"
+
+          for target_and_variable in \
+            "aarch64-apple-darwin:DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN" \
+            "x86_64-unknown-linux-gnu:DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU" \
+            "aarch64-unknown-linux-gnu:DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU"
+          do
+            target="${target_and_variable%%:*}"
+            variable="${target_and_variable#*:}"
+            archive="mvmctl-${target}.tar.gz"
+            digest="$(awk -v archive="${archive}" '$2 == archive { print $1 }' "${trust_dir}/checksums-sha256.txt")"
+            if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::release ${INSTALL_VERSION} has no valid SHA-256 for ${archive}" >&2
+              exit 1
+            fi
+            sed -i -E "s/^${variable}=\"[0-9a-f]*\"/${variable}=\"${digest}\"/" install.sh
+            grep -qxF "${variable}=\"${digest}\"" install.sh
+          done
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -94,9 +127,6 @@ jobs:
 
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
 
       - name: Download verified WebLinux runtime pack
         env:

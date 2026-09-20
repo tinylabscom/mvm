@@ -12,6 +12,7 @@ mod cold_launch;
 mod doc_examples;
 mod hvf_save_restore;
 mod initramfs;
+mod installer;
 mod kernel_pin;
 pub(crate) mod launch_e2e;
 mod machine_journey;

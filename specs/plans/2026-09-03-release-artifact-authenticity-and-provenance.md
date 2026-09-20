@@ -49,7 +49,9 @@ Any claim wording has to carry that split, in the shape claim 13 and the
 `Preview` rows already use.
 
 Closed since: `mvmctl env update` verifies the bundle in-process and refuses a
-missing or invalid one, so all three paths now refuse (issue #3272).
+missing or invalid one (issue #3272). The later install-lifecycle closure also
+authenticates a fresh host's temporary verifier before requiring the exact-tag
+bundle, so the build, fetch, install, and self-update paths now refuse.
 
 ## WS-A — Add the claim for what already ships
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # mvmctl installer. Downloads the released binary for this platform from
-# GitHub releases, verifies its sha256 (and cosign signature if cosign is
-# present), installs it, and on macOS applies the required VM entitlements.
+# GitHub releases, verifies its SHA-256 and tag-pinned release signature,
+# installs it, and on macOS applies the required VM entitlements.
 #
 # Layout. Every release is unpacked whole into its own directory and the
 # commands on PATH reach it through one `current` link:
@@ -28,7 +28,8 @@
 #   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
-#   MVM_SKIP_HASH_VERIFY   set to 1 to skip checksum (emergency only)
+#   MVM_TRUSTED_ARCHIVE_SHA256 trusted archive hash for a non-default fresh install
+#   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
 #   MVM_SKIP_BOOTSTRAP     set to 1 to skip preparing the builder VM
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
@@ -37,6 +38,9 @@ set -eu
 
 REPO="tinylabscom/mvm"
 DEFAULT_VERSION="v0.17.0"
+DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN="5fdf95929a90820af6ab4c22cc1a31e5ae6bc5eae2f3b6a795a06986797d0bce"
+DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU="8fe4115197a3c467465f4b40401e8f01fed1a837dfdf32985336975dab99213f"
+DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU="74d1077e6e3b6f5aa2a477f582f7de9bf69dfc48668289c501fd747450515b59"
 API_BASE="${MVM_UPDATE_API_URL:-https://api.github.com}"
 DL_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
 INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
@@ -126,6 +130,28 @@ release_verifier() {
       return 0
     fi
   done
+}
+
+default_archive_sha256() {
+  case "$TARGET" in
+    aarch64-apple-darwin) printf '%s\n' "$DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN" ;;
+    x86_64-unknown-linux-gnu) printf '%s\n' "$DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU" ;;
+    aarch64-unknown-linux-gnu) printf '%s\n' "$DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU" ;;
+  esac
+}
+
+# A fresh host has no trusted executable capable of checking the Sigstore
+# bundle. Authenticate the downloaded archive against a hash carried by this
+# installer (or supplied out of band) before running its mvmctl temporarily.
+trusted_archive_sha256() {
+  hash="${MVM_TRUSTED_ARCHIVE_SHA256:-}"
+  if [ -z "$hash" ] && [ "$VERSION" = "$DEFAULT_VERSION" ]; then
+    hash="$(default_archive_sha256)"
+  fi
+  [ -n "$hash" ] || return 0
+  printf '%s\n' "$hash" | grep -Eq '^[0-9A-Fa-f]{64}$' \
+    || die "trusted archive SHA-256 must be exactly 64 hexadecimal characters"
+  printf '%s\n' "$hash" | tr 'A-F' 'a-f'
 }
 
 # --- Versioned install -------------------------------------------------------
@@ -691,6 +717,7 @@ case "$VERSION" in
   ''|*[!A-Za-z0-9._+-]*) die "release tag is not a safe directory name: $VERSION" ;;
 esac
 
+got="$(sha256_of "$TMP/$ARCHIVE")"
 if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
   warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification"
 else
@@ -698,7 +725,6 @@ else
     || die "could not download checksums-sha256.txt"
   want="$(grep " $ARCHIVE\$" "$TMP/checksums.txt" | awk '{print $1}' | head -n1)"
   [ -n "$want" ] || die "no checksum for $ARCHIVE in checksums-sha256.txt"
-  got="$(sha256_of "$TMP/$ARCHIVE")"
   if [ "$want" != "$got" ]; then
     rm -f "$TMP/$ARCHIVE"
     die "checksum mismatch for $ARCHIVE (want $want, got $got)"
@@ -706,14 +732,31 @@ else
   say "Checksum verified."
 fi
 
-# Signature. An mvmctl already on the host verifies offline against its
-# embedded trust root, so it is preferred to cosign; with neither, the SHA-256
-# above is all that holds. Once a verifier is present, a missing bundle refuses.
+# Signature. An installed mvmctl verifies offline against its embedded trust
+# root and is preferred to cosign. A fresh host authenticates the archive
+# against the installer-baked hash before running only its mvmctl as a temporary
+# verifier. Every path requires the bundle; there is no unsigned fallback.
 VERIFIER="$(release_verifier)"
-if [ -n "$VERIFIER" ] || command -v cosign >/dev/null 2>&1; then
-  curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null \
-    || die "no signature bundle published for $ARCHIVE"
+if [ -z "$VERIFIER" ] && ! command -v cosign >/dev/null 2>&1; then
+  trusted_hash="$(trusted_archive_sha256)"
+  [ -n "$trusted_hash" ] \
+    || die "fresh install requires a trusted archive SHA-256; use the baked default, install cosign, or set MVM_TRUSTED_ARCHIVE_SHA256 from an independent trusted source"
+  [ "$got" = "$trusted_hash" ] \
+    || die "trusted archive SHA-256 mismatch for $ARCHIVE (want $trusted_hash, got $got)"
+
+  bootstrap_dir="$TMP/bootstrap-verifier"
+  mkdir -p "$bootstrap_dir"
+  tar xzf "$TMP/$ARCHIVE" -C "$bootstrap_dir" "mvmctl-${TARGET}/mvmctl" \
+    || die "could not extract the authenticated bootstrap verifier"
+  VERIFIER="$bootstrap_dir/mvmctl-${TARGET}/mvmctl"
+  [ -x "$VERIFIER" ] || die "authenticated archive contains no executable mvmctl verifier"
+  "$VERIFIER" env verify-release --help 2>/dev/null | grep -q -- '--tag' \
+    || die "authenticated archive's mvmctl cannot verify release signatures"
 fi
+
+curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null \
+  || die "no signature bundle published for $ARCHIVE"
+
 if [ -n "$VERIFIER" ]; then
   "$VERIFIER" env verify-release "$TMP/$ARCHIVE" --tag "$VERSION" >/dev/null \
     || die "signature verification failed for $ARCHIVE"
@@ -729,7 +772,7 @@ elif command -v cosign >/dev/null 2>&1; then
     die "cosign signature verification failed for $ARCHIVE"
   fi
 else
-  warn "no mvmctl or cosign on this host — skipping signature verification"
+  die "no release signature verifier is available"
 fi
 
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"
