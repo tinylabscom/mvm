@@ -253,8 +253,12 @@ Last updated: 2026-09-20
       - [x] W5e #3364: `mvmctl build image-set <role>` builds one target in
             the HVF or Firecracker builder and publishes it to the local image
             cache; `bin/dev` pairs the checkouts with pair-scoped state.
-      - [ ] W5f–W5m #3364: each in-tree image consumer moved onto the
-            selector.
+      - [x] W5f #3364: the builder VM reads the selector — a selected
+            checkout's `builder-vm` target, built once by the shared
+            local-image-set build and installed under a `local_pair`
+            provenance fingerprint; the tool bootstrap is exempt.
+      - [ ] W5g–W5m #3364: each remaining in-tree image consumer moved onto
+            the selector.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

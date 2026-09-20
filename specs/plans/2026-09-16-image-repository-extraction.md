@@ -700,10 +700,16 @@ Delivery slices, one PR each:
       sets the selector and the pair-scoped `MVM_HOME` and `CARGO_TARGET_DIR`.
       Landed as `mvmctl build image-set <role>` on the HVF/Firecracker shell job,
       with the image checkout's own host-binary and manifest scripts.
-- [ ] W5f (`mvm`) — the builder VM: `find_builder_vm_flake`,
+- [x] W5f (`mvm`) — the builder VM: `find_builder_vm_flake`,
       `builder_vm_is_source_checkout` and their callers, the Stage 0 source
       fingerprint in `stage0_cache.rs`, the flake references `stage0-init.rs`
       hard-codes, and the kernel and image attribute-name contract.
+      Landed as a selector-aware `bootstrap_builder_vm_image`: a selected
+      checkout serves its `builder-vm` target from the pair-keyed local
+      cache through one shared build (`build_target_for_pair`), installed
+      under a `local_pair` provenance fingerprint; the in-tree/published tool
+      bootstrap is exempt so image builds never recurse; `stage0-init` reads
+      its flake namespace from the build conf.
 - [ ] W5g (`mvm`) — the default workload image (`default_microvm.rs`) and the
       `MVM_BOOT_IMAGE=build|fetch` resolver.
 - [ ] W5h (`mvm`) — kernel acquisition and the initramfs.

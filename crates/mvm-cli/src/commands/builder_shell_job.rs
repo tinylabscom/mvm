@@ -63,7 +63,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
 
     let choice = resolve_choice();
     admit_source_builder_image(choice, || {
-        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
+        crate::commands::env::builder_vm::bootstrap_tool_builder_vm_image()
     })?;
     let result = match choice {
         BuilderBackendChoice::Libkrun => libkrun_shell_builder(cli.verbose)

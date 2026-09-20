@@ -27,13 +27,6 @@ impl ShellJobBuilder {
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Hvf => "HVF",
-            Self::Firecracker => "Firecracker",
-        }
-    }
-
     /// Boot this backend's builder image and run `job` in it.
     pub(crate) fn run(self, job: &mvm_build::libkrun_builder::BuilderShellJob) -> Result<()> {
         match self {

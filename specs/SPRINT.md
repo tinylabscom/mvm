@@ -311,6 +311,13 @@
       host-binary and manifest scripts, and publishes it to the local image
       cache; `bin/dev` runs it with `MVM_HOME` and `CARGO_TARGET_DIR` scoped to
       the pair.
+      W5 (#3364) slice W5f: `bootstrap_builder_vm_image` routes through the
+      selector — a selected checkout's `builder-vm` target is built once by
+      the shared local-image-set build and installed into the builder-VM cache
+      under a `local_pair` provenance fingerprint that changes with either
+      checkout; the in-tree/published tool bootstrap is exempt, so building a
+      local image set never routes through the image it builds; `stage0-init`
+      takes its flake namespace from the build conf instead of a hard-code.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

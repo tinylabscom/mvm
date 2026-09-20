@@ -643,6 +643,14 @@ pub(super) fn builder_vm_source_cache_status(
     dir: &std::path::Path,
     expected_fingerprint: &str,
 ) -> BuilderVmSourceCacheStatus {
+    cache_status(dir, expected_fingerprint, STAGE0_SOURCE_KIND)
+}
+
+fn cache_status(
+    dir: &std::path::Path,
+    expected_fingerprint: &str,
+    source_kind: &str,
+) -> BuilderVmSourceCacheStatus {
     if !dir.join("vmlinux").exists() || !dir.join("rootfs.ext4").exists() {
         return BuilderVmSourceCacheStatus::MissingArtifact;
     }
@@ -674,19 +682,31 @@ pub(super) fn builder_vm_source_cache_status(
     if !provenance_path.exists() {
         return BuilderVmSourceCacheStatus::MissingProvenance;
     }
-    if !builder_vm_source_cache_provenance_matches(dir, expected_fingerprint) {
+    if !builder_vm_source_cache_provenance_matches(dir, expected_fingerprint, source_kind) {
         return BuilderVmSourceCacheStatus::ProvenanceMismatch;
     }
 
     BuilderVmSourceCacheStatus::Hit
 }
 
-#[cfg(any(feature = "builder-vm", test))]
+#[cfg(test)]
 pub(super) fn builder_vm_source_cache_ready(
     dir: &std::path::Path,
     expected_fingerprint: &str,
 ) -> bool {
-    builder_vm_source_cache_status(dir, expected_fingerprint).is_ready()
+    cache_ready(dir, expected_fingerprint, STAGE0_SOURCE_KIND)
+}
+
+/// Whether a cache installed from a local image pair is ready under
+/// `expected_fingerprint`.
+#[cfg(feature = "builder-vm")]
+pub(super) fn local_pair_cache_ready(dir: &std::path::Path, expected_fingerprint: &str) -> bool {
+    cache_ready(dir, expected_fingerprint, LOCAL_PAIR_SOURCE_KIND)
+}
+
+#[cfg(any(feature = "builder-vm", test))]
+fn cache_ready(dir: &std::path::Path, expected_fingerprint: &str, source_kind: &str) -> bool {
+    cache_status(dir, expected_fingerprint, source_kind).is_ready()
 }
 
 #[cfg(any(feature = "builder-vm", test))]
@@ -760,13 +780,21 @@ struct BuilderVmSourceCacheProvenance {
     acquired_at: Option<String>,
 }
 
+/// Provenance `source_kind` for a cache built by the in-tree Stage 0 path.
+pub(super) const STAGE0_SOURCE_KIND: &str = "source_checkout_stage0";
+/// Provenance `source_kind` for a cache installed from a local image pair's
+/// `builder-vm` target; the fingerprint names both checkout identities.
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) const LOCAL_PAIR_SOURCE_KIND: &str = "local_pair";
+
 fn builder_vm_source_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
+    source_kind: &str,
 ) -> Result<BuilderVmSourceCacheProvenance> {
     Ok(BuilderVmSourceCacheProvenance {
         schema_version: 1,
-        source_kind: "source_checkout_stage0".to_string(),
+        source_kind: source_kind.to_string(),
         source_fingerprint: source_fingerprint.to_string(),
         artifacts: builder_vm_artifact_names_present(dir)?,
         image_tag: None,
@@ -800,8 +828,10 @@ fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String
 fn builder_vm_source_cache_provenance_matches(
     dir: &std::path::Path,
     expected_fingerprint: &str,
+    source_kind: &str,
 ) -> bool {
-    let expected = match builder_vm_source_cache_provenance(dir, expected_fingerprint) {
+    let expected = match builder_vm_source_cache_provenance(dir, expected_fingerprint, source_kind)
+    {
         Ok(expected) => expected,
         Err(_) => return false,
     };
@@ -813,14 +843,38 @@ fn builder_vm_source_cache_provenance_matches(
 }
 
 #[cfg(any(feature = "builder-vm", test))]
+fn write_cache_provenance(
+    dir: &std::path::Path,
+    source_fingerprint: &str,
+    source_kind: &str,
+) -> Result<()> {
+    write_builder_vm_provenance(
+        dir,
+        &builder_vm_source_cache_provenance(dir, source_fingerprint, source_kind)?,
+    )
+}
+
+/// Write only the provenance sidecar, for tests that assemble the other
+/// sidecars themselves.
+#[cfg(test)]
 pub(super) fn write_builder_vm_source_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> Result<()> {
-    write_builder_vm_provenance(
-        dir,
-        &builder_vm_source_cache_provenance(dir, source_fingerprint)?,
-    )
+    write_cache_provenance(dir, source_fingerprint, STAGE0_SOURCE_KIND)
+}
+
+/// Write the full cache-sidecar set for a cache installed from a local image
+/// pair. The format is the Stage 0 sidecar format with the `local_pair`
+/// provenance kind; the readiness check is [`local_pair_cache_ready`].
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) fn write_local_pair_cache_sidecars(
+    dir: &std::path::Path,
+    source_fingerprint: &str,
+) -> Result<()> {
+    write_builder_vm_source_fingerprint(dir, source_fingerprint)?;
+    write_builder_vm_artifact_digest_manifest(dir)?;
+    write_cache_provenance(dir, source_fingerprint, LOCAL_PAIR_SOURCE_KIND)
 }
 
 /// Write the full cache-sidecar set — source fingerprint, artifact-digest
@@ -836,7 +890,7 @@ pub(super) fn write_builder_vm_cache_sidecars(
 ) -> Result<()> {
     write_builder_vm_source_fingerprint(dir, source_fingerprint)?;
     write_builder_vm_artifact_digest_manifest(dir)?;
-    write_builder_vm_source_cache_provenance(dir, source_fingerprint)
+    write_cache_provenance(dir, source_fingerprint, STAGE0_SOURCE_KIND)
 }
 
 #[cfg(any(feature = "builder-vm", test))]
@@ -845,27 +899,58 @@ pub(super) fn promote_builder_vm_stage0_cache(
     final_dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> Result<()> {
+    promote_source_cache(
+        staging_dir,
+        final_dir,
+        source_fingerprint,
+        STAGE0_SOURCE_KIND,
+    )
+}
+
+/// Promote a builder-VM cache staged from a local image pair's `builder-vm`
+/// target, validating the same sidecar set Stage 0 promotion does.
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) fn promote_local_pair_cache(
+    staging_dir: &std::path::Path,
+    final_dir: &std::path::Path,
+    source_fingerprint: &str,
+) -> Result<()> {
+    promote_source_cache(
+        staging_dir,
+        final_dir,
+        source_fingerprint,
+        LOCAL_PAIR_SOURCE_KIND,
+    )
+}
+
+#[cfg(any(feature = "builder-vm", test))]
+fn promote_source_cache(
+    staging_dir: &std::path::Path,
+    final_dir: &std::path::Path,
+    source_fingerprint: &str,
+    source_kind: &str,
+) -> Result<()> {
     validate_builder_vm_stage0_artifacts(staging_dir)?;
     if !builder_vm_source_fingerprint_matches(staging_dir, source_fingerprint) {
         anyhow::bail!(
-            "Stage 0 builder VM staging dir {} is missing the expected source fingerprint",
+            "builder VM staging dir {} is missing the expected source fingerprint",
             staging_dir.display()
         );
     }
     if !builder_vm_artifact_digest_manifest_matches(staging_dir) {
         anyhow::bail!(
-            "Stage 0 builder VM staging dir {} is missing matching artifact digests",
+            "builder VM staging dir {} is missing matching artifact digests",
             staging_dir.display()
         );
     }
-    if !builder_vm_source_cache_provenance_matches(staging_dir, source_fingerprint) {
+    if !builder_vm_source_cache_provenance_matches(staging_dir, source_fingerprint, source_kind) {
         anyhow::bail!(
-            "Stage 0 builder VM staging dir {} is missing matching provenance metadata",
+            "builder VM staging dir {} is missing matching provenance metadata",
             staging_dir.display()
         );
     }
 
-    if final_dir.exists() && builder_vm_source_cache_ready(final_dir, source_fingerprint) {
+    if final_dir.exists() && cache_ready(final_dir, source_fingerprint, source_kind) {
         std::fs::remove_dir_all(staging_dir).with_context(|| {
             format!(
                 "removing redundant Stage 0 staging dir {}",
@@ -876,9 +961,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
     }
 
     replace_builder_vm_cache_dir(staging_dir, final_dir)?;
-    if !builder_vm_source_cache_ready(final_dir, source_fingerprint) {
+    if !cache_ready(final_dir, source_fingerprint, source_kind) {
         anyhow::bail!(
-            "promoted Stage 0 builder VM cache {} failed source-cache validation",
+            "promoted builder VM cache {} failed source-cache validation",
             final_dir.display()
         );
     }

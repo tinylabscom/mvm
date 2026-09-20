@@ -14,6 +14,8 @@ mod builder_vm_bootstrap_tests;
 pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
+#[cfg(feature = "builder-vm")]
+mod local_pair;
 #[cfg(test)]
 mod published_fetch_tests;
 mod sdk_sidecar;
@@ -38,6 +40,8 @@ use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
+#[cfg(feature = "builder-vm")]
+pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
 #[cfg(all(test, not(feature = "release-artifact-bootstrap")))]
 use bootstrap::perform_builder_vm_download_published;
 #[cfg(test)]
@@ -65,6 +69,8 @@ pub(crate) use kernel::resolve_kernel_source;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(all(test, feature = "builder-vm"))]
 use kernel::{format_compile_elapsed, format_compile_start};
+#[cfg(feature = "builder-vm")]
+pub(crate) use local_pair::ensure_pair_built;
 #[cfg(feature = "builder-vm")]
 pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 #[cfg(feature = "builder-vm")]

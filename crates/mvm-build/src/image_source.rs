@@ -44,8 +44,9 @@ mod local_set;
 
 pub use build::{
     BUILDER_HOST_BINARIES, EMIT_MANIFEST_SCRIPT, EmitRequest, HOST_BINARIES_SCRIPT,
-    LocalImageBuildError, OutputFile, OutputFormat, TargetContract, build_host_binaries,
-    contract_for, emit_argv, emit_local_manifest, render_build_script, stage_work_tree,
+    LocalImageBuildError, OutputFile, OutputFormat, PairBuild, TargetContract, build_host_binaries,
+    build_target_for_pair, contract_for, emit_argv, emit_local_manifest, render_build_script,
+    stage_work_tree,
 };
 pub use cache::{
     CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,

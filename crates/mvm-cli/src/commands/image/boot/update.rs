@@ -58,11 +58,27 @@ pub(super) fn run(request: &UpdateRequest) -> Result<()> {
     Ok(())
 }
 
-/// In a source checkout the working tree is authoritative: replacing the
-/// locally built image with a prebuilt would make the tree a lie about what
-/// the next boot runs.
+/// Where images are built from source — the in-tree flakes, or a local image
+/// checkout the selector names. Either way the local build is authoritative.
+fn images_built_from_source_checkout() -> bool {
+    if crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout() {
+        return true;
+    }
+    use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
+    matches!(
+        resolve_image_source(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            configured_images_dir().as_deref(),
+        ),
+        Ok(ImageSource::LocalCheckout(_))
+    )
+}
+
+/// Where images are built from source, the working tree is authoritative:
+/// replacing the locally built image with a prebuilt would make the tree a
+/// lie about what the next boot runs.
 fn refuse_in_source_checkout(force: bool) -> Result<()> {
-    if force || !crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout() {
+    if force || !images_built_from_source_checkout() {
         return Ok(());
     }
     bail!(
