@@ -101,7 +101,7 @@ opposite one, `drop_page_cache`).
       typed launch posture reaches it. Claim-catalog function witnesses must
       now resolve exactly once; claim 13 names the bound-credential production
       control, and the Firecracker/HVF restore witnesses have distinct names.
-- [ ] **A2.3** No citation gate covers `specs/adrs/`. ADR-041 says
+- [x] **A2.3** No citation gate covers `specs/adrs/`. ADR-041 says
       `mvm_hostd::nodectl` is implemented and the module has zero bytes;
       ADR-015 pins `PROTOCOL_VERSION = 2` against a tree that says `3`, with a
       witness name that resolves to nothing; nine more citations name deleted

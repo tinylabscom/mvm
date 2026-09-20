@@ -1211,7 +1211,7 @@ can be admitted, with no recovery path today.
 - `specs/adrs/007-vmbackend-single-trait.md` — the `VmBackend` trait
   boundary this ADR's tier matrix depends on; the `WorkloadBackend`
   marker trait that type-enforces the QEMU carve-out above is defined in
-  `crates/mvm-backend/src/workload_backend.rs`.
+  `crates/mvm-runtime/src/workload_backend.rs`.
 - `specs/adrs/014-signed-audited-execution-plans.md` — claim 8's signing
   and admission mechanics.
 - `specs/adrs/020-host-services-broker.md` — claims 12 and 13's broker

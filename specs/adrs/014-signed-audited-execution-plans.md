@@ -28,12 +28,12 @@ mvmctl machine run <image|flake|manifest>
   │
   ├── build/resolve rootfs
   │
-  ├── admit_plan_for_boot(...)                    [crates/mvm-cli/src/commands/vm/up.rs]
+  ├── admit_plan_for_boot(...)                    [crates/mvm-cli/src/commands/vm/up/admission.rs]
   │     │
   │     ├── sha256_file(rootfs.ext4)
   │     ├── synthesize_plan(SynthesisInput { .. })  [mvm-core::plan::synthesis]
   │     │     fresh UUIDv4 plan_id, 128-bit nonce, short validity window
-  │     ├── host_signer::load_or_init(~/.mvm/keys/) [crates/mvm-cli/src/commands/vm/host_signer.rs]
+  │     ├── host_signer::load_or_init(~/.mvm/keys/) [crates/mvm-hostd/src/audit/host_keypair.rs]
   │     │     mode-0600 secret half, refuses loose perms
   │     ├── admit_for_run(input, clock, nonce_ledger, ...) [mvm-hostd::plan_admission]
   │     │     ├── sign_plan + verify_plan (roundtrip)
@@ -42,7 +42,7 @@ mvmctl machine run <image|flake|manifest>
   │     └── AuditEmitter::emit_admitted(...)        [crates/mvm-cli/src/commands/vm/audit_chain.rs]
   │           appends a signed envelope to ~/.mvm/audit/<tenant>.jsonl
   │
-  ├── backend.start(&start_config)                  [mvm-backend::AnyBackend]
+  ├── backend.start(&start_config)                  [mvm-runtime::AnyBackend]
   ├── on Ok:  emit_launched_if(ctx, backend_name)
   └── on Err: emit_failed_if(ctx, "backend-start", &e); return Err
 ```
