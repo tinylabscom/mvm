@@ -827,7 +827,10 @@ mod tests {
             return;
         };
         let server = std::thread::spawn(move || {
-            let (_c, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut payload = [0_u8; 5];
+            stream.read_exact(&mut payload).unwrap();
+            assert_eq!(&payload, b"first");
         });
 
         let mut bridge = SubstitutionBridge::new();
