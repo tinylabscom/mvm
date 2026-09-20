@@ -144,6 +144,11 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
     ),
     ("sdk-sidecar", AuditPosture::DelegatesToSub(SDK_SIDECAR_SUB)),
+    // `build image-set` builds one target of the local image checkout in the
+    // builder VM and publishes it into the pair-scoped local image cache.
+    // Like the other build-time cache preparation verbs here, it does not
+    // emit a local audit-chain entry of its own.
+    ("image-set", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[

@@ -253,34 +253,13 @@ fn sniff_kernel_format(path: &Path) -> KernelFormat {
         }
     }
 
-    // Read the head for magic sniffing. The deepest magic we check is the x86
-    // bzImage setup header at offset 0x202, so read through 0x208.
-    let mut header = [0u8; 0x208];
+    let mut header = [0u8; KernelFormat::SNIFF_LEN];
     let n = match std::fs::File::open(path) {
         Ok(mut f) => f.read(&mut header).unwrap_or(0),
         Err(_) => return KernelFormat::Elf, // fallback; validator will catch missing file
     };
-
-    if n >= 4 && header[..4] == [0x7f, b'E', b'L', b'F'] {
-        return KernelFormat::Elf;
-    }
-
-    // x86 bzImage: setup-header magic "HdrS" (0x53726448 LE) at offset 0x202
-    // (Documentation/x86/boot.rst, `header` field). A bzImage is neither ELF
-    // nor a flat Image; classify it Raw so the validator rejects it loudly on
-    // ELF/Image direct-boot backends (Firecracker, libkrun) instead of the old
-    // behaviour of silently calling it Elf and panicking at boot.
-    if n >= 0x206 && &header[0x202..0x206] == b"HdrS" {
-        return KernelFormat::Raw;
-    }
-
-    // arm64 Image magic is at offset 56 (bytes 56-59), little-endian u32 == 0x644D5241.
-    // This field was added in Linux 3.17; all kernels we'd ship carry it.
-    if n >= 60 {
-        let magic = u32::from_le_bytes(header[56..60].try_into().unwrap());
-        if magic == 0x644D_5241 {
-            return KernelFormat::Image;
-        }
+    if let Some(format) = KernelFormat::sniff_magic(&header[..n]) {
+        return format;
     }
 
     // Fallback — most Nix-built kernels that reach this path are ELF vmlinux.

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Run this checkout's mvmctl paired with a local mvm-images checkout.
+#
+#   MVM_IMAGES_DIR=../mvm-images bin/dev build image-set builder-vm
+#
+# The pair is this mvm checkout and the image checkout MVM_IMAGES_DIR names.
+# Everything mutable the pair needs is keyed by a digest of the two canonical
+# roots:
+#
+#   MVM_HOME          <state>/home, outside both checkouts so nothing written
+#                     there changes either one's recorded identity: caches,
+#                     staging, Stage 0 work, VM state, and every VM, TAP and
+#                     socket name, which are derived from it
+#   CARGO_TARGET_DIR  <mvm>/target/pair-<digest>, inside this checkout's
+#                     ignored target directory, where its cargo wrappers
+#                     require a target directory to be
+#
+# Two pairs therefore share no mutable state and no VM identities. The state
+# root defaults to ${XDG_STATE_HOME:-~/.local/state}/mvm/pairs and can be
+# moved with MVM_PAIRS_DIR.
+#
+# The binary is built with the embedded host binaries (`just embed`), in the
+# debug profile, and then run with the arguments given.
+
+set -euo pipefail
+
+die() {
+  echo "bin/dev: $*" >&2
+  exit 1
+}
+
+canonical_dir() {
+  (CDPATH='' cd -- "$1" >/dev/null 2>&1 && pwd -P) || die "$2 $1: not a directory"
+}
+
+inside() { # path root
+  case "$1/" in "$2"/*) return 0 ;; *) return 1 ;; esac
+}
+
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d' ' -f1
+  else
+    shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+mvm_root=$(canonical_dir "$(dirname -- "${BASH_SOURCE[0]}")/.." "mvm checkout")
+[ -n "${MVM_IMAGES_DIR:-}" ] ||
+  die "MVM_IMAGES_DIR is not set; name the mvm-images checkout to pair with this one"
+images_root=$(canonical_dir "$MVM_IMAGES_DIR" "MVM_IMAGES_DIR=")
+[ "$images_root" != "$mvm_root" ] || die "MVM_IMAGES_DIR names this mvm checkout"
+
+pair_id=$(printf '%s\n%s\n' "$mvm_root" "$images_root" | sha256_hex | cut -c1-16)
+pairs_dir=${MVM_PAIRS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mvm/pairs}
+mkdir -p -- "$pairs_dir"
+pairs_dir=$(canonical_dir "$pairs_dir" "MVM_PAIRS_DIR=")
+state="$pairs_dir/$pair_id"
+for root in "$mvm_root" "$images_root"; do
+  ! inside "$state" "$root" || die "the pair state $state would be inside the checkout $root"
+done
+mkdir -p -- "$state/home"
+chmod 0700 "$state" "$state/home"
+printf 'mvm=%s\nimages=%s\n' "$mvm_root" "$images_root" > "$state/pair"
+
+export MVM_IMAGES_DIR="$images_root"
+export MVM_HOME="$state/home"
+export CARGO_TARGET_DIR="$mvm_root/target/pair-$pair_id"
+
+(cd -- "$mvm_root" && just embed) >&2
+exec "$CARGO_TARGET_DIR/debug/mvmctl" "$@"

@@ -18,6 +18,8 @@ mod kernel;
 mod published_fetch_tests;
 mod sdk_sidecar;
 mod setpriv_source;
+#[cfg(feature = "builder-vm")]
+mod shell_job;
 mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
@@ -65,6 +67,8 @@ pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(feature = "builder-vm")]
 pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
+#[cfg(feature = "builder-vm")]
+pub(crate) use shell_job::ShellJobBuilder;
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
 #[cfg(any(

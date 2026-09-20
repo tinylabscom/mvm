@@ -210,7 +210,9 @@ const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
-const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
+/// The builder image cache layout this host reads; a builder image built for
+/// another layout is refused rather than booted.
+pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
 ///
