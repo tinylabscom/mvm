@@ -72,9 +72,11 @@ review that were not in the branch when it merged, plus one decision.
   uses (`terminate_firecracker_pid`: SIGTERM, then SIGKILL, and an error if the
   pid survives), and its failure is reported in the refusal instead of a claim
   that the VMM was stopped; before, `teardown_paused` ignored the kill's result
-  and always returned `Ok`. It never signals a recorded pid that is no longer
-  Firecracker (`is_firecracker_pid_running`, as `FcHandle::kill` checks), so a
-  recycled pid is only a stale marker. The per-VM network endpoint is left alone, as it is
+  and always returned `Ok`. It signals a recorded pid only once
+  `is_firecracker_for_socket` confirms it is the Firecracker serving this VM's
+  API socket; only a positively different answer (the process is gone, is not
+  Firecracker, or serves another socket) makes the pid a stale marker, and an
+  identity it cannot confirm is an error. The per-VM network endpoint is left alone, as it is
   for a paused machine, so a retried resume still has it. A warm resume that
   did not rotate goes through the same refusal, stopping the VM through the
   backend's `stop`; no backend completes a live-memory warm start today (every
@@ -93,12 +95,23 @@ review that were not in the branch when it merged, plus one decision.
     admission stops nothing, and a refusal is recorded once. The admission is
     settled while the `fc.admitted` record is written, so no interrupt lands
     between the two.
-  - *SIGINT, SIGTERM, SIGHUP.* `handle_registry` gains `on_interrupt`, a
-    cleanup the signal handler's existing `stop_all_attached` call runs. The
-    self-pipe handler now serves SIGTERM and SIGHUP too (the byte it writes is
-    the signal number; exit status is 128 plus it), so a terminate request or
-    a closed terminal cleans up like Ctrl-C. The console's Ctrl-C forwarding
-    still applies to SIGINT only.
+  - *SIGINT, SIGTERM, SIGHUP.* A new `mvm_runtime::interrupt_cleanup` module
+    holds cleanups registered with `on_interrupt`, and the CLI's signal
+    handler (`termination_handler`) runs them all with `run_all` before it
+    exits. The self-pipe handler now serves SIGTERM and SIGHUP too (the byte it
+    writes is the signal number; exit status is 128 plus it), so a terminate
+    request or a closed terminal cleans up like Ctrl-C. The console's Ctrl-C
+    forwarding still applies to SIGINT only. The handler writes to stderr
+    without `eprintln!`, which panics on the EIO a closed terminal returns and
+    would skip every cleanup.
+
+    `interrupt_cleanup` replaces `handle_registry`, which #3506 deleted as dead
+    code: nothing had populated it since May, and its `stop_all_attached` walked
+    an empty map. This change is now the only user of the mechanism, so it
+    carries just the cleanup registry and not the attached-handle registry
+    #3506 removed. A test drives the handler closure the CLI installs, so
+    dropping the cleanup call from it again fails a test rather than passing
+    silently, as the rebase onto #3506 briefly did.
   - *SIGKILL and out-of-memory kills* cannot be caught. The guest keeps running
     until the next state-touching command, whose reconcile pass on entry stops
     it.
@@ -126,9 +139,20 @@ review that were not in the branch when it merged, plus one decision.
   - *Paths by name.* Reconcile derives the state directory from the machine's
     name under the `vms` root, not from the record's `vm_dir`, which some
     registrations leave empty.
-  - *One resume per machine.* `resume_machine` holds a per-machine lock
-    (`instances/<name>/resume.lock`, the existing `FileLock`) for the whole
-    resume, and reconcile skips a machine whose lock is held.
+  - *One lifecycle change per machine.* `resume_machine` and `pause_machine`
+    hold a per-machine lock (`instances/<name>/resume.lock`, the existing
+    `FileLock`) for the whole operation, and reconcile skips a machine whose
+    lock is held.
+  - *Only a paused machine is restored.* A sealed resume refuses unless the
+    registry records the machine paused. Otherwise `resume` on a running
+    machine would restore an old snapshot over it, and a resume whose process
+    was killed would leave a guest reconcile cannot see, since reconcile acts
+    only on paused records. A machine with no registry record is refused for
+    the same reason.
+  - *A registry write that fails after admission* is reported with the
+    instruction not to resume again: the registry still says paused, so a
+    resume would restore the sealed snapshot over the running, admitted guest.
+  - *Markers are written atomically* (temporary file and rename).
   - *A failed resume request.* `guard_and_resume` tears the VMM down when
     `resume` errors, since a request that timed out on the client side can
     still have been applied.
@@ -172,6 +196,11 @@ review that were not in the branch when it merged, plus one decision.
   chain-signed per-tenant log. So the refusal is enforced by the code path, but
   its record is not tamper-evident, and it must not be cited as an enforced
   claim. A chain-signed refusal entry is W1b.8 in the plan, open.
+
+Reconcile sweeps abandoned staging only under each registered machine's
+instance directory. Fork and template restores stage beside their own sealed
+directories, which reconcile does not visit; their abandoned staging is removed
+only by the next restore from the same place.
 
 ## Upgrade impact
 

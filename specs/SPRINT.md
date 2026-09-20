@@ -146,8 +146,12 @@
       declares, on both the in-process and the builder-VM writer.
       W1b (issue #3431) hardens the reseed
       helper and makes a resume whose guest does not confirm a reseed a
-      refusal rather than a warning; its live Firecracker refusal witness and
-      a chain-signed refusal entry are open.
+      refusal rather than a warning; the post-merge follow-up runs the
+      interrupt cleanup from the installed signal handler, restores only a
+      machine the registry records as paused on every resume path, and fails
+      closed when a restore's Firecracker identity cannot be confirmed. Its
+      live Firecracker refusal witness and a chain-signed refusal entry are
+      open.
   - [ ] W5 — issue #3382: copy-on-write HVF restore from a verified,
         unlinked private clone (W5.1–W5.6); no page sharing between restored
         guests; a cross-tenant restore or fork is refused as a policy guard.

@@ -113,9 +113,16 @@ Last updated: 2026-09-19
         confirm a reseed is stopped, left paused and recorded in the local
         audit log); W1b.9–W1b.12 done (a bounded admission window, SIGINT,
         SIGTERM and SIGHUP cleanup, an `fc.admitted` record reconcile trusts,
-        a per-machine resume lock, locked registry writes, retryable encrypted
-        snapshots whose staging is removed on interrupt, and no signal to a
-        pid that is not this VM's Firecracker). Open: W1b.7, the
+        a per-machine resume lock held by resumes and pauses alike, locked
+        registry writes, retryable encrypted snapshots whose staging is removed
+        on interrupt, and no signal to a pid that is not this VM's Firecracker,
+        with resolved-path comparison and an error when the identity cannot be
+        confirmed). The post-merge follow-up restores the interrupt cleanup the
+        installed signal handler runs (as `interrupt_cleanup`, replacing the
+        module an upstream cleanup deleted as dead code), requires every resume
+        path — sealed, plain, warm, and mock — to find the machine recorded
+        paused, and warns against a second resume when the registry write fails
+        after admission. Open: W1b.7, the
         live Firecracker refusal witness, and W1b.8, a chain-signed refusal
         entry.
   - [ ] W5 — issue #3382: W5.1–W5.6 done. HVF restores map guest RAM

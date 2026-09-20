@@ -49,7 +49,10 @@ fn stamp(state_dir: &Path, marker: &str) -> Result<()> {
     let pid = recorded_pid(&pid_file)
         .with_context(|| format!("no Firecracker pid in {}", pid_file.display()))?;
     let path = state_dir.join(marker);
-    std::fs::write(&path, &pid).with_context(|| format!("writing {}", path.display()))
+    // Written to a temporary file and renamed into place, so a reader never
+    // sees a half-written pid.
+    mvm_core::atomic_io::atomic_write(&path, pid.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Record that a pause sealed the VM whose Firecracker `state_dir` holds, and

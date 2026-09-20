@@ -63,7 +63,6 @@ pub mod driver;
 // Firecracker host mechanics moved to mvm-backends::fc; re-exported so
 // `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
 pub use mvm_backends::fc::host as firecracker;
-pub mod handle_registry;
 /// The HVF end of the checkpoint restore seams (fork into a fresh identity,
 /// same-identity resume) — the counterpart of the capture control the HVF
 /// driver hands back through `vm_full_control`.
@@ -72,6 +71,9 @@ pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
 pub mod image_lineage;
+/// Cleanups the CLI's signal handler runs before it exits on SIGINT, SIGTERM
+/// or SIGHUP.
+pub mod interrupt_cleanup;
 /// Namespace-agnostic hash-linked lineage walk + read-only enumeration shared by
 /// [`checkpoint`] and [`image_lineage`]. The walk traits stay crate-private (the
 /// stores provide concrete wrappers); the enumeration result types

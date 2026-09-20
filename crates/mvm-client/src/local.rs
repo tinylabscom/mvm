@@ -198,6 +198,7 @@ impl LocalBackend {
     /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
     /// rather than silently cold-booting.
     fn warm_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
+        require_registry_paused(name)?;
         let config = VmStartConfig {
             name: name.to_string(),
             ..Default::default()
@@ -212,10 +213,12 @@ impl LocalBackend {
                         }));
                     }
                 };
-                // FC keeps its pid across pause/resume, so the marker must be
-                // cleared explicitly on a successful warm resume.
-                let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
-                set_registry_resumed(name)?;
+                // A warm start resumes the paused process itself, so the pause
+                // marker still names it and would keep reporting it paused.
+                if let Err(error) = mvm_runtime::vm::admission::clear_paused(&vm_state_dir(name)) {
+                    tracing::warn!(vm = %name, error = %format!("{error:#}"), "could not clear the pause marker");
+                }
+                mark_resumed_after_restore(name)?;
                 // A warm resume restores live memory, not a sealed snapshot, so it
                 // carries no epoch/lengths — only the reseed summary.
                 Ok(ResumeOutcome {
@@ -235,11 +238,12 @@ impl LocalBackend {
     /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
     /// mock, which has no guest agent).
     fn plain_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
+        require_registry_paused(name)?;
         if !Self::uses_sealed_snapshot(backend) {
             backend
                 .resume(&VmId(name.to_string()))
                 .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-            set_registry_resumed(name)?;
+            mark_resumed_after_restore(name)?;
             return Ok(ResumeOutcome::default());
         }
 
@@ -262,7 +266,7 @@ impl LocalBackend {
         let sidecar = verify_and_resume(name, &*io)
             .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
         let reseed = None;
-        set_registry_resumed(name)?;
+        mark_resumed_after_restore(name)?;
         // Report the verified snapshot's epoch + artifact lengths so the caller's
         // WorkloadWake audit entry carries the same detail the pause did.
         Ok(ResumeOutcome {
@@ -288,6 +292,11 @@ fn resume_sealed<S: PostRestoreSignal + Send + 'static>(
     signal: S,
     timeouts: AdmissionTimeouts,
 ) -> Result<(mvm_core::crypto::snapshot_hmac::IntegritySidecar, String)> {
+    // Only a machine the registry records as paused is restored. A running
+    // machine would lose everything since its last pause to an old snapshot,
+    // and a machine reconcile cannot see as paused could not be found and
+    // stopped if this process died before admitting its guest.
+    require_registry_paused(name)?;
     let claim = AdmissionClaim::default();
     let _interrupt = arm_interrupted_admission(name, &claim);
     // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
@@ -312,10 +321,49 @@ fn resume_sealed<S: PostRestoreSignal + Send + 'static>(
     )?;
     set_registry_resumed(name).map_err(|e| {
         backend_err(format!(
-            "VM {name:?} resumed and its guest reseeded and was admitted, but {e}"
+            "VM {name:?} resumed and its guest reseeded and was admitted, but {e}. \
+             The guest is running, and its admission is recorded beside its VMM. Do not \
+             run resume again: the registry still says paused, so a resume would restore \
+             the sealed snapshot over the running guest and discard what it has done since. \
+             Fix the registry, then pause or stop the machine as usual."
         ))
     })?;
     Ok((sidecar, reseed))
+}
+
+/// Mark `name` resumed after its restore, naming the recovery path if the
+/// registry write fails once the guest is already running.
+fn mark_resumed_after_restore(name: &str) -> Result<()> {
+    set_registry_resumed(name).map_err(|e| {
+        backend_err(format!(
+            "VM {name:?} resumed, but {e}.              The guest is running. Do not run resume again: the registry still              says paused, so another resume would restore over the running guest              and discard what it has done since. Fix the registry, then pause or              stop the machine as usual."
+        ))
+    })
+}
+
+/// Refuse to restore `name` unless the registry records it as paused.
+fn require_registry_paused(name: &str) -> Result<()> {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let paused = {
+        let _lock = mvm_runtime::vm::name_registry::acquire_registry_lock(&registry_path)
+            .map_err(|e| backend_err(format!("{e:#}")))?;
+        VmNameRegistry::load(&registry_path)
+            .map_err(|e| backend_err(format!("{e:#}")))?
+            .lookup(name)
+            .map(|record| record.paused)
+    };
+    match paused {
+        Some(true) => Ok(()),
+        Some(false) => Err(backend_err(format!(
+            "VM {name:?} is not paused; resume restores its sealed snapshot and would \
+             discard everything the running machine has done since that pause. If a pause \
+             of it was interrupted, run the pause again first"
+        ))),
+        None => Err(backend_err(format!(
+            "VM {name:?} has no registry record, so a resume of it could not be tracked \
+             or recovered; refusing to restore it"
+        ))),
+    }
 }
 
 /// Who settled a resume's admission first: the resume, or an interrupt.
@@ -379,10 +427,10 @@ impl AdmissionClaim {
 fn arm_interrupted_admission(
     name: &str,
     claim: &AdmissionClaim,
-) -> mvm_runtime::handle_registry::InterruptCleanup {
+) -> mvm_runtime::interrupt_cleanup::InterruptCleanup {
     let owned = name.to_string();
     let claim = claim.clone();
-    mvm_runtime::handle_registry::on_interrupt(&format!("resume of {name}"), move || {
+    mvm_runtime::interrupt_cleanup::on_interrupt(&format!("resume of {name}"), move || {
         if claim.refuse() {
             stop_interrupted_admission(&owned);
         }
@@ -1150,6 +1198,11 @@ impl MvmClient for LocalBackend {
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
         let name = &id.0;
         let backend = self.lifecycle_backend_for(name);
+        // The same per-machine lock a resume holds: a pause racing a resume
+        // would otherwise seal and mark paused a machine the resume then marks
+        // resumed, or the reverse.
+        let _lifecycle = mvm_runtime::vm::instance_snapshot::lock_resume(name)
+            .map_err(|e| backend_err(format!("{e:#}")))?;
 
         // Opt-in warm-base barrier: wait for the workload to signal "primed"
         // before sealing. Fails closed — a timeout propagates so no half-warmed
@@ -1597,7 +1650,7 @@ mod tests {
         let registry_path = register("vm-int");
         let claim = AdmissionClaim::default();
         let _armed = arm_interrupted_admission("vm-int", &claim);
-        let processed = mvm_runtime::handle_registry::stop_all_attached();
+        let processed = mvm_runtime::interrupt_cleanup::run_all();
         assert!(processed.contains(&"resume of vm-int".to_string()));
         assert!(is_paused(&registry_path, "vm-int"), "left paused");
         let log = audit_log();
@@ -1619,7 +1672,7 @@ mod tests {
         let claim = AdmissionClaim::default();
         let _armed = arm_interrupted_admission("vm-late", &claim);
         assert!(claim.admit(|| Ok(())).expect("admitted"));
-        mvm_runtime::handle_registry::stop_all_attached();
+        mvm_runtime::interrupt_cleanup::run_all();
         assert!(!is_paused(&registry_path, "vm-late"), "not refused");
         assert!(!audit_log().contains("\"resume_refused\""));
     }
@@ -1666,6 +1719,65 @@ mod tests {
         assert!(refusal.contains("no space left"), "{refusal}");
     }
 
+    /// A sealed resume restores only a machine the registry records as
+    /// paused, and refuses before it loads anything otherwise.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_sealed_resume_refuses_a_machine_that_is_not_paused() {
+        let _data = IsolatedDataDir::new();
+        let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
+        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned).expect("sealed");
+        let before = canned.calls().len();
+
+        let unregistered = resume_sealed("vm-run", &canned, Guest::Reseeded, QUICK)
+            .expect_err("no record")
+            .to_string();
+        assert!(
+            unregistered.contains("no registry record"),
+            "{unregistered}"
+        );
+
+        register("vm-run");
+        let running = resume_sealed("vm-run", &canned, Guest::Reseeded, QUICK)
+            .expect_err("not paused")
+            .to_string();
+        assert!(running.contains("is not paused"), "{running}");
+        assert_eq!(canned.calls().len(), before, "nothing was loaded");
+    }
+
+    /// A pause waits for a resume of the same machine to finish.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_pause_waits_for_a_resume_in_progress() {
+        let _data = IsolatedDataDir::new();
+        std::fs::create_dir_all(mvm_runtime::MockBackend::vm_dir("vm-race")).unwrap();
+        let resuming = mvm_runtime::vm::instance_snapshot::lock_resume("vm-race").expect("lock");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = std::sync::Arc::clone(&done);
+        let pause = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(
+                LocalBackend::with_hypervisor("mock")
+                    .pause_machine(&MachineId("vm-race".into()), PauseOpts::default()),
+            );
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            result
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !done.load(std::sync::atomic::Ordering::SeqCst),
+            "the pause must wait while a resume holds the machine"
+        );
+        drop(resuming);
+        pause
+            .join()
+            .unwrap()
+            .expect("the pause completes once the resume is done");
+    }
+
     /// Answers the post-restore signal as a guest that reseeded, recording
     /// which interrupt cleanups were registered while it was being asked.
     #[cfg(feature = "test-support")]
@@ -1677,7 +1789,7 @@ mod tests {
             true
         }
         fn post_restore(&self, _: &str) -> anyhow::Result<PostRestoreOutcome> {
-            *self.0.lock().unwrap() = mvm_runtime::handle_registry::pending_interrupt_cleanups();
+            *self.0.lock().unwrap() = mvm_runtime::interrupt_cleanup::pending();
             Guest::Reseeded.post_restore("")
         }
     }
@@ -1713,8 +1825,7 @@ mod tests {
             "an interrupt during admission would have stopped the VMM"
         );
         assert!(
-            !mvm_runtime::handle_registry::pending_interrupt_cleanups()
-                .contains(&"resume of vm-seal".to_string()),
+            !mvm_runtime::interrupt_cleanup::pending().contains(&"resume of vm-seal".to_string()),
             "the cleanup is withdrawn once the guest is admitted"
         );
         assert!(
@@ -2285,6 +2396,18 @@ mod tests {
         let be = LocalBackend::with_hypervisor("mock");
         let id = MachineId("snap-roundtrip".into());
 
+        // A resume is admitted only for a machine the registry records as
+        // paused; this test drives the backend directly, so it records that
+        // itself.
+        let registry_path = register("snap-roundtrip");
+        let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
+        assert!(
+            registry
+                .set_paused("snap-roundtrip", true)
+                .expect("pause flag")
+        );
+        registry.save(&registry_path).expect("save registry");
+
         let outcome = be
             .pause_machine(&id, PauseOpts::default())
             .await
@@ -2299,6 +2422,95 @@ mod tests {
         be.resume_machine(&id, ResumeOpts::default())
             .await
             .expect("resume verifies the sealed envelope and restores");
+    }
+
+    /// A plain resume restores only a machine the registry records as paused,
+    /// on the non-sealed and mock paths exactly as on the sealed one.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_plain_resume_refuses_a_machine_the_registry_does_not_record_paused() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("vm-plain".into());
+
+        let missing = be
+            .resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect_err("no record")
+            .to_string();
+        assert!(missing.contains("no registry record"), "{missing}");
+
+        let registry_path = register("vm-plain");
+        let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
+        registry
+            .set_paused("vm-plain", false)
+            .expect("recorded running");
+        registry.save(&registry_path).expect("save registry");
+
+        let running = be
+            .resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect_err("running")
+            .to_string();
+        assert!(running.contains("is not paused"), "{running}");
+    }
+
+    /// A warm resume is held to the same paused-record precondition, before it
+    /// touches the backend at all.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_warm_resume_refuses_a_machine_the_registry_does_not_record_paused() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("vm-warm".into());
+
+        let missing = be
+            .resume_machine(
+                &id,
+                ResumeOpts {
+                    warm: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("no record")
+            .to_string();
+        assert!(missing.contains("no registry record"), "{missing}");
+
+        let registry_path = register("vm-warm");
+        let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
+        registry
+            .set_paused("vm-warm", false)
+            .expect("recorded running");
+        registry.save(&registry_path).expect("save registry");
+
+        let running = be
+            .resume_machine(
+                &id,
+                ResumeOpts {
+                    warm: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("running")
+            .to_string();
+        assert!(running.contains("is not paused"), "{running}");
+    }
+
+    /// A registry write that fails after the restore names the running guest
+    /// and tells the operator not to resume it again.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn a_failed_resume_mark_warns_against_resuming_again() {
+        let _data = IsolatedDataDir::new();
+        let registry_path = register("vm-mark");
+        std::fs::write(&registry_path, "not a registry").expect("corrupt the registry");
+
+        let error = mark_resumed_after_restore("vm-mark").expect_err("corrupt registry");
+        let msg = error.to_string();
+        assert!(msg.contains("Do not run resume again"), "{msg}");
+        assert!(msg.contains("guest is running"), "{msg}");
     }
 
     #[tokio::test]
