@@ -8,6 +8,8 @@
 
 use crate::context::KrunContext;
 #[cfg(feature = "libkrun-sys")]
+use crate::context::KrunKernelSource;
+#[cfg(feature = "libkrun-sys")]
 use crate::context::NetworkingMode;
 use crate::error::{Error, install_hint, is_available};
 #[cfg(feature = "libkrun-sys")]
@@ -104,20 +106,22 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
             .kernel_path
             .as_ref()
             .expect("validate_boot_config guarantees kernel_path is set when root_dir is absent");
-        // A `mkGuest` workload image ships no kernel — boot libkrun's
-        // bundled libkrunfw kernel (TSI + vsock). When the declared kernel
-        // file is absent, materialize the bundled one at that path (idempotent;
-        // the `Raw` set_kernel below loads the file directly, so the bundled
-        // load/entry addrs aren't needed here). Builder / interactive images
-        // carry a real built kernel and skip this. Single source for every
-        // caller (up / invoke / run) so none re-implements the fallback.
-        if !Path::new(kernel_path).exists() {
-            sys::extract_bundled_kernel(Path::new(kernel_path))?;
-        }
+        let bundled_kernel = match ctx.kernel_source {
+            KrunKernelSource::External => None,
+            KrunKernelSource::BundledLibkrunfw => {
+                Some(sys::extract_bundled_kernel(Path::new(kernel_path))?)
+            }
+        };
+        let configured_kernel = bundled_kernel
+            .as_ref()
+            .map_or_else(|| Path::new(kernel_path), |kernel| kernel.path.as_path());
+        let configured_format = bundled_kernel
+            .as_ref()
+            .map_or(ctx.kernel_format, |kernel| kernel.format);
         let initramfs_path = ctx.initramfs_path.as_deref().map(Path::new);
         krun.set_kernel(
-            Path::new(kernel_path),
-            ctx.kernel_format,
+            configured_kernel,
+            configured_format,
             initramfs_path,
             ctx.kernel_cmdline.as_deref(),
         )?;
@@ -335,6 +339,12 @@ mod tests {
     fn validate_boot_config_accepts_kernel_plus_rootfs() {
         let ctx = KrunContext::new("vm", "/k", "/r");
         validate_boot_config(&ctx).expect("kernel + rootfs is valid");
+    }
+
+    #[test]
+    fn validate_boot_config_accepts_bundled_kernel_plus_rootfs() {
+        let ctx = KrunContext::new_bundled_kernel("vm", "/cache/kernel", "/r");
+        validate_boot_config(&ctx).expect("bundled kernel + rootfs is valid");
     }
 
     #[test]

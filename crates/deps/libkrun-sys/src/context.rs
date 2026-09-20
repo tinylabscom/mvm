@@ -81,6 +81,18 @@ pub struct HostListenOverride {
     pub socket_path: String,
 }
 
+/// Where libkrun obtains the kernel bytes configured by [`KrunContext`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KrunKernelSource {
+    /// Load the caller-supplied file using [`KrunContext::kernel_format`].
+    #[default]
+    External,
+    /// Extract libkrunfw's firmware payload and preserve its declared load and
+    /// entry addresses in the host-appropriate artifact format.
+    BundledLibkrunfw,
+}
+
 /// Configuration for a libkrun guest VM.
 ///
 /// Pure data — no I/O until [`start`](crate::start) /
@@ -94,6 +106,10 @@ pub struct KrunContext {
     /// bundled TSI-patched kernel transparently in `set_root` mode.
     #[serde(default)]
     pub kernel_path: Option<String>,
+    /// Whether `kernel_path` names a caller-owned external kernel or the cache
+    /// destination for libkrunfw's bundled payload.
+    #[serde(default)]
+    pub kernel_source: KrunKernelSource,
     /// Format passed to `krun_set_kernel`. Defaults to `Raw` for
     /// backwards-compatible supervisor JSON and for aarch64 Image-style
     /// kernels; x86_64 callers that extract an ELF vmlinux override this.
@@ -240,6 +256,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: Some(kernel_path.into()),
+            kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: Some(rootfs_path.into()),
             initramfs_path: None,
@@ -270,6 +287,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: Some(kernel_path.into()),
+            kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: None,
             initramfs_path: Some(initramfs_path.into()),
@@ -303,6 +321,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: None,
+            kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: None,
             initramfs_path: None,
@@ -324,6 +343,24 @@ impl KrunContext {
             vsock_socket_dir: None,
             networking: NetworkingMode::Tsi,
         }
+    }
+
+    /// Construct a disk-root context that boots libkrunfw's bundled kernel.
+    /// `kernel_cache_path` receives a raw arm64 image or an address-preserving
+    /// x86_64 ELF artifact when the supervisor configures the VM.
+    pub fn new_bundled_kernel(
+        name: impl Into<String>,
+        kernel_cache_path: impl Into<String>,
+        rootfs_path: impl Into<String>,
+    ) -> Self {
+        let mut ctx = Self::new(name, kernel_cache_path, rootfs_path);
+        ctx.kernel_source = KrunKernelSource::BundledLibkrunfw;
+        ctx.kernel_format = if cfg!(target_arch = "x86_64") {
+            KernelFormat::Elf
+        } else {
+            KernelFormat::Raw
+        };
+        ctx
     }
 
     /// Set the guest entrypoint `argv` (libkrun's `krun_set_exec`
@@ -539,6 +576,35 @@ mod tests {
         let ctx = KrunContext::new("vm-1", "/path/vmlinux.elf", "/path/rootfs.ext4")
             .with_kernel_format(KernelFormat::Elf);
         assert_eq!(ctx.kernel_format, KernelFormat::Elf);
+    }
+
+    #[test]
+    fn bundled_kernel_context_records_its_source_explicitly() {
+        let ctx = KrunContext::new_bundled_kernel(
+            "stage0",
+            "/cache/libkrunfw/vmlinux",
+            "/state/stage0-root.ext4",
+        );
+
+        assert_eq!(ctx.kernel_path.as_deref(), Some("/cache/libkrunfw/vmlinux"));
+        assert_eq!(ctx.rootfs_path.as_deref(), Some("/state/stage0-root.ext4"));
+        assert_eq!(ctx.kernel_source, KrunKernelSource::BundledLibkrunfw);
+        let expected = if cfg!(target_arch = "x86_64") {
+            KernelFormat::Elf
+        } else {
+            KernelFormat::Raw
+        };
+        assert_eq!(ctx.kernel_format, expected);
+    }
+
+    #[test]
+    fn bundled_kernel_source_roundtrips_through_json() {
+        let ctx = KrunContext::new_bundled_kernel("stage0", "/cache/kernel", "/root.ext4");
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: KrunContext = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.kernel_source, KrunKernelSource::BundledLibkrunfw);
+        assert_eq!(back.kernel_format, ctx.kernel_format);
     }
 
     #[test]

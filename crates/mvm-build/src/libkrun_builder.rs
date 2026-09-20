@@ -986,24 +986,18 @@ impl LibkrunBuilderVm {
         )
         .map_err(BuilderVmError::NixBuildFailed)?;
 
-        let mut krun = KrunContext::new(
-            &vm_name,
-            path_to_str(&bundled_kernel, "bundled_kernel")?,
-            path_to_str(&root_disk, "stage0_root_disk")?,
-        )
-        .with_kernel_format(KernelFormat::Raw)
-        .with_cmdline(cmdline)
-        .with_resources(self.vcpus, self.memory_mib)
-        .with_console_output(path_to_str(&console_log, "console_log")?)
-        .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
-        // vda is the root disk supplied above; this store is vdb.
-        .add_disk(
-            "nix-store",
-            path_to_str(nix_store_lock.path(), "nix_store_img")?,
-            false,
-        )
-        .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
-        .add_disk("output", path_to_str(&output_disk, "output_disk")?, false);
+        let mut krun = stage0_krun_context(&vm_name, &bundled_kernel, &root_disk, cmdline)?
+            .with_resources(self.vcpus, self.memory_mib)
+            .with_console_output(path_to_str(&console_log, "console_log")?)
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
+            // vda is the root disk supplied above; this store is vdb.
+            .add_disk(
+                "nix-store",
+                path_to_str(nix_store_lock.path(), "nix_store_img")?,
+                false,
+            )
+            .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
+            .add_disk("output", path_to_str(&output_disk, "output_disk")?, false);
         let (identity_material, identity_drive) = stage_builder_flowmux_identity(&vm_state_dir)?;
         krun = krun.add_disk(
             "mvm-identity",
@@ -2276,6 +2270,20 @@ fn krun_context_for_image(
             reason: "RootDir is a Stage 0 seed representation and must be materialized as an ext4 root before launch".to_string(),
         }),
     }
+}
+
+fn stage0_krun_context(
+    vm_name: &str,
+    bundled_kernel: &Path,
+    root_disk: &Path,
+    cmdline: String,
+) -> Result<KrunContext, BuilderVmError> {
+    Ok(KrunContext::new_bundled_kernel(
+        vm_name,
+        path_to_str(bundled_kernel, "bundled_kernel")?,
+        path_to_str(root_disk, "stage0_root_disk")?,
+    )
+    .with_cmdline(cmdline))
 }
 
 /// Host architecture tag used as a cache-key segment for
@@ -4790,6 +4798,27 @@ mod tests {
             "Stage 0 builder boots must use the explicit vsock device, not TSI"
         );
         assert_eq!(ctx.host_listen_ports, vec![mvm_agentd::vsock::EGRESS_PORT]);
+    }
+
+    #[test]
+    fn stage0_context_marks_the_libkrunfw_kernel_as_bundled() {
+        let ctx = stage0_krun_context(
+            "stage0-test",
+            Path::new("/cache/libkrunfw/vmlinux"),
+            Path::new("/state/stage0-root.ext4"),
+            "console=hvc0 root=/dev/vda rw init=/init".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ctx.kernel_source,
+            libkrun_sys::KrunKernelSource::BundledLibkrunfw
+        );
+        assert_eq!(ctx.kernel_path.as_deref(), Some("/cache/libkrunfw/vmlinux"));
+        assert_eq!(
+            ctx.kernel_cmdline.as_deref(),
+            Some("console=hvc0 root=/dev/vda rw init=/init")
+        );
     }
 
     #[test]

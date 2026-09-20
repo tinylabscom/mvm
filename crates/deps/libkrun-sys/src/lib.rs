@@ -32,6 +32,8 @@
 #[cfg(feature = "libkrun-sys")]
 mod sys;
 
+#[cfg(any(feature = "libkrun-sys", test))]
+mod bundled_kernel;
 mod context;
 mod error;
 mod start;
@@ -40,7 +42,8 @@ mod supervisor;
 pub use error::{Error, install_hint, install_paths, is_available};
 
 pub use context::{
-    GuestEntrypoint, KernelFormat, KrunContext, KrunDisk, KrunVirtioFs, NetworkingMode,
+    GuestEntrypoint, KernelFormat, KrunContext, KrunDisk, KrunKernelSource, KrunVirtioFs,
+    NetworkingMode,
 };
 
 // Exported whenever the module compiles, not only under the FFI feature.
