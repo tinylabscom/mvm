@@ -1304,15 +1304,30 @@ fn pause_emits_workload_sleep_audit_entry() {
 #[test]
 #[cfg(feature = "test-support")]
 fn resume_emits_workload_wake_audit_entry() {
-    // Plan 65 W3: pause-then-resume against the mock backend.
-    // The seal-and-verify round-trip works because `CannedIO`
-    // writes its stubs to disk and `verify_and_resume` reads
-    // them back through the same HMAC-sealed sidecar.
+    // Pause-then-resume against the mock backend. The audit fixture uses the
+    // direct-boot path, so record the machine explicitly before exercising the
+    // resume gate: only a registry-tracked paused machine may be restored.
     let sandbox = AuditSandbox::new();
     bring_up_mock_vm(&sandbox, "resume-vm");
+    let registry_path = sandbox.mvm_root().join("share/vm-names.json");
+    let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+        .expect("load fixture registry");
+    if registry.lookup("resume-vm").is_none() {
+        registry
+            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+                "resume-vm",
+                "",
+                "none",
+            ))
+            .expect("register resume fixture");
+        registry
+            .save(&registry_path)
+            .expect("save fixture registry");
+    }
 
     let pause = sandbox
         .mvmctl()
+        .env("MVM_SKIP_RECONCILE", "1")
         .args(["machine", "pause", "resume-vm", "--hypervisor", "mock"])
         .output()
         .expect("spawn mvmctl pause");
@@ -1323,6 +1338,7 @@ fn resume_emits_workload_wake_audit_entry() {
     );
     let resume = sandbox
         .mvmctl()
+        .env("MVM_SKIP_RECONCILE", "1")
         .args(["machine", "resume", "resume-vm", "--hypervisor", "mock"])
         .output()
         .expect("spawn mvmctl resume");
