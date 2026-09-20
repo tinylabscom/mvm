@@ -9,7 +9,7 @@
 //! `src_port`. With no endpoint configured, every stream fails closed.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::vmm::host_write::{HostWrite, HostWriteBacklog};
 use crate::vmm::vsock_transport::CONNECTION_IDLE_TIMEOUT;
 use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
@@ -34,11 +35,22 @@ pub(crate) const EGRESS_BURST_BYTES: u64 = 8 * 1024 * 1024;
 /// What the device should signal the guest after an inbound endpoint-relay frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndpointRelayAction {
-    /// Opened + relayed to the endpoint (or a later frame on an open stream).
-    Relayed,
-    /// Refused: no endpoint or a connect failure. Fail-closed — the stream is
-    /// reset and nothing leaves the host.
+    /// Accepted for the endpoint (or a later frame on an open stream).
+    /// `forwarded` bytes reached the endpoint socket during the call; the rest
+    /// of the payload is queued behind them and goes out on a later flush.
+    Relayed { forwarded: usize },
+    /// Refused: no endpoint, a connect failure, a closed endpoint socket, or a
+    /// guest that sent past its window. Fail-closed — the stream is reset.
     Refused,
+}
+
+/// Result of retrying queued guest bytes against their endpoint sockets.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct EndpointBacklogFlush {
+    /// Bytes that reached each endpoint socket during the flush.
+    pub forwarded: Vec<(u32, usize)>,
+    /// Connection ids whose endpoint socket failed; they were closed.
+    pub failed: Vec<u32>,
 }
 
 /// Result of draining the open endpoint sockets once.
@@ -264,6 +276,13 @@ pub(crate) trait GuestEndpointRelay {
         limit: &mut dyn FnMut(u32) -> usize,
     ) -> EndpointRelayDrain;
 
+    /// Retry the guest bytes each connection's endpoint socket could not take
+    /// yet. A connection whose socket has failed is closed and reported.
+    fn flush_backlogs(&mut self) -> EndpointBacklogFlush;
+
+    /// Whether any connection has guest bytes waiting for its endpoint socket.
+    fn has_backlog(&self) -> bool;
+
     /// Close the endpoint side of `conn_id`.
     fn close_connection(&mut self, conn_id: u32);
 
@@ -286,6 +305,8 @@ pub(crate) struct SubstitutionBridge {
 struct EndpointConn {
     stream: UnixStream,
     last_activity: Instant,
+    /// Guest bytes the endpoint socket has not taken yet.
+    backlog: HostWriteBacklog,
 }
 
 impl SubstitutionBridge {
@@ -393,6 +414,7 @@ impl GuestEndpointRelay for SubstitutionBridge {
                     EndpointConn {
                         stream,
                         last_activity: Instant::now(),
+                        backlog: HostWriteBacklog::default(),
                     },
                 );
                 self.bump(1);
@@ -416,9 +438,36 @@ impl GuestEndpointRelay for SubstitutionBridge {
             .conns
             .get_mut(&conn_id)
             .expect("open_connection returned true, so the connection is present");
-        write_nonblocking(&mut conn.stream, payload);
         conn.last_activity = Instant::now();
-        EndpointRelayAction::Relayed
+        match conn.backlog.submit(&mut conn.stream, payload) {
+            HostWrite::Forwarded(forwarded) => EndpointRelayAction::Relayed { forwarded },
+            HostWrite::Failed => EndpointRelayAction::Refused,
+        }
+    }
+
+    fn flush_backlogs(&mut self) -> EndpointBacklogFlush {
+        let mut flushed = EndpointBacklogFlush::default();
+        for (conn_id, conn) in self.conns.iter_mut() {
+            if !conn.backlog.is_pending() {
+                continue;
+            }
+            match conn.backlog.flush(&mut conn.stream) {
+                HostWrite::Forwarded(0) => {}
+                HostWrite::Forwarded(n) => {
+                    conn.last_activity = Instant::now();
+                    flushed.forwarded.push((*conn_id, n));
+                }
+                HostWrite::Failed => flushed.failed.push(*conn_id),
+            }
+        }
+        for conn_id in &flushed.failed {
+            self.close_connection(*conn_id);
+        }
+        flushed
+    }
+
+    fn has_backlog(&self) -> bool {
+        self.conns.values().any(|conn| conn.backlog.is_pending())
     }
 
     fn drain_endpoint_bytes_limited(
@@ -482,28 +531,11 @@ impl GuestEndpointRelay for SubstitutionBridge {
     }
 }
 
-/// Write `payload` to a non-blocking socket, briefly spinning past `WouldBlock` so
-/// a small frame goes out without stalling the run loop indefinitely.
-fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
-    let mut off = 0;
-    let mut spins = 0u32;
-    while off < payload.len() {
-        match stream.write(&payload[off..]) {
-            Ok(0) => break,
-            Ok(n) => off += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && spins < 10_000 => {
-                spins += 1;
-                std::thread::yield_now();
-            }
-            Err(_) => break,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::bind_unix_listener;
+    use std::io::Write;
     use std::time::Duration;
 
     /// No endpoint configured → every stream is refused, nothing opened.
@@ -583,6 +615,7 @@ mod tests {
                 EndpointConn {
                     stream,
                     last_activity: Instant::now(),
+                    backlog: HostWriteBacklog::default(),
                 },
             );
             peers.push(peer);
@@ -621,7 +654,12 @@ mod tests {
         b.set_endpoint(&sock);
 
         let raw = b"1.2.3.4:80\n";
-        assert_eq!(b.relay_guest_bytes(3, raw), EndpointRelayAction::Relayed);
+        assert_eq!(
+            b.relay_guest_bytes(3, raw),
+            EndpointRelayAction::Relayed {
+                forwarded: raw.len()
+            }
+        );
         assert!(b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 1);
 
@@ -652,6 +690,7 @@ mod tests {
             EndpointConn {
                 stream,
                 last_activity: Instant::now(),
+                backlog: HostWriteBacklog::default(),
             },
         );
         peer.write_all(&vec![b'x'; 1024]).unwrap();
@@ -693,13 +732,13 @@ mod tests {
 
         assert_eq!(
             b.relay_guest_bytes(7, b"first"),
-            EndpointRelayAction::Relayed
+            EndpointRelayAction::Relayed { forwarded: 5 }
         );
         assert_eq!(active.load(Ordering::Relaxed), 1);
         // Second frame on the same open stream — no new connection.
         assert_eq!(
             b.relay_guest_bytes(7, b"second"),
-            EndpointRelayAction::Relayed
+            EndpointRelayAction::Relayed { forwarded: 6 }
         );
         assert_eq!(active.load(Ordering::Relaxed), 1);
 
@@ -713,6 +752,73 @@ mod tests {
         assert_eq!(got, b"firstsecond");
     }
 
+    /// An endpoint that is not reading leaves the guest's bytes queued, in
+    /// order, and a later flush delivers them and reports what went out.
+    #[test]
+    fn a_stalled_endpoint_keeps_guest_bytes_queued_until_it_reads() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut bridge = SubstitutionBridge::with_budget(EgressBudget::trusted_builder());
+        bridge.conns.insert(
+            7,
+            EndpointConn {
+                stream,
+                last_activity: Instant::now(),
+                backlog: HostWriteBacklog::default(),
+            },
+        );
+        let payload: Vec<u8> = (0..crate::vmm::host_write::MAX_HOST_BACKLOG)
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let EndpointRelayAction::Relayed { forwarded: first } =
+            bridge.relay_guest_bytes(7, &payload)
+        else {
+            panic!("an open stream accepts the payload");
+        };
+        assert!(first < payload.len());
+        assert!(bridge.has_backlog());
+
+        let mut received = Vec::new();
+        let mut total = first;
+        let mut buf = vec![0u8; 16 * 1024];
+        while received.len() < payload.len() {
+            let n = peer.read(&mut buf).unwrap();
+            received.extend_from_slice(&buf[..n]);
+            let flushed = bridge.flush_backlogs();
+            assert!(flushed.failed.is_empty());
+            total += flushed.forwarded.iter().map(|(_, n)| n).sum::<usize>();
+        }
+        assert_eq!(received, payload);
+        assert_eq!(total, payload.len());
+        assert!(!bridge.has_backlog());
+    }
+
+    #[test]
+    fn a_closed_endpoint_socket_fails_its_queued_stream() {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut bridge = SubstitutionBridge::with_budget(EgressBudget::trusted_builder());
+        bridge.conns.insert(
+            7,
+            EndpointConn {
+                stream,
+                last_activity: Instant::now(),
+                backlog: HostWriteBacklog::default(),
+            },
+        );
+        let payload = vec![0u8; crate::vmm::host_write::MAX_HOST_BACKLOG];
+        assert!(matches!(
+            bridge.relay_guest_bytes(7, &payload),
+            EndpointRelayAction::Relayed { .. }
+        ));
+        drop(peer);
+
+        let flushed = bridge.flush_backlogs();
+        assert_eq!(flushed.failed, vec![7]);
+        assert!(!bridge.is_active());
+    }
+
     #[test]
     fn poll_fds_include_open_endpoint_streams() {
         let dir = tempfile::tempdir().unwrap();
@@ -721,7 +827,10 @@ mod tests {
             return;
         };
         let server = std::thread::spawn(move || {
-            let (_c, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut payload = [0_u8; 5];
+            stream.read_exact(&mut payload).unwrap();
+            assert_eq!(&payload, b"first");
         });
 
         let mut bridge = SubstitutionBridge::new();
@@ -729,7 +838,7 @@ mod tests {
         assert!(bridge.poll_fds().is_empty());
         assert_eq!(
             bridge.relay_guest_bytes(7, b"first"),
-            EndpointRelayAction::Relayed
+            EndpointRelayAction::Relayed { forwarded: 5 }
         );
         assert_eq!(bridge.poll_fds().len(), 1);
         bridge.close_connection(7);
@@ -748,6 +857,7 @@ mod tests {
             EndpointConn {
                 stream,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+                backlog: HostWriteBacklog::default(),
             },
         );
 
@@ -775,7 +885,7 @@ mod tests {
         bridge.set_endpoint(&sock);
         assert_eq!(
             bridge.relay_guest_bytes(7, b"open"),
-            EndpointRelayAction::Relayed
+            EndpointRelayAction::Relayed { forwarded: 4 }
         );
 
         // Drain every token, then keep writing on the already-open stream. A
@@ -785,7 +895,7 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(
                 bridge.relay_guest_bytes(7, &[b'x'; 1024]),
-                EndpointRelayAction::Relayed,
+                EndpointRelayAction::Relayed { forwarded: 1024 },
                 "an open stream must backpressure, never reset"
             );
         }
@@ -839,6 +949,7 @@ mod tests {
             EndpointConn {
                 stream,
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(600),
+                backlog: HostWriteBacklog::default(),
             },
         );
 
@@ -896,6 +1007,7 @@ mod tests {
                 EndpointConn {
                     stream,
                     last_activity: Instant::now(),
+                    backlog: HostWriteBacklog::default(),
                 },
             );
             assert!(bridge.budget.try_reserve_stream());

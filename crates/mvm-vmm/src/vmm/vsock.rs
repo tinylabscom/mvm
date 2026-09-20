@@ -238,6 +238,8 @@ impl VsockShared {
 
     pub fn set_trusted_builder_egress(&mut self) {
         self.handlers.set_trusted_builder_egress();
+        self.transport
+            .exempt_host_ports_from_idle(VsockHandlerRegistry::relay_ports());
     }
 
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
@@ -356,6 +358,13 @@ impl VsockShared {
 
     pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         self.handlers.poll_fds()
+    }
+
+    /// Whether guest bytes are queued for a host socket that could not take
+    /// them yet. Readiness alone cannot wake the host-I/O loop for these — the
+    /// sockets are watched for reading — so the loop polls on a timer instead.
+    pub(super) fn has_host_backlog(&self) -> bool {
+        self.handlers.has_host_backlog()
     }
 }
 
@@ -1667,6 +1676,109 @@ mod tests {
         let (h, payload) = reply.expect("endpoint reply framed back to the guest");
         assert_eq!(h.src_port, mvm_agentd::vsock::EGRESS_PORT);
         assert!(payload.starts_with(b"OK:"));
+    }
+
+    /// The last `fwd_cnt` the device reported to guest port `guest_port`.
+    fn last_reported_fwd_cnt(d: &VsockShared, guest_port: u32) -> Option<u32> {
+        d.transport
+            .pending_rx
+            .iter()
+            .rev()
+            .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == guest_port)
+            .map(|(h, _)| h.fwd_cnt)
+    }
+
+    /// The endpoint is another process, and it reads when the host schedules
+    /// it. Guest bytes it has not read yet must wait for it rather than be
+    /// dropped: a gap desynchronises the FlowMux stream the endpoint parses, and
+    /// the session dies with a frame that will not decode. The guest's window
+    /// has to follow what the endpoint actually took, or nothing holds the guest
+    /// back while the endpoint is stalled.
+    #[test]
+    fn egress_bytes_wait_for_a_stalled_endpoint_and_arrive_intact() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let payload: Vec<u8> = (0..crate::vmm::host_write::MAX_HOST_BACKLOG)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let expected = payload.len();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            released.recv().unwrap();
+            let mut all = vec![0u8; expected];
+            c.read_exact(&mut all).unwrap();
+            all
+        });
+
+        let mut d = dev();
+        d.set_network_endpoint(&sock);
+        d.set_trusted_builder_egress();
+        for chunk in payload.chunks(4096) {
+            let rw = VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1500,
+                dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                len: chunk.len() as u32,
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                buf_alloc: HOST_BUF_ALLOC,
+                ..Default::default()
+            };
+            d.handle_packet(rw, chunk);
+        }
+
+        let stalled = last_reported_fwd_cnt(&d, 1500).expect("the guest was credited");
+        assert!(
+            (stalled as usize) < expected,
+            "bytes the endpoint has not read must not be reported forwarded"
+        );
+        assert!(d.has_host_backlog());
+
+        release.send(()).unwrap();
+        let started = std::time::Instant::now();
+        while d.has_host_backlog() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "the queued bytes never reached the endpoint"
+            );
+            let _ = d.service_host_io();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(server.join().unwrap(), payload);
+        assert_eq!(last_reported_fwd_cnt(&d, 1500), Some(expected as u32));
+    }
+
+    /// A trusted builder's egress session carries every flow the build has
+    /// open. Evicting it for a minute of silence — a derivation compiling
+    /// without fetching — resets all of them.
+    #[test]
+    fn a_trusted_builder_egress_session_is_not_evicted_for_being_idle() {
+        let mut d = dev();
+        d.set_trusted_builder_egress();
+        let rw = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1500,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
+            ..Default::default()
+        };
+        assert!(d.transport.record_tx_credit(&rw));
+        assert!(d.transport.try_add_recv(&rw, 0));
+
+        let later = std::time::Instant::now()
+            + crate::vmm::vsock_transport::CONNECTION_IDLE_TIMEOUT
+            + std::time::Duration::from_secs(1);
+        assert!(d.transport.evict_idle_connections_at(later).is_empty());
     }
 
     #[test]

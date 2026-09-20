@@ -128,6 +128,11 @@ pub(crate) struct VsockTransportCore {
     /// quiet — and a request/response control channel is quiet for exactly as
     /// long as the operation it is waiting on.
     long_lived: std::collections::HashSet<u32>,
+    /// Host ports whose streams are exempt from idle eviction, for the
+    /// guest-initiated relays whose guest port is ephemeral. A trusted builder's
+    /// egress session is quiet for as long as a derivation compiles without
+    /// fetching, and evicting it tears down every flow multiplexed on it.
+    long_lived_host_ports: std::collections::HashSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -164,6 +169,7 @@ impl VsockTransportCore {
             pending_rx: VecDeque::new(),
             tx_credit: HashMap::new(),
             long_lived: std::collections::HashSet::new(),
+            long_lived_host_ports: std::collections::HashSet::new(),
         }
     }
 
@@ -294,20 +300,40 @@ impl VsockTransportCore {
             bytes: 0,
             last_activity: now,
         });
-        entry.bytes = entry.bytes.saturating_add(n);
+        // `fwd_cnt` is a free-running counter the guest subtracts modulo 2^32;
+        // saturating it would shut the guest's window for good after 4 GiB.
+        entry.bytes = entry.bytes.wrapping_add(n);
         entry.last_activity = now;
         true
+    }
+
+    /// Report `n` more bytes of an existing connection as consumed by the host,
+    /// reopening that much of the guest's send window. A connection the device
+    /// no longer tracks has nothing to credit.
+    pub(crate) fn credit_forwarded(&mut self, host_port: u32, guest_port: u32, n: u32) {
+        if let Some(entry) = self.recv_cnt.get_mut(&VsockConnectionKey {
+            host_port,
+            guest_port,
+        }) {
+            entry.bytes = entry.bytes.wrapping_add(n);
+            entry.last_activity = Instant::now();
+        }
     }
 
     pub(crate) fn set_long_lived_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
         self.long_lived = ports.into_iter().collect();
     }
 
+    /// Exempt streams to these host ports from idle eviction.
+    pub(crate) fn exempt_host_ports_from_idle(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.long_lived_host_ports.extend(ports);
+    }
+
     pub(crate) fn evict_idle_connections(&mut self) -> Vec<VsockConnectionKey> {
         self.evict_idle_connections_at(Instant::now())
     }
 
-    fn evict_idle_connections_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
+    pub(crate) fn evict_idle_connections_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
         let mut latest_activity =
             HashMap::with_capacity(self.recv_cnt.len() + self.tx_credit.len());
         for (key, credit) in &self.recv_cnt {
@@ -324,6 +350,7 @@ impl VsockTransportCore {
             .into_iter()
             .filter_map(|(key, activity)| {
                 (!self.long_lived.contains(&key.guest_port)
+                    && !self.long_lived_host_ports.contains(&key.host_port)
                     && now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT)
                     .then_some(key)
             })
@@ -927,6 +954,31 @@ mod tests {
         }
         assert_eq!(core.recv_cnt.len(), MAX_CONNECTIONS);
         assert!(core.try_add_recv(&existing, 1));
+    }
+
+    #[test]
+    fn forwarded_credit_is_a_free_running_counter() {
+        let mut core = transport();
+        let inbound = VsockHdr {
+            src_port: 1500,
+            dst_port: 5253,
+            ..Default::default()
+        };
+        assert!(core.try_add_recv(&inbound, u32::MAX - 1));
+        core.credit_forwarded(5253, 1500, 3);
+        assert_eq!(
+            core.fwd_cnt_for(5253, 1500),
+            1,
+            "fwd_cnt must wrap like the guest's own counter, not stick at u32::MAX"
+        );
+    }
+
+    #[test]
+    fn forwarded_credit_for_an_untracked_connection_is_ignored() {
+        let mut core = transport();
+        core.credit_forwarded(5253, 1500, 3);
+        assert_eq!(core.fwd_cnt_for(5253, 1500), 0);
+        assert!(core.recv_cnt.is_empty());
     }
 
     #[test]

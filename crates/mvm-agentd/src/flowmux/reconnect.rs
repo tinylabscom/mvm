@@ -6,7 +6,7 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use crate::flowmux_drive::GuestIngressTarget;
 
@@ -14,6 +14,12 @@ use super::{FlowMuxClient, FlowMuxError, FlowMuxStream, FlowMuxUdpSocket, Sessio
 
 /// Default timeout for an individual call that waits through reconnect.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longest one reconnect attempt may take, dial and handshake together. The
+/// host speaks first on a new session, so a dial that lands on a host which
+/// never answers would otherwise hold the reconnect loop — and with it every
+/// caller — for good.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reconnect policy: bounded exponential backoff with a small absolute cap.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +30,8 @@ pub struct ReconnectPolicy {
     pub max_delay: Duration,
     /// Maximum number of reconnect attempts before giving up.
     pub max_attempts: u32,
+    /// Longest one attempt, dial and handshake together, may take.
+    pub attempt_timeout: Duration,
 }
 
 impl Default for ReconnectPolicy {
@@ -32,6 +40,7 @@ impl Default for ReconnectPolicy {
             initial_delay: Duration::from_millis(250),
             max_delay: Duration::from_secs(16),
             max_attempts: 10,
+            attempt_timeout: ATTEMPT_TIMEOUT,
         }
     }
 }
@@ -117,10 +126,17 @@ impl FlowMuxReconnectClient {
     /// reconnect loop owns, and the client's own state says whether that one
     /// has finished its handshake. Waiting on only the first parks forever on
     /// a client that is still connecting, since nothing replaces it.
+    ///
+    /// The snapshot is taken with `borrow_and_update`, which marks it seen.
+    /// A plain `borrow` leaves every clone of the receiver reporting the
+    /// reconnect loop's first replacement as unseen forever, so once any
+    /// session had been replaced, a dead one sent this loop straight back to
+    /// the same dead snapshot without ever awaiting: one guest CPU pinned, the
+    /// runtime worker lost, and the caller's timeout unable to fire.
     async fn active_client(&self) -> Result<Arc<FlowMuxClient>, FlowMuxError> {
         let mut current = self.current.clone();
         loop {
-            let snapshot = current.borrow().clone();
+            let snapshot = current.borrow_and_update().clone();
             let Some(client) = snapshot else {
                 if current.changed().await.is_err() {
                     return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
@@ -187,11 +203,20 @@ impl FlowMuxReconnectClient {
         client.resolve(name, qtype).await
     }
 
+    /// Resolve once the reconnect owner has given up: the session will not
+    /// come back, and every call fails from here on. A process whose only job
+    /// is this session should exit then, so what depends on it fails at once
+    /// and says why, instead of waiting out a timeout per request.
+    pub async fn gave_up(&self) {
+        let mut current = self.current.clone();
+        while current.changed().await.is_ok() {}
+    }
+
     /// Build a reconnect client from an existing watch receiver.
     ///
     /// Test-only: lets in-crate tests stand up a client that is already
     /// connected to a mock host without going through the reconnect factory.
-    #[cfg(all(test, feature = "addons"))]
+    #[cfg(test)]
     pub(crate) fn from_receiver(current: watch::Receiver<Option<Arc<FlowMuxClient>>>) -> Self {
         Self { current }
     }
@@ -232,7 +257,10 @@ async fn reconnect_loop<S, F, Fut>(
 
         attempts += 1;
         if attempts > policy.max_attempts {
-            warn!("FlowMux reconnect exhausted; entering dead state");
+            error!(
+                attempts = policy.max_attempts,
+                "FlowMux session to the host lost and not re-established; guest egress is down"
+            );
             let _ = current_tx.send(None);
             return;
         }
@@ -241,34 +269,161 @@ async fn reconnect_loop<S, F, Fut>(
         tokio::time::sleep(delay + jitter).await;
         delay = (delay * 2).min(policy.max_delay);
 
-        match connector().await {
-            Ok(stream) => {
-                match FlowMuxClient::connect_with_ingress(
-                    stream,
-                    guest_signing_key.clone(),
-                    host_anchor,
-                    ingress_targets.as_ref().clone(),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        let new_client = Arc::new(client);
-                        let state = new_client.state();
-                        if current_tx.send(Some(new_client)).is_err() {
-                            return;
-                        }
-                        *state_rx = state;
-                        attempts = 0;
-                        delay = policy.initial_delay;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "FlowMux reconnect handshake failed");
-                    }
+        let attempt = async {
+            let stream = connector().await?;
+            FlowMuxClient::connect_with_ingress(
+                stream,
+                guest_signing_key.clone(),
+                host_anchor,
+                ingress_targets.as_ref().clone(),
+            )
+            .await
+        };
+        match tokio::time::timeout(policy.attempt_timeout, attempt).await {
+            Ok(Ok(client)) => {
+                let new_client = Arc::new(client);
+                let state = new_client.state();
+                if current_tx.send(Some(new_client)).is_err() {
+                    return;
                 }
+                *state_rx = state;
+                attempts = 0;
+                delay = policy.initial_delay;
+                info!("FlowMux session re-established");
             }
-            Err(e) => {
-                warn!(error = %e, "FlowMux reconnect transport failed");
-            }
+            Ok(Err(e)) => warn!(error = %e, attempt = attempts, "FlowMux reconnect failed"),
+            Err(_) => warn!(
+                attempt = attempts,
+                timeout_secs = policy.attempt_timeout.as_secs(),
+                "FlowMux reconnect timed out"
+            ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+    use tokio::sync::mpsc;
+
+    fn client_in(state: SessionState) -> (Arc<FlowMuxClient>, watch::Sender<SessionState>) {
+        let (tx, _requests) = mpsc::unbounded_channel();
+        let (state_tx, state) = watch::channel(state);
+        let client = FlowMuxClient {
+            tx,
+            state,
+            next_stream_id: Arc::new(AtomicU32::new(1)),
+        };
+        (Arc::new(client), state_tx)
+    }
+
+    /// Run `active_client` on its own thread and report whether it returned
+    /// within `wait`. A busy loop never yields, so no in-runtime timeout can
+    /// catch it; only a thread the test is not blocked on can.
+    fn settles_within(
+        client: FlowMuxReconnectClient,
+        wait: Duration,
+    ) -> Option<Result<(), FlowMuxError>> {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("test runtime");
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(200), client.active_client()).await
+            });
+            let _ = done.send(result.map(|r| r.map(|_| ())).unwrap_or(Ok(())));
+        });
+        outcome.recv_timeout(wait).ok()
+    }
+
+    /// The reconnect loop has already replaced the session once, and the
+    /// replacement has died with no successor yet. A caller must wait for the
+    /// next session rather than spin on the dead one.
+    #[test]
+    fn a_dead_session_after_a_reconnect_is_waited_on_not_spun_on() {
+        let (first, _first_state) = client_in(SessionState::Ready);
+        let (current_tx, current) = watch::channel(Some(first));
+        let client = FlowMuxReconnectClient::from_receiver(current);
+        let (dead, _dead_state) = client_in(SessionState::Dead(Arc::from("session closed")));
+        current_tx.send(Some(dead)).expect("receiver alive");
+
+        let outcome = settles_within(client, Duration::from_secs(5));
+
+        assert!(
+            outcome.is_some(),
+            "active_client never yielded while the session was dead"
+        );
+        drop(current_tx);
+    }
+
+    /// A dial that lands on a host which never answers must cost one attempt,
+    /// not the session: the loop gives up after its budget and says so.
+    #[test]
+    fn a_reconnect_that_never_completes_is_bounded_and_ends_in_giving_up() {
+        let (dead, _dead_state) = client_in(SessionState::Dead(Arc::from("session closed")));
+        let (current_tx, current) = watch::channel(Some(Arc::clone(&dead)));
+        let client = FlowMuxReconnectClient::from_receiver(current);
+        let policy = ReconnectPolicy {
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_attempts: 2,
+            attempt_timeout: Duration::from_millis(50),
+        };
+        let seed: [u8; 32] = [7; 32];
+        let key = SigningKey::from_bytes(&seed);
+        let anchor = key.verifying_key();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let mut state = dead.state();
+            let hangs = || std::future::pending::<Result<tokio::io::DuplexStream, FlowMuxError>>();
+            let owner = tokio::spawn(async move {
+                reconnect_loop(
+                    hangs,
+                    key,
+                    anchor,
+                    Arc::new(Vec::new()),
+                    current_tx,
+                    &mut state,
+                    policy,
+                )
+                .await;
+            });
+            tokio::time::timeout(Duration::from_secs(5), client.gave_up())
+                .await
+                .expect("the reconnect owner gave up instead of waiting forever");
+            owner.await.expect("reconnect owner task");
+        });
+    }
+
+    /// And when the next session does arrive, the waiting caller gets it.
+    #[test]
+    fn a_caller_waiting_through_a_dead_session_gets_its_replacement() {
+        let (dead, _dead_state) = client_in(SessionState::Dead(Arc::from("session closed")));
+        let (current_tx, current) = watch::channel(Some(dead));
+        let client = FlowMuxReconnectClient::from_receiver(current);
+        let (next, _next_state) = client_in(SessionState::Ready);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let got = runtime.block_on(async move {
+            let waiter = tokio::spawn(async move { client.active_client().await });
+            tokio::task::yield_now().await;
+            current_tx
+                .send(Some(Arc::clone(&next)))
+                .expect("receiver alive");
+            let got = waiter.await.expect("waiter task");
+            (got, next)
+        });
+        let (got, next) = got;
+        assert!(Arc::ptr_eq(&got.expect("the replacement session"), &next));
     }
 }

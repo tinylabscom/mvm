@@ -37,7 +37,7 @@ use mvm_contract::protocol::network_flow::{
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub use self::ingress::FlowMuxIngressHandle;
 use self::ingress::{
@@ -897,20 +897,15 @@ impl FlowMuxSession {
         let payload = self.frame_payload(payload_len).to_vec();
 
         let mut streams = lock_tcp_streams(&self.streams);
-        let handle = match streams.get_mut(&stream_id) {
-            Some(h) => h,
-            None => {
-                warn!(stream_id, "Data frame on unknown stream");
-                self.send_goaway("unknown stream")?;
-                return Ok(());
-            }
+        let Some(handle) = streams.get_mut(&stream_id) else {
+            drop(streams);
+            self.discard_late_frame(Opcode::Data, stream_id);
+            return Ok(());
         };
 
         if handle.host_half_closed.load(Ordering::Relaxed) {
             drop(streams);
-            self.send_reset(stream_id, "data after host half-close")?;
-            self.remove_stream(stream_id);
-            return Ok(());
+            return self.reset_host_stream(stream_id, "data after host half-close");
         }
 
         {
@@ -919,9 +914,7 @@ impl FlowMuxSession {
                 warn!(error = %e, stream_id, "guest credit exhausted");
                 drop(reg);
                 drop(streams);
-                self.send_reset(stream_id, "credit exhausted")?;
-                self.remove_stream(stream_id);
-                return Ok(());
+                return self.reset_host_stream(stream_id, "credit exhausted");
             }
         }
 
@@ -932,9 +925,7 @@ impl FlowMuxSession {
         {
             warn!(error = %e, stream_id, "write to upstream failed");
             drop(streams);
-            self.send_reset(stream_id, "upstream write failed")?;
-            self.remove_stream(stream_id);
-            return Ok(());
+            return self.reset_host_stream(stream_id, "upstream write failed");
         }
 
         // Replenish the consumed credit so the guest can keep sending.
@@ -955,23 +946,18 @@ impl FlowMuxSession {
 
     fn handle_guest_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         let mut streams = lock_tcp_streams(&self.streams);
-        let handle = match streams.get_mut(&stream_id) {
-            Some(h) => h,
-            None => {
-                warn!(stream_id, "HalfClose on unknown stream");
-                self.send_goaway("unknown stream")?;
-                return Ok(());
-            }
+        let Some(handle) = streams.get_mut(&stream_id) else {
+            drop(streams);
+            self.discard_late_frame(Opcode::HalfClose, stream_id);
+            return Ok(());
         };
 
         let _ = handle.upstream.shutdown(std::net::Shutdown::Write);
 
         if handle.host_half_closed.load(Ordering::Relaxed) {
             // Both directions are now done.
-            handle.retired.store(true, Ordering::Relaxed);
             drop(streams);
-            self.send_reset(stream_id, "stream complete")?;
-            self.remove_stream(stream_id);
+            self.reset_host_stream(stream_id, "stream complete")?;
         } else {
             let _ = lock_registry(&self.registry).half_close(stream_id);
         }
@@ -1163,23 +1149,50 @@ impl FlowMuxSession {
         // cleartext until the authenticated session itself eventually exits.
         self.http_flows.remove(&stream_id);
         http_flow::cancel_forwarding(&self.http_cancellations, stream_id);
-        let was_live = lock_tcp_streams(&self.streams).remove(&stream_id);
-        let live = was_live.is_some();
-        if let Some(handle) = was_live {
-            handle.retired.store(true, Ordering::Relaxed);
-            let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
-        }
-        let _ = lock_registry(&self.registry).retire(stream_id);
         // Only announce a teardown we are actually performing. A relay thread
         // that already reset this stream has told the guest once; telling it
         // again names a stream the guest has retired, which is a protocol error
         // on its validator and kills the whole session — taking every other
         // live stream with it. The guest is right to refuse the second one, so
         // the fix belongs here.
-        if live {
-            self.send_reset(stream_id, "reset by peer")?;
+        self.reset_host_stream(stream_id, "reset by peer")
+    }
+
+    /// Tear down a TCP stream and tell the guest, unless someone already has.
+    ///
+    /// Exactly one `Reset` per stream may reach the guest: its validator
+    /// retires the stream on the first, and ends the session over any frame
+    /// that names it afterwards. The relay thread resets streams too, when its
+    /// upstream fails, so whichever side sets `retired` first owns the `Reset`,
+    /// and the relay checks the same flag under the session lock before each
+    /// frame it sends (see [`wire::write_stream_frame_to`]).
+    fn reset_host_stream(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        let handle = lock_tcp_streams(&self.streams).remove(&stream_id);
+        let _ = lock_registry(&self.registry).retire(stream_id);
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+        let owns_reset = !handle.retired.swap(true, Ordering::AcqRel);
+        let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
+        if owns_reset {
+            self.send_reset(stream_id, reason)?;
         }
         Ok(())
+    }
+
+    /// Drop a guest frame that names a stream the host has already torn down.
+    ///
+    /// The session validator admitted it, so the stream is one the guest opened
+    /// legitimately; only the host has let go of it — a relay that reset it
+    /// when its upstream failed, or a reset for data after the upstream closed.
+    /// The guest sent this before our `Reset` reached it and could not have
+    /// known better. Answering with `GoAway` ends the session, and with it
+    /// every other flow the guest has open, over a race the guest lost fairly.
+    fn discard_late_frame(&self, opcode: Opcode, stream_id: u32) {
+        debug!(
+            ?opcode,
+            stream_id, "dropping frame for a stream the host reset"
+        );
     }
 
     fn remove_stream(&mut self, stream_id: u32) {
@@ -2875,6 +2888,63 @@ mod tests {
         host.join().unwrap().unwrap();
     }
 
+    /// The host resets a stream the guest is still writing to — here, data
+    /// after the upstream closed. The guest's `HalfClose` was already on the
+    /// wire and names a stream the host no longer has. That is the guest losing
+    /// a race, not breaking the protocol, and it must not end the session: every
+    /// other flow on it would go down too.
+    #[test]
+    fn a_late_frame_on_a_stream_the_host_reset_does_not_end_the_session() {
+        let banner = tcp_banner_server();
+        let echo = tcp_echo_server();
+        assert_eq!(banner.ip(), echo.ip());
+        let (mut guest, mut guest_session, host) = run_session(gate_allowing_ports(
+            banner.ip(),
+            &[banner.port(), echo.port()],
+            &[],
+        ));
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", banner.ip(), banner.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Opened);
+        loop {
+            let (op, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
+            if op == Opcode::HalfClose {
+                break;
+            }
+            assert_eq!(op, Opcode::Data);
+        }
+
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"late");
+        let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!((opcode, stream_id), (Opcode::Reset, 1));
+        write_frame(&mut guest, &mut guest_session, Opcode::HalfClose, 1, b"");
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            3,
+            format!("{}:{}", echo.ip(), echo.port()).as_bytes(),
+        );
+        let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            (opcode, stream_id),
+            (Opcode::Opened, 3),
+            "session ended instead: {}",
+            String::from_utf8_lossy(&payload)
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
     #[test]
     fn dns_resolve_rate_limit_refuses_overflow() {
         let limits = RegistryLimits {
@@ -2926,6 +2996,59 @@ mod tests {
         let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Reset);
         assert!(!payload.is_empty());
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// The relay resets a stream on its own (here: the guest never returned
+    /// credit), and the guest, not having seen that yet, keeps writing. The
+    /// guest gets exactly one `Reset` for the stream. A second names a stream
+    /// its validator has already retired, and it ends the session over it.
+    #[test]
+    fn a_stream_the_relay_reset_is_not_reset_again() {
+        let banner = tcp_banner_server();
+        let echo = tcp_echo_server();
+        assert_eq!(banner.ip(), echo.ip());
+        let limits = RegistryLimits {
+            initial_credit: 0,
+            credit_wait: Duration::from_millis(200),
+            ..Default::default()
+        };
+        let (mut guest, mut guest_session, host) = run_session_with(
+            gate_allowing_ports(banner.ip(), &[banner.port(), echo.port()], &[]),
+            limits,
+        );
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", banner.ip(), banner.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Opened);
+        let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!((opcode, stream_id), (Opcode::Reset, 1));
+
+        // Already on the wire before the guest read the Reset.
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"late");
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            3,
+            format!("{}:{}", echo.ip(), echo.port()).as_bytes(),
+        );
+        let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            (opcode, stream_id),
+            (Opcode::Opened, 3),
+            "expected the next open to be answered, got {opcode:?} on {stream_id}: {}",
+            String::from_utf8_lossy(&payload)
+        );
 
         drop(guest);
         host.join().unwrap().unwrap();

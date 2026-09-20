@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
 use super::host_dial_bridge::HostDialBridge;
+use super::host_write::HostWrite;
 use super::substitution_bridge::{
     EgressBudget, EndpointRelayAction, GuestEndpointRelay, READ_CHUNK, SubstitutionBridge,
 };
@@ -50,6 +51,10 @@ impl<'a> VsockHandlerContext<'a> {
 
     pub(crate) fn try_add_recv(&mut self, inbound: &VsockHdr, n: u32) -> bool {
         self.transport.try_add_recv(inbound, n)
+    }
+
+    pub(crate) fn credit_forwarded(&mut self, host_port: u32, guest_port: u32, n: u32) {
+        self.transport.credit_forwarded(host_port, guest_port, n);
     }
 
     pub(crate) fn remove_recv(&mut self, host_port: u32, guest_port: u32) {
@@ -126,6 +131,11 @@ pub(crate) trait GuestPortHandler: Any + Send {
     fn poll_fds(&self) -> Vec<RawFd> {
         Vec::new()
     }
+    /// Whether guest bytes are waiting for a host socket that could not take
+    /// them. The host-I/O loop retries on a short timer while this holds.
+    fn has_host_backlog(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) trait HostInitiatedHandler: Any + Send {
@@ -139,6 +149,10 @@ pub(crate) trait HostInitiatedHandler: Any + Send {
     fn cancel(&mut self) {}
     fn poll_fds(&self) -> Vec<RawFd> {
         Vec::new()
+    }
+    /// See [`GuestPortHandler::has_host_backlog`].
+    fn has_host_backlog(&self) -> bool {
+        false
     }
 }
 
@@ -220,14 +234,19 @@ impl VsockHandlerRegistry {
             .set_endpoint(path);
     }
 
+    /// The guest ports whose streams relay to a host endpoint.
+    pub(crate) fn relay_ports() -> [u32; 2] {
+        [
+            mvm_agentd::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::BROKER_PORT,
+        ]
+    }
+
     /// Drop the workload egress ceilings for a trusted-builder VM. Both ports
     /// keep sharing one budget.
     pub(crate) fn set_trusted_builder_egress(&mut self) {
         let budget = EgressBudget::trusted_builder();
-        for port in [
-            mvm_agentd::vsock::EGRESS_PORT,
-            mvm_agentd::vsock::BROKER_PORT,
-        ] {
+        for port in Self::relay_ports() {
             self.guest_handler_mut::<StreamRelayHandler>(port)
                 .expect("relay handler present")
                 .bridge
@@ -406,6 +425,17 @@ impl VsockHandlerRegistry {
         fds
     }
 
+    /// Whether any handler holds guest bytes a host socket has not taken yet.
+    pub(crate) fn has_host_backlog(&self) -> bool {
+        self.host_initiated
+            .iter()
+            .any(|handler| handler.has_host_backlog())
+            || self
+                .guest_ports
+                .values()
+                .any(|handler| handler.has_host_backlog())
+    }
+
     pub(crate) fn has_host_bindings(&self) -> bool {
         self.host_initiated
             .iter()
@@ -508,6 +538,26 @@ impl StreamRelayHandler {
         }
     }
 
+    /// Retry guest bytes the endpoint socket could not take when they arrived,
+    /// and return the credit for whatever it takes now. A connection whose
+    /// endpoint socket failed is reset, like any other relay failure.
+    fn flush_guest_backlogs(&mut self, ctx: &mut VsockHandlerContext<'_>) {
+        let flushed = self.bridge.flush_backlogs();
+        for (conn_id, forwarded) in flushed.forwarded {
+            if let Some(hdr) = self.headers.get(&conn_id).copied() {
+                ctx.try_add_recv(&hdr, forwarded as u32);
+                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+            }
+        }
+        for conn_id in flushed.failed {
+            self.tx_pending.remove(&conn_id);
+            if let Some(hdr) = self.headers.remove(&conn_id) {
+                ctx.remove_recv(hdr.dst_port, hdr.src_port);
+                ctx.queue_reply(&hdr, OP_RST, &[]);
+            }
+        }
+    }
+
     fn queue_up_to_credit(
         &mut self,
         ctx: &mut VsockHandlerContext<'_>,
@@ -558,15 +608,19 @@ impl GuestPortHandler for StreamRelayHandler {
             }
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                if !ctx.try_add_recv(&hdr, n as u32) {
+                // Admit the connection now; credit only what the endpoint
+                // socket takes. Bytes still queued for it are not forwarded,
+                // so the guest's window stays shut until they are.
+                if !ctx.try_add_recv(&hdr, 0) {
                     self.bridge.close_connection(hdr.src_port);
                     self.headers.remove(&hdr.src_port);
                     ctx.queue_reply(&hdr, OP_RST, &[]);
                     return;
                 }
                 match self.bridge.relay_guest_bytes(hdr.src_port, &payload[..n]) {
-                    EndpointRelayAction::Relayed => {
+                    EndpointRelayAction::Relayed { forwarded } => {
                         self.headers.insert(hdr.src_port, hdr);
+                        ctx.try_add_recv(&hdr, forwarded as u32);
                         ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
                     }
                     EndpointRelayAction::Refused => {
@@ -594,6 +648,8 @@ impl GuestPortHandler for StreamRelayHandler {
         if !self.bridge.is_active() && self.tx_pending.is_empty() {
             return None;
         }
+
+        self.flush_guest_backlogs(ctx);
 
         // First, try to push any buffered egress bytes that previously lacked
         // guest receive credit. This lets progress resume as soon as the guest
@@ -648,6 +704,10 @@ impl GuestPortHandler for StreamRelayHandler {
     fn poll_fds(&self) -> Vec<RawFd> {
         self.bridge.poll_fds()
     }
+
+    fn has_host_backlog(&self) -> bool {
+        self.bridge.has_backlog()
+    }
 }
 
 struct AgentVsockHandler {
@@ -680,13 +740,22 @@ impl HostInitiatedHandler for AgentVsockHandler {
             OP_RESPONSE => self.bridge.on_established(hdr.dst_port),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                if !ctx.try_add_recv(&hdr, n as u32) {
+                if !ctx.try_add_recv(&hdr, 0) {
                     self.bridge.close(hdr.dst_port);
                     ctx.queue_reply(&hdr, OP_RST, &[]);
                     return;
                 }
-                self.bridge.write_to_host(hdr.dst_port, &payload[..n]);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                match self.bridge.write_to_host(hdr.dst_port, &payload[..n]) {
+                    HostWrite::Forwarded(forwarded) => {
+                        ctx.try_add_recv(&hdr, forwarded as u32);
+                        ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                    }
+                    HostWrite::Failed => {
+                        self.bridge.close(hdr.dst_port);
+                        ctx.remove_recv(hdr.dst_port, hdr.src_port);
+                        ctx.queue_reply(&hdr, OP_RST, &[]);
+                    }
+                }
             }
             OP_SHUTDOWN | OP_RST => {
                 self.bridge.close(hdr.dst_port);
@@ -714,6 +783,11 @@ impl HostInitiatedHandler for AgentVsockHandler {
                 &[],
             );
         }
+        for (conn_id, forwarded) in self.bridge.flush_backlogs() {
+            let guest_port = mvm_agentd::vsock::GUEST_AGENT_PORT;
+            ctx.credit_forwarded(conn_id, guest_port, forwarded as u32);
+            ctx.queue_host_packet(conn_id, guest_port, OP_CREDIT_UPDATE, &[]);
+        }
         for (conn_id, bytes) in self.bridge.drain_host() {
             agent_dbg(&format!(
                 "host→guest {} bytes on stream {conn_id}",
@@ -740,6 +814,10 @@ impl HostInitiatedHandler for AgentVsockHandler {
 
     fn poll_fds(&self) -> Vec<RawFd> {
         self.bridge.poll_fds()
+    }
+
+    fn has_host_backlog(&self) -> bool {
+        self.bridge.has_backlog()
     }
 }
 
@@ -773,13 +851,22 @@ impl HostInitiatedHandler for HostDialVsockHandler {
             OP_RESPONSE => self.bridge.on_established(hdr.dst_port),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                if !ctx.try_add_recv(&hdr, n as u32) {
+                if !ctx.try_add_recv(&hdr, 0) {
                     self.bridge.close(hdr.dst_port);
                     ctx.queue_reply(&hdr, OP_RST, &[]);
                     return;
                 }
-                self.bridge.write_to_host(hdr.dst_port, &payload[..n]);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                match self.bridge.write_to_host(hdr.dst_port, &payload[..n]) {
+                    HostWrite::Forwarded(forwarded) => {
+                        ctx.try_add_recv(&hdr, forwarded as u32);
+                        ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                    }
+                    HostWrite::Failed => {
+                        self.bridge.close(hdr.dst_port);
+                        ctx.remove_recv(hdr.dst_port, hdr.src_port);
+                        ctx.queue_reply(&hdr, OP_RST, &[]);
+                    }
+                }
             }
             OP_SHUTDOWN | OP_RST => {
                 self.bridge.close(hdr.dst_port);
@@ -793,6 +880,10 @@ impl HostInitiatedHandler for HostDialVsockHandler {
     fn drain(&mut self, ctx: &mut VsockHandlerContext<'_>) -> Option<u32> {
         for (conn_id, guest_port) in self.bridge.accept_new() {
             ctx.queue_host_packet(conn_id, guest_port, OP_REQUEST, &[]);
+        }
+        for (conn_id, guest_port, forwarded) in self.bridge.flush_backlogs() {
+            ctx.credit_forwarded(conn_id, guest_port, forwarded as u32);
+            ctx.queue_host_packet(conn_id, guest_port, OP_CREDIT_UPDATE, &[]);
         }
         for (conn_id, guest_port, bytes) in self.bridge.drain_host() {
             ctx.queue_host_packet(conn_id, guest_port, OP_RW, &bytes);
@@ -810,6 +901,10 @@ impl HostInitiatedHandler for HostDialVsockHandler {
 
     fn poll_fds(&self) -> Vec<RawFd> {
         self.bridge.poll_fds()
+    }
+
+    fn has_host_backlog(&self) -> bool {
+        self.bridge.has_backlog()
     }
 }
 
