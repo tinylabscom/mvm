@@ -67,6 +67,10 @@ pub const GATES: &[Gate] = &[
     ("check-no-host-nix", crate::check_no_host_nix::run),
     ("check-no-vz", crate::check_no_vz::run),
     ("check-forbidden-deps", crate::check_forbidden_deps::run),
+    (
+        "check-core-module-ownership",
+        crate::check_core_module_ownership::run,
+    ),
     ("check-doc-claims", crate::check_doc_claims::run),
     (
         "check-machine-doc-guards",

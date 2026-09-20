@@ -32,6 +32,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::rate_limit::TokenBucket;
 use mvm_contract::protocol::agent_capability::{
     CapabilityDescriptor, CapabilityId, CapabilityLimits, SchemaRef, payload_digest,
 };
@@ -46,7 +47,6 @@ use mvm_core::protocol::host_audit::{
     BROKER_AUDIT_TOKENS_PER_SEC, EmitBatchEntryStatus, EmitBatchRequest, EmitBatchResponse,
     EmitErrorCode, EmitRequest, EmitResponse,
 };
-use mvm_core::rate_limit::TokenBucket;
 use tokio::sync::Mutex;
 
 use crate::broker::audit_client::{AuditClient, AuditClientError};

@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted for the metering data model and audit-chain wiring. The
-sampling producer — the code that actually reads instance resource
-consumption and calls the aggregator — is not built yet.
+Superseded. The unused resource-metering model was removed when core
+ownership was tightened: no production sampling producer or consumer had
+ever been built. AI egress token metering remains a separate, live host-side
+feature.
 
 ## Context
 
@@ -19,7 +20,7 @@ Pricing, tiers, and invoicing are commercial policy, not runtime
 architecture. Folding that policy into the runtime library would couple
 a local-first runtime crate to one specific commercial model.
 
-## Decision
+## Historical decision
 
 `mvm-core::metering` defines the resource-usage data shapes and their
 aggregation, not a sampling daemon or an exporter:
@@ -36,10 +37,9 @@ Every bucket chains into the tamper-evident host audit log via
 other audited state transition uses. A host operator cannot retroactively
 edit or delete a metering bucket without breaking the chain.
 
-Buckets also serialize to JSONL (`MeteringBucket::to_jsonl`, one bucket
-per line) for a per-tenant rollup file, and to a Prometheus exposition
-format (`to_prometheus`) for ops dashboards — two read paths over the
-same audited source of truth.
+Buckets also serialized to JSONL, one bucket per line, for a per-tenant
+rollup file and to a Prometheus exposition format for ops dashboards — two
+read paths over the same audited source of truth.
 
 Pricing, tiers, invoicing, and any payment-processor integration are out
 of scope for mvm's runtime. This module answers "how much did this
@@ -53,11 +53,11 @@ One canonical, tamper-evident resource-usage record per tenant, instance,
 and tag-set — a downstream pricing system can consume it without mvm's
 runtime ever holding commercial logic.
 
-The sampling producer does not exist yet: the shapes, the aggregation
-function, and the audit-chain wiring are proven end-to-end by an
-integration test, but nothing in the runtime calls
-`MeteringBucket::aggregate` in production today. Standing this up is
-follow-on work, not part of this decision.
+The proposed sampling producer was never implemented, and the shapes,
+aggregation function, exporter, and integration test were removed once they
+had no production consumer. A future resource-metering implementation must
+choose an owning runtime or fleet crate instead of returning these types to
+the shared core crate.
 
 This ADR does not define billing tiers, usage caps, or their enforcement
 — those are commercial and quota decisions that, if built, belong to a

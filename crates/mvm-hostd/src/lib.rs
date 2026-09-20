@@ -33,7 +33,10 @@ pub mod audit;
 pub mod audit_signer;
 pub mod broker;
 pub mod drive;
+/// Host egress-broker decision logic (closed-by-default allow/deny per request).
+pub mod egress_broker;
 pub mod exit_capture;
+pub mod extension_admission;
 pub mod extension_controller;
 /// Length-prefixed message framing (4-byte BE length + body,
 /// cap-before-alloc) for the same-uid UDS control channels. Relocated
@@ -63,6 +66,7 @@ pub mod plan_admission;
 /// The prelaunched-supervisor attach verify+merge. Pure (no VM, no
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
+pub mod rate_limit;
 pub mod run;
 /// Resume orchestration for durable agent sessions: turn a parked session
 /// record back into an admitted `ExecutionPlan`.

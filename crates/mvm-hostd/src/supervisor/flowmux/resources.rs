@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mvm_core::rate_limit::TokenBucket;
+use crate::rate_limit::TokenBucket;
 
 use super::registry::{self, RegistryLimits, VmFlowBudget};
 

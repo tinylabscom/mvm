@@ -6,10 +6,7 @@
 // unsafe carve-out for process-wide env mutation in tests.
 
 pub mod action;
-/// SCITT-compatible action state capsules with hash chaining and evidence binding.
-pub mod action_state;
 pub mod arch;
-pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;
@@ -25,7 +22,6 @@ pub mod runtime_catalog;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod config;
-pub mod conformance_badge;
 pub mod dev_network;
 pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
@@ -34,18 +30,10 @@ pub(crate) mod digest_shape;
 /// Real on-disk footprint of a path — the one measurement behind every
 /// "how much would this reclaim" counter in the CLI.
 pub mod disk_usage;
-/// Host egress-broker decision logic (closed-by-default allow/deny per request).
-pub mod egress_broker;
-/// Egress-broker handler: compose decision + trace into an audit record.
-pub mod egress_handler;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
-pub mod extension_admission;
-/// Per-dimension resolution of a workload's grants across the CLI, a JSON
-/// grants file, the project manifest, and the operator's host config.
-pub mod grants_resolve;
 /// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// Pure health-state reducer: fold probe results into a health state and
@@ -58,21 +46,12 @@ pub mod image_lineage;
 /// The signed, atomic image set: a manifest indexing every member pack, the
 /// lock that pins one set, and the pure checks that gate a set before boot.
 pub mod image_set;
-/// Ingress secret redaction (mask known secret values before they reach the guest).
-pub mod ingress_redaction;
-/// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
-pub mod init_supervisor;
 pub mod kernel_advisory;
-pub mod kernel_artifact;
 pub mod kernel_format;
-/// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
-pub mod launch_metadata;
 /// Backend-recorded launch phases, so a caller can see inside `start`.
 pub mod launch_trace;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
-/// Clearing one run's leftover sidecars before the next boot.
-pub mod run_sidecars;
 /// Per-VM host bounds on a VMM process through a transient systemd scope on
 /// the user's own manager — the one mechanism that both places an unprivileged
 /// process under cgroup v2 CPU, memory and task limits and reports back what is
@@ -88,9 +67,6 @@ pub mod vcpu_quota;
 // re-exported here as a module alias so every existing
 // `crate::lifecycle::X` path keeps resolving unchanged.
 pub use mvm_contract::lifecycle;
-/// Resident-memory accounting for warm pools (learned charge + admission).
-pub mod memory_budget;
-pub mod metering;
 pub mod migration;
 pub mod naming;
 pub mod net;
@@ -99,11 +75,6 @@ pub mod pack_cache;
 pub mod pack_revocation;
 pub mod pack_trust;
 pub mod packs;
-/// Same-page-merge confinement policy: whether two guest-memory merge
-/// candidates (tenant + sealed image + fork family) may be host-wide
-/// same-page merged. Pure decision only, fails closed to `Refuse`; no
-/// kernel/`madvise` enforcement lives here.
-pub mod page_merge;
 pub mod pii;
 /// Compiled-in release-signing identity: the OIDC issuer and identity
 /// templates a stock binary trusts for its own release packs, with
@@ -145,7 +116,6 @@ pub mod policy;
 pub mod protocol;
 #[cfg(feature = "provenance")]
 pub mod provenance;
-pub mod rate_limit;
 pub mod receipt;
 /// The signed index of an evidence archive: manifest, citations, and the
 /// checked-versus-asserted completeness distinction.
@@ -160,8 +130,6 @@ pub mod session_transition;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;
-/// Shared SOCKS5 UDP datagram wire codec for the guest proxy and host relay.
-pub mod socks5_udp;
 /// Read side of the workload stream plane: the consumer trait, its filters,
 /// and the framed transport to a VM's host-side broker. Lives here rather
 /// than in `mvm-client` so `mvm-sdk` — which sits below `mvm-hostd`, which

@@ -26,7 +26,7 @@ use crate::audit::assurance::{
     AssuranceAuditSink, AssuranceLedger, AttestationRecord, LedgerRefs, PlanIdentity, ProbeRecord,
     SessionIdentity,
 };
-use mvm_core::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
+use crate::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};

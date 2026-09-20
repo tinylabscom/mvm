@@ -1,9 +1,7 @@
-//! SOCKS5 UDP datagrams shared by the guest proxy and host relay.
+//! SOCKS5 UDP datagrams carried inside authenticated FlowMux frames.
 
 use std::net::IpAddr;
 
-/// First-line marker selecting the SOCKS5 UDP relay on the shared egress stream.
-pub const FRAME_LINE: &str = "MVM_SOCKS5_UDP/1";
 /// Maximum SOCKS5 UDP datagram payload accepted by the relay.
 pub const MAX_DATAGRAM_BYTES: usize = 65_535;
 

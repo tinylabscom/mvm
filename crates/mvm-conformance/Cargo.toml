@@ -21,6 +21,7 @@ required-features = ["bdd"]
 bdd = []
 
 [dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
 serde.workspace = true
 toml.workspace = true
 
@@ -47,7 +48,6 @@ serde_json.workspace = true
 # starting a VM. `test-support` keeps the conformance-only inspection helpers
 # out of production builds.
 mvm-runtime = { workspace = true, features = ["test-support"] }
-mvm-core = { workspace = true, features = ["test-support"] }
 # `test-support` for `elf::test_fixture`: the sidecar resolver proves an
 # artifact's libc from its `DT_NEEDED`, so a staged fixture has to be a real ELF.
 mvm-fs = { workspace = true, features = ["test-support"] }

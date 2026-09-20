@@ -11,10 +11,10 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
-use mvm_core::grants_resolve::{
+use crate::grants_resolve::{
     GrantLayer, GrantProvenance, GrantSurface, load_grants_file, resolve_grants,
 };
+use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 use mvm_core::network_policy::{AiPolicy, NetworkPolicy, NetworkPreset};
 use mvm_core::user_config::MvmConfig;
 

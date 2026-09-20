@@ -349,7 +349,7 @@ fn prepare_child_state_dir(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfi
         serde_json::to_vec(cfg).context("serializing the restored HVF launch config")?,
     )
     .with_context(|| format!("writing {}", config_path.display()))?;
-    mvm_core::run_sidecars::clear_prior_run(req.state_dir);
+    crate::run_sidecars::clear_prior_run(req.state_dir);
     let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
     let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::restore_ready_path(
         req.state_dir,

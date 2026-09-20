@@ -8,9 +8,9 @@
 use std::path::Path;
 
 use cucumber::{given, then, when};
+use mvm_conformance::page_merge::{MergeDecision, PageMergeScope, may_merge};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::crypto::snapshot_hmac::{MEM_FILENAME, VMSTATE_FILENAME};
-use mvm_core::page_merge::{MergeDecision, PageMergeScope, may_merge};
 use mvm_core::plan::{SignedImageRef, TenantId};
 use mvm_runtime::microvm::{RestoredDeviceModel, assert_vsock_only_device_model};
 use mvm_runtime::vm::instance_snapshot::{

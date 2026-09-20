@@ -5004,16 +5004,16 @@ mod tests {
         let placements = std::collections::BTreeSet::from([
             mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
         ]);
-        let extension = mvm_core::extension_admission::admit_extension(
+        let extension = crate::extension_admission::admit_extension(
             &manifest,
             &promoted.verified,
-            mvm_core::extension_admission::ExtensionAuthority {
+            crate::extension_admission::ExtensionAuthority {
                 requested: &authority,
                 policy_ceiling: &authority,
                 session_grant: &authority,
                 explicit_approval: &authority,
             },
-            mvm_core::extension_admission::ExtensionAdmissionPolicy {
+            crate::extension_admission::ExtensionAdmissionPolicy {
                 placements: &placements,
                 budgets: extension_budgets,
             },

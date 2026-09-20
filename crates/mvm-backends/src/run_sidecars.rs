@@ -24,14 +24,14 @@ use std::path::Path;
 /// desired end state either way, and a state directory that cannot be written
 /// is a failure the boot itself reports far more clearly than a removal would.
 pub fn clear_prior_run(state_dir: &Path) {
-    let _ = std::fs::remove_file(crate::exit_capture::exit_file_path(state_dir));
-    let _ = std::fs::remove_file(crate::usage_capture::usage_file_path(state_dir));
+    let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(state_dir));
+    let _ = std::fs::remove_file(mvm_core::usage_capture::usage_file_path(state_dir));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage_capture::{Mechanism, Metric, UsageCapture};
+    use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 
     #[test]
     fn a_prior_runs_usage_does_not_survive_into_the_next_boot() {
@@ -39,7 +39,7 @@ mod tests {
         // two is killed before it can write anything, and run two's exit
         // report must not find run one's number sitting there.
         let dir = tempfile::tempdir().expect("tempdir");
-        crate::usage_capture::write_captured(
+        mvm_core::usage_capture::write_captured(
             dir.path(),
             &UsageCapture {
                 cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
@@ -50,9 +50,9 @@ mod tests {
 
         clear_prior_run(dir.path());
 
-        assert!(!crate::usage_capture::usage_file_path(dir.path()).exists());
+        assert!(!mvm_core::usage_capture::usage_file_path(dir.path()).exists());
         assert_eq!(
-            crate::usage_capture::read_captured(dir.path()),
+            mvm_core::usage_capture::read_captured(dir.path()),
             UsageCapture::default(),
             "a cleared sidecar reads as unobserved, never as the last run's numbers"
         );
@@ -61,11 +61,11 @@ mod tests {
     #[test]
     fn a_prior_runs_exit_code_does_not_survive_into_the_next_boot() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(crate::exit_capture::exit_file_path(dir.path()), b"7\n").expect("write");
+        std::fs::write(mvm_core::exit_capture::exit_file_path(dir.path()), b"7\n").expect("write");
 
         clear_prior_run(dir.path());
 
-        assert_eq!(crate::exit_capture::read_captured(dir.path()), None);
+        assert_eq!(mvm_core::exit_capture::read_captured(dir.path()), None);
     }
 
     #[test]

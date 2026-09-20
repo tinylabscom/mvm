@@ -1,8 +1,8 @@
 //! `did:key` derivation and parsing for Ed25519 public keys.
 //!
 //! This module implements the W3C `did:key` method for Ed25519 keys, used by
-//! [`crate::receipt::ExecutionReceipt`] and [`crate::conformance_badge::ConformanceBadge`]
-//! as the portable signer identity format.
+//! [`crate::receipt::ExecutionReceipt`] and other signed evidence as the
+//! portable signer identity format.
 //!
 //! An Ed25519 `did:key` value is:
 //!

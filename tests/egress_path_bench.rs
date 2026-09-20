@@ -16,7 +16,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mvm_core::socks5_udp::{Address, Datagram};
+use mvm_agentd::socks5_udp::{Address, Datagram};
 
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_RUNS: usize = 250;

@@ -34,15 +34,24 @@ Higher layers provide I/O and platform behavior. For example,
 `mvm-runtime` implements lifecycle operations, `mvm-hostd` enforces admitted
 plans, and `mvm-observability` installs the process-global tracing layer.
 
+Modules used by only one workspace crate belong to that consumer rather than
+this foundation crate. The remaining modules have overlapping consumers and do
+not form independent dependency leaves. In particular, the pack implementation
+is not an acyclic extraction seam: it uses core architecture, plan-key,
+digest-shape, and image-verification code, while core image-set and trust/cache
+modules consume pack types. Moving it alone would create a dependency cycle;
+changing that boundary belongs with the broader `mvm-core`/`mvm-contract`
+ownership decision.
+
 ## Main areas
 
 | Area | Representative modules |
 |---|---|
 | Domain model | `domain`, `runtime_catalog`, `catalog`, `workload_address` |
 | Configuration and identity | `config`, `naming`, `arch`, `platform` |
-| Security | `crypto`, `at_rest`, `ingress_redaction`, `policy` |
-| Lifecycle evidence | `checkpoint`, `snapshot_frame`, `health`, `action_state` |
-| Host/guest services | `service`, `protocol`, `guest_netd`, `egress_broker` |
+| Security | `crypto`, `policy`, `receipt`, `residency` |
+| Lifecycle evidence | `checkpoint`, `snapshot_frame`, `health`, `image_lineage` |
+| Host/guest services | `protocol`, `guest_netd`, `stream_client`, `substitution_wire` |
 | Runtime abstraction | `build_env`, `client`, `util` test support |
 | Observability data | `observability`, `span_timing`, `usage_capture` |
 

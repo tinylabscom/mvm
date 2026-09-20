@@ -26,8 +26,8 @@ use crate::egress_client::{
 };
 use crate::flowmux::{FlowMuxError, FlowMuxReconnectClient};
 use crate::guest_vsock_session::splice_streams;
+use crate::socks5_udp::{self, Address, Datagram};
 use mvm_core::guest_netd::ConnectAck;
-use mvm_core::socks5_udp::{self, Address, Datagram};
 
 /// Default loopback address for the in-guest DNS stub.
 pub(crate) const DEFAULT_DNS_STUB_LISTEN: &str = mvm_core::guest_netd::DEFAULT_DNS_STUB_LISTEN;
