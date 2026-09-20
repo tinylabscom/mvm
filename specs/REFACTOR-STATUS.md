@@ -124,7 +124,6 @@ Last updated: 2026-09-19
         not same-user processes); restored guests share no pages; a restore is
         reported only once the supervisor has applied it. RAM is no longer
         held in the supervisor during a restore, and stopping a restored guest
-        no longer copies its image. W5.7 (sandbox supervisors) is open.
         no longer copies its image. W5.7 (sandbox supervisors) and W5.8
         (return memory a restored guest frees) are open.
   - [x] W9 — signed bundles push to and fetch from image registries

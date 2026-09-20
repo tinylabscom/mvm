@@ -11,16 +11,15 @@ hypervisor page, which the host page must divide, and refuses the old
 inline-RAM format by name. Capture streams RAM from the live mapping and
 publishes the frame by atomic rename after the RAM file is synced.
 
-`restore_hvf_vm` clones `memory.bin` and the frame into the VM's state
-directory, which must be owner-only and on a local filesystem. It opens each
-clone read-only, removes its name, hashes it against the digest the checkpoint
 `restore_hvf_vm` first sets the VM's state directory (and every directory
 above it inside the mvm home) to `0700`, then clones `memory.bin` and the frame
 into it. The directory must be owned by this user, carry no group or other
 permission bits, have no ACL entry that grants access, and be on a local
 filesystem; each clone is narrowed to `0600` before it is opened, because a
-clone keeps its source's mode. It opens each clone read-only, removes its name, hashes it against the digest the checkpoint
-recorded, and passes the supervisor only those two descriptors. The supervisor
+clone keeps its source's mode. It opens each clone read-only, removes its
+name, and hashes it against the digest the checkpoint recorded, before any of
+it is mapped. The restore then passes the
+supervisor only those two descriptors. The supervisor
 refuses saved state named without descriptors, or a descriptor that still has a
 name or is open for writing, and maps the RAM `MAP_PRIVATE` before the
 reservation is registered with the hypervisor. The checkpoint layer leaves
@@ -38,11 +37,10 @@ successful restore of a VM that was already gone.
 ## What the verification guarantees
 
 The bytes mapped are the bytes verified, as against other users and against
-later edits or replacement of the checkpoint. It is **not** a guarantee against
 later edits or replacement of the checkpoint. Other users are kept out of the
 clone's short-lived name by the owner-only, ACL-free directory and the clone's
-`0600` mode, not by where the mvm home happens to be. It is **not** a guarantee against
-a process running as the same user. Such a process can open the clone for
+`0600` mode, not by where the mvm home happens to be. It is **not** a guarantee
+against a process running as the same user. Such a process can open the clone for
 writing in the few system calls between its creation and the removal of its
 name — for the whole copy on a filesystem that cannot clone — and a
 same-user loop that watches the directory wins that race often. This is out of

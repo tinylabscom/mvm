@@ -427,17 +427,17 @@ fn restore_hvf_vm_with(
             req.state_dir.display()
         );
     }
+    // The private copies are created in the state dir under a temporary name,
+    // so it has to be reachable by this user alone before anything reads or
+    // writes it. State dirs are created at the process umask; this puts it,
+    // and every directory above it inside the mvm home, at 0700.
+    mvm_core::config::create_private_dir(req.state_dir)
+        .with_context(|| format!("making {} private", req.state_dir.display()))?;
     let parent = read_parent_config(req.state_dir)?;
     let anchors = read_anchors(req.state_dir)?;
     let mut cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
     prepare_child_state_dir(req, &cfg)?;
-    // The private copies are created in the state dir under a temporary name,
-    // so it has to be reachable by this user alone before one is made. State
-    // dirs are created at the process umask; this puts it, and every
-    // directory above it inside the mvm home, at 0700.
-    mvm_core::config::create_private_dir(req.state_dir)
-        .with_context(|| format!("making {} private", req.state_dir.display()))?;
     // Verification comes before anything that could map: the supervisor is
     // handed only descriptors of private copies that already matched the
     // checkpoint's recorded digests, and it refuses a restore named by path.
