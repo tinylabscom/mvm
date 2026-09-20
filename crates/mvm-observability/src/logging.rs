@@ -22,6 +22,39 @@ pub enum LogFormat {
     Json,
 }
 
+/// Process-level tracing configuration.
+///
+/// Start from the workspace defaults with [`ObservabilityConfig::new`], then
+/// compose only the settings the owning binary needs before calling
+/// [`ObservabilityConfig::init`].
+#[must_use = "the tracing configuration must be initialized to take effect"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityConfig {
+    format: LogFormat,
+    fallback_filter: String,
+}
+
+impl ObservabilityConfig {
+    /// Build a tracing configuration with [`DEFAULT_FILTER`].
+    pub fn new(format: LogFormat) -> Self {
+        Self {
+            format,
+            fallback_filter: DEFAULT_FILTER.to_string(),
+        }
+    }
+
+    /// Use `fallback_filter` when `RUST_LOG` is unset.
+    pub fn with_fallback_filter(mut self, fallback_filter: impl Into<String>) -> Self {
+        self.fallback_filter = fallback_filter.into();
+        self
+    }
+
+    /// Install this configuration as the process-global tracing subscriber.
+    pub fn init(self) -> ObservabilityGuard {
+        init_config(self.format, &self.fallback_filter)
+    }
+}
+
 /// Filter applied when `RUST_LOG` is unset and no caller override is given.
 pub const DEFAULT_FILTER: &str = "mvm=info,warn";
 
@@ -46,8 +79,11 @@ where
 
 /// Resolve the log filter: `RUST_LOG` wins, then `fallback`.
 fn log_filter(fallback: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::try_new(fallback).unwrap_or_else(|_| EnvFilter::new("warn")))
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| fallback_log_filter(fallback))
+}
+
+fn fallback_log_filter(fallback: &str) -> EnvFilter {
+    EnvFilter::try_new(fallback).unwrap_or_else(|_| EnvFilter::new("warn"))
 }
 
 /// Keeps process-lifetime observability resources alive.
@@ -79,10 +115,10 @@ impl Drop for ObservabilityGuard {
 /// Call once at program startup. Respects `RUST_LOG` for filtering, falling
 /// back to [`DEFAULT_FILTER`].
 pub fn init(format: LogFormat) -> ObservabilityGuard {
-    init_with_filter(format, DEFAULT_FILTER)
+    ObservabilityConfig::new(format).init()
 }
 
-/// Initialize the global tracing subscriber with an explicit fallback filter.
+/// Initialize the global tracing subscriber from a composed configuration.
 ///
 /// The log filter is attached to the formatting layer rather than to the
 /// registry, so that the span-timing and OTLP layers can carry their own,
@@ -94,7 +130,7 @@ pub fn init(format: LogFormat) -> ObservabilityGuard {
 /// [`otlp::config`]. A configuration that cannot be honoured — cleartext to a
 /// remote host, a malformed header — is reported once on stderr and export
 /// stays off; it never stops the program.
-pub fn init_with_filter(format: LogFormat, fallback_filter: &str) -> ObservabilityGuard {
+fn init_config(format: LogFormat, fallback_filter: &str) -> ObservabilityGuard {
     let logs = format_layer(format).with_filter(log_filter(fallback_filter));
     let timings = span_timing::format_from_env().map(|_| span_timing_layer());
     let (otlp_layer, otlp_guard) = match otlp_export(&service_name()) {
@@ -195,17 +231,15 @@ mod tests {
     }
 
     #[test]
-    fn log_filter_prefers_the_supplied_fallback_over_a_hardcoded_one() {
-        // RUST_LOG is process-global; this asserts the fallback path only,
-        // which is the branch callers control.
-        let filter = log_filter("mvm=debug");
+    fn fallback_log_filter_prefers_the_supplied_value_over_a_hardcoded_one() {
+        let filter = fallback_log_filter("mvm=debug");
         assert!(format!("{filter}").contains("debug"));
     }
 
     #[test]
-    fn log_filter_recovers_from_an_unparseable_fallback() {
+    fn fallback_log_filter_recovers_from_an_unparseable_value() {
         // An invalid fallback must not panic the program being logged.
-        let filter = log_filter("!!!not a filter!!!");
+        let filter = fallback_log_filter("!!!not a filter!!!");
         assert!(!format!("{filter}").is_empty());
     }
 
@@ -225,5 +259,22 @@ mod tests {
     #[test]
     fn default_filter_keeps_mvm_at_info() {
         assert_eq!(DEFAULT_FILTER, "mvm=info,warn");
+    }
+
+    #[test]
+    fn observability_config_uses_the_workspace_filter_by_default() {
+        let config = ObservabilityConfig::new(LogFormat::Json);
+
+        assert_eq!(config.format, LogFormat::Json);
+        assert_eq!(config.fallback_filter, DEFAULT_FILTER);
+    }
+
+    #[test]
+    fn observability_config_composes_a_caller_filter() {
+        let config =
+            ObservabilityConfig::new(LogFormat::Human).with_fallback_filter("mvm=debug,hyper=warn");
+
+        assert_eq!(config.format, LogFormat::Human);
+        assert_eq!(config.fallback_filter, "mvm=debug,hyper=warn");
     }
 }

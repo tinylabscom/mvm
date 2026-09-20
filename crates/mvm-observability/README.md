@@ -13,11 +13,11 @@ lightweight `tracing` facade but do not depend on this crate.
 
 ## How it works
 
-`logging::init` builds one subscriber from a filter and `LogFormat`, then
-installs it as the process-global default. Human output is optimized for
-interactive terminals; structured output is suitable for automation. The
-default filter can be overridden explicitly without requiring each binary to
-rebuild subscriber wiring.
+`logging::init` builds one subscriber from the standard defaults and a
+`LogFormat`, then installs it as the process-global default. Human output is
+optimized for interactive terminals; structured output is suitable for
+automation. `ObservabilityConfig` composes a caller-supplied fallback filter
+without requiring each binary to rebuild subscriber wiring.
 
 `SpanTimingLayer` observes span lifecycle events, records elapsed durations,
 and updates the shared registry in `mvm-core`. Metrics DTOs and Prometheus
@@ -29,7 +29,7 @@ protocol; only the dependency-heavy subscriber layer lives here.
 | Item | Responsibility |
 |---|---|
 | `init` | Install logging with standard defaults |
-| `init_with_filter` | Install logging with a caller-supplied filter |
+| `ObservabilityConfig` | Compose logging settings before installation |
 | `LogFormat` | Select human or structured output |
 | `DEFAULT_FILTER` | Workspace default directive |
 | `SpanTimingLayer` | Feed tracing span durations into shared metrics |

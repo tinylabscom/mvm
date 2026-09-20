@@ -386,9 +386,12 @@ So the remaining work is not where the brief pointed.
       pairs from `network_policy.rs`: one composable egress-mode method replaces
       the preset/allow-list mode constructors, the existing AI attachment method
       replaces both AI constructors, and a composable budget method replaces the
-      long AI constructor. `check-public-function-names` ratchets the remaining
-      count at 65 and prevents cleared modules from regressing. Continue
-      per-module rather than as one sweep. #3315.
+      long AI constructor. A second slice replaces observability's
+      `init_with_filter` overload with `ObservabilityConfig`, keeping the common
+      `init` entry point while letting binaries compose their fallback filter.
+      `check-public-function-names` ratchets the remaining count at 64 and
+      prevents both cleared modules from regressing. Continue per-module rather
+      than as one sweep. #3315.
 - [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
       builder methods exist only on the variant they apply to — an
       unrepresentable-illegal-states fix, not a panic-removal exercise.

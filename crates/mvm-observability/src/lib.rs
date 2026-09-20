@@ -18,6 +18,6 @@ pub mod otlp;
 pub mod span_timing_layer;
 
 pub use exit::{INTERRUPT_FLUSH_BOUND, exit, exit_after_interrupt};
-pub use logging::{DEFAULT_FILTER, LogFormat, ObservabilityGuard, init, init_with_filter};
+pub use logging::{DEFAULT_FILTER, LogFormat, ObservabilityConfig, ObservabilityGuard, init};
 pub use otlp::OtlpLayer;
 pub use span_timing_layer::SpanTimingLayer;

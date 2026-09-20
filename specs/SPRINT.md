@@ -14,11 +14,13 @@
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.
       The first reviewable slice clears all five pairs from
       `mvm-contract::policy::network_policy`: egress mode, AI attachment, and
-      total budget now compose from the base constructors. A repository gate
-      ratchets the remaining count at 65 and forbids regressions in cleared
-      modules. Focused contract tests and four gate tests pass; the remaining
-      modules and the separate expect-message and supervisor-timeout audits stay
-      open.
+      total budget now compose from the base constructors. The second slice
+      clears `mvm-observability::logging`: `ObservabilityConfig` composes the
+      caller fallback filter and owns subscriber installation, while `init`
+      remains the standard-default convenience. A repository gate ratchets the
+      remaining count at 64 and forbids regressions in both cleared modules.
+      Focused configuration tests and the gate tests pass; the remaining modules
+      and the separate expect-message and supervisor-timeout audits stay open.
 
 - [ ] **Agent sandbox drive plane.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`; epic #3275.
