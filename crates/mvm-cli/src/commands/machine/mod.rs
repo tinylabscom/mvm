@@ -264,9 +264,6 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Reset the VM before the entrypoint (currently a no-op).
     #[arg(long, requires = "entrypoint")]
     pub reset: bool,
-    /// Load entrypoint secrets from workload IR.
-    #[arg(long, value_name = "PATH", requires = "entrypoint")]
-    pub from_workload_ir: Option<PathBuf>,
     /// `-` to stream yours; otherwise read PATH.
     // Deliberately one line: this crate's help-length rule measures clap's
     // long help, which is the whole doc comment, so extended paragraphs here
@@ -308,7 +305,6 @@ impl Default for MachineRunArgs {
             entrypoint: false,
             fresh: false,
             reset: false,
-            from_workload_ir: None,
             stdin: None,
             attach: false,
         }

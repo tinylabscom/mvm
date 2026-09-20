@@ -29,9 +29,10 @@ printf '%s\n' 'Summarize the security boundary in this repository.' | \
     --allow-host api.anthropic.com:443 --stdin - --timeout 120
 ```
 
-`--from-workload-ir` is required. It lowers the `SecretRef` into the signed
-execution plan and gives only the per-call entrypoint the placeholder and
-proxy environment. A plain image boot receives neither.
+`--from-workload-ir` is required for this secret-bearing workload. It lowers
+the `SecretRef` into the signed execution plan; the host endpoint mints an
+opaque placeholder and PID 1 exports it before launching the image workload.
+A plain image boot receives neither a binding nor a placeholder.
 
 ## Offline smoke check
 

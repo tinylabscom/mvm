@@ -42,6 +42,7 @@ pub mod policy;
 pub mod policy_resolver;
 pub mod run_grants;
 pub mod run_network;
+pub mod secrets;
 
 /// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
 /// directory tree the run binds by content identity without attaching it

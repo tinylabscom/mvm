@@ -180,6 +180,9 @@ pub(in crate::commands) struct StartArgs {
     /// Template (or pre-built manifest) to boot. Same resolution
     /// rules as `mvmctl invoke`'s `<MANIFEST>` argument.
     pub manifest: String,
+    /// Load admitted secret bindings from Workload IR.
+    #[arg(long, value_name = "PATH")]
+    pub from_workload_ir: Option<std::path::PathBuf>,
     /// Start the session in dev mode. Required for subsequent
     /// `session exec` / `run-code` / `console` calls — those verbs
     /// refuse prod-mode sessions. Default: prod (matches the
@@ -1006,6 +1009,8 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     let mem_mib = u64::from(args.memory_mib);
     let agent_verb_override = args.agent_verb.clone();
     let is_dev = args.dev;
+    let admit_secrets =
+        mvm_client::admission::secrets::resolve_workload_secrets(args.from_workload_ir.as_deref())?;
     let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
     let ctx_sink = Rc::clone(&admit_ctx);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
@@ -1034,8 +1039,8 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             cpus,
             mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
+            secret_release: admit_secrets.secret_release,
+            secrets: admit_secrets.secrets.clone(),
             caller_commitment: None,
             ledger: &ledger,
             keys_dir: None,
@@ -1318,6 +1323,7 @@ mod tests {
     fn validate_start_args_refuses_agent_verbs_on_dev() {
         let err = validate_start_args(&StartArgs {
             manifest: "tmpl".into(),
+            from_workload_ir: None,
             dev: true,
             agent_verb: vec!["ping".into()],
             cpus: 2,

@@ -48,6 +48,17 @@ fn run_persistent(
     let name = resolve_machine_run_name(&args)?;
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
+    let secret_refs =
+        mvm_client::admission::secrets::load_workload_ir(args.run.from_workload_ir.as_deref())?
+            .map(|workload| {
+                mvm_client::admission::secrets::workload_machine_refs(&workload, "local")
+            });
+    if let Some(references) = secret_refs.as_deref() {
+        mvm_client::secret::SecretService::local()
+            .context("opening the local secret service")?
+            .validate_for_admission("local", references)
+            .context("validating workload secret references")?;
+    }
 
     if args.run.dry_run {
         let summary = machine_start_preflight_summary(
@@ -63,7 +74,13 @@ fn run_persistent(
         return Ok(());
     }
 
-    let booted = persist_and_boot_machine(&name, &spec, action, start_args_for_run(&args, &name))?;
+    let booted = persist_and_boot_machine(
+        &name,
+        &spec,
+        action,
+        start_args_for_run(&args, &name),
+        secret_refs.as_deref(),
+    )?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
@@ -80,6 +97,7 @@ fn persist_and_boot_machine(
     spec: &MachineSpec,
     action: SpecReconcile,
     start: MachineStartArgs,
+    secret_refs: Option<&[mvm_client::secret::MachineSecretRef]>,
 ) -> Result<bool> {
     match action {
         SpecReconcile::Reuse => {}
@@ -90,6 +108,24 @@ fn persist_and_boot_machine(
             );
             lifecycle::stop_running_machine(name);
             overwrite_machine_spec(spec)?;
+        }
+    }
+    if lifecycle::machine_is_running(name) && secret_refs.is_some() {
+        anyhow::bail!(
+            "machine {name:?} is already running; stop it before changing its secret bindings"
+        );
+    }
+    if let Some(references) = secret_refs {
+        let service = mvm_client::secret::SecretService::local()
+            .context("opening the local secret service")?;
+        if references.is_empty() {
+            service
+                .clear_machine_references(name)
+                .context("clearing persistent-machine secret references")?;
+        } else {
+            service
+                .record_machine_references(name, references)
+                .context("recording persistent-machine secret references")?;
         }
     }
     if lifecycle::machine_is_running(name) {
@@ -379,7 +415,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         timeout: args.run.timeout.unwrap_or(30),
         cpus: args.run.cpus,
         memory_mib,
-        from_workload_ir: args.from_workload_ir.clone(),
+        from_workload_ir: args.run.from_workload_ir.clone(),
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
         machine_name,
@@ -760,7 +796,7 @@ mod network_surface_tests {
             br#"{"schema_version":"0.1","id":"legacy","apps":[{"name":"probe","source":{"kind":"local_path","path":"."},"image":{"kind":"nix_packages","packages":[]},"entrypoints":[],"resources":{"cpu_cores":1,"memory_mb":256,"rootfs_size_mb":512},"network":{"mode":"bridge","raw_ip_stack":true}}]}"#,
         )
         .expect("write stale IR");
-        let err = crate::commands::vm::up::load_workload_ir(Some(&ir))
+        let err = mvm_client::admission::secrets::load_workload_ir(Some(&ir))
             .expect_err("the retired field must fail at the IR boundary");
         let message = format!("{err:#}");
         assert!(
@@ -775,7 +811,7 @@ mod network_surface_tests {
         for network in [Some(net()), None] {
             let described = format!("{network:?}");
             let ir = write_ir(dir.path(), network);
-            let loaded = crate::commands::vm::up::load_workload_ir(Some(&ir))
+            let loaded = mvm_client::admission::secrets::load_workload_ir(Some(&ir))
                 .expect("IR loads")
                 .expect("workload present");
             assert_eq!(loaded.apps.len(), 1, "{described}");
@@ -788,6 +824,6 @@ mod network_surface_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let bad = dir.path().join("workload.json");
         std::fs::write(&bad, b"{ not json").expect("write");
-        assert!(crate::commands::vm::up::load_workload_ir(Some(&bad)).is_err());
+        assert!(mvm_client::admission::secrets::load_workload_ir(Some(&bad)).is_err());
     }
 }

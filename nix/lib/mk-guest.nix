@@ -30,24 +30,32 @@
 # use its NixOS module — that's the systemd-heavy path we're
 # explicitly avoiding here.
 
-{ nixpkgs, microvm, mvmSrc }:
+{
+  nixpkgs,
+  microvm,
+  mvmSrc,
+}:
 { system }:
 let
   pkgs = import nixpkgs { inherit system; };
-  lib  = nixpkgs.lib;
-
+  lib = nixpkgs.lib;
 
   # Static busybox — single binary, every shell utility as an applet.
   # `pkgsStatic` ensures no glibc dynamic-linker hop at /init time
   # (which alone saves ~10ms vs a glibc-linked init).
   busybox = pkgs.pkgsStatic.busybox;
 
-  classifyEntrypoint = ep:
+  classifyEntrypoint =
+    ep:
     let
-      hasShell    = ep ? shell;
-      hasCommand  = ep ? command;
+      hasShell = ep ? shell;
+      hasCommand = ep ? command;
       hasServices = ep ? services;
-      forms       = lib.count (b: b) [ hasShell hasCommand hasServices ];
+      forms = lib.count (b: b) [
+        hasShell
+        hasCommand
+        hasServices
+      ];
     in
     if forms == 0 then
       throw ''
@@ -59,13 +67,15 @@ let
       ''
     else if forms > 1 then
       throw "mkGuest: entrypoint must declare exactly one form, not several"
-    else if hasShell then "shell"
-    else if hasCommand then "command"
-    else "services";
+    else if hasShell then
+      "shell"
+    else if hasCommand then
+      "command"
+    else
+      "services";
 
   # Render a single command list as a quoted shell command line.
-  renderCommand = argv:
-    lib.concatStringsSep " " (map lib.escapeShellArg argv);
+  renderCommand = argv: lib.concatStringsSep " " (map lib.escapeShellArg argv);
 
   sshNeedles = [
     "ssh"
@@ -80,85 +90,106 @@ let
     "private key"
   ];
 
-  containsSshMarker = value:
+  containsSshMarker =
+    value:
     let
       lower = lib.toLower (toString value);
     in
     lib.any (needle: lib.hasInfix needle lower) sshNeedles;
 
-  packageLabel = pkg:
+  packageLabel =
+    pkg:
     let
       asString = toString pkg;
       attrText =
         if builtins.isAttrs pkg then
-          lib.concatStringsSep " " (lib.filter (s: s != "") [
-            (pkg.pname or "")
-            (pkg.name or "")
-            (pkg.meta.mainProgram or "")
-          ])
-        else "";
+          lib.concatStringsSep " " (
+            lib.filter (s: s != "") [
+              (pkg.pname or "")
+              (pkg.name or "")
+              (pkg.meta.mainProgram or "")
+            ]
+          )
+        else
+          "";
     in
     "${attrText} ${asString}";
 
 in
-{ name
-, entrypoint
-, services       ? { }
-, packages       ? [ ]
-, hypervisor     ? "firecracker"
-, vcpus          ? 1
-, memory_mib     ? 256
-, dev            ? null
-, uids           ? null   # { agent = <int>; entrypoint = <int>; } — see below
-, builderUid     ? null   # optional uid used by an in-guest build daemon
-, extraFiles     ? { }
-# Whether to bake the `mvm-audit-probe` binary into the rootfs at
-# `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
-# production binary. A live-VM `host.audit.v1` round-trip fixture image sets
-# this `true` and runs the probe as its entrypoint; the production guest
-# closure never includes it.
-, withAuditProbe ? false
-# Optional kernel package. When set, mkGuest copies its module
-# tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
-# `modprobe vmw_vsock_virtio_transport` before forking the agent.
-# Required when the kernel ships AF_VSOCK as a module (the default
-# nixpkgs `linuxPackages.kernel` config). Without it,
-# `mvm-guest-agent`'s `socket(AF_VSOCK, …)` returns EAFNOSUPPORT and
-# every host-side surface (`mvmctl console`, `dev shell`, `build`)
-# goes dark on a guest booted from that kernel.
-, kernel         ? null
-# PID 1 boot command, distinct from the `entrypoint`. When set, mkGuest
-# renders it to `/etc/mvm/boot` and `/init` sources THAT as PID 1 — while
-# `/etc/mvm/entrypoint` is left for the caller's `extraFiles` to own (it
-# is the guest agent's per-call marker). This separation exists
-# because the two roles genuinely need different values for an
-# agent-dispatched function workload: PID 1 must idle (keep the VM
-# alive), while the agent's marker names the single-shot per-call wrapper.
-# Baking both onto `/etc/mvm/entrypoint` made `extraFiles` clobber the
-# rendered PID-1 command, so PID 1 exec'd the single-shot wrapper, which
-# exits at boot → kernel panic. `null` (the default) keeps the legacy
-# single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
-, bootCommand    ? null
-# Declared-but-unenforced surface. `mvmctl generate template` emits
-# `healthChecks` into its app/web/postgres/worker scaffolds and the mkGuest
-# guide teaches all three, but the multi-service supervisor they depend on is
-# still the stub below (`entrypointKind == "services"`). Rejecting them made
-# every scaffolded project fail to evaluate; accepting them silently would be
-# worse, so they are recorded in `passthru.mvm` and warned about at eval time.
-# When the supervisor lands, wire these in and drop the warning — the
-# conformance suite fails if the docs still call them unimplemented.
-, healthChecks   ? { }
-, volumeMounts   ? { }
-, serviceGroup   ? null
+{
+  name,
+  entrypoint,
+  services ? { },
+  packages ? [ ],
+  hypervisor ? "firecracker",
+  vcpus ? 1,
+  memory_mib ? 256,
+  dev ? null,
+  uids ? null, # { agent = <int>; entrypoint = <int>; } — see below
+  builderUid ? null, # optional uid used by an in-guest build daemon
+  extraFiles ? { },
+  # Whether to bake the `mvm-audit-probe` binary into the rootfs at
+  # `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
+  # production binary. A live-VM `host.audit.v1` round-trip fixture image sets
+  # this `true` and runs the probe as its entrypoint; the production guest
+  # closure never includes it.
+  withAuditProbe ? false,
+  # Optional kernel package. When set, mkGuest copies its module
+  # tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
+  # `modprobe vmw_vsock_virtio_transport` before forking the agent.
+  # Required when the kernel ships AF_VSOCK as a module (the default
+  # nixpkgs `linuxPackages.kernel` config). Without it,
+  # `mvm-guest-agent`'s `socket(AF_VSOCK, …)` returns EAFNOSUPPORT and
+  # every host-side surface (`mvmctl console`, `dev shell`, `build`)
+  # goes dark on a guest booted from that kernel.
+  kernel ? null,
+  # PID 1 boot command, distinct from the `entrypoint`. When set, mkGuest
+  # renders it to `/etc/mvm/boot` and `/init` sources THAT as PID 1 — while
+  # `/etc/mvm/entrypoint` is left for the caller's `extraFiles` to own (it
+  # is the guest agent's per-call marker). This separation exists
+  # because the two roles genuinely need different values for an
+  # agent-dispatched function workload: PID 1 must idle (keep the VM
+  # alive), while the agent's marker names the single-shot per-call wrapper.
+  # Baking both onto `/etc/mvm/entrypoint` made `extraFiles` clobber the
+  # rendered PID-1 command, so PID 1 exec'd the single-shot wrapper, which
+  # exits at boot → kernel panic. `null` (the default) keeps the legacy
+  # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
+  bootCommand ? null,
+  # Declared-but-unenforced surface. `mvmctl generate template` emits
+  # `healthChecks` into its app/web/postgres/worker scaffolds and the mkGuest
+  # guide teaches all three, but the multi-service supervisor they depend on is
+  # still the stub below (`entrypointKind == "services"`). Rejecting them made
+  # every scaffolded project fail to evaluate; accepting them silently would be
+  # worse, so they are recorded in `passthru.mvm` and warned about at eval time.
+  # When the supervisor lands, wire these in and drop the warning — the
+  # conformance suite fails if the docs still call them unimplemented.
+  healthChecks ? { },
+  volumeMounts ? { },
+  serviceGroup ? null,
 }:
 let
   # Shape checks. `healthChecks` is consumed (rendered into the guest's probe
   # drop-in directory below); the rest are recorded only, so a typo in them
   # would otherwise be invisible.
   declaredButUnenforced =
-    (if builtins.isAttrs healthChecks then [ ] else throw "mkGuest: healthChecks must be an attribute set")
-    ++ (if builtins.isAttrs volumeMounts then [ ] else throw "mkGuest: volumeMounts must be an attribute set")
-    ++ (if serviceGroup == null || builtins.isString serviceGroup then [ ] else throw "mkGuest: serviceGroup must be a string or null");
+    (
+      if builtins.isAttrs healthChecks then
+        [ ]
+      else
+        throw "mkGuest: healthChecks must be an attribute set"
+    )
+    ++ (
+      if builtins.isAttrs volumeMounts then
+        [ ]
+      else
+        throw "mkGuest: volumeMounts must be an attribute set"
+    )
+    ++ (
+      if serviceGroup == null || builtins.isString serviceGroup then
+        [ ]
+      else
+        throw "mkGuest: serviceGroup must be a string or null"
+    );
 
   # `healthChecks.<name> = { healthCmd; healthIntervalSecs?; healthTimeoutSecs?; }`
   # becomes one `/etc/mvm/probes.d/<name>.json` drop-in per check.
@@ -168,26 +199,28 @@ let
   # serving the results back over vsock as `ProbeStatus`. Every piece of that
   # existed; nothing wrote the drop-ins, so the directory was always empty and a
   # declared health check did nothing at all. This is the missing link.
-  probeDropIns = lib.mapAttrs'
-    (checkName: check:
-      let
-        cmd =
-          if check ? healthCmd then check.healthCmd
-          else throw "mkGuest: healthChecks.${checkName} must set `healthCmd`";
-        interval = if check ? healthIntervalSecs then check.healthIntervalSecs else 30;
-        timeout = if check ? healthTimeoutSecs then check.healthTimeoutSecs else 10;
-      in
-      lib.nameValuePair "/etc/mvm/probes.d/${checkName}.json" {
-        content = builtins.toJSON {
-          name = checkName;
-          inherit cmd;
-          interval_secs = interval;
-          timeout_secs = timeout;
-          output_format = "exit_code";
-        };
-        mode = "0444";
-      })
-    healthChecks;
+  probeDropIns = lib.mapAttrs' (
+    checkName: check:
+    let
+      cmd =
+        if check ? healthCmd then
+          check.healthCmd
+        else
+          throw "mkGuest: healthChecks.${checkName} must set `healthCmd`";
+      interval = if check ? healthIntervalSecs then check.healthIntervalSecs else 30;
+      timeout = if check ? healthTimeoutSecs then check.healthTimeoutSecs else 10;
+    in
+    lib.nameValuePair "/etc/mvm/probes.d/${checkName}.json" {
+      content = builtins.toJSON {
+        name = checkName;
+        inherit cmd;
+        interval_secs = interval;
+        timeout_secs = timeout;
+        output_format = "exit_code";
+      };
+      mode = "0444";
+    }
+  ) healthChecks;
 
   # The caller's own files win: a flake that hand-writes a drop-in for the same
   # path meant to, and silently replacing it would be worse than the collision.
@@ -201,48 +234,47 @@ let
   # `seq` on the validation first: a shape error must surface regardless of
   # which thunk the evaluator happens to force earliest, not only when some
   # later binding drags it in.
-  warnUnenforced = value:
+  warnUnenforced =
+    value:
     builtins.seq declaredButUnenforced (
-    if unenforcedNames == [ ] then
-      value
-    else
-      builtins.trace
-        ("mkGuest: ${builtins.concatStringsSep ", " unenforcedNames} "
+      if unenforcedNames == [ ] then
+        value
+      else
+        builtins.trace (
+          "mkGuest: ${builtins.concatStringsSep ", " unenforcedNames} "
           + "declared but NOT enforced — the multi-service supervisor is not wired yet. "
-          + "The values are recorded in passthru.mvm for the host; nothing acts on them.")
-        value);
+          + "The values are recorded in passthru.mvm for the host; nothing acts on them."
+        ) value
+    );
 
   entrypointKind = classifyEntrypoint entrypoint;
-  isDev =
-    if dev == null then entrypointKind == "shell"
-    else dev;
+  isDev = if dev == null then entrypointKind == "shell" else dev;
   isSealed = !isDev;
   # Whether this image wires the dev console transport. This is an image
   # wiring fact, not an agent-artifact variant; the agent binary is universal
   # and enforces DevOnly verbs at runtime.
   withInteractive = isDev;
 
-  extraFileLabel = path:
+  extraFileLabel =
+    path:
     let
       rawSpec = extraFilesWithProbes.${path};
-      spec =
-        if builtins.isString rawSpec then { source = rawSpec; }
-        else rawSpec;
+      spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
       source = if spec ? source then toString spec.source else "";
       content = if spec ? content then toString spec.content else "";
     in
     "${path} ${source} ${content}";
 
-  extraFileSourceRoots = lib.filter (source: source != "") (map
-    (path:
+  extraFileSourceRoots = lib.filter (source: source != "") (
+    map (
+      path:
       let
         rawSpec = extraFilesWithProbes.${path};
-        spec =
-          if builtins.isString rawSpec then { source = rawSpec; }
-          else rawSpec;
+        spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
       in
-      if spec ? source then spec.source else "")
-    (lib.attrNames extraFilesWithProbes));
+      if spec ? source then spec.source else ""
+    ) (lib.attrNames extraFilesWithProbes)
+  );
 
   sshClosureInfo = pkgs.closureInfo {
     rootPaths = packages ++ extraFileSourceRoots;
@@ -255,13 +287,20 @@ let
   # seeded copy. The CA bundle is copied into `/etc` below, so retaining the
   # source `cacert` store path would duplicate the same certificate bytes.
   rootfsClosureInfo = pkgs.closureInfo {
-    rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots;
+    rootPaths = [
+      busybox
+      setprivPkg
+    ]
+    ++ packages
+    ++ extraFileSourceRoots;
   };
 
   assertNoSshTemplateInputs =
     let
       badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
-      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFilesWithProbes);
+      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (
+        lib.attrNames extraFilesWithProbes
+      );
       badPackageNames = map (pkg: packageLabel pkg) badPackages;
       badFileNames = map (path: path) badFiles;
     in
@@ -273,7 +312,8 @@ let
         Rejected packages: ${builtins.toJSON badPackageNames}
         Rejected extraFiles: ${builtins.toJSON badFileNames}
       ''
-    else true;
+    else
+      true;
 
   assertNoSshClosureScript = ''
     if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-(openssh|dropbear|ssh|sshpass|sshfs|autossh)(-|$)' \
@@ -339,10 +379,7 @@ let
   defaultEntrypointUid = if isDev then 0 else 1000;
   resolvedUids = {
     agent = if uids != null && uids ? agent then uids.agent else 990;
-    entrypoint =
-      if uids != null && uids ? entrypoint
-      then uids.entrypoint
-      else defaultEntrypointUid;
+    entrypoint = if uids != null && uids ? entrypoint then uids.entrypoint else defaultEntrypointUid;
   };
 
   # GID == UID by convention. /etc/group entries below mirror this.
@@ -354,25 +391,31 @@ let
   # may read the 0400 key after init drops its mount privilege.
   egressUid = 989;
   assertDedicatedEgressUid =
-    if egressUid == 0
+    if
+      egressUid == 0
       || egressUid == agentUid
       || egressUid == entrypointUid
       || (builderUid != null && egressUid == builderUid)
-    then throw "mkGuest: uid 989 is reserved for the FlowMux egress service"
-    else true;
+    then
+      throw "mkGuest: uid 989 is reserved for the FlowMux egress service"
+    else
+      true;
   # Dedicated owner for the CRNG reseed helper, the one guest process holding
   # CAP_SYS_ADMIN. Sharing a uid with the agent or the workload would let that
   # process signal it, change its limits, or pose as it on its socket. The
   # guest agent's `CRNG_RESEED_HELPER_UID` is the same number.
   crngReseedUid = 988;
   assertDedicatedCrngReseedUid =
-    if crngReseedUid == 0
+    if
+      crngReseedUid == 0
       || crngReseedUid == agentUid
       || crngReseedUid == entrypointUid
       || crngReseedUid == egressUid
       || (builderUid != null && crngReseedUid == builderUid)
-    then throw "mkGuest: uid 988 is reserved for the CRNG reseed helper"
-    else true;
+    then
+      throw "mkGuest: uid 988 is reserved for the CRNG reseed helper"
+    else
+      true;
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
@@ -385,8 +428,10 @@ let
   # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
   # uid==0 short-circuits to the bare command — no point setpriv-ing
   # to root.
-  setprivWrap = uid: cmd:
-    if uid == 0 then cmd
+  setprivWrap =
+    uid: cmd:
+    if uid == 0 then
+      cmd
     else
       # No exec: PID 1 runs the workload as a child so /init can capture $?.
       # Persistent services exec `sleep infinity` inside and never return.
@@ -402,11 +447,17 @@ let
   # nothing.
   entrypointArgv =
     if entrypointKind == "shell" then
-      [ entrypoint.shell "-i" ]
+      [
+        entrypoint.shell
+        "-i"
+      ]
     else if entrypointKind == "command" then
       entrypoint.command
     else
-      [ "/bin/sh" "-i" ];
+      [
+        "/bin/sh"
+        "-i"
+      ];
 
   rawEntrypointCmd =
     if entrypointKind == "shell" then
@@ -414,7 +465,7 @@ let
     else if entrypointKind == "command" then
       renderCommand entrypoint.command
     else
-      "/bin/sh -i";  # services fallthrough; the supervisor isn't wired yet
+      "/bin/sh -i"; # services fallthrough; the supervisor isn't wired yet
 
   # The full /etc/mvm/entrypoint body. For shell + command forms,
   # setpriv-wrap as appropriate. For services (still stubbed),
@@ -644,7 +695,7 @@ let
         # Reject a non-identifier name so a malformed token can't smuggle a shell
         # construct into `export`.
         case "$mvm_k" in
-          ""|*[!A-Za-z0-9_]*) echo "mvm-init: skipping malformed secret env name"; continue ;;
+          ""|[0-9]*|*[!A-Za-z0-9_]*) echo "mvm-init: skipping malformed secret env name"; continue ;;
         esac
         export "$mvm_k=$mvm_v"
       done < /run/mvm/secret-env
@@ -1124,15 +1175,17 @@ let
   # one under-indented line anywhere in the block above silently moves every
   # other line — including the shebang — one column right. Assert the rendered
   # bytes instead of trusting the indentation to stay uniform.
-  initScript = builtins.seq assertDedicatedEgressUid (builtins.seq assertDedicatedCrngReseedUid (
-    lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
-      mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
-      The kernel exec()s /init and will panic with ENOEXEC. This almost always
-      means a line inside the /init block of nix/lib/mk-guest.nix is indented
-      less than its neighbours, which moves the whole script one or more
-      columns right. Re-align that line.
-    '' (pkgs.writeScript "mvm-init" initText)
-  ));
+  initScript = builtins.seq assertDedicatedEgressUid (
+    builtins.seq assertDedicatedCrngReseedUid (
+      lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
+        mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
+        The kernel exec()s /init and will panic with ENOEXEC. This almost always
+        means a line inside the /init block of nix/lib/mk-guest.nix is indented
+        less than its neighbours, which moves the whole script one or more
+        columns right. Re-align that line.
+      '' (pkgs.writeScript "mvm-init" initText)
+    )
+  );
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.
@@ -1147,31 +1200,32 @@ let
   # passes `bootCommand` — see that arg's doc. Same setpriv wrap as the
   # entrypoint so PID 1 drops to the entrypoint uid (a no-op at uid 0).
   bootFile =
-    if bootCommand == null then null
-    else pkgs.writeText "mvm-boot" ''
-      #!/bin/sh
-      # Auto-generated by mkGuest at build time. Do not edit.
-      ${setprivWrap entrypointUid (renderCommand bootCommand)}
-    '';
+    if bootCommand == null then
+      null
+    else
+      pkgs.writeText "mvm-boot" ''
+        #!/bin/sh
+        # Auto-generated by mkGuest at build time. Do not edit.
+        ${setprivWrap entrypointUid (renderCommand bootCommand)}
+      '';
 
   # A caller that hands us a `bootCommand` has split PID 1 (idle) from
   # the agent's per-call marker, so it MUST supply that marker itself via
   # extraFiles — otherwise /etc/mvm/entrypoint would be absent and the
   # agent's RunEntrypoint would have nothing to dispatch.
   _bootContract =
-    if bootCommand != null && !(extraFiles ? "/etc/mvm/entrypoint")
-    then throw ''
-      mkGuest: `bootCommand` is set but `extraFiles` does not provide
-      "/etc/mvm/entrypoint" (the guest agent's per-call marker, ADR-005).
-      The function-service factory must bake it.
-    ''
-    else true;
+    if bootCommand != null && !(extraFiles ? "/etc/mvm/entrypoint") then
+      throw ''
+        mkGuest: `bootCommand` is set but `extraFiles` does not provide
+        "/etc/mvm/entrypoint" (the guest agent's per-call marker, ADR-005).
+        The function-service factory must bake it.
+      ''
+    else
+      true;
 
   # Variant marker (dev|prod). In-guest source of truth — paired
   # with passthru.mvm.{accessible,sealed} on the derivation.
-  variantFile = pkgs.writeText "mvm-variant" (
-    if isDev then "dev\n" else "prod\n"
-  );
+  variantFile = pkgs.writeText "mvm-variant" (if isDev then "dev\n" else "prod\n");
 
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
 
@@ -1179,8 +1233,7 @@ let
   # Present on every image. Sealed images fail closed because control RPCs
   # require a launch-provisioned grant; DevOnly verbs are additionally gated
   # by the runtime profile.
-  verbTrustFile = pkgs.writeText "mvm-verb-trust"
-    ''{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}'';
+  verbTrustFile = pkgs.writeText "mvm-verb-trust" ''{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}'';
 
   # Side-binaries from the guest-agent derivation. The agent, netinit,
   # addon-dns, exit-report, and egress-client the guest execs at boot now
@@ -1211,39 +1264,39 @@ let
   # Binary-source variants exist so the builder-vm flake can
   # install `mvm-host-vm-init` at `/sbin/mvm-host-vm-init` without
   # inlining its bytes as a string (`writeText` is text-only).
-  extraFilePopulation = lib.concatMapStringsSep "\n"
-    (path:
-      let
-        rawSpec = extraFilesWithProbes.${path};
-        spec =
-          if builtins.isString rawSpec then { source = rawSpec; }
-          else rawSpec;
-        hasContent = spec ? content;
-        hasSource = spec ? source;
-        mode =
-          if spec ? mode then spec.mode
-          else if hasSource then "0755"
-          else "0644";
-        src =
-          if hasContent then
-            pkgs.writeText "extra-${builtins.hashString "sha256" path}" spec.content
-          else if hasSource then
-            spec.source
-          else
-            throw "mkGuest: extraFiles[${path}] must set either `content` (text) or `source` (file path)";
-      in
-      # Path arrives from Nix-interpolated keys (no shell escaping
-      # needed); inline via `"$out${path}"` rather than via
-      # `lib.escapeShellArg` so the shell expands `$out` instead of
-      # treating it as a literal in single quotes.
-      ''
-        mkdir -p "$out$(dirname ${lib.escapeShellArg path})"
-        ${pkgs.coreutils}/bin/install -m ${mode} \
-          ${src} \
-          "$out${path}"
-      ''
-    )
-    (lib.attrNames extraFilesWithProbes);
+  extraFilePopulation = lib.concatMapStringsSep "\n" (
+    path:
+    let
+      rawSpec = extraFilesWithProbes.${path};
+      spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
+      hasContent = spec ? content;
+      hasSource = spec ? source;
+      mode =
+        if spec ? mode then
+          spec.mode
+        else if hasSource then
+          "0755"
+        else
+          "0644";
+      src =
+        if hasContent then
+          pkgs.writeText "extra-${builtins.hashString "sha256" path}" spec.content
+        else if hasSource then
+          spec.source
+        else
+          throw "mkGuest: extraFiles[${path}] must set either `content` (text) or `source` (file path)";
+    in
+    # Path arrives from Nix-interpolated keys (no shell escaping
+    # needed); inline via `"$out${path}"` rather than via
+    # `lib.escapeShellArg` so the shell expands `$out` instead of
+    # treating it as a literal in single quotes.
+    ''
+      mkdir -p "$out$(dirname ${lib.escapeShellArg path})"
+      ${pkgs.coreutils}/bin/install -m ${mode} \
+        ${src} \
+        "$out${path}"
+    ''
+  ) (lib.attrNames extraFilesWithProbes);
 
   # ── Rootfs tree population ────────────────────────────────────
   #
@@ -1323,13 +1376,16 @@ let
     # the rendered entrypoint is both. `_bootContract` is forced here so
     # the misconfig throws at build time, not at boot.
     ${builtins.seq _bootContract (
-      if bootCommand == null then ''
-        cp ${entrypointFile} "$out/etc/mvm/entrypoint"
-        chmod 0500 "$out/etc/mvm/entrypoint"
-      '' else ''
-        cp ${bootFile} "$out/etc/mvm/boot"
-        chmod 0500 "$out/etc/mvm/boot"
-      ''
+      if bootCommand == null then
+        ''
+          cp ${entrypointFile} "$out/etc/mvm/entrypoint"
+          chmod 0500 "$out/etc/mvm/entrypoint"
+        ''
+      else
+        ''
+          cp ${bootFile} "$out/etc/mvm/boot"
+          chmod 0500 "$out/etc/mvm/boot"
+        ''
     )}
     cp ${variantFile} "$out/etc/mvm/variant"
     chmod 0444 "$out/etc/mvm/variant"
@@ -1340,10 +1396,15 @@ let
     # agent falls back to class-only gating (no file = permissive default
     # for interactive dev shells). Mode 0444: guest reads it at startup;
     # the dm-verity seal prevents any runtime modification.
-    ${if isSealed then ''
-      cp ${verbTrustFile} "$out/etc/mvm/verb-trust.json"
-      chmod 0444 "$out/etc/mvm/verb-trust.json"
-    '' else ""}
+    ${
+      if isSealed then
+        ''
+          cp ${verbTrustFile} "$out/etc/mvm/verb-trust.json"
+          chmod 0444 "$out/etc/mvm/verb-trust.json"
+        ''
+      else
+        ""
+    }
 
     # /etc/passwd + /etc/group provision root (mandatory for PID 1)
     # plus the egress service, agent, and entrypoint uids resolved at build time.
@@ -1366,9 +1427,12 @@ let
       mkdir -p "$out/home/mvm-worker"
       chmod 0755 "$out/home/mvm-worker"
     fi
-    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
-      printf 'mvm-builder:x:${toString builderUid}:${toString builderUid}:mvm build worker:/tmp:/bin/sh\n' >> "$out/etc/passwd"
-    ''}
+    ${lib.optionalString
+      (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid)
+      ''
+        printf 'mvm-builder:x:${toString builderUid}:${toString builderUid}:mvm build worker:/tmp:/bin/sh\n' >> "$out/etc/passwd"
+      ''
+    }
     chmod 0644 "$out/etc/passwd"
 
     cat > "$out/etc/group" <<EOF
@@ -1381,9 +1445,12 @@ let
     if [ "${toString entrypointUid}" != "0" ] && [ "${toString entrypointUid}" != "${toString agentUid}" ]; then
       printf 'mvm-worker:x:${toString entrypointUid}:\n' >> "$out/etc/group"
     fi
-    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
-      printf 'mvm-builder:x:${toString builderUid}:\n' >> "$out/etc/group"
-    ''}
+    ${lib.optionalString
+      (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid)
+      ''
+        printf 'mvm-builder:x:${toString builderUid}:\n' >> "$out/etc/group"
+      ''
+    }
     chmod 0644 "$out/etc/group"
 
     # Default /etc/resolv.conf and CA cert bundle — needed for any
@@ -1411,10 +1478,15 @@ let
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
     # caller opts in. The production guest closure never carries it.
-    ${if withAuditProbe then ''
-      cp ${mvmAuditProbeBinary} "$out/usr/local/bin/audit-probe"
-      chmod 0555 "$out/usr/local/bin/audit-probe"
-    '' else ""}
+    ${
+      if withAuditProbe then
+        ''
+          cp ${mvmAuditProbeBinary} "$out/usr/local/bin/audit-probe"
+          chmod 0555 "$out/usr/local/bin/audit-probe"
+        ''
+      else
+        ""
+    }
 
     # Kernel modules. `/init` `modprobe`s vsock before forking the
     # agent (default nixpkgs kernel ships AF_VSOCK as `=m`); without
@@ -1432,11 +1504,10 @@ let
     # single-output kernel packages microvm.nix wraps.
     ${lib.optionalString (kernel != null) (
       let
-        candidates =
-          (if kernel ? modules then [ kernel.modules ] else [ ])
-          ++ [ kernel ];
+        candidates = (if kernel ? modules then [ kernel.modules ] else [ ]) ++ [ kernel ];
         candidateRefs = lib.concatMapStringsSep " " (c: ''"${c}"'') candidates;
-      in ''
+      in
+      ''
         for cand in ${candidateRefs}; do
           if [ -d "$cand/lib/modules" ]; then
             shopt -s nullglob
@@ -1534,20 +1605,26 @@ let
       # e.g. nixpkgs e2fsprogs ships `mkfs.ext4` in its `bin` output, so iterating
       # `${pkg}/sbin` on the default (lib) output finds nothing and `/sbin/mkfs.ext4`
       # is never created — which fails OCI rootfs materialization (`exited 127`).
-      (pkg:
-        let binOut = lib.getBin pkg; in ''
-        for srcdir in bin sbin; do
-          if [ -d "${binOut}/$srcdir" ]; then
-            for binpath in "${binOut}/$srcdir"/*; do
-              [ -e "$binpath" ] || continue
-              name=$(basename "$binpath")
-              ln -sf "$binpath" "$out/usr/local/bin/$name"
-              ln -sf "$binpath" "$out/sbin/$name"
-            done
-          fi
-        done
-      '')
-      (builtins.seq assertNoSshTemplateInputs packages)}
+      (
+        pkg:
+        let
+          binOut = lib.getBin pkg;
+        in
+        ''
+          for srcdir in bin sbin; do
+            if [ -d "${binOut}/$srcdir" ]; then
+              for binpath in "${binOut}/$srcdir"/*; do
+                [ -e "$binpath" ] || continue
+                name=$(basename "$binpath")
+                ln -sf "$binpath" "$out/usr/local/bin/$name"
+                ln -sf "$binpath" "$out/sbin/$name"
+              done
+            fi
+          done
+        ''
+      )
+      (builtins.seq assertNoSshTemplateInputs packages)
+    }
   '';
 
   # Package the tree as an ext4 image. nixpkgs ships a make-ext4-fs
@@ -1567,19 +1644,20 @@ let
   rootfsHashSeed = "00000000-0000-0000-0000-000000000002";
   e2fsprogsPinnedHashSeed =
     let
-      pinned = pkgs.runCommand "e2fsprogs-pinned-hash-seed"
-        {
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-        }
-        ''
-          mkdir -p "$out/bin"
-          for tool in ${pkgs.e2fsprogs.bin}/bin/*; do
-            ln -s "$tool" "$out/bin/"
-          done
-          rm "$out/bin/mkfs.ext4"
-          makeWrapper ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 "$out/bin/mkfs.ext4" \
-            --add-flags "-E hash_seed=${rootfsHashSeed}"
-        '';
+      pinned =
+        pkgs.runCommand "e2fsprogs-pinned-hash-seed"
+          {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          }
+          ''
+            mkdir -p "$out/bin"
+            for tool in ${pkgs.e2fsprogs.bin}/bin/*; do
+              ln -s "$tool" "$out/bin/"
+            done
+            rm "$out/bin/mkfs.ext4"
+            makeWrapper ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 "$out/bin/mkfs.ext4" \
+              --add-flags "-E hash_seed=${rootfsHashSeed}"
+          '';
     in
     pinned // { bin = pinned; };
 
@@ -1603,17 +1681,18 @@ let
   # so mutable images have room to grow before their first boot. mkGuest mounts
   # its rootfs read-only and puts mutable directories on tmpfs, so that reserve
   # can never be used.
-  rootfsImage = pkgs.runCommand "mvm-rootfs-${name}.ext4"
-    {
-      nativeBuildInputs = [ pkgs.e2fsprogs ];
-    }
-    ''
-      cp --reflink=auto ${rootfsImageWithGrowthReserve} "$out"
-      chmod u+w "$out"
-      resize2fs -M "$out"
-      e2fsck -fn "$out"
-      chmod 0444 "$out"
-    '';
+  rootfsImage =
+    pkgs.runCommand "mvm-rootfs-${name}.ext4"
+      {
+        nativeBuildInputs = [ pkgs.e2fsprogs ];
+      }
+      ''
+        cp --reflink=auto ${rootfsImageWithGrowthReserve} "$out"
+        chmod u+w "$out"
+        resize2fs -M "$out"
+        e2fsck -fn "$out"
+        chmod 0444 "$out"
+      '';
 
   mvmMeta = {
     inherit name hypervisor;
@@ -1674,34 +1753,39 @@ let
     # from the rendering instead would report drop-ins that never reached the
     # image: a first version of this did, and breaking the merge outright
     # changed no assertion at all.
-    probes = lib.mapAttrs
-      (_: spec: builtins.fromJSON spec.content)
-      (lib.filterAttrs
-        (path: _: lib.hasPrefix "/etc/mvm/probes.d/" path)
-        extraFilesWithProbes);
+    probes = lib.mapAttrs (_: spec: builtins.fromJSON spec.content) (
+      lib.filterAttrs (path: _: lib.hasPrefix "/etc/mvm/probes.d/" path) extraFilesWithProbes
+    );
     # Declared-but-unenforced, recorded so a host or an audit can see the gap
     # between what the flake asked for and what the guest actually does.
     unenforced = {
-      inherit services healthChecks volumeMounts serviceGroup;
+      inherit
+        services
+        healthChecks
+        volumeMounts
+        serviceGroup
+        ;
       names = unenforcedNames;
     };
   };
 in
-warnUnenforced (rootfsImage.overrideAttrs (old: {
-  passthru = (old.passthru or { }) // {
-    mvm = mvmMeta;
-    inherit rootfsTree;
-    inherit rootfsClosureInfo;
-    inherit setprivHelperName;
-    # Surface the chosen hypervisor + resource defaults at the top
-    # of passthru so `nix eval` is sufficient for mvmctl to drive
-    # the runtime — no NixOS evaluation needed.
-    inherit hypervisor;
-    resources = { inherit vcpus memory_mib; };
-    # Expose the side-binaries from the guest-agent build so
-    # downstream derivations (per-service launch line
-    # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
-    # `mvm-seccomp-apply` without re-running the cargo build.
-    inherit guestAgentPkg seccompApplyBinary;
-  };
-}))
+warnUnenforced (
+  rootfsImage.overrideAttrs (old: {
+    passthru = (old.passthru or { }) // {
+      mvm = mvmMeta;
+      inherit rootfsTree;
+      inherit rootfsClosureInfo;
+      inherit setprivHelperName;
+      # Surface the chosen hypervisor + resource defaults at the top
+      # of passthru so `nix eval` is sufficient for mvmctl to drive
+      # the runtime — no NixOS evaluation needed.
+      inherit hypervisor;
+      resources = { inherit vcpus memory_mib; };
+      # Expose the side-binaries from the guest-agent build so
+      # downstream derivations (per-service launch line
+      # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
+      # `mvm-seccomp-apply` without re-running the cargo build.
+      inherit guestAgentPkg seccompApplyBinary;
+    };
+  })
+)

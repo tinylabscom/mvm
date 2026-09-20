@@ -623,6 +623,7 @@ mod tests {
                 tenant: "local".into(),
                 name: "openai".into(),
                 placeholder_var: Some("API_KEY".into()),
+                guest_path: None,
                 destinations: vec!["api.openai.com".into()],
             }],
         )
@@ -658,6 +659,7 @@ mod tests {
                 tenant: "local".into(),
                 name: "openai".into(),
                 placeholder_var: Some("API_KEY".into()),
+                guest_path: None,
                 destinations: vec!["api.openai.com".into()],
             }],
         )

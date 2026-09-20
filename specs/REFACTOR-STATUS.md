@@ -284,6 +284,12 @@ Last updated: 2026-09-19
       and Workload IR expose the agent preset and AI token budget across Rust,
       Python, and TypeScript, while the undispatched legacy network fields are
       removed (#3287).
+      WS-S T10 is complete (#3284): Workload IR and persistent sidecars lower
+      through one shared secret resolver for entrypoint, transient, persistent,
+      session and in-process launches. The workload runner appends only opaque
+      environment placeholders to PID 1 after endpoint minting; file bindings
+      remain plan-bound, malformed sidecars refuse boot, and secret-bearing
+      launches do not use a pre-booted warm parent.
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.

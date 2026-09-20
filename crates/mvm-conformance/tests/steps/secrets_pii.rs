@@ -161,3 +161,96 @@ fn redactor_reports_categories(world: &mut CliWorld) {
         "us_ssn rule must fire"
     );
 }
+
+#[given(expr = "workload IR declaring environment secret {string} as {string}")]
+fn workload_ir_with_env_secret(world: &mut CliWorld, secret: String, var: String) {
+    use mvm_contract::ir::{
+        App, EnvValue, Image, Resources, SecretMount, SecretRef, Source, Workload,
+    };
+    let tmp = tempfile::tempdir().expect("create workload IR temp dir");
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        var.clone(),
+        EnvValue::SecretRef {
+            reference: SecretRef {
+                name: secret.clone(),
+                mount: SecretMount::Env { var },
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec!["api.example.com".to_string()],
+                sigv4: None,
+            },
+        },
+    );
+    let workload = Workload {
+        schema_version: "0.1".to_string(),
+        id: "shared-secret-resolution".to_string(),
+        apps: vec![App {
+            name: "app".to_string(),
+            source: Source::LocalPath {
+                path: ".".to_string(),
+                include: vec!["**".to_string()],
+                exclude: Vec::new(),
+            },
+            image: Image::NixPackages {
+                packages: Vec::new(),
+            },
+            entrypoints: Vec::new(),
+            env,
+            mounts: Vec::new(),
+            network: None,
+            resources: Resources {
+                cpu_cores: 1,
+                memory_mb: 128,
+                rootfs_size_mb: 256,
+            },
+            dependencies: None,
+            threat_tier: Default::default(),
+            addons: Vec::new(),
+            hooks: Default::default(),
+            files: Vec::new(),
+            health_check: None,
+        }],
+        volumes: Vec::new(),
+        extensions: Default::default(),
+    };
+    std::fs::write(
+        tmp.path().join("workload.json"),
+        serde_json::to_vec(&workload).expect("serialize workload IR"),
+    )
+    .expect("write workload IR");
+    world.secret_tmp = Some(tmp);
+    world.secret_name = Some(secret);
+}
+
+#[when("shared secret resolution runs for transient, persistent, and session launch")]
+fn resolve_secrets_for_every_launch(world: &mut CliWorld) {
+    let path = world
+        .secret_tmp
+        .as_ref()
+        .expect("workload IR temp dir")
+        .path()
+        .join("workload.json");
+    let resolutions = (0..3)
+        .map(|_| {
+            mvm_client::admission::secrets::resolve_workload_secrets(Some(&path))
+                .expect("shared secret resolution")
+        })
+        .collect::<Vec<_>>();
+    assert!(resolutions.windows(2).all(|pair| pair[0] == pair[1]));
+    let first = &resolutions[0];
+    world.secret_metadata_json = Some(format!(
+        "{:?}:{}:{}",
+        first.secret_release,
+        first.secrets.len(),
+        first.secrets[0].name
+    ));
+}
+
+#[then(expr = "every launch resolves the same plan-bound {string} binding")]
+fn every_launch_is_plan_bound(world: &mut CliWorld, var: String) {
+    let expected = format!("PlanBound:1:{var}");
+    assert_eq!(
+        world.secret_metadata_json.as_deref(),
+        Some(expected.as_str())
+    );
+}

@@ -4,17 +4,16 @@
 //! [`admit_and_boot_local`] is the thin, safe-by-default entrypoint the
 //! `mvm-client` local backend calls. It hashes the already-materialized
 //! `rootfs.ext4`, synthesizes an `ExecutionPlan` with the conservative facade
-//! defaults (deny-all egress, standard seccomp, no secrets, no bundle, no
-//! host-fs shares), and hands the whole thing to [`admit_and_start`]. The
+//! defaults (deny-all egress, standard seccomp, no bundle, no host-fs shares),
+//! plus any metadata-only secret bindings resolved by the caller, and hands
+//! the whole thing to [`admit_and_start`]. The
 //! backend never boots until the plan is signed, verified, inside its validity
 //! window, and non-replayed — the same gate `mvmctl up`/`run` go through.
 //!
-//! The richer knobs the CLI threads (secrets, bundle pins, deps volumes,
-//! per-destination redaction) are deliberately absent: the facade
-//! `MachineSpec` does not carry them, so exposing them here would invent a
-//! surface no caller can fill. When a driver needs them it uses the CLI
-//! admission path directly. Egress is the exception, and only because the
-//! facade grew a way to say it: an egress *grant* is carried, and the launch
+//! Bundle pins, deps volumes, and per-destination redaction remain absent. The
+//! facade does carry typed secret references, which the client validates and
+//! lowers before this seam; values remain host-only. Egress is likewise
+//! explicit: an egress *grant* is carried, and the launch
 //! config's policy is derived from it, so the plan the boot was signed under
 //! and the policy the gate reads come from one authored value.
 //!
@@ -27,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
+use mvm_core::plan::{PlanSeccompTier, SecretBinding, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::{VmStartConfig, VmVolume};
 use mvm_runtime::AnyBackend;
 
@@ -81,6 +80,10 @@ pub struct LocalRunRequest {
     /// `None` keeps the pre-grant baseline: no CPU cap, no wall-clock bound,
     /// deny-all egress.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Metadata-only secret bindings resolved by the caller. Raw values stay
+    /// behind the host substitution endpoint.
+    pub secrets: Vec<SecretBinding>,
+    pub secret_release: SecretReleasePolicy,
     /// An externally-signed plan to admit instead of synthesizing and
     /// self-signing one — a fleet-issued plan whose signer the operator pinned
     /// in the host config's `trusted_plan_signers`.
@@ -222,8 +225,8 @@ pub fn admit_and_boot_local(
         fs_policy_ref: None,
         egress_policy_ref: None,
         tool_policy_ref: None,
-        secret_release: SecretReleasePolicy::None,
-        secrets: Vec::new(),
+        secret_release: req.secret_release,
+        secrets: req.secrets.clone(),
         audit_event_prefix: None,
         cpus: req.cpus,
         mem_mib: u64::from(req.mem_mib),
@@ -408,6 +411,13 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            secrets: vec![SecretBinding {
+                name: "API_KEY".into(),
+                source: mvm_core::plan::SecretSource::Keystore {
+                    address: "openai".into(),
+                },
+            }],
+            secret_release: SecretReleasePolicy::PlanBound,
             signed_plan: None,
         };
 
@@ -432,6 +442,11 @@ mod tests {
         assert!(!started.admitted.signer_id().is_empty());
         assert_eq!(started.admitted.plan().image.sha256.len(), 64);
         assert_eq!(started.admitted.plan().runtime_profile.0, "mock");
+        assert_eq!(
+            started.admitted.plan().admission_profile.secret_release,
+            SecretReleasePolicy::PlanBound
+        );
+        assert_eq!(started.admitted.plan().secrets, req.secrets);
     }
 
     /// The launch volume set is baked into the signed plan's shares in the
@@ -518,6 +533,8 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            secrets: Vec::new(),
+            secret_release: SecretReleasePolicy::None,
             signed_plan: None,
         };
         let started = admit_and_boot_local(
@@ -587,6 +604,8 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            secrets: Vec::new(),
+            secret_release: SecretReleasePolicy::None,
             signed_plan: None,
         };
         let err = admit_and_boot_local(
@@ -665,6 +684,8 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            secrets: Vec::new(),
+            secret_release: SecretReleasePolicy::None,
             signed_plan: None,
         };
         let err = admit_and_boot_local(
@@ -738,6 +759,8 @@ mod signed_boot_tests {
             volumes: Vec::new(),
             destroy_on_exit: true,
             grants: None,
+            secrets: Vec::new(),
+            secret_release: SecretReleasePolicy::None,
             signed_plan: Some(mvm_core::plan::sign_plan(&plan, &fleet_key(), "fleet-prod")),
         }
     }

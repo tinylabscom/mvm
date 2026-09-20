@@ -48,18 +48,7 @@ pub fn persists_plan_before_start(hypervisor: &str) -> bool {
     )
 }
 
-pub fn load_workload_ir(
-    workload_ir_path: Option<&std::path::Path>,
-) -> Result<Option<mvm_contract::ir::Workload>> {
-    let Some(ir_path) = workload_ir_path else {
-        return Ok(None);
-    };
-    let bytes = std::fs::read(ir_path)
-        .with_context(|| format!("reading workload IR at {}", ir_path.display()))?;
-    let workload: mvm_contract::ir::Workload = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
-    Ok(Some(workload))
-}
+pub use crate::admission::secrets::load_workload_ir;
 
 pub struct PersistentImageStartParams<'a> {
     pub name: &'a str,
@@ -213,6 +202,7 @@ pub fn start_persistent_oci_machine(
 
     let admission_ledger = InMemoryNonceLedger::new();
     let ingress = machine_port_ingress(ports)?;
+    let resolved_secrets = crate::admission::secrets::resolve_machine_secrets(name)?;
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
             outputs: Vec::new(),
@@ -227,8 +217,8 @@ pub fn start_persistent_oci_machine(
             cpus,
             mem_mib: u64::from(memory_mib),
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
+            secret_release: resolved_secrets.secret_release,
+            secrets: resolved_secrets.secrets,
             caller_commitment,
             ledger: &admission_ledger,
             keys_dir: None,
