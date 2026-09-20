@@ -389,9 +389,12 @@ So the remaining work is not where the brief pointed.
       long AI constructor. A second slice replaces observability's
       `init_with_filter` overload with `ObservabilityConfig`, keeping the common
       `init` entry point while letting binaries compose their fallback filter.
-      `check-public-function-names` ratchets the remaining count at 64 and
-      prevents both cleared modules from regressing. Continue per-module rather
-      than as one sweep. #3315.
+      A third slice collapses `mvm-vmm`'s `run_with_pause_hook` and
+      `run_with_hooks` wrappers into the existing `RunHooks` parameter object:
+      `run` is now the one slice-backed entry point, with composable pause and
+      throttle hooks. `check-public-function-names` ratchets the remaining count
+      at 62 and prevents all three cleared modules from regressing. Continue
+      per-module rather than as one sweep. #3315.
 - [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
       builder methods exist only on the variant they apply to — an
       unrepresentable-illegal-states fix, not a panic-removal exercise.

@@ -8,10 +8,11 @@ Last updated: 2026-09-20
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
       70 lexical public `f` / `f_with_*` sibling pairs. The first per-module
       slice clears all five pairs from `network_policy.rs`; the second replaces
-      observability's filter overload with a composable `ObservabilityConfig`.
-      The repository gate ratchets the remaining count at 64 and prevents both
-      cleared modules from regressing. The other modules plus D1/D2 remain
-      open.
+      observability's filter overload with a composable `ObservabilityConfig`;
+      the third replaces both `mvm-vmm` run-loop overloads with one `run`
+      function taking composable `RunHooks`. The repository gate ratchets the
+      remaining count at 62 and prevents all three cleared modules from
+      regressing. The other modules plus D1/D2 remain open.
 
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.
