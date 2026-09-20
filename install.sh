@@ -28,7 +28,7 @@
 #   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
-#   MVM_TRUSTED_ARCHIVE_SHA256 trusted archive hash for a non-default fresh install
+#   MVM_TRUSTED_ARCHIVE_SHA256 optional independent archive hash for a fresh install
 #   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
@@ -786,19 +786,21 @@ if command -v cosign >/dev/null 2>&1; then
 fi
 if [ -z "$VERIFIER" ] && [ -z "$COSIGN" ]; then
   trusted_hash="$(trusted_archive_sha256)"
-  [ -n "$trusted_hash" ] \
-    || die "fresh install requires a trusted archive SHA-256; use the baked default, install cosign, or set MVM_TRUSTED_ARCHIVE_SHA256 from an independent trusted source"
-  [ "$got" = "$trusted_hash" ] \
-    || die "trusted archive SHA-256 mismatch for $ARCHIVE (want $trusted_hash, got $got)"
+  if [ -n "$trusted_hash" ]; then
+    [ "$got" = "$trusted_hash" ] \
+      || die "trusted archive SHA-256 mismatch for $ARCHIVE (want $trusted_hash, got $got)"
 
-  bootstrap_dir="$TMP/bootstrap-verifier"
-  mkdir -p "$bootstrap_dir"
-  tar xzf "$TMP/$ARCHIVE" -C "$bootstrap_dir" "mvmctl-${TARGET}/mvmctl" \
-    || die "could not extract the authenticated bootstrap verifier"
-  VERIFIER="$bootstrap_dir/mvmctl-${TARGET}/mvmctl"
-  [ -x "$VERIFIER" ] || die "authenticated archive contains no executable mvmctl verifier"
-  if ! "$VERIFIER" env verify-release --help 2>/dev/null | grep -q -- '--tag'; then
-    VERIFIER=""
+    bootstrap_dir="$TMP/bootstrap-verifier"
+    mkdir -p "$bootstrap_dir"
+    tar xzf "$TMP/$ARCHIVE" -C "$bootstrap_dir" "mvmctl-${TARGET}/mvmctl" \
+      || die "could not extract the authenticated bootstrap verifier"
+    VERIFIER="$bootstrap_dir/mvmctl-${TARGET}/mvmctl"
+    [ -x "$VERIFIER" ] || die "authenticated archive contains no executable mvmctl verifier"
+    if ! "$VERIFIER" env verify-release --help 2>/dev/null | grep -q -- '--tag'; then
+      VERIFIER=""
+    fi
+  fi
+  if [ -z "$VERIFIER" ]; then
     COSIGN="$(bootstrap_cosign)"
   fi
 fi

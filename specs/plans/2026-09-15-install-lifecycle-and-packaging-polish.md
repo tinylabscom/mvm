@@ -32,7 +32,7 @@ releases and across distros.
 | I2 | Every install makes an unauthenticated `api.github.com` call to resolve the latest tag — rate-limited, and a hard failure behind a proxy | `install.sh:48-58` |
 | I3 | Binaries are installed straight over the previous set, so a failed upgrade leaves `mvmctl` and its adjacent host binaries torn apart — worse for us than for a single-binary tool, because adjacency is a requirement | `install.sh` install step |
 | I4 | No uninstaller exists anywhere | — |
-| I5 | Resolved: self-update verifies in-process, and a fresh install authenticates the selected archive against an installer-carried or independently supplied SHA-256 before using its `mvmctl` when capable or a separately hash-pinned temporary cosign for a legacy release to verify the mandatory tag-pinned bundle | `install.sh`, `crates/mvm-cli/src/update.rs` |
+| I5 | Resolved: self-update verifies in-process, and a fresh install authenticates the baked archive against an installer-carried SHA-256 before probing its `mvmctl`; legacy or unpinned archives use a separately hash-pinned temporary cosign and execute no archive byte before the mandatory tag-pinned bundle verifies | `install.sh`, `crates/mvm-cli/src/update.rs` |
 | I6 | `tests/install_sh.rs` tests the current script against synthetic assets only; nothing runs the current installer against older published releases, and nothing runs the released Linux binary across distros, though we ship `-unknown-linux-gnu` and glibc drift is unmeasured | `tests/install_sh.rs` |
 | I7 | The Nix package hardcodes `version = "0.18.0-rc.1"`, so it drifts from `Cargo.toml` silently | `nix/packages/mvmctl.nix:54` |
 | I8 | No written boundary between what a Nix check asserts and what the Rust harness asserts, against ~4000 lines of `nix/lib` | `nix/tests/` |
@@ -114,11 +114,12 @@ Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
       train and refuses a missing or invalid bundle.
 - [x] Have `install.sh` prefer `mvmctl env verify-release` once a binary exists
       on disk and fall back to `cosign`. On a fresh host with neither, require
-      an installer-carried archive hash (or an independently supplied hash for
-      a non-default version), check it before executing only the downloaded
-      `mvmctl` as a temporary verifier, and require its tag-pinned bundle. A
-      legacy archive that predates the verb falls back to a separately
-      hash-pinned temporary cosign. There is no unsigned fallback.
+      an installer-carried archive hash, check it before executing only the
+      downloaded `mvmctl` as a temporary verifier, and require its tag-pinned
+      bundle. A legacy archive that predates the verb, or an explicit version
+      with no independently supplied hash, uses a separately hash-pinned
+      temporary cosign without executing archive bytes first. There is no
+      unsigned fallback.
 - [x] Rewrite the claim 20 boundary in
       `specs/adrs/001-microvm-security-posture.md`: the claim names all four
       refusing paths and records the installer script plus its baked archive

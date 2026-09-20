@@ -15,10 +15,11 @@ installed, and otherwise warned. Now:
   the help text, because an older `mvmctl` can exit 0 on a subcommand it does
   not know. If there is no such `mvmctl`, it falls back to `cosign`.
 - A later epic #3277 closure removed the remaining fresh-host warning path. If
-  neither verifier exists, the installer authenticates the archive against an
-  installer-carried or independently supplied SHA-256 before using its
-  `mvmctl` as a temporary verifier when capable. A legacy archive instead uses
-  a separately hash-pinned temporary cosign. Every path requires the bundle.
+  neither verifier exists, the installer authenticates its baked archive
+  against an installer-carried SHA-256 before using its `mvmctl` as a temporary
+  verifier when capable. A legacy or unpinned archive instead uses a separately
+  hash-pinned temporary cosign without executing archive bytes first. Every
+  path requires the bundle.
 - The `cosign` fallback now pins `refs/tags/$VERSION` exactly, instead of
   matching any tag.
 
@@ -35,4 +36,4 @@ with no verifier must authenticate the temporary one or refuse.
 - `install_sh_refuses_an_archive_the_installed_mvmctl_rejects`
 - `install_sh_refuses_a_missing_bundle_once_it_can_verify`
 - `fresh_install_bootstraps_signature_verification_from_a_trusted_archive_hash`
-- `fresh_install_refuses_without_a_verifier_or_trusted_archive_hash`
+- `fresh_install_without_an_archive_hash_never_executes_the_payload_before_verification`

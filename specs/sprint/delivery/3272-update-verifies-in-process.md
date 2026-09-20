@@ -20,11 +20,11 @@ its help text now says that; it used to say "Skip checksum verification", which
 was wrong.
 
 Claim 20 originally named these three paths. The later epic #3277 closure added
-the install path: a fresh host authenticates the selected archive against an
-installer-carried or independently supplied SHA-256 before using its `mvmctl`
-when capable, or a separately hash-pinned temporary cosign for a legacy
-release. A build without `manifest-verify` remains a refusing implementation
-boundary.
+the install path: a fresh host authenticates the baked archive against an
+installer-carried SHA-256 before using its `mvmctl` when capable. A legacy or
+unpinned archive uses a separately hash-pinned temporary cosign and executes no
+archive byte before verification. A build without `manifest-verify` remains a
+refusing implementation boundary.
 
 The `manifest-verify` tests on these paths never ran in CI: every use of the
 feature there was `cargo run --example`. A step in `Lint feature coverage` runs

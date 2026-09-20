@@ -51,8 +51,8 @@ fn fresh_install_has_no_unsigned_fallback(_world: &mut CliWorld) {
     let script = installer();
     assert!(
         !script.contains("skipping signature verification")
-            && script.contains("fresh install requires a trusted archive SHA-256")
-            && script.contains("trusted cosign SHA-256 mismatch"),
+            && script.contains("trusted cosign SHA-256 mismatch")
+            && script.contains("no signature bundle published for $ARCHIVE"),
         "a host without a verifier must authenticate one or refuse the install"
     );
 }

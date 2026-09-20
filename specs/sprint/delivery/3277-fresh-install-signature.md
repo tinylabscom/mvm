@@ -19,15 +19,17 @@ the same exact-tag check. The full payload is extracted or installed only
 after signature verification succeeds.
 
 An explicit non-default version cannot reuse the baked release's trust anchor.
-It needs `MVM_TRUSTED_ARCHIVE_SHA256` from an independent trusted source, an
-already installed verifier, or host `cosign`. Every route requires the bundle;
-there is no unsigned fallback. A missing anchor, mismatched hash, missing
-bundle, or invalid signature refuses without installing the payload.
+It may receive `MVM_TRUSTED_ARCHIVE_SHA256` from an independent source;
+otherwise the installer skips its in-archive verifier and uses the pinned
+temporary cosign, so no archive byte executes before signature verification.
+Every route requires the bundle; there is no unsigned fallback. A mismatched
+supplied hash, invalid verifier hash, missing bundle, or invalid signature
+refuses without installing the payload.
 
 ## Witnesses
 
 - `fresh_install_bootstraps_signature_verification_from_a_trusted_archive_hash`
-- `fresh_install_refuses_without_a_verifier_or_trusted_archive_hash`
+- `fresh_install_without_an_archive_hash_never_executes_the_payload_before_verification`
 - `fresh_install_refuses_a_wrong_trusted_hash_before_executing_the_payload`
 - `fresh_install_refuses_a_missing_signature_bundle`
 - `fresh_install_bootstraps_pinned_cosign_for_a_legacy_release`

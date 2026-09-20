@@ -563,7 +563,7 @@ impl Host {
         command
     }
 
-    fn installer(&self, base: &str, version: &str) -> Command {
+    fn installer_base(&self, base: &str) -> Command {
         let mut command = self.script("install.sh");
         command
             .env("MVM_UPDATE_DOWNLOAD_URL", base)
@@ -571,12 +571,16 @@ impl Host {
                 "MVM_COSIGN_DOWNLOAD_URL",
                 format!("{base}/sigstore/cosign/releases/download"),
             )
-            .env("MVM_TRUSTED_COSIGN_SHA256", sha256_hex(&stub_cosign()))
-            .env("MVM_VERSION", version)
-            .env(
-                "MVM_TRUSTED_ARCHIVE_SHA256",
-                published_archive_sha256(base, version),
-            );
+            .env("MVM_TRUSTED_COSIGN_SHA256", sha256_hex(&stub_cosign()));
+        command
+    }
+
+    fn installer(&self, base: &str, version: &str) -> Command {
+        let mut command = self.installer_base(base);
+        command.env("MVM_VERSION", version).env(
+            "MVM_TRUSTED_ARCHIVE_SHA256",
+            published_archive_sha256(base, version),
+        );
         command
     }
 
@@ -740,7 +744,7 @@ fn install_sh_uses_baked_version_without_calling_api() {
 }
 
 #[test]
-fn install_sh_refuses_api_fallback_without_an_out_of_band_archive_hash() {
+fn install_sh_falls_back_to_api_and_verifies_without_an_archive_hash() {
     let release = Release::new("v9.9.9");
     let mut routes = release.routes();
     routes.push((
@@ -751,17 +755,16 @@ fn install_sh_refuses_api_fallback_without_an_out_of_band_archive_hash() {
 
     let host = Host::new();
     let output = host
-        .script("install.sh")
+        .installer_base(&base)
         .env("MVM_UPDATE_API_URL", &base)
-        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
         .output()
         .unwrap();
     assert!(
-        !output.status.success(),
-        "an API-selected archive has no installer-baked trust anchor"
+        output.status.success(),
+        "an API-selected archive must use the pinned external verifier: {}",
+        stderr(&output)
     );
-    assert!(stderr(&output).contains("trusted archive SHA-256"));
-    assert!(!host.bin().join("mvmctl").exists());
+    assert_eq!(host.mvmctl_version(), "mvmctl v9.9.9");
 }
 
 #[test]
@@ -845,21 +848,26 @@ fn fresh_install_refuses_a_mismatched_bootstrap_cosign_hash() {
 }
 
 #[test]
-fn fresh_install_refuses_without_a_verifier_or_trusted_archive_hash() {
+fn fresh_install_without_an_archive_hash_never_executes_the_payload_before_verification() {
     let release = Release::new("v9.9.9");
     let (base, _stop) = serve_releases(&[&release]);
     let host = Host::new();
 
+    let log = host.root.join("bootstrap-verifier.log");
     let output = host
-        .script("install.sh")
-        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .installer_base(&base)
         .env("MVM_VERSION", "v9.9.9")
+        .env("MVM_TEST_INVOCATION_LOG", &log)
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("trusted archive SHA-256"));
-    assert!(!host.bin().join("mvmctl").exists());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let invocations = std::fs::read_to_string(&log).unwrap();
+    assert!(invocations.contains("verify-blob"));
+    assert!(
+        !invocations.contains("env verify-release --help"),
+        "an archive without an independent hash must not execute its mvmctl before signature verification: {invocations}"
+    );
 }
 
 #[test]
