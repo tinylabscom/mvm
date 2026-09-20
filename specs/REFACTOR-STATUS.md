@@ -104,6 +104,13 @@ Last updated: 2026-09-20
       protocol citations are corrected, and unbuilt IPv6 and node-control
       designs are Proposed rather than claimed as shipped.
 
+- [x] **ADR-001's security authority matches the shipped guest.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.4, issue #3318.
+      The sealed guest uses `mvm-setpriv --no-new-privs` plus the agent's
+      `PR_CAPBSET_DROP` sweep, claim 3 carries its backend-scoping rationale
+      directly, contributor guidance covers every live ADR, and no temporary
+      citation-gate exception remains.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is

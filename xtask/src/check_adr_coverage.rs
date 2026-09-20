@@ -375,16 +375,6 @@ fn section_resolves(body: &str, section: &str) -> bool {
 /// sequenced, not to make broken references permanent.
 const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     (
-        106,
-        "cited by ADR-001's claim-3 row for the block+ext4 dm-verity scoping; the file was never \
-         written or was deleted — the scoping rationale must move into ADR-001 itself (#3318)",
-    ),
-    (
-        107,
-        "cited by ADR-001 as the sole authority for why virtiofs-root does not witness claim 3; \
-         the file does not exist, so a numbered claim's backend exclusion rests on nothing (#3318)",
-    ),
-    (
         9,
         "function-call entrypoints — split across ADR-005/008/010/011 during the function-service \
          refactor; references to the original ADR-009 number are historical",
@@ -438,48 +428,7 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
 ];
 
-const KNOWN_MISSING_ADR_SECTIONS: &[(u32, &str, &str)] = &[
-    (
-        1,
-        "w2",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w22",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w3",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w41",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w43",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w5",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w51",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-    (
-        1,
-        "w52",
-        "legacy security-workstream label; ADR-001 has no matching heading (#3318)",
-    ),
-];
+const KNOWN_MISSING_ADR_SECTIONS: &[(u32, &str, &str)] = &[];
 
 /// Run the check; print findings; return Err on any `[error]` line.
 pub fn run(workspace: &Path) -> Result<()> {
@@ -690,6 +639,25 @@ mod tests {
     }
 
     #[test]
+    fn retired_claim_scoping_adrs_are_not_allowlisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        let retired = adr_token(106);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nThis decision depends on {retired}.\n"),
+        )
+        .unwrap();
+
+        assert!(
+            run(root).is_err(),
+            "retired claim-scoping authorities must fail like any missing ADR"
+        );
+    }
+
+    #[test]
     fn adr_references_are_existence_evidence_not_implementation_coverage() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
@@ -731,6 +699,24 @@ mod tests {
         .unwrap();
 
         assert!(run(root).is_err(), "a missing section must fail the gate");
+    }
+
+    #[test]
+    fn legacy_security_workstream_sections_are_not_allowlisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1}\n\nSee {adr1} §W2.\n"),
+        )
+        .unwrap();
+
+        assert!(
+            run(root).is_err(),
+            "legacy workstream labels must fail like any missing ADR section"
+        );
     }
 
     #[test]

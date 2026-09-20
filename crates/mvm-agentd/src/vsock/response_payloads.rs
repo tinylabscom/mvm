@@ -124,7 +124,7 @@ pub enum ProcErrorKind {
     /// The agent failed to spawn the child (executable missing,
     /// EACCES, ENOMEM, etc.).
     SpawnFailed,
-    /// Per-child seccomp / setpriv envelope failed to apply.
+    /// Per-child process security envelope failed to apply.
     /// Agent refuses to spawn an un-confined child.
     SecurityEnvelopeFailed,
     /// argv was empty, argv\[0\] was empty / not absolute / on a

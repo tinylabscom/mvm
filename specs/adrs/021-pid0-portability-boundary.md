@@ -95,8 +95,9 @@ over vsock. No shell-out beyond audited verbs — the agent does not exec
 arbitrary binaries on the host's behalf outside the process-start and
 entrypoint paths that emit audit events, and production builds strip the
 general-purpose exec handler entirely. No broad seccomp escape — the
-agent runs under `setpriv --bounding-set=-all --no-new-privs` with the
-standard seccomp profile; a pid0 implementation may not require a more
+agent runs through `mvm-setpriv --no-new-privs`, narrows its capability
+bounding set through `PR_CAPBSET_DROP`, and uses the standard seccomp profile;
+a pid0 implementation may not require a more
 permissive profile than verity-init's own dm-verity setup needs. No
 bypass of `AuthenticatedFrame` — every host-guest control message is
 signed and replay-protected, and no backend may introduce an out-of-band

@@ -2476,7 +2476,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Spawn a new process. Returns a `pid_token` string the host uses to refer to the process for the rest of its lifetime — the token is opaque to the host so a buggy or malicious caller can never address a process it didn't start.\n\nChildren spawned this way inherit the agent's bounding-set (`--bounding-set=-all --no-new-privs`); the handler additionally `process_group(0)`s and sets `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated against an allowlist before exec.",
+          "description": "Spawn a new process. Returns a `pid_token` string the host uses to refer to the process for the rest of its lifetime — the token is opaque to the host so a buggy or malicious caller can never address a process it didn't start.\n\nChildren spawned this way inherit the agent's already-narrowed capability bounding set and kernel-enforced no-new-privileges state; the handler additionally `process_group(0)`s and sets `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated against an allowlist before exec.",
           "type": "object",
           "required": [
             "ProcStart"
@@ -3867,7 +3867,7 @@
           ]
         },
         {
-          "description": "Per-child seccomp / setpriv envelope failed to apply. Agent refuses to spawn an un-confined child.",
+          "description": "Per-child process security envelope failed to apply. Agent refuses to spawn an un-confined child.",
           "type": "string",
           "enum": [
             "SecurityEnvelopeFailed"

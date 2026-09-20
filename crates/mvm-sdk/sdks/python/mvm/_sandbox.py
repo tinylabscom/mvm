@@ -887,13 +887,13 @@ class _LiveTransport:
         """Shell ``mvmctl proc start <vm> -e ... -- <argv>``.
 
         Refuses with :class:`SandboxDevOnly` when the resolved
-        template is prod (ADR-001 §W4.3, claim 4). The agent fails
+        template is prod (ADR-001 claim 4). The agent fails
         closed anyway; the SDK refuses first so a typo doesn't
         emit a spurious vsock request."""
         if self.build_mode != "dev":
             raise SandboxDevOnly(
                 f"`commands.start` requires a dev-mode template; resolved template "
-                f"build_mode={self.build_mode!r}. ADR-001 §W4.3 (security claim 4) "
+                f"build_mode={self.build_mode!r}. ADR-001 security claim 4 "
                 f"strips the agent's `do_exec` handler in prod builds — re-build the "
                 f"template with `mvmctl template build --dev <name>`, or use "
                 f"`files.write` to stage inputs into the running VM instead.",
@@ -966,7 +966,7 @@ class _LiveTransport:
         obtain a ``pid_token``, then ``mvmctl proc wait <pid_token>``
         to capture stdout/stderr/exit. Refuses with
         :class:`SandboxDevOnly` when the resolved template is prod
-        (matches ``commands_start``'s policy — ADR-001 §W4.3, claim
+        (matches ``commands_start``'s policy — ADR-001 claim
         4)."""
         self._require_dev("exec", ["machine", "proc", "start", self.vm_id, *argv])
 
@@ -1564,7 +1564,7 @@ class Sandbox:
         Convenience over ``commands.start`` + the underlying
         ``mvmctl proc wait`` round-trip. Refuses with
         :class:`SandboxDevOnly` when the resolved template is prod
-        (ADR-001 §W4.3, claim 4) — no silent fallback.
+        (ADR-001 claim 4) — no silent fallback.
 
         Live mode only: in record mode the call raises
         :class:`SandboxModeError` because the recording's lowering

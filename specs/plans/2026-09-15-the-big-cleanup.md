@@ -107,17 +107,12 @@ opposite one, `drop_page_cache`).
       witness name that resolves to nothing; nine more citations name deleted
       crates. All mechanically catchable by extending
       `check-witness-citations` to ADRs. #3317.
-- [ ] **A2.4** ADR-001 is internally wrong in three places. Claim 1's
-      Enforcement cell (`:141`) names `setpriv --bounding-set=-all`, a flag the
-      sealed guest's `mvm-setpriv` does not implement and actively rejects
-      (`crates/mvm-agentd/tests/mvm_setpriv.rs:64`) — the real drop is
-      `PR_CAPBSET_DROP` in the agent
-      (`crates/mvm-agentd/src/guest_mount.rs:895`), and the flag is correct
-      only for the builder VM. Claim 3's row (`:754`) and its backend-scoping
-      section (`:889-893`) cite **ADR-106** and **ADR-107**, neither of which
-      exists — and ADR-107 is the sole stated authority for why virtiofs-root
-      does not witness claim 3. And `CLAUDE.md`'s "no ADR above 051" is false;
-      052 and 110 exist and are cited by six other ADRs. #3318.
+- [x] **A2.4** ADR-001 now names the sealed guest's shipped privilege boundary:
+      `mvm-setpriv --no-new-privs` followed by the agent's `PR_CAPBSET_DROP`
+      sweep. Claim 3's backend-scoping rationale lives in ADR-001 instead of
+      nonexistent numbered ADRs 106 and 107. Contributor guidance recognizes
+      every live ADR, including 052 and 110, and the temporary citation-gate
+      exceptions are gone. #3318.
 - [ ] **A2.5** Two `Accepted` ADRs describe subsystems with zero bytes:
       ADR-041 (`mvm_hostd::nodectl`) and ADR-049 §2 (`WebLinuxBackend` is a
       unit struct whose every method returns `unavailable()`). Eleven

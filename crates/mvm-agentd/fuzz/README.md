@@ -1,7 +1,7 @@
 # mvm-agentd fuzz targets
 
-`cargo-fuzz` harnesses for the host↔guest JSON protocol surface, per
-ADR-001 §W4.2.
+`cargo-fuzz` harnesses for the host↔guest JSON protocol surface described in
+ADR-001's claims ledger.
 
 ## Targets
 
