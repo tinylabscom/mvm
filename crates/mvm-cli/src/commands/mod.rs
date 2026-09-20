@@ -124,7 +124,6 @@ pub(crate) fn default_run_profile() -> RunProfile {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-#[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]

@@ -316,6 +316,16 @@
       APIs, and examples. Complete with 43 focused tests, gated-target checks,
       all 67 repository gates, clippy, and the full workspace suite.
 
+- [x] **ADR-to-tree parity sweep — issue #3309.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.1 + G2. Reconcile ten
+      architecture records with the shipped crate ownership, CLI surface,
+      bundle and image-verification posture, rootless guest path, warm-snapshot
+      limits, and current egress/virtio implementation. Remove stale tree-side
+      comments and the obsolete large-enum lint allowance, and record why the
+      bounded hickory DNS codec remains. Complete with CLI tests, documentation
+      and ADR gates, workspace check and clippy, and the serial full workspace
+      suite.
+
 - [x] **Honest production file-size gate — issue #3313.**
       `specs/plans/2026-09-15-the-big-cleanup.md` C1. Count lines outside all
       test-only items and externally gated test modules, scan every production

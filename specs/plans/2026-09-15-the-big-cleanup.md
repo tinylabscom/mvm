@@ -90,10 +90,11 @@ was never built (ADR-033's `vmm-rustvmm-queue` feature gate, ADR-025's
 freeze-time page-cache priming — the only page-cache symbol in the tree is the
 opposite one, `drop_page_cache`).
 
-- [ ] **A2.1** Land #3309 — amend the eleven `ADR-WRONG` / `BOTH-STALE` entries
-      and fix the one tree-side residue
-      (`crates/mvm-cli/src/commands/mod.rs:128` allows
-      `clippy::large_enum_variant` for an `Up` variant ADR-027 deleted).
+- [x] **A2.1** Land #3309 — amend the eleven `ADR-WRONG` / `BOTH-STALE`
+      entries and the follow-up parity findings across ADRs 022, 024–028 and
+      030–033. The tree-side residue is gone too:
+      `crates/mvm-cli/src/commands/mod.rs` no longer allows
+      `clippy::large_enum_variant` for an `Up` variant ADR-027 deleted.
 - [x] **A2.2** **Claim 11's CVE gate has no production caller.** #3316.
       Restate claim 11 as seal-time CVE/SBOM evidence plus admission-time
       integrity verification, and declare `apply_install_gate` dormant until a
@@ -430,10 +431,11 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
       Dropping them also removed `vmm-sys-util` 0.12, so the `vmm-sys-util`
       duplicate-major exception is gone from `deny.toml` and
       `check-duplicate-majors`, and the Linux closure budget ratchets 238 → 235.
-- [ ] **G2** ADR-032 says hickory is not pulled; three manifests pull it
-      (#3309). Decide whether the dependency stays and record the budget
-      rationale either way — this is a decision that was made in code and never
-      written down.
+- [x] **G2** ADR-032 says hickory is not pulled; three manifests pull it
+      (#3309). The dependency stays: `hickory-proto` supplies the bounded DNS
+      wire codec used on the shipped guest/host egress path, avoiding a second
+      security-sensitive parser, while the higher-level resolver remains
+      optional. ADR-032 now records that scope and budget rationale.
 
 ## H. Nix
 

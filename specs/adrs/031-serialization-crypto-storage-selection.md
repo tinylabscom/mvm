@@ -24,7 +24,7 @@ The incumbent stack:
 - **Crypto:** `ed25519-dalek` (signing, chain-signed audit),
   `ring`/`rustls`/`rcgen` (egress-substitution TLS re-origination,
   ADR-023), plus attestation and a keystore/secret_store using
-  `mlock` + `zeroize` + `subtle`. The threat model (ADR-002) trusts the
+  `mlock` + `zeroize` + `subtle`. The threat model (ADR-001) trusts the
   host with the hypervisor and private keys, runs one workload per guest,
   and keeps secret values out of the guest entirely.
 - **Storage:** append-only chain-signed JSONL audit log (verified by the
@@ -64,12 +64,12 @@ recorded with the condition under which it would be revisited.
 
 4. **IOTA Stronghold — declined, with the strongest residual case.** Its
    encrypted-snapshot and in-memory protection would harden the at-rest
-   host signer key and secret memory. But ADR-002 scopes a malicious host
+   host signer key and secret memory. But ADR-001 scopes a malicious host
    and hardware-backed key attestation out of the threat model, which is
    most of what Stronghold buys, so it is hardening beyond the stated
    boundary. At-rest key encryption, if wanted, is a focused change using
    an in-tree AEAD, not a new secrets engine. *Revisit only* alongside an
-   ADR-002 amendment that brings host compromise into scope.
+   ADR-001 amendment that brings host compromise into scope.
 
 ## Consequences
 

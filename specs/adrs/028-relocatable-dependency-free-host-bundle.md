@@ -16,7 +16,7 @@ past it never sees the security substrate behind `mvmctl` at all — DX is
 the gate, the substrate is the moat behind it.
 
 The mechanics of a relocatable bundle are well understood: ship the CLI,
-the VMM dylibs, the egress gateway, the guest kernel, and the agent
+the VMM dylibs, the guest kernel, and the agent
 rootfs in one directory; make dynamic linkage load-relative
 (`$ORIGIN`-relative rpath on Linux via patchelf, `@loader_path` install
 names on macOS) so nothing resolves to a system prefix; bake the guest
@@ -41,7 +41,7 @@ dependency-free bundle. On a supported host the one-line installer drops
 a self-contained directory and `mvmctl machine run ...` works with no
 package-manager prerequisites.
 
-- The bundle vendors: the CLI, the egress gateway, libkrun, libkrunfw,
+- The bundle vendors: the CLI, libkrun, libkrunfw,
   the guest kernel (baked at build time), and the agent rootfs.
 - Dynamic linkage is load-relative; a wrapper points the CLI at the
   bundled rootfs.
@@ -49,9 +49,11 @@ package-manager prerequisites.
   shell and release packager share derivations. The Nix consumer path
   relocates the signed prebuilt; source checkouts keep building locally
   from in-repo flakes.
-- The bundle is signed and the installer verifies the signature before
-  install — an extension of the existing dev-image hash-verify posture,
-  not a new mechanism.
+- The completed bundle will be signed and the installer will verify the
+  signature before install — an extension of the existing dev-image
+  hash-verify posture, not a current guarantee. During staging, the installer
+  verifies the published checksum unconditionally and warns/skips detached
+  signature verification when no signed bundle or verifier is available.
 
 ## Why Option A, and how it's staged
 
@@ -72,14 +74,14 @@ vendor it:
   key. Pinned, signed, and reproducible beats mutable and foreign on
   every axis the threat model cares about.
 - **VMM-vendoring is the last, separable step**, so committing to it now
-  is low-risk: the bundle machinery (gateway, kernel, rootfs, rpath
-  rewriting, the signed installer) lands first and proves itself
+  is low-risk: the bundle machinery (kernel, rootfs, rpath
+  rewriting, the installer and its future detached-signature gate) lands first and proves itself
   regardless of when the VMM source gets pinned.
 
 **Staging.** Each step ships and is useful on its own, macOS first, since
 the package-manager pain is worst there:
 
-1. **Bundle machinery.** The egress gateway, kernel, and agent rootfs in
+1. **Bundle machinery.** The kernel and agent rootfs in
    one relocatable, load-relative, signed artifact with a verifying
    installer — components already built today, so this step proves the
    plumbing.
@@ -87,7 +89,7 @@ the package-manager pain is worst there:
    by the root flake into the same artifact. This is the only
    Option-A-specific increment, and it lands last, after step 1 is
    trusted. After this, macOS first-run is genuinely zero-dependency.
-3. **Linux.** Follows the same gateway-vendoring timing as the macOS
+3. **Linux.** Follows the same VMM-vendoring timing as the macOS
    path.
 
 **Pre-merge checklist gating the VMM-vendoring step:**
