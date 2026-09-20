@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn a_short_state_dir_keeps_every_firecracker_socket_in_place() {
-        let dir = "/root/.mvm/vms/mvm-stage0-firecracker-26289-1789708959173633880";
+        let dir = "/srv/state/vms/mvm-stage0-firecracker-26289-1789708959173633880";
         assert_eq!(fc_socket_dir(dir), Path::new(dir));
         assert_eq!(fc_api_socket_path(dir), format!("{dir}/fc.socket"));
         assert_eq!(

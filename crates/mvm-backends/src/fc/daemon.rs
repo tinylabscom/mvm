@@ -494,7 +494,7 @@ mod tests {
             err.to_string().contains("longer than a Unix socket"),
             "{err}"
         );
-        ensure_api_socket_fits("/root/.mvm/vms/w/fc.socket").expect("a short path fits");
+        ensure_api_socket_fits("/srv/vms/w/fc.socket").expect("a short path fits");
     }
 
     #[test]

@@ -208,14 +208,12 @@ jobs:
       # Hosted runners protect their distro kernel under /boot; the workload
       # kernel is not what this lane proves.
       MVM_KERNEL_SOURCE: download
-      # QEMU, named rather than auto-detected. Stage 0 on a hosted runner has
-      # only ever worked under QEMU: until helpers began inheriting their
-      # caller's backend, the helper this lane re-executes forced QEMU, and
-      # that is the path the nightly bootstrapped through for months. With the
-      # inherited backend it auto-detects Firecracker here and the Stage 0 VM's
-      # API socket never appears, which is a Firecracker-on-hosted-runner
-      # problem and not something the cold source path should be red for.
-      MVM_BUILDER_BACKEND: qemu
+      # Firecracker, named rather than auto-detected, because it is what a
+      # Linux/KVM host auto-detects and so the path a contributor's cold
+      # bootstrap takes. The home below is deep enough that Firecracker's API
+      # socket would overflow the Unix socket limit without the short socket
+      # namespace, so this lane also keeps that fallback exercised.
+      MVM_BUILDER_BACKEND: firecracker
     steps:
       - uses: actions/checkout@v6
 
@@ -228,7 +226,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -260,22 +258,6 @@ jobs:
             exit 1
           fi
           sudo chmod 666 /dev/kvm
-
-      - name: Grant QEMU Stage 0 access to vhost-vsock
-        run: |
-          set -euo pipefail
-          test -c /dev/vhost-vsock
-          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
-          sudo chmod 0600 /dev/vhost-vsock
-          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
-
-      - name: Grant QEMU Stage 0 read access to the hosted kernel
-        run: |
-          set -euo pipefail
-          KERNEL_RELEASE="$(uname -r)"
-          sudo chmod a+r \
-            "/boot/vmlinuz-${KERNEL_RELEASE}" \
-            "/boot/initrd.img-${KERNEL_RELEASE}"
 
       - name: Bootstrap the builder image from source
         env:

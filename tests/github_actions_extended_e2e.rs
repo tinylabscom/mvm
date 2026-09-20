@@ -656,62 +656,51 @@ fn the_source_bootstrap_job_keeps_the_guest_consoles_of_a_failed_run() {
     assert!(
         job.contains("if: failure()")
             && job.contains("uses: actions/upload-artifact@v7")
-            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log"),
-        "a failed source bootstrap must upload the guest consoles that name the cause"
+            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log")
+            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/firecracker.log"),
+        "a failed source bootstrap must upload the guest consoles and the VMM log that \
+         name the cause; a Firecracker that refuses to start says why only in the latter"
     );
 }
 
+/// The witness runs the backend a Linux/KVM host auto-detects, under a home
+/// deep enough that Firecracker's sockets must move to the short namespace.
+/// It was pinned to QEMU while that overflow made Firecracker exit before
+/// creating its API socket, which read as a hosted-runner limitation.
 #[test]
-fn the_source_bootstrap_job_makes_the_stage0_boot_files_readable() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("sudo chmod a+r")
-            && job.contains("/boot/vmlinuz-${KERNEL_RELEASE}")
-            && job.contains("/boot/initrd.img-${KERNEL_RELEASE}"),
-        "the unprivileged QEMU Stage 0 process must be able to read the hosted runner kernel and initramfs"
-    );
-}
-
-#[test]
-fn the_source_bootstrap_job_grants_stage0_vhost_vsock_access() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("test -c /dev/vhost-vsock")
-            && job.contains("sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock")
-            && job.contains("sudo chmod 0600 /dev/vhost-vsock")
-            && job.contains("test -r /dev/vhost-vsock && test -w /dev/vhost-vsock"),
-        "the unprivileged QEMU Stage 0 process must own and be able to open the hosted vhost-vsock device"
-    );
-}
-
-/// Stage 0 on a hosted runner has only ever worked under QEMU. Auto-detect
-/// answers Firecracker there, whose Stage 0 VM never opens its API socket.
-#[test]
-fn the_source_bootstrap_job_names_the_backend_its_stage0_can_use() {
+fn the_source_bootstrap_job_bootstraps_through_firecracker() {
     let workflow = ci_full();
     let job = job_block(&workflow, "source-bootstrap-linux");
 
     assert_eq!(
         field_after(job, "MVM_BUILDER_BACKEND:").as_deref(),
-        Some("qemu"),
-        "the cold source witness must name QEMU rather than auto-detecting a \
-         backend whose Stage 0 cannot boot on a hosted runner"
+        Some("firecracker"),
+        "the cold source witness must bootstrap through the backend Linux/KVM auto-detects"
+    );
+    assert!(
+        job.contains("/usr/bin/firecracker --version"),
+        "the Firecracker Stage 0 needs the pinned Firecracker installed"
     );
 }
 
+/// Firecracker brings its own vsock device and boots the downloaded kernel, so
+/// the grants a QEMU Stage 0 needed would only widen what the job can touch.
 #[test]
-fn the_source_bootstrap_job_installs_qemu_for_stage0() {
+fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
     let workflow = ci_full();
     let job = job_block(&workflow, "source-bootstrap-linux");
 
-    assert!(
-        job.contains("packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd"),
-        "the QEMU Stage 0 builder must be installed before the source bootstrap"
-    );
+    for qemu_only in [
+        "/dev/vhost-vsock",
+        "/boot/vmlinuz",
+        "qemu-system-x86",
+        "virtiofsd",
+    ] {
+        assert!(
+            !job.contains(qemu_only),
+            "the Firecracker source witness must not provision `{qemu_only}`"
+        );
+    }
 }
 
 /// Every step of the source witness is fatal, in the order the path runs.
