@@ -203,6 +203,14 @@ docs commit went out as #3581). Under the
       repository gates and `just check-gated`. No startup witness is checked at
       runtime and no capture is certified. Evidence:
       `specs/sprint/delivery/3420-telemetry-source-inventory.md`.
+      W1d offline emit-path baselines are measured and committed: the
+      `telemetry-baseline` xtask harness (seven focused tests) plus five
+      release runs on Apple M3 Max with variance and ×1.5 budgets; admission
+      is at the timer floor, preparation dominates, and burst flood fairness
+      is recorded as effectively zero with ~49% contention — a documented
+      deficiency. Control/exit latency (W1e) stays command-only pending live
+      hardware lanes; no VM was booted. Full battery passes. Evidence:
+      `specs/sprint/delivery/3420-telemetry-baselines.md`.
       W3a preparatory runtime capture: bounded reader handoffs, owned completion
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:

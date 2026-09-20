@@ -546,7 +546,6 @@ When using Playwright or other browser tools, explicitly set the output path to 
 If you accidentally save files to the repo, delete them immediately before committing.
 
 <!-- graft:start -->
-
 ## Graft — repo context graph
 
 This repo is indexed in `graft/`: small linked markdown nodes that explain each
