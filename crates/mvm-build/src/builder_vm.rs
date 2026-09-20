@@ -1329,6 +1329,10 @@ pub struct BuilderExtraDisk {
 /// boundary but do not produce Nix build artifacts. The OCI image
 /// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
 /// into a writable virtio-blk image.
+/// The builder image cache layout this host reads; a builder image built for
+/// another layout is refused rather than booted.
+pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderShellJob {
     pub work_dir: PathBuf,

@@ -28,7 +28,11 @@ use mvm_core::image_set::ImageSetRole;
 use mvm_core::kernel_format::KernelFormat;
 use thiserror::Error;
 
-use super::cache::{ImageBuildRole, ImageBuildTarget};
+use super::LocalImageCheckout;
+use super::cache::{
+    CacheLookup, CachedImageSet, EntryContext, ImageBuildRole, ImageBuildTarget, KeyInputs,
+    LocalImageCache, LocalImageCacheKey,
+};
 use crate::builder_vm_runtime::copy_dir_filtered;
 use crate::guest_libc::GuestLibc;
 
@@ -450,6 +454,168 @@ fn run_tool(what: &str, cmd: &mut Command) -> Result<String, LocalImageBuildErro
         what: what.to_string(),
         detail: "printed non-UTF-8 output".to_string(),
     })
+}
+
+/// One built (or cache-hit) target of a checkout pair.
+#[derive(Debug)]
+pub struct PairBuild {
+    /// The key the entry answers; also the identity the install sidecars
+    /// record.
+    pub key: LocalImageCacheKey,
+    /// The verified cache entry holding the target's files.
+    pub entry: CachedImageSet,
+    /// False when a cache hit answered without running the build.
+    pub built: bool,
+}
+
+/// Build `target` from the checkout pair and publish it to `cache`, answering
+/// an unchanged pair from the cache without booting anything.
+///
+/// This is the one implementation of a local image-set build; the `build
+/// image-set` verb and the builder-VM bootstrap share it, so a target built
+/// either way is the same bytes under the same key. The two closures are the
+/// VM boundary, injected so this crate stays free of backend drivers and tests
+/// can run a build without a VM: `prepare_builder` readies the builder image
+/// the job runs in, and `run_job` boots it. Neither runs on a cache hit.
+///
+/// `prepare_builder` must not itself route through this function for the
+/// builder-vm target: the image-set build runs *inside* a builder, so its
+/// builder image comes from the in-tree or published bootstrap, never from
+/// the pair being built.
+pub fn build_target_for_pair(
+    checkout: &LocalImageCheckout,
+    mvm_root: &Path,
+    target: ImageBuildTarget,
+    arch: GuestArch,
+    cache: &LocalImageCache,
+    prepare_builder: &mut dyn FnMut() -> Result<(), String>,
+    run_job: &mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+) -> Result<PairBuild, LocalImageBuildError> {
+    let contract = contract_for(&target)?;
+    let ctx = EntryContext {
+        images: checkout,
+        mvm_checkout: mvm_root,
+        roles: contract.set_roles,
+    };
+    let key_inputs = KeyInputs {
+        images: checkout,
+        mvm_checkout: mvm_root,
+        target: &target,
+        arch,
+    };
+    let key =
+        LocalImageCacheKey::derive(&key_inputs).map_err(|error| LocalImageBuildError::Tool {
+            what: "deriving the local image cache key".to_string(),
+            detail: error.to_string(),
+        })?;
+    match cache
+        .lookup(&key, &ctx)
+        .map_err(|error| LocalImageBuildError::Tool {
+            what: "looking up the local image cache".to_string(),
+            detail: error.to_string(),
+        })? {
+        CacheLookup::Hit(entry) => {
+            return Ok(PairBuild {
+                key,
+                entry: *entry,
+                built: false,
+            });
+        }
+        CacheLookup::Evicted { .. } | CacheLookup::Miss => {}
+    }
+
+    prepare_builder().map_err(|detail| LocalImageBuildError::Tool {
+        what: "preparing the builder VM image".to_string(),
+        detail,
+    })?;
+    let host_bins = if contract.needs_host_binaries {
+        Some(build_host_binaries(checkout.root(), mvm_root, arch)?)
+    } else {
+        None
+    };
+
+    let scratch = scratch_dir()?;
+    let work = scratch.path().join("work");
+    let out = scratch.path().join("out");
+    std::fs::create_dir_all(&out).map_err(|source| LocalImageBuildError::Io {
+        op: "creating",
+        path: out.clone(),
+        source,
+    })?;
+    stage_work_tree(checkout.root(), mvm_root, host_bins.as_deref(), &work)?;
+    // The staged copies must be of the trees the key names; an edit while
+    // they were being copied would publish one tree's bytes under another's
+    // identity.
+    let staged_key =
+        LocalImageCacheKey::derive(&key_inputs).map_err(|error| LocalImageBuildError::Tool {
+            what: "re-verifying the staged checkouts".to_string(),
+            detail: error.to_string(),
+        })?;
+    if staged_key != key {
+        return Err(LocalImageBuildError::Unsupported {
+            target: target.to_string(),
+            reason: "a checkout changed while it was being staged for the build; run it again"
+                .to_string(),
+        });
+    }
+
+    let job = crate::builder_vm::BuilderShellJob {
+        work_dir: work,
+        artifact_out: out.clone(),
+        script: render_build_script(&target, arch, contract),
+        extra_disks: Vec::new(),
+    };
+    run_job(&job).map_err(|detail| LocalImageBuildError::Tool {
+        what: format!("running the builder shell job for {target}"),
+        detail,
+    })?;
+
+    let staged = cache
+        .stage(&key)
+        .map_err(|error| LocalImageBuildError::Tool {
+            what: "staging the local image cache entry".to_string(),
+            detail: error.to_string(),
+        })?;
+    emit_local_manifest(&EmitRequest {
+        images_root: checkout.root(),
+        mvm_root,
+        arch,
+        builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+        built: &out,
+        out: staged.dir(),
+        contract,
+    })?;
+    let outcome = cache
+        .publish(staged, &ctx)
+        .map_err(|error| LocalImageBuildError::Tool {
+            what: "publishing the local image cache entry".to_string(),
+            detail: error.to_string(),
+        })?;
+    Ok(PairBuild {
+        key,
+        entry: outcome.entry().clone(),
+        built: true,
+    })
+}
+
+/// Mutable scratch for one build, removed when the build returns. It sits in
+/// the mvm cache rather than inside either checkout, whose identity it would
+/// otherwise change.
+fn scratch_dir() -> Result<tempfile::TempDir, LocalImageBuildError> {
+    let parent = Path::new(&mvm_core::config::mvm_cache_dir()).join("local-image-builds");
+    std::fs::create_dir_all(&parent).map_err(|source| LocalImageBuildError::Io {
+        op: "creating",
+        path: parent.clone(),
+        source,
+    })?;
+    tempfile::Builder::new()
+        .prefix("build-")
+        .tempdir_in(&parent)
+        .map_err(|source| LocalImageBuildError::Io {
+            op: "creating a build directory in",
+            path: parent,
+            source,
+        })
 }
 
 #[cfg(test)]

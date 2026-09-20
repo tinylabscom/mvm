@@ -1076,7 +1076,14 @@ mod linux {
             .cloned()
             .unwrap_or_else(|| "image".into());
         let arch = machine_arch()?;
-        let flake_ref = format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{attr}");
+        // The attr namespace defaults to the in-tree builder-vm flake; a conf
+        // key overrides it (one mechanism for every layout that stages a
+        // different tree at /work).
+        let flake_base = conf
+            .get("MVM_STAGE0_FLAKE")
+            .cloned()
+            .unwrap_or_else(|| "path:/work/nix/images/builder-vm#packages".into());
+        let flake_ref = format!("{flake_base}.{arch}-linux.{attr}");
 
         // Clear a `/homeless-shelter` left by a crashed prior build before nix's
         // unsandboxed purity check trips on it and wedges the bootstrap.
@@ -1150,8 +1157,10 @@ mod linux {
     /// `/out/mvm-kernel.config`. Cheap — it's a cached dependency of the
     /// kernel just built.
     fn emit_resolved_config(nix: &Path, arch: &str, config_attr: &str) -> Result<(), String> {
-        let flake_ref =
-            format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{config_attr}");
+        // Same default as the image build; the conf is not threaded into this
+        // helper because both refs are built from the one staged tree.
+        let flake_base = "path:/work/nix/images/builder-vm#packages";
+        let flake_ref = format!("{flake_base}.{arch}-linux.{config_attr}");
         let mut cmd = Command::new(nix);
         cmd.args([
             "build",

@@ -153,18 +153,86 @@ pub(super) fn stage0_locked_input_sources(
     Ok(out)
 }
 
+/// Prepare the builder VM image for the images the caller selected.
+///
+/// With a local image checkout selected, the builder VM is the checkout
+/// pair's `builder-vm` target, built once through the shared local-image-set
+/// build and installed from the local image cache. With the selector unset,
+/// the in-tree Stage 0 build or the published prebuilt prepares the tool
+/// builder directly.
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = selected_local_checkout()? {
+        return bootstrap_builder_vm_image_from_local_pair(&checkout);
+    }
+    bootstrap_tool_builder_vm_image()
+}
+
+/// The local image checkout the selector names, if that is the selected
+/// source. A configured path that does not resolve is an error here, never a
+/// quiet fall-through to the in-tree flake.
+#[cfg(feature = "builder-vm")]
+pub(super) fn selected_local_checkout()
+-> Result<Option<mvm_build::image_source::LocalImageCheckout>> {
+    use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
+    Ok(
+        match resolve_image_source(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            configured_images_dir().as_deref(),
+        )? {
+            ImageSource::LocalCheckout(checkout) => Some(checkout),
+            ImageSource::Released | ImageSource::InTree { .. } => None,
+        },
+    )
+}
+
+/// Prepare the builder-VM image the local image-set build itself runs in:
+/// the in-tree Stage 0 build or the published prebuilt.
+///
+/// Exempt from the image source selector: an image-set build runs inside
+/// this builder, so routing it through the pair's `builder-vm` target would
+/// recurse — building the builder image would need the builder image.
+pub(in crate::commands) fn bootstrap_tool_builder_vm_image() -> Result<()> {
     #[cfg(feature = "builder-vm")]
     return bootstrap_builder_vm_image_with(
         || {
             mvm_build::builder_vm_bootstrap::maybe_reexec_builder_vm_bootstrap_helper()
                 .map_err(anyhow::Error::from)
         },
-        bootstrap_builder_vm_image_in_process,
+        bootstrap_tool_builder_vm_image_in_process,
     );
 
     #[cfg(not(feature = "builder-vm"))]
-    bootstrap_builder_vm_image_in_process()
+    bootstrap_tool_builder_vm_image_in_process()
+}
+
+/// Serve the builder-VM cache from the pair's `builder-vm` target: build it
+/// through the shared local-image-set path when the pair changed, install the
+/// verified entry under a fingerprint naming both checkouts, and answer an
+/// unchanged pair from the installed cache.
+#[cfg(feature = "builder-vm")]
+fn bootstrap_builder_vm_image_from_local_pair(
+    checkout: &mvm_build::image_source::LocalImageCheckout,
+) -> Result<()> {
+    use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget};
+    let target = ImageBuildTarget {
+        role: ImageBuildRole::BuilderVm,
+        attr: FlakeAttr::new("default").expect("default is a valid flake attribute"),
+    };
+    let build = super::local_pair::ensure_pair_built(checkout, target)?;
+    let fingerprint = super::local_pair::pair_fingerprint(&build.key);
+    let arch = builder_vm_host_arch();
+    let out_dir = std::path::Path::new(&mvm_core::config::mvm_cache_dir())
+        .join("builder-vm")
+        .join(arch);
+    if super::stage0_cache::local_pair_cache_ready(&out_dir, &fingerprint) {
+        crate::ui::info(&format!(
+            "Builder VM image already cached at {}.",
+            out_dir.display()
+        ));
+        return Ok(());
+    }
+    super::local_pair::install_pair_builder_vm(&build.entry, arch, &fingerprint)
 }
 
 #[cfg(feature = "builder-vm")]
@@ -178,7 +246,7 @@ fn bootstrap_builder_vm_image_with(
     bootstrap_in_process()
 }
 
-fn bootstrap_builder_vm_image_in_process() -> Result<()> {
+fn bootstrap_tool_builder_vm_image_in_process() -> Result<()> {
     let arch = builder_vm_host_arch();
     let out_dir = format!("{}/builder-vm/{arch}", mvm_core::config::mvm_cache_dir());
     let out_dir_path = std::path::Path::new(&out_dir);

@@ -23,7 +23,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
     let boundary =
         SidecarBuildBoundary::for_choice(mvm_build::builder_backend_select::resolve_choice());
     if boundary != SidecarBuildBoundary::Stage0 {
-        super::bootstrap::bootstrap_builder_vm_image().with_context(|| {
+        super::bootstrap::bootstrap_tool_builder_vm_image().with_context(|| {
             format!(
                 "preparing the {} builder image for the SDK sidecar build",
                 boundary.name()
