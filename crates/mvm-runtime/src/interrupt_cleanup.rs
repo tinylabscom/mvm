@@ -9,9 +9,11 @@
 //! work the signal actually cut short.
 //!
 //! This replaces an earlier per-process registry of attached runtime handles
-//! that nothing populated and that was deleted as dead code. The resume
-//! admission and the restore staging directory are the users of this module;
-//! the signal handler is its only caller of [`run_all`].
+//! that nothing populated: its sweep had no live caller, so an interrupt ran
+//! no cleanup at all. The resume admission and the restore staging directory
+//! are the users of this module; the signal handler is its only caller of
+//! [`run_all`]. A cleanup registered while `run_all` is draining stays
+//! registered but does not run — the process exits right after the drain.
 //!
 //! Not a process supervisor: an uncatchable kill (SIGKILL, an out-of-memory
 //! kill) or an abort runs nothing here. What those leave behind is found later

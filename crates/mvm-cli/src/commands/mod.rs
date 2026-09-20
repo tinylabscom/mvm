@@ -794,7 +794,12 @@ fn termination_handler(
             "\n{}",
             interrupt_cleanup_message(stage0_active)
         );
-        let _ = mvm_runtime::interrupt_cleanup::run_all();
+        let ran = mvm_runtime::interrupt_cleanup::run_all();
+        if !ran.is_empty() {
+            // A cleanup that could not settle its work (an unkillable VMM, a
+            // failed registry write) leaves only this line behind.
+            tracing::warn!(cleanups = ?ran, "ran interrupt cleanups before exiting");
+        }
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
                 unsafe {

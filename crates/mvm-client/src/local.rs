@@ -218,7 +218,7 @@ impl LocalBackend {
                 if let Err(error) = mvm_runtime::vm::admission::clear_paused(&vm_state_dir(name)) {
                     tracing::warn!(vm = %name, error = %format!("{error:#}"), "could not clear the pause marker");
                 }
-                mark_resumed_after_restore(name)?;
+                mark_resumed_after_restore(name, "")?;
                 // A warm resume restores live memory, not a sealed snapshot, so it
                 // carries no epoch/lengths — only the reseed summary.
                 Ok(ResumeOutcome {
@@ -243,7 +243,7 @@ impl LocalBackend {
             backend
                 .resume(&VmId(name.to_string()))
                 .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-            mark_resumed_after_restore(name)?;
+            mark_resumed_after_restore(name, "")?;
             return Ok(ResumeOutcome::default());
         }
 
@@ -266,7 +266,7 @@ impl LocalBackend {
         let sidecar = verify_and_resume(name, &*io)
             .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
         let reseed = None;
-        mark_resumed_after_restore(name)?;
+        mark_resumed_after_restore(name, "")?;
         // Report the verified snapshot's epoch + artifact lengths so the caller's
         // WorkloadWake audit entry carries the same detail the pause did.
         Ok(ResumeOutcome {
@@ -319,29 +319,32 @@ fn resume_sealed<S: PostRestoreSignal + Send + 'static>(
         || mvm_runtime::vm::admission::record_admitted(&state_dir),
         || io.teardown_paused(),
     )?;
-    set_registry_resumed(name).map_err(|e| {
-        backend_err(format!(
-            "VM {name:?} resumed and its guest reseeded and was admitted, but {e}. \
-             The guest is running, and its admission is recorded beside its VMM. Do not \
-             run resume again: the registry still says paused, so a resume would restore \
-             the sealed snapshot over the running guest and discard what it has done since. \
-             Fix the registry, then pause or stop the machine as usual."
-        ))
-    })?;
+    mark_resumed_after_restore(name, " and its guest reseeded and was admitted")?;
     Ok((sidecar, reseed))
 }
 
-/// Mark `name` resumed after its restore, naming the recovery path if the
-/// registry write fails once the guest is already running.
-fn mark_resumed_after_restore(name: &str) -> Result<()> {
+/// Mark `name` resumed after its restore, naming the running guest and the
+/// recovery path if the registry write fails once the guest is already
+/// running. `detail` names what already succeeded beyond the restore itself.
+fn mark_resumed_after_restore(name: &str, detail: &str) -> Result<()> {
     set_registry_resumed(name).map_err(|e| {
         backend_err(format!(
-            "VM {name:?} resumed, but {e}.              The guest is running. Do not run resume again: the registry still              says paused, so another resume would restore over the running guest              and discard what it has done since. Fix the registry, then pause or              stop the machine as usual."
+            "VM {name:?} resumed{detail}, but {e}. \
+             The guest is running. Do not run resume again: the registry still \
+             says paused, so another resume would restore over the running guest \
+             and discard what it has done since. Fix the registry, then pause or \
+             stop the machine as usual."
         ))
     })
 }
 
 /// Refuse to restore `name` unless the registry records it as paused.
+///
+/// The `paused` flag is load-bearing here: it must mean this machine was
+/// sealed by a real pause, with its current snapshot beside it. Anything else
+/// that parks a machine — the host idle-sleep reaper, for one — must not set
+/// it without also discarding or invalidating the sealed snapshot, or a
+/// resume of the parked machine would restore a stale snapshot over it.
 fn require_registry_paused(name: &str) -> Result<()> {
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
     let paused = {
@@ -2507,7 +2510,7 @@ mod tests {
         let registry_path = register("vm-mark");
         std::fs::write(&registry_path, "not a registry").expect("corrupt the registry");
 
-        let error = mark_resumed_after_restore("vm-mark").expect_err("corrupt registry");
+        let error = mark_resumed_after_restore("vm-mark", "").expect_err("corrupt registry");
         let msg = error.to_string();
         assert!(msg.contains("Do not run resume again"), "{msg}");
         assert!(msg.contains("guest is running"), "{msg}");

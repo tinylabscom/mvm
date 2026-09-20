@@ -105,13 +105,13 @@ review that were not in the branch when it merged, plus one decision.
     without `eprintln!`, which panics on the EIO a closed terminal returns and
     would skip every cleanup.
 
-    `interrupt_cleanup` replaces `handle_registry`, which #3506 deleted as dead
-    code: nothing had populated it since May, and its `stop_all_attached` walked
-    an empty map. This change is now the only user of the mechanism, so it
-    carries just the cleanup registry and not the attached-handle registry
-    #3506 removed. A test drives the handler closure the CLI installs, so
-    dropping the cleanup call from it again fails a test rather than passing
-    silently, as the rebase onto #3506 briefly did.
+    `interrupt_cleanup` replaces `handle_registry`: nothing had populated its
+    attached-handle map since May, and after the rebase onto the change that
+    removed the module's only caller, no signal path ran its sweep at all. This
+    change is now the only user of the mechanism, so it carries just the
+    cleanup registry and not the attached-handle registry. A test drives the
+    handler closure the CLI installs, so dropping the cleanup call from it
+    again fails a test rather than passing silently, as the rebase briefly did.
   - *SIGKILL and out-of-memory kills* cannot be caught. The guest keeps running
     until the next state-touching command, whose reconcile pass on entry stops
     it.
@@ -143,6 +143,11 @@ review that were not in the branch when it merged, plus one decision.
     hold a per-machine lock (`instances/<name>/resume.lock`, the existing
     `FileLock`) for the whole operation, and reconcile skips a machine whose
     lock is held.
+  - *Interrupt coverage.* The sealed restore arms an interrupt cleanup that
+    stops the VMM and records the refusal. A warm or non-sealed resume arms
+    none yet: interrupting one leaves the guest running with the registry
+    still saying paused, found only by the next reconcile pass (and reconcile
+    today only reconciles Firecracker machines).
   - *Only a paused machine is restored.* A sealed resume refuses unless the
     registry records the machine paused. Otherwise `resume` on a running
     machine would restore an old snapshot over it, and a resume whose process

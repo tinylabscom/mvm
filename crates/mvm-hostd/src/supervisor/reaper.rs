@@ -259,7 +259,10 @@ fn sweep(
         registry.deregister(&name);
     }
     // Mark slept VMs paused so the next tick skips them (idle requires
-    // `!paused`) and `mvmctl ls` shows them as sleeping until woken.
+    // `!paused`) and `mvmctl ls` shows them as sleeping until woken. The
+    // flag now also gates a sealed restore, so a future wake path must clear
+    // the machine's sealed snapshot before any CLI resume of a slept machine
+    // can be allowed; slept machines carry a live guest, not a sealed one.
     for name in to_pause {
         let _ = registry.set_paused(&name, true);
     }
