@@ -5,10 +5,11 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const MAX_SIBLING_PAIRS: usize = 64;
+const MAX_SIBLING_PAIRS: usize = 62;
 const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-contract/src/policy/network_policy.rs",
     "crates/mvm-observability/src/logging.rs",
+    "crates/mvm-vmm/src/vmm/run.rs",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

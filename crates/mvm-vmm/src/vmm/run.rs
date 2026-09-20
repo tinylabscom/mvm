@@ -259,6 +259,82 @@ where
     pub _marker: std::marker::PhantomData<fn() -> C>,
 }
 
+type DefaultPauseHook<C> =
+    fn(&C, &[&dyn SnapshotDeviceState]) -> Result<(), <C as HypervisorVcpu>::Error>;
+type DefaultThrottle = fn() -> bool;
+
+fn ignore_pause<C: HypervisorVcpu>(
+    _vcpu: &C,
+    _devices: &[&dyn SnapshotDeviceState],
+) -> Result<(), C::Error> {
+    Ok(())
+}
+
+fn never_throttle() -> bool {
+    false
+}
+
+impl<C, X, Q, P> RunHooks<C, X, Q, P, DefaultPauseHook<C>, DefaultThrottle>
+where
+    C: HypervisorVcpu,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+{
+    /// Build the standard hook set. Pauses need no callback and CPU throttling
+    /// is disabled until the corresponding composable method is called.
+    pub fn new(on_exception: X, should_stop: Q, should_pause: P) -> Self {
+        Self {
+            on_exception,
+            should_stop,
+            should_pause,
+            on_pause: ignore_pause::<C>,
+            should_throttle: never_throttle,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<C, X, Q, P, H, T> RunHooks<C, X, Q, P, H, T>
+where
+    C: HypervisorVcpu,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+    T: Fn() -> bool,
+{
+    /// Invoke `on_pause` while the vCPU is held outside guest execution.
+    pub fn on_pause<NextH>(self, on_pause: NextH) -> RunHooks<C, X, Q, P, NextH, T>
+    where
+        NextH: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+    {
+        RunHooks {
+            on_exception: self.on_exception,
+            should_stop: self.should_stop,
+            should_pause: self.should_pause,
+            on_pause,
+            should_throttle: self.should_throttle,
+            _marker: self._marker,
+        }
+    }
+
+    /// Hold the vCPU outside guest execution while `should_throttle` is true.
+    pub fn throttle_when<NextT>(self, should_throttle: NextT) -> RunHooks<C, X, Q, P, H, NextT>
+    where
+        NextT: Fn() -> bool,
+    {
+        RunHooks {
+            on_exception: self.on_exception,
+            should_stop: self.should_stop,
+            should_pause: self.should_pause,
+            on_pause: self.on_pause,
+            should_throttle,
+            _marker: self._marker,
+        }
+    }
+}
+
 /// Run `vcpu` until it halts/cancels or `on_exception` says stop.
 ///
 /// - `set_irq(intid, level)` raises/lowers a device interrupt line (the backend's
@@ -278,72 +354,7 @@ where
 ///   out of guest execution — polling once first, then sleeping — so guest RAM and
 ///   device state freeze in place until the pause clears (resume) or a stop
 ///   arrives. Backends with no pause primitive pass `|| false`.
-pub fn run<C, S, X, Q, P>(
-    vcpu: &C,
-    set_irq: S,
-    devices: &mut [&mut dyn RunDevice],
-    on_exception: X,
-    should_stop: Q,
-    should_pause: P,
-) -> Result<RunOutcome, C::Error>
-where
-    C: HypervisorVcpu,
-    S: Fn(u32, bool) -> Result<(), C::Error>,
-    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
-    Q: Fn() -> bool,
-    P: Fn() -> bool,
-{
-    run_with_pause_hook(
-        vcpu,
-        set_irq,
-        devices,
-        on_exception,
-        should_stop,
-        should_pause,
-        |_, _| Ok(()),
-    )
-}
-
-/// Run a vCPU and invoke `on_pause` while the vCPU is held outside guest
-/// execution. The hook is called repeatedly until the pause request clears so
-/// a host control plane can publish a snapshot asynchronously after the pause
-/// acknowledgement arrives.
-pub fn run_with_pause_hook<C, S, X, Q, P, H>(
-    vcpu: &C,
-    set_irq: S,
-    devices: &mut [&mut dyn RunDevice],
-    on_exception: X,
-    should_stop: Q,
-    should_pause: P,
-    on_pause: H,
-) -> Result<RunOutcome, C::Error>
-where
-    C: HypervisorVcpu,
-    S: Fn(u32, bool) -> Result<(), C::Error>,
-    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
-    Q: Fn() -> bool,
-    P: Fn() -> bool,
-    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
-{
-    run_with_hooks(
-        vcpu,
-        set_irq,
-        devices,
-        RunHooks {
-            on_exception,
-            should_stop,
-            should_pause,
-            on_pause,
-            should_throttle: || false,
-            _marker: std::marker::PhantomData,
-        },
-    )
-}
-
-/// Run a vCPU with the full hook set. This is the single implementation shared
-/// by [`run`] and [`run_with_pause_hook`]; callers that need a throttle hold
-/// supply a `should_throttle` predicate.
-pub fn run_with_hooks<C, S, X, Q, P, H, T>(
+pub fn run<C, S, X, Q, P, H, T>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
@@ -364,7 +375,7 @@ where
 /// Run one vCPU against a device model reached through `bus`.
 ///
 /// The single loop body, shared by every backend and by every vCPU of an SMP
-/// machine. It differs from [`run_with_hooks`] only in reaching devices through
+/// machine. It differs from [`run`] only in reaching devices through
 /// the bus rather than owning them, which is what lets several threads drive it
 /// at once.
 ///
@@ -772,6 +783,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn run_accepts_one_composable_hook_set() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let hooks = RunHooks::new(no_exceptions, || true, || false)
+            .on_pause(|_, _| Ok(()))
+            .throttle_when(|| false);
+
+        let outcome = run(&vcpu, |_, _| Ok(()), &mut devs, hooks).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Halt);
+    }
+
     /// A heartbeat wake (`Canceled` with `should_stop()==false`) polls devices,
     /// raises any reported IRQ, and keeps running — it must NOT end the run.
     #[test]
@@ -792,9 +816,11 @@ mod tests {
                 Ok(())
             },
             &mut devs,
-            no_exceptions,
-            || false, // never a real stop → cancels are heartbeat wakes
-            || false, // no pause
+            RunHooks::new(
+                no_exceptions,
+                || false, // never a real stop → cancels are heartbeat wakes
+                || false, // no pause
+            ),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Halt); // ran to the guest halt, not the cancel
@@ -821,9 +847,11 @@ mod tests {
                 Ok(())
             },
             &mut devs,
-            no_exceptions,
-            || true,  // real stop
-            || false, // no pause
+            RunHooks::new(
+                no_exceptions,
+                || true,  // real stop
+                || false, // no pause
+            ),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Canceled);
@@ -846,9 +874,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || false,
-            || paused.load(Ordering::SeqCst),
+            RunHooks::new(no_exceptions, || false, || paused.load(Ordering::SeqCst)),
         )
         .unwrap();
         resume.join().unwrap();
@@ -882,9 +908,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Halt);
@@ -913,9 +937,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(dev.writes, vec![(0x10, 0x55)]);
@@ -951,9 +973,7 @@ mod tests {
                 Ok(())
             },
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(*raised.borrow(), vec![(42u32, true)]);
@@ -987,9 +1007,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(*vcpu.reads.borrow(), vec![0xab, 0]); // device value, then RAZ
@@ -1003,9 +1021,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Canceled);
@@ -1030,16 +1046,18 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            |_: &ScriptVcpu, _, _| {
-                *seen.borrow_mut() += 1;
-                Ok(if *seen.borrow() >= 2 {
-                    RunControl::Stop
-                } else {
-                    RunControl::Continue
-                })
-            },
-            || true,
-            || false,
+            RunHooks::new(
+                |_: &ScriptVcpu, _, _| {
+                    *seen.borrow_mut() += 1;
+                    Ok(if *seen.borrow() >= 2 {
+                        RunControl::Stop
+                    } else {
+                        RunControl::Continue
+                    })
+                },
+                || true,
+                || false,
+            ),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Stopped);
@@ -1054,9 +1072,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || true,
-            || false,
+            RunHooks::new(no_exceptions, || true, || false),
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Halt);
@@ -1128,9 +1144,7 @@ mod tests {
                 &vcpu,
                 |_, _| Ok(()),
                 &mut devs,
-                no_exceptions,
-                || true,
-                || false,
+                RunHooks::new(no_exceptions, || true, || false),
             )
             .unwrap();
             assert_eq!(out, RunOutcome::Halt);
@@ -1259,7 +1273,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let out = run_with_hooks(
+        let out = run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1294,7 +1308,7 @@ mod tests {
             throttle_for_clear.store(false, Ordering::SeqCst);
         });
 
-        run_with_hooks(
+        run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1329,9 +1343,7 @@ mod tests {
             &vcpu2,
             |_, _| Ok(()),
             &mut devs2,
-            no_exceptions,
-            || false,
-            || paused.load(Ordering::SeqCst),
+            RunHooks::new(no_exceptions, || false, || paused.load(Ordering::SeqCst)),
         )
         .unwrap();
         assert!(
@@ -1358,7 +1370,7 @@ mod tests {
         let pause_calls = Arc::new(AtomicUsize::new(0));
         let pause_calls_for_hook = Arc::clone(&pause_calls);
 
-        run_with_hooks(
+        run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1395,7 +1407,7 @@ mod tests {
             throttle_for_clear.store(false, Ordering::SeqCst);
         });
 
-        run_with_hooks(
+        run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1430,7 +1442,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let out = run_with_hooks(
+        let out = run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1476,7 +1488,7 @@ mod tests {
         let pause_calls_for_hook = Arc::clone(&pause_calls);
 
         let started = std::time::Instant::now();
-        let out = run_with_hooks(
+        let out = run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
@@ -1525,9 +1537,7 @@ mod tests {
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
-            no_exceptions,
-            || false,
-            || paused.load(Ordering::SeqCst),
+            RunHooks::new(no_exceptions, || false, || paused.load(Ordering::SeqCst)),
         )
         .unwrap();
         resume.join().unwrap();

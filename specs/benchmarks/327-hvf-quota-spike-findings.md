@@ -22,7 +22,8 @@ seam**; the difference is the guest.
 
 - **Tier A — real hypervisor, real run loop, synthetic guest.** A throwaway
   harness creates a real `HvfVm`, a real `HvfVcpu`, and drives
-  `mvm_vmm::vmm::run::run_with_pause_hook` — the production run loop — with a
+  `mvm_vmm::vmm::run::run` with a composed `RunHooks` pause callback — the
+  production run loop — with a
   real `HvfHandle::force_exit` from the controller thread. The guest program is
   hand-assembled arm64 running at EL1 out of mapped guest RAM: a tight loop
   incrementing a counter the host reads out of the same mapping (so guest
