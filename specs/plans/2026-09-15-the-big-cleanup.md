@@ -380,10 +380,15 @@ So the remaining work is not where the brief pointed.
       supervisor code Preview claim 18's wall-clock bound is built from. The
       brief's "every magic length gets a name, a reason, and a test" applies
       hardest here, because these timeouts *are* the bound. #3315.
-- [ ] **D3** 62 `f` / `f_with_X` public sibling pairs — `capture_vm_full` has
-      two extended forms, `network_policy.rs` has four pairs in one file.
-      Collapse each to one function taking a params struct, per the rule
-      CLAUDE.md already states. Per-module, not one sweep. #3315.
+- [ ] **D3** A fresh lexical measurement after the core ownership cleanup found
+      70 `f` / `f_with_X` public sibling pairs (including crate-visible test
+      helpers), not the stale 62. The first per-module slice removes all five
+      pairs from `network_policy.rs`: one composable egress-mode method replaces
+      the preset/allow-list mode constructors, the existing AI attachment method
+      replaces both AI constructors, and a composable budget method replaces the
+      long AI constructor. `check-public-function-names` ratchets the remaining
+      count at 65 and prevents cleared modules from regressing. Continue
+      per-module rather than as one sweep. #3315.
 - [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
       builder methods exist only on the variant they apply to — an
       unrepresentable-illegal-states fix, not a panic-removal exercise.

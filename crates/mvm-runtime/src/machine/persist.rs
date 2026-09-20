@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn ai_policy_round_trips_through_json_and_skips_when_absent() {
         let mut spec = spec_fixture("web");
-        spec.ai = Some(mvm_core::network_policy::AiPolicy::metered_with_total_budget(50_000));
+        spec.ai = Some(mvm_core::network_policy::AiPolicy::metered().with_total_budget(50_000));
         let json = serde_json::to_string(&spec).expect("serialize");
         let parsed: MachineSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.ai, spec.ai);

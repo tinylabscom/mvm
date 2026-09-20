@@ -71,6 +71,10 @@ pub const GATES: &[Gate] = &[
         "check-core-module-ownership",
         crate::check_core_module_ownership::run,
     ),
+    (
+        "check-public-function-names",
+        crate::check_public_function_names::run,
+    ),
     ("check-doc-claims", crate::check_doc_claims::run),
     (
         "check-machine-doc-guards",

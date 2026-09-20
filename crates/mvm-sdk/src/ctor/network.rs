@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn with_ai_attaches_policy() {
-        let policy = AiPolicy::metered_with_total_budget(10_000);
+        let policy = AiPolicy::metered().with_total_budget(10_000);
         let net = network(NetworkMode::Bridge).with_ai(policy.clone());
         assert_eq!(net.ai, Some(policy));
     }
