@@ -51,9 +51,6 @@ const ALLOWLIST: &[&str] = &[
     // feature took the whole ASN.1 stack with it, so the shipped closure now
     // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
-    // async-trait 0.1.92 requires syn 3 to stay compatible with current nightly
-    // Clippy; other proc macros have not yet converged from syn 1 and 2.
-    "syn",
     // sysinfo remains on the Windows 0.52 family while Tokio and current
     // Windows support crates use the 0.53 target shims. These are host-only.
     "windows-core",

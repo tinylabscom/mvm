@@ -25,6 +25,8 @@ mod shell_job;
 mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
+mod test_pair;
+#[cfg(test)]
 mod tests;
 mod vm_helpers;
 
@@ -42,6 +44,25 @@ use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 #[cfg(feature = "builder-vm")]
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
+pub(crate) use bootstrap::selected_local_checkout;
+
+/// Whether images are built from source here: the in-tree flakes, or a local
+/// image checkout the selector names. Either way the local build is
+/// authoritative. An invalid configured path is not an answer either way —
+/// the verb that uses the selection reports it.
+pub(crate) fn images_built_from_source() -> bool {
+    if find_builder_vm_flake_is_source_checkout() {
+        return true;
+    }
+    use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
+    matches!(
+        resolve_image_source(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            configured_images_dir().as_deref(),
+        ),
+        Ok(ImageSource::LocalCheckout(_))
+    )
+}
 #[cfg(all(test, not(feature = "release-artifact-bootstrap")))]
 use bootstrap::perform_builder_vm_download_published;
 #[cfg(test)]

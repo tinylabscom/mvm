@@ -392,22 +392,36 @@ fn builder_backend_check_for(
 pub(super) fn boot_image_acquisition_check() -> Check {
     use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
 
-    let is_checkout = crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
-    let resolved = resolve(None, is_checkout);
+    use crate::commands::env::builder_vm as builder_vm_mod;
+    let is_checkout = builder_vm_mod::find_builder_vm_flake_is_source_checkout();
+    let pair_selected = builder_vm_mod::selected_local_checkout()
+        .ok()
+        .flatten()
+        .map(|checkout| checkout.root().display().to_string());
+    let resolved = resolve(None, builder_vm_mod::images_built_from_source());
 
     // The arm can be chosen and still be unsatisfiable: `build` on an installed
-    // binary has no flake to build from. Say so here rather than letting the
-    // first image acquisition be where the operator finds out.
-    let availability = match resolved.choice {
-        BootImageAcquisition::Build if is_checkout => "in-repo image flake present".to_string(),
-        BootImageAcquisition::Build => {
+    // binary has no flake to build from. Say so here rather than letting
+    // the first image acquisition be where the operator finds out.
+    let availability = match (resolved.choice, &pair_selected) {
+        (BootImageAcquisition::Build, Some(pair)) => {
+            format!("building from the local image checkout at {pair}")
+        }
+        (BootImageAcquisition::Build, None) if is_checkout => {
+            "in-repo image flake present".to_string()
+        }
+        (BootImageAcquisition::Build, None) => {
             "NO in-repo image flake — a forced local build will refuse".to_string()
         }
-        BootImageAcquisition::Fetch if is_checkout => {
+        (BootImageAcquisition::Fetch, Some(_)) => {
+            "a checkout is selected — fetching the published set is refused until the selector              is unset"
+                .to_string()
+        }
+        (BootImageAcquisition::Fetch, None) if is_checkout => {
             "fetching a prebuilt from a source checkout; the image will record itself as fetched"
                 .to_string()
         }
-        BootImageAcquisition::Fetch => "published image".to_string(),
+        (BootImageAcquisition::Fetch, None) => "published image".to_string(),
     };
 
     Check {
