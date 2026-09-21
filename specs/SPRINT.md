@@ -139,6 +139,15 @@
       records 28 runtime gaps and 17 non-runtime exclusions, not capture coverage.
       Remaining W1 sources/harness/measurements and runtime certification are open.
       Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W1 gap acceptance is tested: four executable regressions pin the
+      outside-span drop, unbounded span-event state, detached process-local
+      capture and sealed-agent subscriber gaps by asserting today's deficient
+      behavior, and the `s34_telemetry_capture` suite carries the three
+      not-yet-enabled contracts as explicit `@wip` pending scenarios. Meta
+      gates, workspace tests, doctests, clippy, all 72 repository gates and
+      `just check-gated` pass. No runtime behavior changes; passing gap tests
+      certify nothing. Evidence:
+      `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
       W3a preparatory runtime capture: bounded reader handoffs, owned completion
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:

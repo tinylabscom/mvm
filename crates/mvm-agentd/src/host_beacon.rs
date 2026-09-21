@@ -322,4 +322,57 @@ mod tests {
         assert_eq!(outcome.expect("recovers").chain_head, "head-2");
         assert_eq!(calls, 2);
     }
+
+    /// A minimal collector counting events, so the emission can be proved
+    /// without adding a subscriber crate the sealed agent deliberately lacks.
+    struct CountingCollector(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for CountingCollector {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Documents the sealed-agent capture gap, not desired behavior: the
+    /// agent's boot path emits real diagnostics through the `tracing` facade
+    /// — proved here by counting them under a scoped collector — while the
+    /// sealed guest agent installs no subscriber, so in production every one
+    /// of these events is discarded with no host-side copy and no loss
+    /// accounting. The bin-source assertion is the discard half; the closure
+    /// gate holds the crate half (`tracing-subscriber` stays behind the
+    /// `addons` feature). When guest capture delivers these diagnostics to an
+    /// authenticated host collector, flip this into the positive contract.
+    #[test]
+    fn boot_diagnostics_are_emitted_but_the_sealed_agent_discards_them() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let collector = CountingCollector(count.clone());
+        tracing::subscriber::with_default(collector, || {
+            let outcome =
+                report_with_retries(&sample_report(), 1, std::time::Duration::ZERO, |_| {
+                    Err(BeaconError::Unavailable("broker not up".into()))
+                });
+            assert!(outcome.is_err());
+        });
+        assert!(
+            count.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "the give-up diagnostic is really emitted; a subscriber would see it"
+        );
+
+        let sealed_agent_main = include_str!("bin/mvm-guest-agent.rs");
+        assert!(
+            !sealed_agent_main.contains("tracing_subscriber"),
+            "the sealed agent installs no subscriber, so the emissions above \
+             are discarded in production"
+        );
+    }
 }

@@ -308,6 +308,54 @@ mod tests {
         assert!(!named(&spans, "clean").error);
     }
 
+    /// Documents a capture gap, not desired behavior: an event emitted outside
+    /// any span is dropped with no record and no loss accounting — the layer
+    /// exports trace signals only, and nothing else picks these events up.
+    /// The telemetry contract has a standalone-event record family precisely
+    /// because of this. When outside-span capture lands, this test must flip
+    /// into the positive contract rather than being deleted.
+    #[test]
+    fn an_event_outside_any_span_is_dropped_with_no_record_and_no_loss_evidence() {
+        let (queue, rx) = span_queue(64);
+        let counter = queue.clone();
+        let subscriber = tracing_subscriber::registry().with(OtlpLayer::new(queue));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(detail = "boot refused", "orphaned diagnostic");
+        });
+        assert!(
+            drain(&rx).is_empty(),
+            "today nothing is exported for an outside-span event"
+        );
+        assert_eq!(
+            counter.dropped(),
+            0,
+            "and the drop is not even counted as a loss — the event vanishes \
+             before any accounting exists"
+        );
+    }
+
+    /// Documents a boundedness gap, not desired behavior: a span accumulates
+    /// its events in an unbounded vector until close, so a long-lived span
+    /// under an event flood grows memory without limit and without shedding.
+    /// The export queue bounds closed spans only. When per-span event state
+    /// gains a bound, this test must flip into asserting that bound.
+    #[test]
+    fn span_event_state_grows_unbounded_until_close() {
+        let flood = 4096_usize;
+        let spans = capture(|| {
+            tracing::info_span!("long-lived").in_scope(|| {
+                for n in 0..flood {
+                    tracing::info!(n, "flood");
+                }
+            });
+        });
+        assert_eq!(
+            named(&spans, "long-lived").events.len(),
+            flood,
+            "every event is retained in memory; nothing bounds or sheds"
+        );
+    }
+
     #[test]
     fn a_full_queue_drops_closed_spans_without_blocking_the_instrumented_thread() {
         let (queue, rx) = span_queue(1);

@@ -304,6 +304,31 @@ mod tests {
         assert_ne!(recorded, shown.body);
     }
 
+    /// Documents the detached-lifetime capture gap, not desired behavior: a
+    /// machine booted by another process is not in this process's plane
+    /// registry, so a call dispatched into it from here gets a record-nothing
+    /// sink — no sequence number, no chain link, no durable copy an operator
+    /// can read back. Collection is process-local today, not VM-lifetime.
+    /// When a VM-lifetime collector owns capture independently of the booting
+    /// process, this test must flip into the positive contract.
+    #[test]
+    fn a_machine_booted_by_another_process_has_no_durable_copy_here() {
+        let plane = crate::stream::StreamPlane::new();
+        let mut sink = plane.entrypoint_sink("machine-booted-elsewhere");
+        assert!(
+            !sink.is_recorded(),
+            "this process never attached the VM, so nothing captures it"
+        );
+        let shown = sink.ingest(StreamKind::Stdout, b"reaches the caller only");
+        assert_eq!(shown.body, b"reaches the caller only");
+        assert_eq!(
+            shown.recorded,
+            RecordedCopy::NotRecorded,
+            "the bytes reach the caller and nothing else; an operator reading \
+             back later finds no transcript of this call"
+        );
+    }
+
     #[test]
     fn an_unrecorded_vm_hands_its_bytes_straight_back() {
         // A call dispatched into a machine another process booted has no

@@ -195,9 +195,23 @@ The current [binary inventory](../telemetry/README.md) classifies 45 targets:
 28 runtime gaps and 17 non-runtime tools/fixtures. Passing its static gate is not
 runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
-- [ ] Add tests proving current outside-span, detached-lifetime and capture gaps.
+- [x] Add tests proving current outside-span, detached-lifetime and capture gaps.
       Tests for not-yet-enabled features stay in an explicit conformance harness,
       not silently ignored tests presented as product support.
+      Four executable gap regressions assert today's deficient behavior and
+      must flip when the fix lands: the OTLP layer drops outside-span events
+      before any loss accounting and grows span-event state unbounded until
+      close (`mvm-observability`); a machine booted by another process gets a
+      record-nothing sink in this process (`mvm-hostd`); and the sealed agent
+      emits boot diagnostics through the `tracing` facade while installing no
+      subscriber (`mvm-agentd`). The not-yet-enabled contracts live in the
+      conformance harness as the `s34_telemetry_capture` suite: three `@wip`
+      scenarios (standalone-event collection, detached VM-lifetime collection,
+      guest diagnostics reaching the authenticated collector), each naming the
+      regression that must flip in the same change — reported in the runner's
+      pending tally, never silently skipped, and carrying no claim ID until
+      evidence exists. See the
+      [validation record](../sprint/delivery/3420-telemetry-gap-acceptance.md).
 - [ ] Define reproducible hardware/fixture inputs and commit baseline measurements
       for emit p50/p95/p99/max, allocations, memory, control/exit latency and flood
       fairness. Set regression budgets from repeated baseline runs before enabling

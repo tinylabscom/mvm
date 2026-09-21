@@ -62,6 +62,11 @@ Last updated: 2026-09-21
       and clippy pass). All 28 runtime entries
       remain explicit capture gaps; 17 tools/fixtures carry no coverage credit.
       Validation details: `specs/sprint/delivery/3420-telemetry-binary-inventory.md`.
+      W1 gap acceptance is tested: four regressions pin the outside-span,
+      unbounded-span-state, detached-capture and sealed-agent gaps as today's
+      behavior, and `s34_telemetry_capture` holds the pending contracts as
+      explicit `@wip` scenarios. Full battery passes; nothing is certified.
+      Evidence: `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
       W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
       `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
       and limits. This does not enable the independent telemetry service.
