@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn cstr_writes_are_bounded_and_nul_terminated() {
-        let mut buf = [0_i8; 8];
+        let mut buf: [libc::c_char; 8] = [0; 8];
         assert!(unsafe { write_cstr(buf.as_mut_ptr(), buf.len(), "hello") });
         let as_u8: Vec<u8> = buf.iter().map(|&b| b as u8).collect();
         assert_eq!(&as_u8[..6], b"hello\0");
