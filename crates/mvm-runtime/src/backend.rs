@@ -1576,12 +1576,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_capability_unsupported_on_firecracker_runner() {
-        // The runner-backed Firecracker path is cold-boot only. The old raw
-        // snapshot helper is not part of the selectable backend.
+    fn snapshot_capability_live_memory_on_firecracker_runner() {
+        // The runner-backed Firecracker path wires live-memory fork: a running
+        // parent is paused, captured, and resumed, and a forked child restores
+        // the saved state into a fresh VMM with its device paths remapped into
+        // its own state dir.
         assert_eq!(
             AnyBackend::from_hypervisor("firecracker").snapshot_capability(),
-            SnapshotCapability::Unsupported
+            SnapshotCapability::LiveMemory
         );
     }
 
@@ -1609,7 +1611,10 @@ mod tests {
             // Apple Container boots through the HVF supervisor, so it inherits
             // that VMM's save/restore tier — one supervisor, one mechanism.
             ("apple-container", SnapshotCapability::SaveRestore, false),
-            ("firecracker", SnapshotCapability::Unsupported, true),
+            // The vsock-only Firecracker runner forks a running parent at the
+            // live-memory tier: no guest NIC exists to collide with, and the
+            // child's recorded device paths remap into its own state dir.
+            ("firecracker", SnapshotCapability::LiveMemory, true),
             ("hvf", SnapshotCapability::SaveRestore, true),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
@@ -1840,12 +1845,28 @@ mod tests {
     }
 
     #[test]
-    fn warm_start_on_firecracker_refuses_the_legacy_live_memory_tier() {
-        use mvm_core::vm_backend::SnapshotCapability;
-        // The raw Firecracker live-memory restore path could restore a captured
-        // NIC, so the vsock-only backend refuses that legacy tier.
+    fn warm_start_on_firecracker_advertises_live_memory_and_fails_closed() {
+        use mvm_core::vm_backend::{SnapshotCapability, WarmStartError};
+        // The vsock-only runner advertises the live-memory tier its fork path
+        // wires. The trait-level `warm_start` seam is not that path — the same
+        // posture as the HVF runner's save-restore tier — so a request at the
+        // advertised tier fails closed with a typed error instead of silently
+        // degrading to a cold boot.
         let fc = fc_runner();
-        assert_eq!(fc.snapshot_capability(), SnapshotCapability::Unsupported);
+        assert_eq!(fc.snapshot_capability(), SnapshotCapability::LiveMemory);
+        let config = VmStartConfig {
+            name: "ghost".to_string(),
+            ..Default::default()
+        };
+        let err = fc
+            .warm_start(&config, SnapshotCapability::LiveMemory)
+            .expect_err("the trait-level warm_start seam is not the fork path");
+        match err {
+            WarmStartError::Failed(_) => {}
+            WarmStartError::Unsupported { .. } => {
+                panic!("the advertised tier must satisfy the request; the failure is 'not wired'")
+            }
+        }
     }
 
     /// Isolates the `AnyBackend::Mock` construction (unavailable outside

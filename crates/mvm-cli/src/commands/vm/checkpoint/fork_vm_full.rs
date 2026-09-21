@@ -3,11 +3,12 @@
 //!
 //! Everything above this module is backend-neutral — the clone, the verity
 //! binding check, the lineage record. What differs per VMM is the admission
-//! label, the restore mechanism, and how much the restored guest can collide
-//! with the parent it came from. That last one is why the Firecracker arm
-//! carries an opt-in guard and the HVF arm does not: a restored Firecracker
-//! child inherits the parent's guest IP/MAC out of saved memory, and an HVF
-//! guest has no NIC to inherit an address on.
+//! label and the restore mechanism. Neither arm carries a live-parent
+//! restriction: a guest has no NIC (egress rides per-VM vsock proxies keyed
+//! by VM name), so a restored child has no host network identity to collide
+//! with its parent. The per-child resources a restore does carry — the vsock
+//! UDS path and the block devices recorded in the snapshot — are remapped to
+//! the child's own state dir before the child VMM starts.
 
 use anyhow::{Context, Result};
 use mvm_contract::protocol::vm_backend::BackendKind;
@@ -17,7 +18,7 @@ use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, f
 
 use super::{
     CheckpointForkJson, SignedChainAnchor, bind_checkpoint_forked, grant_predecessor_from_vm_name,
-    now_unix, parent_agent_verb_override, read_grant_envelope_for, vm_is_running,
+    now_unix, parent_agent_verb_override, read_grant_envelope_for,
 };
 use crate::ui;
 
@@ -34,9 +35,6 @@ pub(in crate::commands) struct ForkVmFullArmParams<'a> {
     /// Refused with a user-visible error for the same reason as `cpus_override`.
     pub(in crate::commands) memory_override: Option<&'a str>,
     pub(in crate::commands) json: bool,
-    /// Whether the caller explicitly opted into Firecracker's experimental
-    /// full-memory fork. This is ignored for checkpoints from other backends.
-    pub(in crate::commands) bypass_experimental_guard: bool,
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
     pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
@@ -47,18 +45,6 @@ pub(in crate::commands) struct ForkVmFullArmParams<'a> {
 /// fresh claim-8 plan for the child (using the parent's saved cpu/mem — the
 /// restore shape is fixed), rewrite the supervisor config, and boot the child
 /// in restore mode. The child's admitted plan is distinct from the parent's.
-/// Whether the experimental Firecracker vm_full fork restore is opted into.
-///
-/// Off by default: a forked child restores the parent's saved guest memory,
-/// which carries the parent's IP/MAC, and there is no per-child guest
-/// re-addressing yet — so a booted child collides with its parent on the
-/// shared bridge. The opt-in exercises the (proven-sound) restore mechanism
-/// on an isolated single-child network while that per-child network model is
-/// still being settled.
-fn fc_vm_full_fork_experimental_enabled() -> bool {
-    std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
-}
-
 pub(in crate::commands) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
     fork_vm_full_arm_inner(p)
 }
@@ -118,7 +104,6 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
                 child_id,
                 now,
                 json: p.json,
-                bypass_experimental_guard: p.bypass_experimental_guard,
                 declared_secrets: p.declared_secrets,
                 allow_secret_drop: p.allow_secret_drop,
             })?;
@@ -147,10 +132,6 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
     pub(in crate::commands) child_id: CheckpointId,
     pub(in crate::commands) now: u64,
     pub(in crate::commands) json: bool,
-    /// When true, skip the `MVM_FORK_VMFULL_FC_EXPERIMENTAL` guard. The guard
-    /// stays on the lower-level `vm checkpoint fork` path; the user-facing
-    /// `machine warm-restore` verb opts in explicitly.
-    pub(in crate::commands) bypass_experimental_guard: bool,
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
     pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
@@ -160,47 +141,25 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
 /// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
 /// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
 /// Firecracker VMM loaded from the checkpoint snapshot.
+///
+/// The parent may be running: a workload Firecracker carries no NIC (egress
+/// rides per-VM vsock proxies keyed by VM name), so a forked child has no
+/// host network identity to collide with. The snapshot's recorded device
+/// paths — the vsock UDS above all — are remapped onto the child's own state
+/// dir in a private mount namespace before the child VMM starts, and the
+/// no-NIC device-model guard runs between the child's load and resume, so a
+/// NIC-carrying snapshot can never execute. The only true parent/child
+/// identity collision — an equal VM name — is refused by the shared
+/// `fork_vm_full` gate upstream of this arm.
 pub(in crate::commands) fn fork_vm_full_arm_fc(
     p: ForkVmFullArmFcParams<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    // FC vm_full fork loads a snapshot that still carries the parent's TAP
-    // name and guest MAC in bitcode. Remapping backing files is not enough to
-    // make a live-parent fork safe, so require the parent to be stopped first.
-    // The device-path remapping happens in a private mount namespace before
-    // the child Firecracker starts.
-    if vm_is_running(&p.parent_meta.vm_name) {
-        anyhow::bail!(
-            "Firecracker vm_full fork requires the parent VM '{}' to be stopped first;              live-parent fork would collide on the parent's TAP/MAC",
-            p.parent_meta.vm_name
-        );
-    }
-
     // Only a Firecracker-produced machine state can be loaded here. A caller
     // that reached this arm with anything else has mis-dispatched.
     if vm_full_origin(&p.parent_meta) != Some(VmFullOrigin::Firecracker) {
         anyhow::bail!(
             "checkpoint '{}' does not carry a Firecracker machine state",
             p.parent_meta.id
-        );
-    }
-
-    // Firecracker vm_full fork. A forked child restores the parent's saved guest
-    // memory verbatim, which carries the parent's IP/MAC. VMGenID reseeds the
-    // guest RNG on restore but does not re-address the network, so a booted child
-    // would collide with its parent on the shared dev-subnet bridge. The host-tap
-    // side is remappable, but re-IP'ing the guest is a per-child network-model
-    // decision that is not yet settled — refuse cleanly rather than boot a
-    // colliding child. The restore mechanism stays reachable behind an explicit
-    // opt-in for isolated single-child testing on that model, unless the caller
-    // has already opted in (the user-facing `machine warm-restore` path).
-    if !p.bypass_experimental_guard && !fc_vm_full_fork_experimental_enabled() {
-        anyhow::bail!(
-            "forking a vm_full checkpoint on Firecracker is not yet supported: the \
-             forked child inherits the parent's guest IP/MAC from the saved memory \
-             image and has no per-child network reconfiguration, so it would collide \
-             with the parent on the shared bridge. Use an fs_quick fork, or set \
-             MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
-             single-child network."
         );
     }
 
@@ -230,7 +189,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_vm_name: p.child_vm_name.clone(),
             dest_dir: p.dest_dir,
             created_unix: p.now,
-            parent_liveness: ForkParentLiveness::MustBeStopped,
+            parent_liveness: ForkParentLiveness::MayBeRunning,
             child_plan_json: Some(child_plan_json),
             child_tenant_id: Some(child_tenant_id),
         },
@@ -968,23 +927,6 @@ mod tests {
         assert!(err.to_string().contains("wall clock"));
     }
 
-    /// The FC vm_full fork is refused by default (guest re-IP unsettled) and
-    /// only reachable behind the explicit experimental opt-in.
-    #[test]
-    fn fc_vm_full_fork_gated_off_without_optin() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove("MVM_FORK_VMFULL_FC_EXPERIMENTAL");
-        assert!(
-            !fc_vm_full_fork_experimental_enabled(),
-            "FC vm_full fork must be gated off unless explicitly opted in"
-        );
-        env.set("MVM_FORK_VMFULL_FC_EXPERIMENTAL", "1");
-        assert!(
-            fc_vm_full_fork_experimental_enabled(),
-            "opt-in must enable the experimental FC vm_full fork restore"
-        );
-    }
-
     /// Passing --cpus to a vm_full fork is refused with a clear error message
     /// that explains the memory-restore constraint and names the fs_quick
     /// alternative.
@@ -998,7 +940,6 @@ mod tests {
             cpus_override: Some(8),
             memory_override: None,
             json: false,
-            bypass_experimental_guard: false,
             declared_secrets: &[],
             allow_secret_drop: false,
         })
@@ -1022,7 +963,6 @@ mod tests {
             cpus_override: None,
             memory_override: Some("2G"),
             json: false,
-            bypass_experimental_guard: false,
             declared_secrets: &[],
             allow_secret_drop: false,
         })
