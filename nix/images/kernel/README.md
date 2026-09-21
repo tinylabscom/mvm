@@ -11,6 +11,10 @@ olddefconfig`. Two kernels derive from one shared base:
   (virtio-fs, namespaces/cgroups, iptables egress lockdown).
 - [`workload.nix`](./workload.nix) — base + dm-verity (verified boot), with
   compiler size optimization and workload-only namespace/cgroup removal.
+- [`workload-k8s.nix`](./workload-k8s.nix) — base + the same dm-verity
+  delta + cgroup/namespace/netfilter/bridge plumbing for guests that host
+  an in-guest orchestrator (rootless Kubernetes). Deliberately outside the
+  tiny-kernel budget ratchet; measure with `workload-k8s-metrics`.
 
 Two ways the same files are consumed:
 
