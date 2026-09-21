@@ -45,11 +45,24 @@ if [[ "$symbol_count" -gt "$budget" ]]; then
   exit 1
 fi
 
+# The in-guest orchestrator variant: resolve its configfile so the
+# olddefconfig enable/disable guards run over the delta in CI, and record
+# its symbol count for the size-cost record. No budget assertion — the
+# ratchet covers the sealed workload kernel only.
+k8s_config=$(nix build \
+  "./nix/images/builder-vm#packages.${system}.workload-k8s-kernel-configfile" \
+  --impure --no-link --print-out-paths | head -1)
+cp "$k8s_config" "staging/workload-k8s-config-${arch}"
+k8s_symbol_count=$(grep -c '=y$' "$k8s_config")
+echo "workload-k8s kernel ${arch}: ${k8s_symbol_count} =y symbols (no budget)"
+
 raw_bytes=$(stat -c%s "staging/vmlinux-${arch}-workload")
 gzip_bytes=$(gzip -c "staging/vmlinux-${arch}-workload" | wc -c)
 printf '{"arch":"%s","y_symbol_count":%d,"vmlinux_bytes":%d,"vmlinux_gz_bytes":%d}\n' \
   "$arch" "$symbol_count" "$raw_bytes" "$gzip_bytes" \
   > "staging/kernel-metrics-${arch}.json"
+printf '{"arch":"%s","variant":"workload-k8s","y_symbol_count":%d}\n' \
+  "$arch" "$k8s_symbol_count" > "staging/kernel-k8s-metrics-${arch}.json"
 
 (
   cd staging

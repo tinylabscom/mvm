@@ -118,17 +118,39 @@ run *ARGS:
 check-fast-cargo:
     ./scripts/check-fast-cargo.sh
 
+# Build the host-side eBPF object for vsock egress telemetry.
+# Requires nightly Rust and `cargo install bpf-linker`.
+build-ebpf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd crates/mvm-hostd/ebpf
+    PATH="${HOME}/.cargo/bin:${PATH}" cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
+
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
 # on the hot path. Pass through extra args like `--force` or `--source download`.
 runtime-overlay *ARGS:
-    just dev build runtime-overlay build {{ ARGS }}
+    bin/dev build runtime-overlay build {{ ARGS }}
 
 # Build the publishable SDK artifacts without building the full Rust workspace.
 # Usage: just sdk-build [lang]
 #   lang: sdk name (python, typescript) or "all" (default)
 sdk-build LANG="all":
-    just sdk-build-{{ LANG }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ LANG }}" in
+      all)
+        just sdk-build-python
+        just sdk-build-typescript
+        ;;
+      python|typescript)
+        just "sdk-build-{{ LANG }}"
+        ;;
+      *)
+        echo "unknown SDK language: {{ LANG }} (expected all, python, or typescript)" >&2
+        exit 1
+        ;;
+    esac
 
 # Build a single language SDK.
 sdk-build-python:
@@ -149,7 +171,21 @@ sdk-install-typescript:
 # Usage: just sdk-test [lang]
 #   lang: sdk name (python, typescript) or "all" (default)
 sdk-test LANG="all":
-    just sdk-test-{{ LANG }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ LANG }}" in
+      all)
+        just sdk-test-python
+        just sdk-test-typescript
+        ;;
+      python|typescript)
+        just "sdk-test-{{ LANG }}"
+        ;;
+      *)
+        echo "unknown SDK language: {{ LANG }} (expected all, python, or typescript)" >&2
+        exit 1
+        ;;
+    esac
 
 # `--extra schema` installs pydantic; without it the eight
 # `derive_schema` tests fail on an ImportError rather than being skipped.

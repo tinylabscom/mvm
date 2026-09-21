@@ -30,6 +30,11 @@
           pkgs = nixpkgs.legacyPackages.${system};
           base = import ./base.nix { inherit pkgs; };
           workload = import ./workload.nix { inherit pkgs base; };
+          # In-guest orchestrator variant (Kubernetes guests): same verity
+          # delta + cgroup/namespace/netfilter plumbing. Deliberately outside
+          # the tiny-kernel budget ratchet; measure, don't ratchet, until the
+          # variant's cost is understood.
+          workloadK8s = import ./workload-k8s.nix { inherit pkgs base; };
           builder = import ./builder.nix { inherit pkgs base; };
 
           # "aarch64" / "x86_64" for the published filenames (matches the
@@ -124,12 +129,16 @@
         in
         {
           workload-vmlinux = workload;
+          workload-k8s-vmlinux = workloadK8s;
           builder-vmlinux = builder;
           workload-configfile = workload.passthru.configfile;
+          workload-k8s-configfile = workloadK8s.passthru.configfile;
           builder-configfile = builder.passthru.configfile;
           resolved-configs = resolvedConfigs;
           builder-metrics = metricsFor "builder" builder builder.passthru.configfile;
           workload-metrics = metricsFor "workload" workload workload.passthru.configfile;
+          workload-k8s-metrics =
+            metricsFor "workload-k8s" workloadK8s workloadK8s.passthru.configfile;
           metrics = metricsFor "workload" workload workload.passthru.configfile;
           workload-sizeopt-vmlinux = workloadSizeopt;
           workload-sizeopt-configfile = workloadSizeopt.passthru.configfile;

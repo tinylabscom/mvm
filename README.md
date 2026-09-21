@@ -960,7 +960,7 @@ publishes Rust crates to crates.io. It runs on `v*` tags and produces:
 - `checksums-sha256.txt` (combined checksums)
 - SBOM (`sbom.cdx`)
 
-To prepare the next version from conventional commits, run `just release-auto`.
+To prepare the next version from conventional commits, run `just release`.
 To choose the version explicitly, run `just release 1.2.3`. Both commands run
 the local release gates, update the workspace and Nix package versions, prepend
 the generated changelog, and open a `release/v<version>` pull request. After

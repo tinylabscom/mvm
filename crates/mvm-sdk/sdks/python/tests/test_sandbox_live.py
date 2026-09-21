@@ -277,7 +277,7 @@ def test_sandbox_create_live_rejects_an_unknown_profile_before_boot(
     assert _read_fixture_log(tmp_path) == []
 
 
-def test_live_image_boot_lowers_literal_env_allowlist_and_command(tmp_path: Path) -> None:
+def test_live_image_boot_lowers_allowlist_and_command(tmp_path: Path) -> None:
     script = _write_fixture_mvmctl(
         tmp_path,
         up_envelope={"schema_version": 1, "vm_id": "browser", "build_mode": "dev"},
@@ -286,7 +286,6 @@ def test_live_image_boot_lowers_literal_env_allowlist_and_command(tmp_path: Path
     os.environ["MVM_CLI_BIN"] = str(script)
     mvm.Sandbox.create(
         image=mvm.OBSCURA_IMAGE,
-        env={"MODE": "safe"},
         network={
             "mode": "none",
             "egress": {"allowlist": [{"host": "example.com", "port": 443}]},
@@ -295,12 +294,11 @@ def test_live_image_boot_lowers_literal_env_allowlist_and_command(tmp_path: Path
     )
     call = _read_fixture_log(tmp_path)[0]
     assert f"--image {mvm.OBSCURA_IMAGE}" in call
-    assert "--env MODE=safe" in call
     assert "--allow-host example.com:443" in call
     assert "-- /obscura serve" in call
 
 
-def test_live_create_rejects_secret_and_unrepresentable_options_before_boot(
+def test_live_create_rejects_env_and_unrepresentable_options_before_boot(
     tmp_path: Path,
 ) -> None:
     script = _write_fixture_mvmctl(
@@ -309,14 +307,10 @@ def test_live_create_rejects_secret_and_unrepresentable_options_before_boot(
     )
     os.environ["MVM_SDK_MODE"] = "live"
     os.environ["MVM_CLI_BIN"] = str(script)
-    with pytest.raises(mvm.SandboxModeError, match="only literal"):
+    with pytest.raises(mvm.SandboxModeError, match="Sandbox.commands.start"):
         mvm.Sandbox.create(
             "minimal",
-            env={
-                "TOKEN": mvm.secret(
-                    "token", type="bearer", hosts=["example.com"]
-                )
-            },
+            env={"MODE": "safe"},
         )
     assert _read_fixture_log(tmp_path) == []
 
