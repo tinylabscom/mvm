@@ -3281,6 +3281,7 @@ dependencies = [
  "mvm-client",
  "mvm-core",
  "mvm-vmm",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",

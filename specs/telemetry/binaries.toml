@@ -555,6 +555,26 @@ category = "code-generator"
 reason = "Development schema or SDK generator; not a VM runtime producer."
 
 [[binary]]
+package = "mvm-hostlib"
+name = "emit_host_abi_methods"
+source = "crates/mvm-hostlib/src/bin/emit_host_abi_methods.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-hostlib"
+name = "emit_host_abi_schema"
+source = "crates/mvm-hostlib/src/bin/emit_host_abi_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
 package = "mvmctl"
 name = "mvmctl"
 source = "src/main.rs"

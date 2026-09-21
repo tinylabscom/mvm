@@ -379,6 +379,7 @@ pub enum BackpressureReason {
 ///
 /// Readiness transitions are independent of lifecycle transitions —
 /// they do not gate or require `InstanceStatus` to move.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceReadiness {

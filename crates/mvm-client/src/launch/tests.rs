@@ -1117,3 +1117,33 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
             .expect("the start request builds");
     assert_eq!(ungranted.grants, None);
 }
+
+#[test]
+fn launch_request_carries_ports_into_the_persisted_spec() {
+    let image: mvm_core::rootfs_source::RootfsSource = "oci:alpine:3.20".parse().expect("source");
+    let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
+        .name("web")
+        .port("8080:80")
+        .port("8443:443")
+        .build()
+        .expect("valid request");
+    let spec = super::persisted_spec_from_request(&request, "web");
+    assert_eq!(
+        spec.ports,
+        vec!["8080:80".to_string(), "8443:443".to_string()]
+    );
+}
+
+#[test]
+fn launch_request_refuses_a_malformed_port_before_anything_is_persisted() {
+    let image: mvm_core::rootfs_source::RootfsSource = "oci:alpine:3.20".parse().expect("source");
+    let error = LaunchRequest::builder(LifecycleMode::Persistent, image)
+        .name("web")
+        .port("not-a-port:80")
+        .build()
+        .expect_err("a malformed port spec is refused at build");
+    assert!(
+        format!("{error:#}").contains("invalid port spec"),
+        "{error:#}"
+    );
+}

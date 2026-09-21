@@ -1,0 +1,133 @@
+{
+  "abi_major": 1,
+  "abi_minor": 1,
+  "methods": [
+    {
+      "classification": "prod_safe",
+      "key": "backend_capabilities",
+      "name": "backend.capabilities",
+      "summary": "Reports what the backend can do."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_exec",
+      "name": "machine.exec",
+      "summary": "Runs one non-interactive command in a machine."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_inspect",
+      "name": "machine.inspect",
+      "summary": "Inspects one machine."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_list",
+      "name": "machine.list",
+      "summary": "Lists machines, optionally filtered."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_logs",
+      "name": "machine.logs",
+      "summary": "Returns captured console output, base64-encoded."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_rm",
+      "name": "machine.rm",
+      "summary": "Removes a machine, stopping it first when needed."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_stop",
+      "name": "machine.stop",
+      "summary": "Stops a machine. Idempotent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_cp",
+      "name": "guest.cp",
+      "summary": "Copies a file between the host and the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_list",
+      "name": "guest.fs.list",
+      "summary": "Lists a directory in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_mkdir",
+      "name": "guest.fs.mkdir",
+      "summary": "Creates a directory in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_read",
+      "name": "guest.fs.read",
+      "summary": "Reads a file from the guest, base64-encoded."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_remove",
+      "name": "guest.fs.remove",
+      "summary": "Removes a path in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_rename",
+      "name": "guest.fs.rename",
+      "summary": "Moves a path in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_stat",
+      "name": "guest.fs.stat",
+      "summary": "Stats a path in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_fs_write",
+      "name": "guest.fs.write",
+      "summary": "Writes a file in the guest, base64-encoded."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_kill",
+      "name": "guest.proc.kill",
+      "summary": "Kills a tracked guest process."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_list",
+      "name": "guest.proc.list",
+      "summary": "Lists tracked guest processes."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_signal",
+      "name": "guest.proc.signal",
+      "summary": "Signals a tracked guest process."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_start",
+      "name": "guest.proc.start",
+      "summary": "Starts a process in the guest."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stdin",
+      "name": "guest.proc.stdin",
+      "summary": "Writes a tracked process's stdin, base64-encoded."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_wait",
+      "name": "guest.proc.wait",
+      "summary": "Waits for a guest process to end, returning its output."
+    }
+  ],
+  "version": 0
+}

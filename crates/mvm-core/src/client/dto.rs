@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::rootfs_source::{RootfsSource, RootfsSourceParseError};
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MachineId(pub String);
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MachineStatus {
@@ -256,6 +258,7 @@ impl MachineSpecBuilder {
 /// A host:guest port forwarding on a machine — plain listing data that mirrors a
 /// backend's port mapping so a machine record can carry its forwards without
 /// exposing a runtime type.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortMapping {
@@ -267,6 +270,7 @@ pub struct PortMapping {
 /// field is REST-satisfiable plain data (no host handles, no paths, no keys), so
 /// the same struct crosses the gateway wire. New fields carry `#[serde(default)]`
 /// so an older serialized record still deserializes.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineState {
@@ -349,6 +353,7 @@ impl Default for MachineState {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineFilter {
@@ -378,6 +383,7 @@ pub struct LogOpts {
 /// The result of a non-interactive `exec_machine`: the process's exit code and
 /// captured output. (Interactive shells are not a facade operation — they need
 /// a duplex PTY the request/response trait can't model, and stay a CLI concern.)
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecResult {

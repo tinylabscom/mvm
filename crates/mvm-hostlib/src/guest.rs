@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_agentd::vsock::{FsEntry, FsStat, ProcInfo, ProcWaitEvent};
@@ -56,9 +56,12 @@ pub const FS_MKDIR: &str = "guest.fs.mkdir";
 pub const FS_REMOVE: &str = "guest.fs.remove";
 /// Moves a path. Request: `{"id", "from", "to"}`. Reply: `{}`.
 pub const FS_RENAME: &str = "guest.fs.rename";
+/// Copies a file between the host and the guest. Request: `{"id",
+/// "direction", "host_path", "guest_path"}`. Reply: `{}`.
+pub const CP: &str = "guest.cp";
 
 /// Every `guest.*` method.
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 14] = [
     PROC_START,
     PROC_LIST,
     PROC_SIGNAL,
@@ -72,6 +75,7 @@ pub const METHODS: [&str; 13] = [
     FS_MKDIR,
     FS_REMOVE,
     FS_RENAME,
+    CP,
 ];
 
 /// The most output of each stream `guest.proc.wait` holds. One call returns
@@ -187,9 +191,10 @@ impl GuestOps for LocalGuest {
 
 // ── requests ─────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartRequest {
+pub(crate) struct StartRequest {
     id: String,
     argv: Vec<String>,
     #[serde(default)]
@@ -198,47 +203,53 @@ struct StartRequest {
     cwd: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MachineRequest {
+pub(crate) struct MachineRequest {
     id: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SignalRequest {
+pub(crate) struct SignalRequest {
     id: String,
     token: String,
     signum: i32,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProcessRequest {
+pub(crate) struct ProcessRequest {
     id: String,
     token: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StdinRequest {
+pub(crate) struct StdinRequest {
     id: String,
     token: String,
     data_b64: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WaitRequest {
+pub(crate) struct WaitRequest {
     id: String,
     token: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadRequest {
+pub(crate) struct ReadRequest {
     id: String,
     path: String,
     #[serde(default)]
@@ -248,9 +259,10 @@ struct ReadRequest {
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WriteRequest {
+pub(crate) struct WriteRequest {
     id: String,
     path: String,
     data_b64: String,
@@ -262,25 +274,28 @@ struct WriteRequest {
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PathRequest {
+pub(crate) struct PathRequest {
     id: String,
     path: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatRequest {
+pub(crate) struct StatRequest {
     id: String,
     path: String,
     #[serde(default = "follow_by_default")]
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MkdirRequest {
+pub(crate) struct MkdirRequest {
     id: String,
     path: String,
     #[serde(default)]
@@ -289,21 +304,45 @@ struct MkdirRequest {
     parents: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RemoveRequest {
+pub(crate) struct RemoveRequest {
     id: String,
     path: String,
     #[serde(default)]
     recursive: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RenameRequest {
+pub(crate) struct RenameRequest {
     id: String,
     from: String,
     to: String,
+}
+
+/// Which way `guest.cp` moves the file.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CopyDirection {
+    /// Read the host file, write it into the guest.
+    HostToGuest,
+    /// Read the guest file, write it to the host.
+    GuestToHost,
+}
+
+/// A `guest.cp` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CopyRequest {
+    id: String,
+    direction: CopyDirection,
+    host_path: String,
+    guest_path: String,
 }
 
 fn follow_by_default() -> bool {
@@ -312,51 +351,60 @@ fn follow_by_default() -> bool {
 
 // ── replies ──────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct Empty {}
+pub(crate) struct Empty {}
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct StartedReply {
+pub(crate) struct StartedReply {
     token: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct AcceptedReply {
+pub(crate) struct AcceptedReply {
     accepted: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct DataReply {
+pub(crate) struct DataReply {
     data_b64: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct WrittenReply {
+pub(crate) struct WrittenReply {
     bytes_written: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct ListReply {
+pub(crate) struct ListReply {
     entries: Vec<FsEntry>,
     truncated: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct RemovedReply {
+pub(crate) struct RemovedReply {
     entries_removed: u64,
 }
 
 /// How a waited-on process ended.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Exited { code: i32 },
     Killed { signal: i32 },
     TimedOut,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct WaitReply {
+pub(crate) struct WaitReply {
     stdout_b64: String,
     stderr_b64: String,
     /// Output past [`WAIT_OUTPUT_CAP`] on either stream was dropped.
@@ -532,8 +580,60 @@ fn answer(ops: &dyn GuestOps, method: &str, request: &[u8]) -> Result<Outcome, O
             ops.rename(&r.id, &r.from, &r.to).map_err(guest_error)?;
             Outcome::ok(&Empty {})
         }
+        CP => {
+            let r: CopyRequest = parse(request)?;
+            copy_file(ops, &r).map_err(guest_error)?;
+            Outcome::ok(&Empty {})
+        }
         other => return Err(Outcome::invalid_input(&format!("unknown method `{other}`"))),
     })
+}
+
+/// Move one file across the host/guest boundary, composing the copy from
+/// the read and write operations so both directions record the same audit
+/// entries as every other guest file operation. The guest side rides the
+/// chunked fs RPC, so any file size travels wire-sized pieces.
+fn copy_file(ops: &dyn GuestOps, request: &CopyRequest) -> Result<()> {
+    const CHUNK: u64 = mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE as u64;
+    match request.direction {
+        CopyDirection::HostToGuest => {
+            let content = std::fs::read(&request.host_path)
+                .with_context(|| format!("reading {}", request.host_path))?;
+            let written = ops.write_file(
+                &request.id,
+                &request.guest_path,
+                &content,
+                WriteOptions {
+                    mode: DEFAULT_FILE_MODE,
+                    create_parents: true,
+                    follow_symlinks: false,
+                },
+            )?;
+            anyhow::ensure!(
+                written == content.len() as u64,
+                "guest accepted {written} of {} bytes",
+                content.len()
+            );
+            Ok(())
+        }
+        CopyDirection::GuestToHost => {
+            let mut content = Vec::new();
+            let mut offset = 0_u64;
+            loop {
+                let piece =
+                    ops.read_file(&request.id, &request.guest_path, offset, CHUNK, false)?;
+                let last = piece.len() < CHUNK as usize;
+                offset += piece.len() as u64;
+                content.extend_from_slice(&piece);
+                if last {
+                    break;
+                }
+            }
+            std::fs::write(&request.host_path, &content)
+                .with_context(|| format!("writing {}", request.host_path))?;
+            Ok(())
+        }
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, Outcome> {
@@ -874,6 +974,79 @@ mod tests {
             ops.calls.borrow().as_slice(),
             ["mkdir web /d 755 true", "rm web /d true", "mv web /a /b"]
         );
+    }
+
+    #[test]
+    fn cp_host_to_guest_reads_the_host_file_and_writes_the_guest() {
+        let dir = std::env::temp_dir().join(format!("mvm-hostlib-cp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let host_path = dir.join("payload.bin");
+        std::fs::write(&host_path, b"copy me").expect("write host file");
+        let ops = Recording::default();
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": "web",
+            "direction": "host_to_guest",
+            "host_path": host_path,
+            "guest_path": "/tmp/payload.bin",
+        }))
+        .unwrap();
+        let outcome = dispatch(&ops, CP, &request);
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_OK,
+            "{}",
+            String::from_utf8_lossy(&outcome.body)
+        );
+        let calls = ops.calls.borrow();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(
+            calls[0].starts_with("write web /tmp/payload.bin [99, 111, 112, 121, 32, 109, 101]"),
+            "{calls:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cp_guest_to_host_reads_until_a_short_chunk_and_writes_the_host() {
+        let dir = std::env::temp_dir().join(format!("mvm-hostlib-cp-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let host_path = dir.join("out.bin");
+        let ops = Recording::default();
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": "web",
+            "direction": "guest_to_host",
+            "host_path": host_path,
+            "guest_path": "/var/out.bin",
+        }))
+        .unwrap();
+        let outcome = dispatch(&ops, CP, &request);
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_OK,
+            "{}",
+            String::from_utf8_lossy(&outcome.body)
+        );
+        // Recording answers five bytes per read; a five-byte chunk is short,
+        // so one read ends the copy.
+        assert_eq!(std::fs::read(&host_path).expect("host file"), b"hello");
+        let calls = ops.calls.borrow();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("read web /var/out.bin 0"), "{calls:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cp_refuses_an_unknown_direction() {
+        let ops = Recording::default();
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": "web",
+            "direction": "sideways",
+            "host_path": "/a",
+            "guest_path": "/b",
+        }))
+        .unwrap();
+        let outcome = dispatch(&ops, CP, &request);
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
     }
 
     #[test]

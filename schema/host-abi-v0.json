@@ -1,0 +1,1741 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "BackendCapabilitiesReply": {
+      "description": "Opaque report; the shape is owned by the capability negotiation module.",
+      "type": "object"
+    },
+    "BackendCapabilitiesRequest": {
+      "additionalProperties": false,
+      "description": "A request that carries nothing.",
+      "title": "Empty",
+      "type": "object"
+    },
+    "BackpressureReason": {
+      "description": "Why a streaming or queued operation is currently throttled.\n\nClosed enum: every reason is named, and drift between host and guest fails the serde `deny_unknown_fields`-equivalent path (variants must match). Detail strings carried alongside this enum are bounded and redacted — never argv / env / stdin / stdout / stderr / filesystem paths.",
+      "oneOf": [
+        {
+          "description": "Host could not reach the guest agent within the configured grace period. Typically resolves on the next probe.",
+          "enum": [
+            "guest_agent_unavailable"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more integration readiness probes are still pending.",
+          "properties": {
+            "service_health_pending": {
+              "properties": {
+                "pending": {
+                  "description": "Names of services whose readiness scripts have not yet reported success. Echoed verbatim — never user payload.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "pending"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "service_health_pending"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The host is not draining the data-plane stream fast enough, so the guest is holding back to honor the frame cap.",
+          "enum": [
+            "output_consumer_slow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bounded input ring is saturated. The producer must wait.",
+          "enum": [
+            "input_buffer_full"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A chunked artifact transfer is paused (typically host disk pressure or quota).",
+          "enum": [
+            "artifact_transfer_blocked"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The shared builder VM is occupied by another build; this run is queued behind it.",
+          "enum": [
+            "builder_busy"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CopyDirection": {
+      "description": "Which way `guest.cp` moves the file.",
+      "oneOf": [
+        {
+          "description": "Read the host file, write it into the guest.",
+          "enum": [
+            "host_to_guest"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read the guest file, write it to the host.",
+          "enum": [
+            "guest_to_host"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "FsEntry": {
+      "additionalProperties": false,
+      "description": "One entry in an `FsList` response.",
+      "properties": {
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FsEntryKind"
+            }
+          ],
+          "description": "File type. `Other` covers sockets, FIFOs, devices."
+        },
+        "name": {
+          "description": "Bare entry name (no leading directory component).",
+          "type": "string"
+        },
+        "size": {
+          "description": "Size in bytes, or `0` for non-files.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "size"
+      ],
+      "type": "object"
+    },
+    "FsEntryKind": {
+      "description": "Type of a filesystem entry returned by `FsList` / `FsStat`.",
+      "enum": [
+        "file",
+        "dir",
+        "symlink",
+        "other"
+      ],
+      "type": "string"
+    },
+    "GuestCpReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestCpRequest": {
+      "additionalProperties": false,
+      "description": "A `guest.cp` request.",
+      "properties": {
+        "direction": {
+          "$ref": "#/definitions/CopyDirection"
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "host_path": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "direction",
+        "guest_path",
+        "host_path",
+        "id"
+      ],
+      "title": "CopyRequest",
+      "type": "object"
+    },
+    "GuestFsListReply": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/FsEntry"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "title": "ListReply",
+      "type": "object"
+    },
+    "GuestFsListRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path"
+      ],
+      "title": "PathRequest",
+      "type": "object"
+    },
+    "GuestFsMkdirReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestFsMkdirRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mode": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parents": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path"
+      ],
+      "title": "MkdirRequest",
+      "type": "object"
+    },
+    "GuestFsReadReply": {
+      "properties": {
+        "data_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data_b64"
+      ],
+      "title": "DataReply",
+      "type": "object"
+    },
+    "GuestFsReadRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "follow_symlinks": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "length": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "length",
+        "path"
+      ],
+      "title": "ReadRequest",
+      "type": "object"
+    },
+    "GuestFsRemoveReply": {
+      "properties": {
+        "entries_removed": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entries_removed"
+      ],
+      "title": "RemovedReply",
+      "type": "object"
+    },
+    "GuestFsRemoveRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "path"
+      ],
+      "title": "RemoveRequest",
+      "type": "object"
+    },
+    "GuestFsRenameReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestFsRenameRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "id",
+        "to"
+      ],
+      "title": "RenameRequest",
+      "type": "object"
+    },
+    "GuestFsStatReply": {
+      "additionalProperties": false,
+      "description": "Stat metadata for a single filesystem entry.",
+      "properties": {
+        "canonical_path": {
+          "description": "Canonical (post-`realpath`) path the agent operated on. Lets the host detect when a symlink resolution surprised it.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/FsEntryKind"
+        },
+        "mode": {
+          "description": "Unix mode bits (e.g. `0o100644`). Always present; on backends without a unix mode the agent reports a best-effort equivalent.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mtime": {
+          "description": "Modification timestamp as RFC 3339, or `None` if the underlying fs doesn't expose mtime.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "canonical_path",
+        "kind",
+        "mode",
+        "size"
+      ],
+      "title": "FsStat",
+      "type": "object"
+    },
+    "GuestFsStatRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "follow_symlinks": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path"
+      ],
+      "title": "StatRequest",
+      "type": "object"
+    },
+    "GuestFsWriteReply": {
+      "properties": {
+        "bytes_written": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bytes_written"
+      ],
+      "title": "WrittenReply",
+      "type": "object"
+    },
+    "GuestFsWriteRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "create_parents": {
+          "default": false,
+          "type": "boolean"
+        },
+        "data_b64": {
+          "type": "string"
+        },
+        "follow_symlinks": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "mode": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data_b64",
+        "id",
+        "path"
+      ],
+      "title": "WriteRequest",
+      "type": "object"
+    },
+    "GuestProcKillReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestProcKillRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "token"
+      ],
+      "title": "ProcessRequest",
+      "type": "object"
+    },
+    "GuestProcListReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "Per-process metadata returned by `ProcList`.",
+        "properties": {
+          "argv0": {
+            "description": "argv\\[0\\] for display only — the agent does not expose the full argv over the wire (it could echo secrets the caller passed in via env / stdin).",
+            "type": "string"
+          },
+          "pid_token": {
+            "type": "string"
+          },
+          "started_at": {
+            "description": "RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/definitions/ProcState"
+          }
+        },
+        "required": [
+          "argv0",
+          "pid_token",
+          "started_at",
+          "state"
+        ],
+        "title": "ProcInfo",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "GuestProcListRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRequest",
+      "type": "object"
+    },
+    "GuestProcSignalReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestProcSignalRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "signum": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "signum",
+        "token"
+      ],
+      "title": "SignalRequest",
+      "type": "object"
+    },
+    "GuestProcStartReply": {
+      "properties": {
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token"
+      ],
+      "title": "StartedReply",
+      "type": "object"
+    },
+    "GuestProcStartRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "argv",
+        "id"
+      ],
+      "title": "StartRequest",
+      "type": "object"
+    },
+    "GuestProcStdinReply": {
+      "properties": {
+        "accepted": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "title": "AcceptedReply",
+      "type": "object"
+    },
+    "GuestProcStdinRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "data_b64": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data_b64",
+        "id",
+        "token"
+      ],
+      "title": "StdinRequest",
+      "type": "object"
+    },
+    "GuestProcWaitReply": {
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/WaitOutcome"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Output past [`WAIT_OUTPUT_CAP`] on either stream was dropped.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outcome",
+        "stderr_b64",
+        "stdout_b64",
+        "truncated"
+      ],
+      "title": "WaitReply",
+      "type": "object"
+    },
+    "GuestProcWaitRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "token"
+      ],
+      "title": "WaitRequest",
+      "type": "object"
+    },
+    "InstanceReadiness": {
+      "description": "Finer-grained \"is this VM usable?\" state, composed alongside the coarse [`InstanceStatus`] lifecycle.\n\n`InstanceStatus::Running` means the backend accepted the VM and it has not stopped. `InstanceReadiness` explains *whether* it is actually usable: did the agent answer? Are integration probes green? Is a streaming operation currently throttled?\n\nReadiness transitions are independent of lifecycle transitions — they do not gate or require `InstanceStatus` to move.",
+      "oneOf": [
+        {
+          "description": "Backend has accepted the launch request. No further signal from the guest yet.",
+          "enum": [
+            "launch_accepted"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Host is waiting for the guest agent on the assigned vsock port.",
+          "enum": [
+            "agent_connecting"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Guest agent answered protocol hello and capability negotiation succeeded.",
+          "enum": [
+            "agent_ready"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Integration readiness probes are running; the listed services have not yet reported healthy.",
+          "properties": {
+            "services_starting": {
+              "properties": {
+                "pending": {
+                  "description": "Services whose readiness scripts are still pending.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "pending"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "services_starting"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Every integration's readiness contract is satisfied.",
+          "enum": [
+            "services_ready"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "At least one previously-ready service has regressed to unhealthy.",
+          "properties": {
+            "degraded": {
+              "properties": {
+                "unhealthy": {
+                  "description": "Services whose health probe has flipped to unhealthy.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "unhealthy"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "degraded"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A specific runtime resource is saturating; the workload is otherwise live.",
+          "properties": {
+            "backpressured": {
+              "properties": {
+                "reason": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/BackpressureReason"
+                    }
+                  ],
+                  "description": "Typed reason for the throttle."
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "backpressured"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Shutdown sequence has begun.",
+          "enum": [
+            "stopping"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MachineExecReply": {
+      "description": "A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.",
+      "properties": {
+        "exit_code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "exit_code",
+        "stderr_b64",
+        "stdout_b64"
+      ],
+      "title": "ExecReply",
+      "type": "object"
+    },
+    "MachineExecRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.exec` request.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "id"
+      ],
+      "title": "ExecRequest",
+      "type": "object"
+    },
+    "MachineId": {
+      "type": "string"
+    },
+    "MachineInspectReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineInspectRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRef",
+      "type": "object"
+    },
+    "MachineListReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+        "properties": {
+          "auto_resume": {
+            "default": true,
+            "description": "Whether connecting auto-resumes a sleeping machine.",
+            "type": "boolean"
+          },
+          "backend": {
+            "default": "",
+            "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+            "type": "string"
+          },
+          "cpus": {
+            "default": 0,
+            "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "expires_at": {
+            "default": null,
+            "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "flake_ref": {
+            "default": null,
+            "description": "Original flake reference, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guest_ip": {
+            "default": null,
+            "description": "Guest IP, when networking is configured.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/definitions/MachineId"
+          },
+          "last_readiness_change_at": {
+            "default": null,
+            "description": "RFC 3339 timestamp of the last `readiness` change.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memory_mib": {
+            "default": 0,
+            "description": "Guest memory in MiB. `0` when unknown.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ports": {
+            "default": [],
+            "description": "Active host:guest port forwardings.",
+            "items": {
+              "$ref": "#/definitions/PortMapping"
+            },
+            "type": "array"
+          },
+          "profile": {
+            "default": null,
+            "description": "Flake profile name, when built from a profile.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "readiness": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/InstanceReadiness"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Finer-grained host-observed readiness, when tracked."
+          },
+          "revision": {
+            "default": null,
+            "description": "Nix store revision hash, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/MachineStatus"
+          },
+          "status_detail": {
+            "default": null,
+            "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Caller-supplied metadata tags.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "title": "MachineState",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "MachineListRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MachineStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "MachineFilter",
+      "type": "object"
+    },
+    "MachineLogsReply": {
+      "description": "Console bytes, which need not be UTF-8.",
+      "properties": {
+        "data_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data_b64"
+      ],
+      "title": "LogsReply",
+      "type": "object"
+    },
+    "MachineLogsRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.logs` request. There is no `follow`: following a log is a stream, and a single call returns once.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "tail_lines": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "LogsRequest",
+      "type": "object"
+    },
+    "MachineRmReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineRmRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine for removal.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RemoveRequest",
+      "type": "object"
+    },
+    "MachineStatus": {
+      "oneOf": [
+        {
+          "enum": [
+            "starting",
+            "running",
+            "stopped",
+            "failed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "vCPUs paused with the VMM still alive. Kept distinct from `Stopped` so a paused machine stays visible in a default listing instead of folding away. Any detail behind a non-happy status (e.g. a `Failed` reason) travels in [`MachineState::status_detail`], which keeps this enum `Copy`.",
+          "enum": [
+            "paused"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MachineStopReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineStopRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "StopRequest",
+      "type": "object"
+    },
+    "PortMapping": {
+      "additionalProperties": false,
+      "description": "A host:guest port forwarding on a machine — plain listing data that mirrors a backend's port mapping so a machine record can carry its forwards without exposing a runtime type.",
+      "properties": {
+        "guest": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "host": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "guest",
+        "host"
+      ],
+      "type": "object"
+    },
+    "ProcState": {
+      "description": "Lifecycle state of a tracked process.",
+      "oneOf": [
+        {
+          "enum": [
+            "running"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exited": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "exited"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Process was killed by signal `i32`.",
+          "properties": {
+            "killed": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "killed"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Process exceeded its `timeout_secs`; agent killed the pgroup.",
+          "enum": [
+            "timed_out"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "WaitOutcome": {
+      "description": "How a waited-on process ended.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "exited"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "killed"
+              ],
+              "type": "string"
+            },
+            "signal": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "signal"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "timed_out"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "backend_capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/BackendCapabilitiesReply"
+        },
+        "request": {
+          "$ref": "#/definitions/BackendCapabilitiesRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "BackendCapabilities",
+      "type": "object"
+    },
+    "guest_cp": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestCpReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestCpRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestCp",
+      "type": "object"
+    },
+    "guest_fs_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsList",
+      "type": "object"
+    },
+    "guest_fs_mkdir": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsMkdirReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsMkdirRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsMkdir",
+      "type": "object"
+    },
+    "guest_fs_read": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsReadReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsReadRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsRead",
+      "type": "object"
+    },
+    "guest_fs_remove": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsRemoveReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsRemoveRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsRemove",
+      "type": "object"
+    },
+    "guest_fs_rename": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsRenameReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsRenameRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsRename",
+      "type": "object"
+    },
+    "guest_fs_stat": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsStatReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsStatRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsStat",
+      "type": "object"
+    },
+    "guest_fs_write": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestFsWriteReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestFsWriteRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestFsWrite",
+      "type": "object"
+    },
+    "guest_proc_kill": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcKillReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcKillRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcKill",
+      "type": "object"
+    },
+    "guest_proc_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcList",
+      "type": "object"
+    },
+    "guest_proc_signal": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcSignalReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcSignalRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcSignal",
+      "type": "object"
+    },
+    "guest_proc_start": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStartReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStartRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStart",
+      "type": "object"
+    },
+    "guest_proc_stdin": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStdinReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStdinRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStdin",
+      "type": "object"
+    },
+    "guest_proc_wait": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcWaitReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcWaitRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcWait",
+      "type": "object"
+    },
+    "machine_exec": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineExecReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineExecRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineExec",
+      "type": "object"
+    },
+    "machine_inspect": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineInspectReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineInspectRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineInspect",
+      "type": "object"
+    },
+    "machine_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineList",
+      "type": "object"
+    },
+    "machine_logs": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineLogsReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineLogsRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineLogs",
+      "type": "object"
+    },
+    "machine_rm": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineRmReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineRmRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineRm",
+      "type": "object"
+    },
+    "machine_stop": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineStopReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineStopRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineStop",
+      "type": "object"
+    }
+  },
+  "required": [
+    "backend_capabilities",
+    "machine_exec",
+    "machine_inspect",
+    "machine_list",
+    "machine_logs",
+    "machine_rm",
+    "machine_stop",
+    "guest_cp",
+    "guest_fs_list",
+    "guest_fs_mkdir",
+    "guest_fs_read",
+    "guest_fs_remove",
+    "guest_fs_rename",
+    "guest_fs_stat",
+    "guest_fs_write",
+    "guest_proc_kill",
+    "guest_proc_list",
+    "guest_proc_signal",
+    "guest_proc_start",
+    "guest_proc_stdin",
+    "guest_proc_wait"
+  ],
+  "title": "HostAbi",
+  "type": "object"
+}

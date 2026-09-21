@@ -91,6 +91,42 @@ export class SecretInArgError extends Error {}
  */
 export class EmittingContextError extends Error {}
 
+/** Base of every error the host library reports. */
+export class HostLibraryError extends Error {}
+
+/** The machine named does not exist. */
+export class MachineNotFoundError extends HostLibraryError {}
+
+/** The request described a machine that cannot be built. */
+export class MachineSpecError extends HostLibraryError {}
+
+/** The backend failed while carrying the request out. */
+export class MachineBackendError extends HostLibraryError {}
+
+/** The caller is not allowed to do this. */
+export class MachineUnauthorizedError extends HostLibraryError {}
+
+/** The request conflicts with the machine's current state. */
+export class MachineConflictError extends HostLibraryError {}
+
+/** A policy refused the request. */
+export class MachineRejectedError extends HostLibraryError {}
+
+/** The backend cannot answer right now; the request may be retried. */
+export class MachineUnavailableError extends HostLibraryError {}
+
+/** The method is unknown or its request did not parse. */
+export class HostLibraryInputError extends HostLibraryError {}
+
+/** The library and this binding disagree about the ABI version. */
+export class HostLibraryAbiError extends HostLibraryError {}
+
+/** The library could not set itself up in this process. */
+export class HostLibraryEmbedderError extends HostLibraryError {}
+
+/** A fault inside the host library itself. */
+export class HostLibraryInternalError extends HostLibraryError {}
+
 /** The success status; any other value is a failure. */
 export const STATUS_OK = 0;
 
@@ -107,4 +143,19 @@ export const STATUS_ERRORS: Record<number, new (msg: string) => Error> = {
   6: ServiceError,
   7: TransportError,
   8: InvalidInputError,
+};
+
+/** Host-library error code -> error type. */
+export const CODE_ERRORS: Record<string, new (msg: string) => Error> = {
+  "NOT_FOUND": MachineNotFoundError,
+  "INVALID_SPEC": MachineSpecError,
+  "BACKEND_ERROR": MachineBackendError,
+  "UNAUTHORIZED": MachineUnauthorizedError,
+  "CONFLICT": MachineConflictError,
+  "REJECTED": MachineRejectedError,
+  "UNAVAILABLE": MachineUnavailableError,
+  "INVALID_INPUT": HostLibraryInputError,
+  "ABI_NOT_NEGOTIATED": HostLibraryAbiError,
+  "EMBEDDER": HostLibraryEmbedderError,
+  "INTERNAL": HostLibraryInternalError,
 };
