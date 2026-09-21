@@ -216,21 +216,22 @@ mod pair_routing_tests {
     use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact};
     use mvm_core::util::test_env::TestEnv;
 
-    fn selector_env(pair: &Pair) -> (TestEnv, std::path::PathBuf) {
+    fn selector_env(pair: &Pair) -> TestEnv {
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", pair.tmp.path().join("home"));
-        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
         env.set(
             mvm_build::image_source::MVM_IMAGES_DIR_ENV,
             pair.images.root(),
         );
-        (env, pair.tmp.path().join("home"))
+        env
     }
 
     #[test]
     fn download_is_refused_while_a_checkout_is_selected() {
         let pair = Pair::new();
-        let (_env, _home) = selector_env(&pair);
+        let mut env = selector_env(&pair);
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        std::fs::create_dir_all(&home).unwrap();
         let err = run_build(BuildArgs {
             source: Source::Download,
             arch: None,
@@ -248,7 +249,10 @@ mod pair_routing_tests {
     #[test]
     fn the_pair_overlay_installs_into_the_cache_with_its_identity_stamped() {
         let pair = Pair::new();
-        let (_env, home) = selector_env(&pair);
+        let mut env = selector_env(&pair);
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        std::fs::create_dir_all(&home).unwrap();
         pair.publish(
             mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
             "default",
