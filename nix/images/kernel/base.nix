@@ -681,6 +681,14 @@ let
       extraEnables ? [ ],
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
+      # Symbols to re-enable that base.nix disables (audited cuts, and —
+      # deliberately — requiredDisables too). An exemption is how a second,
+      # non-sealed kernel posture keeps a subsystem the sealed workload
+      # posture cuts; every exemption must also appear in `extraEnables`,
+      # so the enable guard below asserts it survived olddefconfig, and
+      # must be named and justified in the caller. The caller's own
+      # `requiredExtraDisables` stay hard — exemptions never weaken them.
+      disableExemptions ? [ ],
     }:
     pkgs.buildPackages.runCommandCC "mvm-kernel-config"
       {
@@ -694,10 +702,16 @@ let
           openssl
         ];
         enableList = pkgs.lib.concatStringsSep " " (baseEnables ++ extraEnables);
+        # Exemptions apply to base's audited cuts only; the caller's own
+        # required disables stay hard.
         disableList = pkgs.lib.concatStringsSep " " (
-          baseDisables ++ extraDisables ++ requiredExtraDisables
+          pkgs.lib.subtractLists disableExemptions (baseDisables ++ extraDisables)
+          ++ requiredExtraDisables
         );
-        requiredDisableList = pkgs.lib.concatStringsSep " " (requiredDisables ++ requiredExtraDisables);
+        requiredDisableList = pkgs.lib.concatStringsSep " " (
+          pkgs.lib.subtractLists disableExemptions requiredDisables
+          ++ requiredExtraDisables
+        );
       }
       ''
         set -euo pipefail
@@ -807,13 +821,14 @@ let
       extraEnables ? [ ],
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
+      disableExemptions ? [ ],
     }:
     (pkgs.linuxManualConfig {
       src = kernelSourceTree;
       version = kernelVersion;
       modDirVersion = kernelVersion;
       configfile = mkConfigfile {
-        inherit extraEnables extraDisables requiredExtraDisables;
+        inherit extraEnables extraDisables requiredExtraDisables disableExemptions;
       };
       allowImportFromDerivation = false;
     }).overrideAttrs
