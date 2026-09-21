@@ -72,10 +72,8 @@ mvm-core.workspace = true
 mvm-http.workspace = true
 mvm-fs.workspace = true
 mvm-agentd.workspace = true
-# `LibkrunNetworkProvider` impls the `NetworkProvider` seam. mvm-net deps only
-# mvm-core + mvm-sdk, so this edge is acyclic. Builder orchestration is an
-# unconditional part of mvm-build, so the provider is always compiled too.
-mvm-net.workspace = true
+# `LibkrunNetworkProvider` implements the optional backend's network seam.
+mvm-net = { workspace = true, optional = true }
 mvm-vmm = { workspace = true }
 # `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
@@ -90,7 +88,7 @@ hex.workspace = true
 # Libkrun FFI facade used by the in-tree builder VM launcher. Native C linkage
 # remains behind libkrun-sys's own opt-in feature; naming the Rust facade here
 # does not link libkrun.
-libkrun-sys.workspace = true
+libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 # JCS canonicalization for the in-rootfs provenance mark and the
@@ -175,7 +173,10 @@ tempfile.workspace = true
 xattr.workspace = true
 
 [features]
-default = []
+default = ["builder-libkrun"]
+# The optional libkrun implementation. Generic builder orchestration remains
+# unconditional; disabling defaults removes only this backend and dependency.
+builder-libkrun = ["dep:libkrun-sys", "dep:mvm-net"]
 # Marks an official binary distribution so artifact resolvers do not infer
 # contributor behavior from the checkout that happens to launch the binary.
 release-channel = []

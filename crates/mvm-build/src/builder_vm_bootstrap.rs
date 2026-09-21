@@ -25,7 +25,7 @@ use std::{fs, io};
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
 
 use crate::builder_vm::BuilderVmError;
-use crate::libkrun_builder::builder_vm_source_checkout_root;
+use crate::builder_vm_image::builder_vm_source_checkout_root;
 
 /// Declare that this process is a library embedding the runtime, not `mvmctl`.
 ///

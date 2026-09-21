@@ -28,7 +28,7 @@ impl ShellJobBuilder {
     }
 
     /// Boot this backend's builder image and run `job` in it.
-    pub(crate) fn run(self, job: &mvm_build::libkrun_builder::BuilderShellJob) -> Result<()> {
+    pub(crate) fn run(self, job: &mvm_build::builder_vm::BuilderShellJob) -> Result<()> {
         match self {
             Self::Hvf => {
                 let (kernel, rootfs, closure_nar) =

@@ -22,18 +22,19 @@
 
 use std::path::{Path, PathBuf};
 
+use mvm_build::builder_vm::BuilderVmImage;
 use mvm_build::builder_vm::{
     BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
     builder_vm_cache_dir,
 };
+use mvm_build::builder_vm_image::unique_job_id;
 use mvm_build::builder_vm_runtime::acquire_nix_store_image_lock_named;
-use mvm_build::libkrun_builder::BuilderVmImage;
 use mvm_build::stage0_host::{
     materialize_stage0_root_disk, prepopulate_stage0_nix_store_image, stage0_nix_store_image_name,
     stage0_result_from_console,
 };
 
-use super::driver_builder::{copy_tree, unique_job_id};
+use super::driver_builder::copy_tree;
 use super::runner::{BuilderRunner, Stage0Run};
 use crate::driver::VmmDriver;
 

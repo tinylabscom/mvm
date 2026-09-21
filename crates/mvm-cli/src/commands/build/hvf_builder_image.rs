@@ -213,7 +213,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
 mod tests {
     use super::*;
     use mvm_backends::driver::hvf::HvfDriver;
-    use mvm_build::libkrun_builder::BuilderShellJob;
+    use mvm_build::builder_vm::BuilderShellJob;
     use mvm_runtime::builder_runner::DriverBuilderVm;
 
     #[test]

@@ -32,6 +32,10 @@ mod store_gc;
 #[path = "stage0-init/seed.rs"]
 mod seed;
 
+#[cfg(any(target_os = "linux", test))]
+#[path = "../seed_store_entries.rs"]
+mod seed_store_entries;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -50,7 +54,6 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use sha2::{Digest, Sha256};
     use std::net::{SocketAddr, TcpStream};
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
@@ -58,6 +61,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use crate::seed::{find_seed_bin, find_seed_cacert, seed_store_has_required_runtime};
+    use crate::seed_store_entries::seed_store_entries_hash;
 
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
@@ -889,25 +893,6 @@ mod linux {
             "schema_version={STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION}\nseed_store_entries_sha256={}\n",
             seed_store_entries_hash(seed_store)?
         ))
-    }
-
-    fn seed_store_entries_hash(seed_store: &Path) -> Result<String, String> {
-        let mut entries = std::fs::read_dir(seed_store)
-            .map_err(|e| format!("read {}: {e}", seed_store.display()))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .map_err(|e| format!("read entry under {}: {e}", seed_store.display()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort_unstable();
-
-        let mut hasher = Sha256::new();
-        for entry in entries {
-            hasher.update(entry.as_bytes());
-            hasher.update(b"\n");
-        }
-        Ok(hex::encode(hasher.finalize()))
     }
 
     fn clear_dir_children(dir: &Path) -> std::io::Result<()> {

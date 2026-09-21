@@ -238,7 +238,7 @@ pub(crate) fn resolve_workload_kernel_path(
         return Ok(p.to_path_buf());
     }
     // ~/.mvm/cache/builder-vm/<arch>/vmlinux — same layout
-    // `mvm_build::libkrun_builder::ensure_builder_vm_image` promotes to.
+    // `mvm_build::builder_vm_image::ensure_builder_vm_image` promotes to.
     let builder_kernel = PathBuf::from(mvm_core::config::mvm_cache_dir())
         .join("builder-vm")
         .join(host_arch())

@@ -18,7 +18,9 @@ use crate::builder_vm::BuilderVmError;
 // its implementation pulls in a chain of host-mkfs helpers that have not been
 // untangled yet; re-exported here so callers already name the VMM-independent
 // path and the eventual move costs them nothing.
-pub use crate::libkrun_builder::{prepopulate_stage0_nix_store_image, stage0_nix_store_image_name};
+pub use crate::builder_vm_image::{
+    prepopulate_stage0_nix_store_image, stage0_nix_store_image_name,
+};
 
 /// Materialize the verified Stage 0 seed as the root ext4 disk the VMM boots.
 ///

@@ -32,7 +32,9 @@ use anyhow::{Context, Result, bail};
 use mvm_build::builder_disk_transport::{
     INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
 };
-use mvm_build::builder_vm::{BuilderVmError, builder_vm_cache_dir};
+use mvm_build::builder_vm::{
+    BuilderVmError, DEFAULT_MEMORY_MIB, DEFAULT_NIX_STORE_MIB, DEFAULT_VCPUS, builder_vm_cache_dir,
+};
 use mvm_build::builder_vm_runtime::{
     PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked, stage_filtered_work_input,
     stage_persistent_job_dir,
@@ -46,11 +48,6 @@ use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
 use crate::driver::VmmDriver;
 use crate::driver::traits::RunningVm;
 use mvm_backends::driver::hvf::HvfDriver;
-
-/// Default persistent nix-store disk size (MiB), matching the one-shot builder.
-const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
-const DEFAULT_VCPUS: u32 = 4;
-const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// Poll interval while waiting for the guest to publish its dispatch listener.
 const READY_POLL: Duration = Duration::from_millis(50);
@@ -101,7 +98,7 @@ impl HvfPersistentHostVm {
             workspace_root: workspace_root.into(),
             host_bin_dir: host_bin_dir.into(),
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
-            vcpus: DEFAULT_VCPUS,
+            vcpus: u32::from(DEFAULT_VCPUS),
             memory_mib: DEFAULT_MEMORY_MIB,
         }
     }

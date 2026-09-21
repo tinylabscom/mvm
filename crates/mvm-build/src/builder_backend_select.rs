@@ -28,12 +28,64 @@ use std::sync::OnceLock;
 use crate::builder_health;
 use crate::builder_vm::{
     BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+    DEFAULT_VCPUS, builder_vm_cache_dir, host_arch_tag,
 };
-use crate::libkrun_builder::{
-    DEFAULT_VCPUS, LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag,
-};
+#[cfg(feature = "builder-libkrun")]
+use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
 use mvm_core::platform::{Platform, current};
+
+#[cfg(not(feature = "builder-libkrun"))]
+#[derive(Debug, Default)]
+struct LibkrunBuilderVm;
+
+#[cfg(not(feature = "builder-libkrun"))]
+impl LibkrunBuilderVm {
+    fn with_closure_nar(self, _closure_nar: Option<PathBuf>) -> Self {
+        self
+    }
+
+    fn with_resources(self, _vcpus: u8, _memory_mib: u32) -> Self {
+        self
+    }
+
+    fn with_verbose(self, _verbose: bool) -> Self {
+        self
+    }
+
+    fn refusal() -> BuilderVmError {
+        BuilderVmError::VmmUnavailable {
+            requested: "libkrun".to_string(),
+            reason: "this build does not include the `builder-libkrun` feature".to_string(),
+        }
+    }
+}
+
+#[cfg(not(feature = "builder-libkrun"))]
+impl BuilderVm for LibkrunBuilderVm {
+    fn run_build(
+        &self,
+        _job: &BuilderJob,
+        _mounts: &BuilderMounts,
+    ) -> Result<BuilderArtifacts, BuilderVmError> {
+        Err(Self::refusal())
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &Path,
+        _entry_path: &str,
+        _workspace_dir: &Path,
+        _artifact_out: &Path,
+        _host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(Self::refusal())
+    }
+
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities::default()
+    }
+}
 
 /// Resolve the optional seeded Nix store closure NAR for the live host's
 /// arch, the same per-arch cache dir every libkrun/qemu builder image read

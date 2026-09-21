@@ -398,7 +398,7 @@ fn dev_build_via_builder_vm_uncached(
     if persistent_routing_allowed(&residency, persistent_dispatch_disabled())
         && crate::builder_vm_runtime::nix_store_image_is_contended(
             &crate::builder_vm::builder_vm_cache_dir(),
-            crate::libkrun_builder::host_arch_tag(),
+            crate::builder_vm::host_arch_tag(),
         )
         && let crate::persistent_builder::SessionAcquisition::Ready(record) =
             crate::persistent_builder::adopt_or_start_session()
@@ -524,8 +524,8 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     mode: BuildMode,
     builder: &B,
 ) -> Result<DevBuildResult> {
+    use crate::builder_vm::GUEST_WORK_DIR;
     use crate::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
-    use crate::libkrun_builder::GUEST_WORK_DIR;
 
     let system = host_system_linux();
     let attr_path = match profile {
@@ -649,8 +649,8 @@ fn try_typed_persistent_build(
     profile: Option<&str>,
 ) -> Option<Result<DevBuildResult>> {
     use crate::builder_route::{BuildDispatch, BuildVerdict, try_typed_build};
+    use crate::builder_vm::GUEST_WORK_DIR;
     use crate::builder_vm::host_system_linux;
-    use crate::libkrun_builder::GUEST_WORK_DIR;
 
     // This route reaches its artifacts through the `/job` share: it stages into
     // a host directory and tells the daemon to export to the guest path the
@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(
             job,
             &crate::builder_vm::BuilderJob::Flake {
-                flake_ref: crate::libkrun_builder::GUEST_WORK_DIR.to_string(),
+                flake_ref: crate::builder_vm::GUEST_WORK_DIR.to_string(),
                 attr_path: format!(
                     "packages.{}.tenant-worker",
                     crate::builder_vm::host_system_linux()

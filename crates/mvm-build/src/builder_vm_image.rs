@@ -1,0 +1,402 @@
+//! VMM-neutral builder image discovery and Stage 0 persistent-store setup.
+
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Deserialize;
+
+use crate::builder_vm::{
+    BUILDER_VM_CACHE_CONTRACT_VERSION, BuilderVmError, BuilderVmImage, builder_vm_cache_dir,
+    host_arch_tag, stage0_store_image_name_for,
+};
+
+#[derive(Debug, Deserialize)]
+struct BuilderVmCacheManifest {
+    #[serde(default)]
+    cache_contract_version: u32,
+    #[serde(default)]
+    runtime_overlay_ready: bool,
+    #[serde(default)]
+    vsock_egress_ready: bool,
+}
+
+fn append_cmdline_token(base: &str, token: &str) -> String {
+    if base.split_whitespace().any(|existing| existing == token) {
+        base.to_string()
+    } else if base.trim().is_empty() {
+        token.to_string()
+    } else {
+        format!("{base} {token}")
+    }
+}
+
+/// The source checkout this package was compiled from, when its builder image
+/// flake is still present.
+pub fn builder_vm_source_checkout_root() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
+    workspace_root
+        .join("nix/images/builder-vm/flake.nix")
+        .is_file()
+        .then_some(workspace_root)
+}
+
+fn read_manifest(path: &Path, arch_dir: &Path) -> Result<BuilderVmCacheManifest, BuilderVmError> {
+    let body = std::fs::read_to_string(path).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "{} missing or unreadable ({error}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
+            path.display(),
+            arch_dir.display(),
+        ))
+    })?;
+    serde_json::from_str(&body).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "{} is malformed ({error}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
+            path.display(),
+            arch_dir.display(),
+        ))
+    })
+}
+
+fn validate_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
+    let kernel = arch_dir.join("vmlinux");
+    let rootfs = arch_dir.join("rootfs.ext4");
+    let cmdline_path = arch_dir.join("cmdline.txt");
+    if !kernel.is_file() || !rootfs.is_file() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "builder VM image not found at {}. Populate the cache by running `nix build ./nix/images/builder-vm#packages.{}-linux.default` on a host with Nix and copying `result/{{vmlinux,rootfs.ext4,cmdline.txt}}` to {}/.",
+            arch_dir.display(),
+            host_arch_tag(),
+            arch_dir.display(),
+        )));
+    }
+    let cmdline = std::fs::read_to_string(&cmdline_path)
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!(
+                "{} missing or unreadable ({error}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
+                cmdline_path.display(),
+                arch_dir.display(),
+            ))
+        })?
+        .trim()
+        .to_string();
+    let cmdline = append_cmdline_token(
+        &cmdline,
+        &crate::builder_vm::builder_hostepoch_cmdline_token(),
+    );
+    let manifest = read_manifest(&arch_dir.join("manifest.json"), arch_dir)?;
+    if manifest.cache_contract_version != BUILDER_VM_CACHE_CONTRACT_VERSION
+        || !manifest.runtime_overlay_ready
+        || !manifest.vsock_egress_ready
+    {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={BUILDER_VM_CACHE_CONTRACT_VERSION}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
+            arch_dir.display(),
+            arch_dir.display(),
+        )));
+    }
+    Ok(cmdline)
+}
+
+fn load_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
+    Ok(BuilderVmImage::new(
+        arch_dir.join("vmlinux"),
+        arch_dir.join("rootfs.ext4"),
+        validate_cache(arch_dir)?,
+    ))
+}
+
+fn default_cache_dir() -> PathBuf {
+    crate::cache_install::default_cache_root().join("builder-vm")
+}
+
+fn shared_cache_is_trustworthy(source: &Path) -> bool {
+    use crate::cache_install::DigestManifestCheck;
+    match crate::cache_install::verify_digest_manifest(
+        source,
+        crate::cache_install::BUILDER_VM_ARTIFACT_DIGEST_FILE,
+        crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+    ) {
+        DigestManifestCheck::Match | DigestManifestCheck::ManifestAbsent => true,
+        rejected => {
+            tracing::debug!(source = %source.display(), verdict = ?rejected,
+                "declining to seed builder image from shared cache: recorded digests do not match");
+            false
+        }
+    }
+}
+
+fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(target).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!("create {}: {error}", target.display()))
+    })?;
+    for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
+        let from = source.join(name);
+        let to = target.join(name);
+        std::fs::copy(&from, &to).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!(
+                "seed builder image cache {} -> {}: {error}",
+                from.display(),
+                to.display(),
+            ))
+        })?;
+    }
+    for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
+        let from = source.join(name);
+        if from.is_file() {
+            let _ = std::fs::copy(&from, target.join(name));
+        }
+    }
+    Ok(())
+}
+
+fn seed_from_default_cache(target: &Path) -> Result<bool, BuilderVmError> {
+    crate::cache_install::seed_on_miss(
+        &builder_vm_cache_dir().join(host_arch_tag()),
+        &default_cache_dir().join(host_arch_tag()),
+        |source| {
+            validate_cache(source).ok()?;
+            shared_cache_is_trustworthy(source).then(|| source.to_path_buf())
+        },
+        |source| copy_cache(&source, target),
+    )
+}
+
+/// Find the current builder image in the configured cache, seeding or
+/// bootstrapping it on a cache miss.
+pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
+    let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
+    match load_from_cache(&arch_dir) {
+        Ok(image) => Ok(image),
+        Err(initial_error) => {
+            if seed_from_default_cache(&arch_dir)? {
+                return load_from_cache(&arch_dir);
+            }
+            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
+                return Err(initial_error);
+            }
+            load_from_cache(&arch_dir)
+        }
+    }
+}
+
+/// Filename of Stage 0's dedicated persistent Nix-store image.
+pub fn stage0_nix_store_image_name() -> String {
+    stage0_store_image_name_for(host_arch_tag())
+}
+
+/// Populate the Stage 0 store image from a materialized seed, when present.
+pub fn prepopulate_stage0_nix_store_image(
+    image: &BuilderVmImage,
+    store_image: &Path,
+) -> Result<(), BuilderVmError> {
+    let host_mkfs = find_host_mkfs_ext4();
+    prepopulate_with_mkfs(image, store_image, host_mkfs.as_deref())
+}
+
+pub(crate) fn prepopulate_with_mkfs(
+    image: &BuilderVmImage,
+    store_image: &Path,
+    host_mkfs: Option<&Path>,
+) -> Result<(), BuilderVmError> {
+    let BuilderVmImage::RootDir { root_dir, .. } = image else {
+        return Ok(());
+    };
+    let seed_nix = root_dir.join("nix");
+    let seed_store = seed_nix.join("store");
+    if !seed_store.is_dir() {
+        return Ok(());
+    }
+    let marker = stage0_marker(&seed_store)?;
+    let marker_path = marker_path(store_image);
+    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
+        && superblock_is_recoverable(store_image)?
+    {
+        return Ok(());
+    }
+    if marker_path.exists() {
+        std::fs::remove_file(&marker_path).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("remove {}: {error}", marker_path.display()))
+        })?;
+    }
+    if let Some(mkfs) = host_mkfs {
+        let blocks = host_file_4k_blocks(store_image)?;
+        let status = Command::new(mkfs)
+            .args(["-F", "-q", "-b", "4096", "-L"])
+            .arg(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+            .arg("-d")
+            .arg(&seed_nix)
+            .arg(store_image)
+            .arg(blocks.to_string())
+            .status()
+            .map_err(|error| {
+                BuilderVmError::ExtractionFailed(format!("spawn {}: {error}", mkfs.display()))
+            })?;
+        if !status.success() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "{} -d {} -> {} exited {}",
+                mkfs.display(),
+                seed_nix.display(),
+                store_image.display(),
+                status.code().unwrap_or(-1),
+            )));
+        }
+    } else {
+        format_empty_stage0_store(store_image)?;
+    }
+    std::fs::write(&marker_path, marker).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!("write {}: {error}", marker_path.display()))
+    })
+}
+
+pub(crate) fn format_empty_stage0_store(path: &Path) -> Result<(), BuilderVmError> {
+    let blocks = host_file_4k_blocks(path)?;
+    let size = blocks * mvm_fs::ext4::BLOCK_SIZE as u64;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("open {}: {error}", path.display()))
+        })?;
+    let device_size = file
+        .metadata()
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {error}", path.display()))
+        })?
+        .len();
+    file.set_len(0)
+        .and_then(|()| file.set_len(device_size))
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("resize {}: {error}", path.display()))
+        })?;
+    mvm_fs::ext4::mkfs::format_empty_ext4_labeled(
+        &mut file,
+        size,
+        crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes(),
+    )
+    .map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "pure-Rust ext4 format of {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn find_host_mkfs_ext4() -> Option<PathBuf> {
+    [
+        "/sbin/mkfs.ext4",
+        "/usr/sbin/mkfs.ext4",
+        "/bin/mkfs.ext4",
+        "/usr/bin/mkfs.ext4",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+    .or_else(|| which::which("mkfs.ext4").ok())
+}
+
+pub(crate) fn host_file_4k_blocks(path: &Path) -> Result<u64, BuilderVmError> {
+    let len = std::fs::metadata(path)
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {error}", path.display()))
+        })?
+        .len();
+    let blocks = len / 4096;
+    if blocks <= 16 {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Stage 0 store image {} is too small for ext4 prepopulation ({len} bytes)",
+            path.display()
+        )));
+    }
+    Ok(blocks - 16)
+}
+
+pub(crate) fn marker_path(store_image: &Path) -> PathBuf {
+    store_image.with_extension("stage0-seed")
+}
+
+pub fn invalidate_stage0_store_after_ext4_error(
+    console_log: &Path,
+    store_image: &Path,
+) -> Result<(), BuilderVmError> {
+    let console = std::fs::read_to_string(console_log).unwrap_or_default();
+    if !console.contains("persistent Stage 0 ext4 store reported") {
+        return Ok(());
+    }
+    match std::fs::remove_file(marker_path(store_image)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
+            "remove invalid Stage 0 store marker for {}: {error}",
+            store_image.display()
+        ))),
+    }
+}
+
+fn superblock_is_recoverable(path: &Path) -> Result<bool, BuilderVmError> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!("open {}: {error}", path.display()))
+    })?;
+    file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("seek {}: {error}", path.display()))
+        })?;
+    let mut fields = [0_u8; 4];
+    file.read_exact(&mut fields).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "read ext4 state from {}: {error}",
+            path.display()
+        ))
+    })?;
+    let magic = u16::from_le_bytes([fields[0], fields[1]]);
+    let state = u16::from_le_bytes([fields[2], fields[3]]);
+    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state & EXT4_ERROR_FS == 0)
+}
+
+pub(crate) fn stage0_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
+    Ok(format!(
+        "schema_version=2\nseed_store_entries_sha256={}\n",
+        crate::seed_store_entries::seed_store_entries_hash(seed_store)
+            .map_err(BuilderVmError::ExtractionFailed)?
+    ))
+}
+
+#[cfg(test)]
+pub(crate) const EXT4_VALID_FS: u16 = 0x0001;
+pub(crate) const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
+pub(crate) const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
+pub(crate) const EXT4_ERROR_FS: u16 = 0x0002;
+
+/// A collision-resistant per-process job identifier shared by all VMMs.
+pub fn unique_job_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("{millis:013}-{}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_id_uses_one_shared_timestamp_pid_shape() {
+        let id = unique_job_id();
+        let (millis, pid) = id.split_once('-').expect("timestamp-pid shape");
+        assert!(millis.parse::<u128>().is_ok());
+        assert_eq!(pid, std::process::id().to_string());
+    }
+
+    #[test]
+    fn stage0_store_name_is_arch_keyed() {
+        assert_eq!(
+            stage0_nix_store_image_name(),
+            format!("nix-store-stage0-{}.img", host_arch_tag())
+        );
+    }
+}

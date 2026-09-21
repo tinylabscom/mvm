@@ -113,11 +113,11 @@ pub const MVM_BUILDER_VM_TIMEOUT_SECS_ENV: &str = "MVM_BUILDER_VM_TIMEOUT_SECS";
 /// space). When the in-guest store exceeds this after a build, the
 /// build script runs `nix-collect-garbage --delete-older-than 14d`.
 /// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB
-/// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::libkrun_builder::DEFAULT_NIX_STORE_MIB)).
+/// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::builder_vm::DEFAULT_NIX_STORE_MIB)).
 /// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`].
 ///
 /// Lives here because `render_flake_cmd_sh` reads it at render time;
-/// `libkrun_builder` re-exports it near `DEFAULT_NIX_STORE_MIB` for
+/// The libkrun compatibility module re-exports it near `DEFAULT_NIX_STORE_MIB` for
 /// discoverability.
 pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
 
@@ -1040,6 +1040,7 @@ fn diagnose_log_path(label: &str, path: &Path) -> String {
 /// calls stream only the freshly-appended tail. Extracted so the tail behaviour
 /// is unit-testable without a thread or a VM. Write errors are swallowed — the
 /// echo must never fail a build.
+#[cfg(any(feature = "builder-libkrun", test))]
 fn drain_appended(file: &mut std::fs::File, sink: &mut impl std::io::Write) -> bool {
     use std::io::Read;
     let mut chunk = Vec::new();
@@ -1057,6 +1058,7 @@ fn drain_appended(file: &mut std::fs::File, sink: &mut impl std::io::Write) -> b
 /// equivalent signal at this layer. Crate-visible: both the nix-stream
 /// streamer here and the host-side supervisor rebuild in `libkrun_builder`
 /// read the same signal.
+#[cfg(any(feature = "builder-libkrun", test))]
 pub(crate) fn verbose_from_env() -> bool {
     std::env::var_os("RUST_LOG").is_some()
 }
@@ -1069,11 +1071,13 @@ pub(crate) fn verbose_from_env() -> bool {
 /// host only read it *after* a failure; this tails it to stderr while the build
 /// runs, but only when verbose (`-v`/`RUST_LOG`). Quiet builds spawn no thread
 /// and pay nothing. Stops + drains on drop, so the closing lines aren't lost.
+#[cfg(any(feature = "builder-libkrun", test))]
 pub(crate) struct JobLogStreamer {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(any(feature = "builder-libkrun", test))]
 impl JobLogStreamer {
     /// Start streaming `nix_stderr_log` to stderr if verbose; otherwise a no-op
     /// guard (no thread).
@@ -1097,6 +1101,7 @@ impl JobLogStreamer {
     }
 }
 
+#[cfg(any(feature = "builder-libkrun", test))]
 impl Drop for JobLogStreamer {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1109,6 +1114,7 @@ impl Drop for JobLogStreamer {
 /// Tail loop: open `log_path` (retrying each poll until the in-guest build
 /// creates it on first write), forward freshly-appended bytes until `stop`,
 /// then one final drain to capture the tail written after the last poll.
+#[cfg(any(feature = "builder-libkrun", test))]
 fn tail_forward(
     log_path: &std::path::Path,
     stop: &std::sync::atomic::AtomicBool,

@@ -17,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 
 use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_choice};
-use mvm_build::builder_vm::{BuilderVm, BuilderVmError};
-use mvm_build::libkrun_builder::{BuilderShellJob, LibkrunBuilderVm};
+use mvm_build::builder_vm::{BuilderShellJob, BuilderVm, BuilderVmError};
+use mvm_build::libkrun_builder::LibkrunBuilderVm;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
