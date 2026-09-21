@@ -60,8 +60,8 @@ impl LineageKind {
 /// with the revert engine, which resolves a target identically before restoring.
 #[derive(Debug)]
 pub(in crate::commands::vm::checkpoint) enum ResolvedTarget {
-    Checkpoint(CheckpointMeta),
-    Image(ImageNode),
+    Checkpoint(Box<CheckpointMeta>),
+    Image(Box<ImageNode>),
 }
 
 pub(in crate::commands) fn run_timeline(args: TimelineArgs) -> Result<()> {
@@ -73,9 +73,9 @@ pub(in crate::commands) fn run_timeline(args: TimelineArgs) -> Result<()> {
     let resolved = resolve_target(&checkpoint_store, &image_store, &args.target, args.kind)?;
     let timeline = match resolved {
         ResolvedTarget::Checkpoint(meta) => {
-            build_checkpoint_timeline(&checkpoint_store, &anchor, meta)?
+            build_checkpoint_timeline(&checkpoint_store, &anchor, *meta)?
         }
-        ResolvedTarget::Image(node) => build_image_timeline(&image_store, &anchor, node)?,
+        ResolvedTarget::Image(node) => build_image_timeline(&image_store, &anchor, *node)?,
     };
 
     if args.json {
@@ -127,8 +127,8 @@ fn resolve_digest(
             "digest {digest} names BOTH a checkpoint and an image node; \
              disambiguate with `--kind checkpoint` or `--kind image`"
         ),
-        (Some(meta), None) => Ok(ResolvedTarget::Checkpoint(meta)),
-        (None, Some(node)) => Ok(ResolvedTarget::Image(node)),
+        (Some(meta), None) => Ok(ResolvedTarget::Checkpoint(Box::new(meta))),
+        (None, Some(node)) => Ok(ResolvedTarget::Image(Box::new(node))),
         (None, None) => match kind {
             Some(k) => bail!("no {} lineage record found for digest {digest}", k.as_str()),
             None => bail!("no checkpoint or image lineage record found for digest {digest}"),
@@ -153,7 +153,7 @@ fn resolve_checkpoint_id(
     let meta = store
         .read_meta(&id)
         .with_context(|| format!("no checkpoint {raw:?} found"))?;
-    Ok(ResolvedTarget::Checkpoint(meta))
+    Ok(ResolvedTarget::Checkpoint(Box::new(meta)))
 }
 
 // ── timeline model (shared by both DAGs) ─────────────────────────────────────
@@ -842,7 +842,7 @@ mod tests {
             panic!("digest must resolve to an image node");
         };
         let anchor = SignedChainAnchor::load().unwrap();
-        let timeline = build_image_timeline(&istore, &anchor, node).unwrap();
+        let timeline = build_image_timeline(&istore, &anchor, *node).unwrap();
 
         assert_eq!(timeline.kind, "image");
         assert_eq!(timeline.node.digest, g1.node_digest.to_string());

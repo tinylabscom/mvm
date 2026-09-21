@@ -376,10 +376,16 @@ const STANDBY_PARENT_TENANT: &str = "standby";
 
 /// The captured parent's own rootfs digest — the bytes it actually booted, so
 /// the plan admitted for it describes what it is rather than what asked for it.
-fn captured_rootfs_digest(meta: &mvm_core::checkpoint::CheckpointMeta) -> Result<String> {
-    mvm_runtime::workload_runner::claim::parent_rootfs_digest(meta)
-        .map(str::to_string)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+fn captured_rootfs_digest(
+    checkpoints: &CheckpointStore,
+    meta: &mvm_core::checkpoint::CheckpointMeta,
+) -> Result<String> {
+    mvm_runtime::checkpoint::materialized_blob_sha256(
+        checkpoints,
+        meta,
+        mvm_core::checkpoint::ROOTFS_BLOB,
+    )
+    .context("reading the captured parent's materialized rootfs digest")
 }
 
 /// Admit a signed `ExecutionPlan` for a captured factory parent.
@@ -474,7 +480,7 @@ fn audit_captured_parent(
     let meta = checkpoints
         .read_meta(&CheckpointId::new(checkpoint_id.to_string()))
         .with_context(|| format!("reading captured checkpoint '{checkpoint_id}'"))?;
-    let rootfs_sha256 = captured_rootfs_digest(&meta)?;
+    let rootfs_sha256 = captured_rootfs_digest(checkpoints, &meta)?;
     let admitted = admit_standby_parent_plan(
         handle,
         backend_name,
@@ -734,8 +740,8 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
 /// child is cloned from that captured content — so a parent captured from image
 /// A must never be handed to a launch of image B. This key is what keeps the
 /// two apart, and it is deliberately the **same digest** claim-8 admission puts
-/// on `plan.image.sha256` and that the runner's `bind_plan_to_parent` checks a
-/// captured parent's `rootfs.ext4` blob against. A standby that passes this
+/// on `plan.image.sha256` and that the runner's `bind_plan_to_parent_digest` checks against
+/// the captured parent's materialized rootfs digest. A standby that passes this
 /// pre-filter is therefore one the downstream binding will also accept, rather
 /// than one that gets reserved and then refused.
 ///
@@ -1130,6 +1136,46 @@ mod tests {
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex_lower(&Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn captured_rootfs_digest_uses_materialized_bytes_for_chunked_checkpoints() {
+        use mvm_runtime::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        let rootfs_bytes = b"captured chunked rootfs";
+        std::fs::write(&rootfs, rootfs_bytes).unwrap();
+        let expected = sha256_hex_of(rootfs_bytes);
+        let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let meta = capture_fs_quick(
+            &checkpoints,
+            CaptureFsQuickParams {
+                id: CheckpointId::new("chunked-parent"),
+                vm_name: "standby-parent".into(),
+                rootfs,
+                supervisor_config_digest: "config".into(),
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+                grants: None,
+            },
+        )
+        .unwrap();
+        let index_address = meta
+            .content
+            .iter()
+            .find(|blob| blob.name == mvm_core::checkpoint::ROOTFS_BLOB)
+            .unwrap()
+            .sha256
+            .clone();
+
+        assert_ne!(index_address, expected);
+        assert_eq!(
+            captured_rootfs_digest(&checkpoints, &meta).unwrap(),
+            expected
+        );
     }
 
     // ── Warm-claim eligibility-gate tests. They assert `try_warm_claim` fails

@@ -2,11 +2,11 @@
 //!
 //! A capture writes every blob into a private staging directory under the
 //! store root, never under the checkpoint's own name. It then commits in a
-//! fixed order ([`commit_plan`]): every file in the content directory is
-//! synced, then the content directory, then the metadata is written through a
-//! synced temporary file, then the staging directory is synced. Only then is
-//! the staging directory renamed to the checkpoint's name and the store root
-//! synced.
+//! fixed order ([`commit_plan`]): every file in the content tree is synced,
+//! then nested directories deepest-first, then the content directory, then
+//! the metadata is written through a synced temporary file, then the staging
+//! directory is synced. Only then is the staging directory renamed to the
+//! checkpoint's name and the store root synced.
 //!
 //! The rename is the single point at which a checkpoint appears, and it is
 //! atomic. A crash before it leaves nothing under the checkpoint's name — only
@@ -65,12 +65,14 @@ pub(super) enum CommitStep {
 /// naming them, then the name under which both appear.
 pub(super) fn commit_plan(
     files: Vec<PathBuf>,
+    nested_content_dirs: Vec<PathBuf>,
     content_dir: PathBuf,
     staging_dir: PathBuf,
     store_root: PathBuf,
 ) -> Vec<CommitStep> {
-    vec![
-        CommitStep::SyncFiles(files),
+    let mut steps = vec![CommitStep::SyncFiles(files)];
+    steps.extend(nested_content_dirs.into_iter().map(CommitStep::SyncDir));
+    steps.extend([
         CommitStep::SyncDir(content_dir),
         CommitStep::WriteMeta,
         CommitStep::SyncDir(staging_dir),
@@ -78,7 +80,8 @@ pub(super) fn commit_plan(
         CommitStep::Publish,
         CommitStep::SyncDir(store_root),
         CommitStep::DropReplaced,
-    ]
+    ]);
+    steps
 }
 
 /// A capture in progress: a private directory the capture writes into, which
@@ -135,8 +138,10 @@ impl<'a> StagedCapture<'a> {
 
     /// The commit order for what is staged now.
     pub(super) fn plan(&self) -> Result<Vec<CommitStep>> {
+        let (files, nested_dirs) = content_tree_entries(&self.content_dir())?;
         Ok(commit_plan(
-            regular_files_in(&self.content_dir())?,
+            files,
+            nested_dirs,
             self.content_dir(),
             self.dir.clone(),
             self.store.root().to_path_buf(),
@@ -279,19 +284,34 @@ pub(super) fn sweep_abandoned(staging_root: &Path) {
     }
 }
 
-/// Every regular file directly in `dir`, sorted. The content directory is
-/// flat, and syncing everything in it — not only what the manifest names —
-/// also covers files a snapshot backend signs into it.
-fn regular_files_in(dir: &Path) -> Result<Vec<PathBuf>> {
+/// Every regular file and nested directory under `dir`. Directories are
+/// deepest-first so every entry is durable before the directory that names it.
+fn content_tree_entries(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-        if entry.file_type()?.is_file() {
-            files.push(entry.path());
+    let mut directories = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in
+            std::fs::read_dir(&current).with_context(|| format!("reading {}", current.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", current.display()))?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                directories.push(entry.path());
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
         }
     }
     files.sort();
-    Ok(files)
+    directories.sort_by(|a, b| {
+        b.components()
+            .count()
+            .cmp(&a.components().count())
+            .then_with(|| a.cmp(b))
+    });
+    Ok((files, directories))
 }
 
 /// Sync `files` concurrently: the device can service several flushes at once,
@@ -310,6 +330,7 @@ mod tests {
     fn the_plan_makes_blobs_durable_before_the_record_and_the_record_before_the_name() {
         let plan = commit_plan(
             vec![PathBuf::from("/s/content/memory.bin")],
+            Vec::new(),
             PathBuf::from("/s/content"),
             PathBuf::from("/s"),
             PathBuf::from("/root"),
@@ -327,6 +348,24 @@ mod tests {
                 CommitStep::DropReplaced,
             ]
         );
+    }
+
+    #[test]
+    fn a_chunk_tree_syncs_files_then_directories_from_the_leaves_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = tmp.path().join("content");
+        let shard = content.join(".chunks/ab");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(content.join("memory.bin.chunks.json"), b"index").unwrap();
+        std::fs::write(shard.join("abcdef"), b"chunk").unwrap();
+
+        let (files, directories) = content_tree_entries(&content).unwrap();
+
+        assert_eq!(
+            files,
+            vec![shard.join("abcdef"), content.join("memory.bin.chunks.json")]
+        );
+        assert_eq!(directories, vec![shard, content.join(".chunks")]);
     }
 
     #[test]

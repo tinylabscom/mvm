@@ -290,6 +290,13 @@
       closed when a restore's Firecracker identity cannot be confirmed. Its
       live Firecracker refusal witness and a chain-signed refusal entry are
       open.
+      W7 (issue #3384) now has its canonical 1 MiB chunk index, durable
+      per-domain hard-link pool, zero elision, chunked memory/rootfs capture,
+      parallel verification and verified contiguous materialization. Chunk
+      verification measured 5.14–10.88x over serial at 1–4 GiB. Live idle
+      recapture added 6.459% on HVF and 5.360% on Firecracker; two Firecracker
+      sibling restores authenticated and received distinct reseeded
+      randomness. C0–C3 are complete; C4–C8 remain open.
   - [ ] W5 — issue #3382: copy-on-write HVF restore from a verified,
         unlinked private clone (W5.1–W5.6); no page sharing between restored
         guests; a cross-tenant restore or fork is refused as a policy guard.

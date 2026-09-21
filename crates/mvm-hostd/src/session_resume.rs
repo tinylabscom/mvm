@@ -552,19 +552,8 @@ fn stage_resume_point(
     parent: &CheckpointMeta,
     state_dir: &Path,
 ) -> Result<()> {
-    std::fs::create_dir_all(state_dir)
-        .with_context(|| format!("creating session state dir {}", state_dir.display()))?;
-    let content_dir = checkpoints.content_dir(&parent.id);
-    for blob in &parent.content {
-        let dst = state_dir.join(&blob.name);
-        if dst.exists() {
-            std::fs::remove_file(&dst)
-                .with_context(|| format!("removing stale {}", dst.display()))?;
-        }
-        mvm_runtime::base::cow::clone_rootfs_for_instance(&content_dir.join(&blob.name), &dst)
-            .with_context(|| format!("staging resume-point blob {}", blob.name))?;
-    }
-    Ok(())
+    mvm_runtime::checkpoint::materialize_checkpoint_blobs(checkpoints, parent, state_dir)
+        .context("staging resume-point blobs")
 }
 
 /// Labels that ride a `session.resumed` audit entry.
@@ -962,6 +951,21 @@ mod tests {
         .unwrap()
     }
 
+    fn first_chunk_membership(
+        store: &CheckpointStore,
+        checkpoint: &CheckpointMeta,
+        blob_name: &str,
+    ) -> std::path::PathBuf {
+        let content_dir = store.content_dir(&checkpoint.id);
+        let index_path = content_dir.join(format!("{blob_name}.chunks.json"));
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(index_path).unwrap()).unwrap();
+        let digest = index["chunks"][0]["object"]
+            .as_str()
+            .expect("the fixture's first chunk must be an object");
+        content_dir.join(".chunks").join(&digest[..2]).join(digest)
+    }
+
     /// The two stores and the signer dir a resume runs against.
     struct Fixture {
         tmp: TempDir,
@@ -1115,8 +1119,20 @@ mod tests {
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
         fx.sessions.write(&rec).unwrap();
 
-        // Byte-flip the content blob the stored record still vouches for.
-        let blob = fx.checkpoints.content_dir(&parent.id).join("rootfs.ext4");
+        // Byte-flip the stored chunk the authenticated index still vouches for.
+        let blob = first_chunk_membership(&fx.checkpoints, &parent, "rootfs.ext4");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &blob,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(&blob).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&blob, permissions).unwrap();
+        }
         std::fs::write(&blob, b"tampered").unwrap();
 
         let m = material();
@@ -1149,10 +1165,24 @@ mod tests {
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
         fx.sessions.write(&rec).unwrap();
 
-        let blob_path = fx.checkpoints.content_dir(&parent.id).join("rootfs.ext4");
+        let content_dir = fx.checkpoints.content_dir(&parent.id);
+        let index_path = content_dir.join("rootfs.ext4.chunks.json");
         let tampered = b"tampered-and-rehashed";
-        std::fs::write(&blob_path, tampered).unwrap();
-        let tampered_sha256 = mvm_core::crypto::image_verify::sha256_file(&blob_path).unwrap();
+        let forged_object = fx.tmp.path().join("forged-object");
+        std::fs::write(&forged_object, tampered).unwrap();
+        let tampered_sha256 = mvm_core::crypto::image_verify::sha256_file(&forged_object).unwrap();
+        let membership = content_dir
+            .join(".chunks")
+            .join(&tampered_sha256[..2])
+            .join(&tampered_sha256);
+        std::fs::create_dir_all(membership.parent().unwrap()).unwrap();
+        std::fs::write(&membership, tampered).unwrap();
+
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+        index["chunks"][0] = serde_json::json!({"object": tampered_sha256});
+        std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+        let forged_index_sha256 = mvm_core::crypto::image_verify::sha256_file(&index_path).unwrap();
 
         let mut forged = fx.checkpoints.read_meta(&parent.id).unwrap();
         let blob = forged
@@ -1160,7 +1190,7 @@ mod tests {
             .iter_mut()
             .find(|b| b.name == "rootfs.ext4")
             .expect("the seeded checkpoint records a rootfs blob");
-        blob.sha256 = tampered_sha256;
+        blob.sha256 = forged_index_sha256;
         // Precondition: the forgery is content-consistent (verify_content
         // alone would pass it) but digest-inconsistent (compute_meta_digest
         // now disagrees with the untouched meta_digest).
@@ -1291,10 +1321,8 @@ mod tests {
             "the boot rootfs must be the session's own staged copy"
         );
         let staged = std::fs::read(&cfg.rootfs_path).expect("the staged rootfs must be on disk");
-        let source =
-            std::fs::read(fx.checkpoints.content_dir(&parent.id).join("rootfs.ext4")).unwrap();
         assert_eq!(
-            staged, source,
+            staged, b"fake-ext4-bytes",
             "the staged copy must carry the resume point's bytes"
         );
     }

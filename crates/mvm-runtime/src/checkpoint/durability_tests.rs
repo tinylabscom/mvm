@@ -51,7 +51,7 @@ impl VmFullControl for Control {
 }
 
 struct Fixture {
-    _tmp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     store: CheckpointStore,
     rootfs: PathBuf,
 }
@@ -62,7 +62,7 @@ fn fixture() -> Fixture {
     let rootfs = tmp.path().join("live-rootfs.ext4");
     std::fs::write(&rootfs, b"disk").unwrap();
     Fixture {
-        _tmp: tmp,
+        temp: tmp,
         store,
         rootfs,
     }
@@ -130,10 +130,18 @@ fn a_failed_recapture_leaves_the_previous_checkpoint_intact_and_verifying() {
     assert_eq!(stored, first);
     verify_content(&fx.store, &stored)
         .expect("a failed attempt to replace a checkpoint must not damage it");
-    assert_eq!(
-        std::fs::read(fx.store.content_dir(&first.id).join("memory.bin")).unwrap(),
-        b"first memory"
-    );
+    let restored = fx.temp.path().join("restored-memory.bin");
+    chunks::materialize_blob(
+        &fx.store.content_dir(&first.id),
+        first
+            .content
+            .iter()
+            .find(|blob| blob.name == "memory.bin")
+            .unwrap(),
+        &restored,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(restored).unwrap(), b"first memory");
 }
 
 #[test]
@@ -142,7 +150,7 @@ fn a_successful_capture_leaves_only_the_checkpoint_and_the_empty_staging_area() 
     let meta = capture(&fx, "c1", b"mem", false).unwrap();
     verify_content(&fx.store, &meta).unwrap();
 
-    assert_eq!(store_entries(&fx.store), vec![".staging", "c1"]);
+    assert_eq!(store_entries(&fx.store), vec![".objects", ".staging", "c1"]);
     let staging: Vec<_> = std::fs::read_dir(fx.store.root().join(".staging"))
         .unwrap()
         .collect();
@@ -158,7 +166,7 @@ fn a_successful_recapture_replaces_the_previous_checkpoint_whole() {
     let stored = fx.store.read_meta(&second.id).unwrap();
     assert_eq!(stored, second);
     verify_content(&fx.store, &stored).unwrap();
-    assert_eq!(store_entries(&fx.store), vec![".staging", "c1"]);
+    assert_eq!(store_entries(&fx.store), vec![".objects", ".staging", "c1"]);
 }
 
 /// What the store holds for `id` after a stop: nothing, or a record whose
@@ -190,21 +198,40 @@ fn stage<'a>(
 ) -> (staging::StagedCapture<'a>, CheckpointMeta) {
     let staged = staging::StagedCapture::begin(store, &CheckpointId::new(id)).unwrap();
     let content = staged.content_dir();
-    std::fs::write(content.join("memory.bin"), memory).unwrap();
-    std::fs::write(content.join("rootfs.ext4"), b"disk").unwrap();
-    let blobs = ["memory.bin", "rootfs.ext4"]
-        .into_iter()
-        .map(|name| ContentBlob {
-            name: name.into(),
-            sha256: sha256_file_hex(&content.join(name)).unwrap(),
-        })
-        .collect();
+    let memory_source = content.join(".memory-source");
+    let rootfs_source = content.join(".rootfs-source");
+    std::fs::write(&memory_source, memory).unwrap();
+    std::fs::write(&rootfs_source, b"disk").unwrap();
+    let pool = chunks::ObjectPool::new(store.root(), &Default::default()).unwrap();
+    let blobs = vec![
+        chunks::chunk_blob(&pool, &content, "memory.bin", &memory_source, false).unwrap(),
+        chunks::chunk_blob(&pool, &content, "rootfs.ext4", &rootfs_source, true).unwrap(),
+    ];
+    std::fs::remove_file(memory_source).unwrap();
+    std::fs::remove_file(rootfs_source).unwrap();
     let meta = CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::VmFull, "vm")
         .content(blobs)
         .supervisor_config_digest("d")
         .created_unix(1)
         .build();
     (staged, meta)
+}
+
+#[test]
+fn a_crash_between_chunk_object_and_index_publication_leaves_no_checkpoint() {
+    let fx = fixture();
+    let staged =
+        staging::StagedCapture::begin(&fx.store, &CheckpointId::new("object-only")).unwrap();
+    let pool = chunks::ObjectPool::new(fx.store.root(), &Default::default()).unwrap();
+    pool.store_and_link(&staged.content_dir(), b"object written before its index")
+        .unwrap();
+
+    std::mem::forget(staged);
+
+    assert!(
+        absent_or_verifying(&fx.store, &CheckpointId::new("object-only")).is_none(),
+        "an object without an authenticated index must not publish a checkpoint"
+    );
 }
 
 /// Run the first `steps` commit steps and then stop as a crash would: no
@@ -283,7 +310,17 @@ fn verify_reports_the_first_failing_blob_in_manifest_order() {
     // Damage every blob, so whichever worker finishes first, the report must
     // still name the manifest's first blob.
     for blob in &meta.content {
-        std::fs::write(content.join(&blob.name), b"tampered").unwrap();
+        if chunks::is_chunked_blob(&content, blob) {
+            let path = chunks::stored_chunk_paths(&content, blob)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            make_writable(&path);
+            std::fs::write(path, b"tampered").unwrap();
+        } else {
+            std::fs::write(content.join(&blob.name), b"tampered").unwrap();
+        }
     }
     let err = verify_content(&fx.store, &meta).unwrap_err().to_string();
     assert!(
@@ -296,8 +333,33 @@ fn verify_reports_the_first_failing_blob_in_manifest_order() {
 fn verify_refuses_a_missing_blob() {
     let fx = fixture();
     let meta = capture(&fx, "c1", b"mem", false).unwrap();
-    std::fs::remove_file(fx.store.content_dir(&meta.id).join("memory.bin")).unwrap();
+    let content = fx.store.content_dir(&meta.id);
+    let memory = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == "memory.bin")
+        .unwrap();
+    let path = chunks::stored_chunk_paths(&content, memory)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
     verify_content(&fx.store, &meta).unwrap_err();
+}
+
+fn make_writable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 }
 
 /// Serial against parallel verification of a realistically sized checkpoint,
@@ -388,4 +450,53 @@ fn verify_timing() {
          speedup: {:.2}x",
         serial.as_secs_f64() / parallel.as_secs_f64()
     );
+}
+
+/// Serial against per-chunk parallel verification at the three acceptance
+/// sizes. The synthetic index repeats one nonzero object so the benchmark
+/// hashes the full logical byte count without consuming 7 GiB of disk.
+#[test]
+#[ignore = "hashes 42 GiB across repeated runs and prints timings; run explicitly"]
+fn chunk_verify_timing() {
+    use std::time::Instant;
+
+    fn best_of<F: FnMut()>(runs: usize, mut f: F) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let start = Instant::now();
+                f();
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::at(tmp.path().join("store"));
+    let pool = chunks::ObjectPool::new(store.root(), &Default::default()).unwrap();
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+
+    for gib in [1u64, 2, 4] {
+        let content = tmp.path().join(format!("{gib}-gib-content"));
+        let blob = chunks::repeated_chunk_blob_for_benchmark(
+            &pool,
+            &content,
+            "memory.bin",
+            gib * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        let serial = best_of(3, || {
+            chunks::verify_blob_serial(&content, &blob).unwrap();
+        });
+        let parallel = best_of(3, || {
+            chunks::verify_blob(&content, &blob).unwrap();
+        });
+        println!(
+            "chunk_verify_timing: {gib} GiB logical, {cpus} cpus\n  \
+             serial (best of 3):   {serial:?}\n  \
+             parallel (best of 3): {parallel:?}\n  \
+             speedup: {:.2}x",
+            serial.as_secs_f64() / parallel.as_secs_f64()
+        );
+    }
 }

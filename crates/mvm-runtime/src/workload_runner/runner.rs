@@ -28,7 +28,7 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 use crate::checkpoint::{
     CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, VmFullControl,
     capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
-    ensure_child_grants_within_parent, verify_content, verify_lineage,
+    ensure_child_grants_within_parent, materialized_blob_sha256, verify_content, verify_lineage,
 };
 use crate::driver::{
     ChildForkRequest, PreloadChildRequest, RunningVm, RunningVmStopTiming, StandbyParentSpawn,
@@ -42,8 +42,8 @@ use crate::warm_snapshot::{
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
-    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent,
-    ensure_child_grants_within_host_ceiling, parent_rootfs_digest,
+    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent_digest,
+    ensure_child_grants_within_host_ceiling,
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 use mvm_vmm::host::cmdline;
@@ -556,7 +556,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
         let plan = claim_plan(claim)?;
-        bind_plan_to_parent(&plan.image.sha256, &parent).map_err(refuse)?;
+        let parent_image_sha256 =
+            materialized_blob_sha256(ctx.checkpoints, &parent, mvm_core::checkpoint::ROOTFS_BLOB)
+                .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
+        bind_plan_to_parent_digest(&plan.image.sha256, &parent_image_sha256).map_err(refuse)?;
         // The same comparison a vm_full fork makes, against the same
         // chain-verified parent record and through the same predicate. A warm
         // claim restores a child out of a parent's saved memory exactly as a
@@ -741,7 +744,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // the VMM. A fork restores a running guest out of the parent's saved
         // memory, so the child comes back holding the parent's CSPRNG state and
         // the parent's wall clock — nothing is scrubbed yet at this point.
-        let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
+        let content_hash =
+            materialized_blob_sha256(ctx.checkpoints, &parent, mvm_core::checkpoint::ROOTFS_BLOB)
+                .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
         let genid = fresh_generation_token(content_hash);
         let token = genid.token;
         let fork_request = ChildForkRequest {
@@ -3573,6 +3578,13 @@ mod tests {
         (checkpoints, snapshots, parent_id, parent_meta)
     }
 
+    fn materialized_parent_rootfs_digest(
+        checkpoints: &CheckpointStore,
+        parent: &CheckpointMeta,
+    ) -> String {
+        materialized_blob_sha256(checkpoints, parent, mvm_core::checkpoint::ROOTFS_BLOB).unwrap()
+    }
+
     #[test]
     fn resident_claim_accepts_a_valid_signed_bundle_manifest_without_hashing_blobs() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
@@ -3644,7 +3656,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
         let snapshot_id = parent_meta.snapshot_id.as_deref().unwrap();
         let manifest_digest =
             mvm_core::checkpoint::content_manifest_digest(&parent_meta.content).to_string();
@@ -3862,7 +3874,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -3999,7 +4011,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let mut handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4117,7 +4129,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
         let rootfs = src.path().join("rootfs.ext4");
 
         let runner = WorkloadRunner::new(
@@ -4305,7 +4317,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4582,7 +4594,7 @@ mod tests {
         // which runs AFTER materialize (so a child dir already exists).
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), false);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4660,7 +4672,7 @@ mod tests {
         // is a non-parent-fault failure reached after the child is tracked.
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), false);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let mut handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4739,7 +4751,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4884,7 +4896,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -4962,7 +4974,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -5031,7 +5043,7 @@ mod tests {
         // A grant-less parent, which is what a factory parent actually is.
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent_with_grants(store_root.path(), src.path(), true, None);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -5101,7 +5113,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent_with_grants(store_root.path(), src.path(), true, None);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -5249,7 +5261,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -5330,7 +5342,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
             seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));

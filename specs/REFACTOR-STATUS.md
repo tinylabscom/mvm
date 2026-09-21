@@ -221,9 +221,14 @@ Last updated: 2026-09-21
           a failed recapture leaves the old checkpoint intact; parallel
           per-blob verify (1.65–2.28x on 2–3 GiB checkpoints). Delivery:
           `specs/sprint/delivery/3384-durable-checkpoint-capture.md`.
-    - [ ] C1 — chunk index and per-domain, hard-linked object pool.
-    - [ ] C2 — chunked capture; idle second checkpoint under 10% of the first.
-    - [ ] C3 — parallel chunk verify; contiguous verified materialization.
+    - [x] C1 — canonical chunk index and per-domain, hard-linked object pool.
+    - [x] C2 — chunked capture, object durability and crash injection are
+          complete. Idle recapture added 6.459% on HVF and 5.360% on
+          Firecracker (24,231,903 bytes over a 452,050,904-byte first
+          checkpoint); two Firecracker sibling restores authenticated and
+          received distinct reseeded randomness.
+    - [x] C3 — parallel chunk verify and contiguous verified materialization;
+          5.14–10.88x over serial at 1–4 GiB logical size.
     - [ ] C4 — diff restore from a cached materialization (with #3382).
     - [ ] C5 — `cache prune` reclaims unlinked objects and abandoned staging.
     - [ ] C6 — index digest as the audited content address.

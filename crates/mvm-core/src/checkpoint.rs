@@ -129,6 +129,78 @@ pub struct ContentBlob {
     pub sha256: String,
 }
 
+/// Isolation boundary for checkpoint chunk deduplication.
+///
+/// The wire form is either `host` or `tenant:<name>`. The field is sealed into
+/// [`CheckpointMeta::meta_digest`], so changing the domain after capture makes
+/// lineage verification fail. Storage code hashes this value before using it
+/// as a directory name; tenant-controlled text never becomes a path component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CheckpointKeyDomain(String);
+
+impl CheckpointKeyDomain {
+    const HOST: &'static str = "host";
+    const TENANT_PREFIX: &'static str = "tenant:";
+
+    #[must_use]
+    pub fn host() -> Self {
+        Self(Self::HOST.to_string())
+    }
+
+    pub fn tenant(name: impl Into<String>) -> Result<Self, CheckpointKeyDomainParseError> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(CheckpointKeyDomainParseError::EmptyTenant);
+        }
+        Ok(Self(format!("{}{name}", Self::TENANT_PREFIX)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_host(&self) -> bool {
+        self.0 == Self::HOST
+    }
+}
+
+impl Default for CheckpointKeyDomain {
+    fn default() -> Self {
+        Self::host()
+    }
+}
+
+impl TryFrom<String> for CheckpointKeyDomain {
+    type Error = CheckpointKeyDomainParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value == Self::HOST {
+            return Ok(Self::host());
+        }
+        let Some(tenant) = value.strip_prefix(Self::TENANT_PREFIX) else {
+            return Err(CheckpointKeyDomainParseError::Unknown(value));
+        };
+        Self::tenant(tenant)
+    }
+}
+
+impl From<CheckpointKeyDomain> for String {
+    fn from(domain: CheckpointKeyDomain) -> Self {
+        domain.0
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CheckpointKeyDomainParseError {
+    #[error("checkpoint key-domain tenant must not be empty")]
+    EmptyTenant,
+    #[error("checkpoint key domain must be \"host\" or start with \"tenant:\", got {0:?}")]
+    Unknown(String),
+}
+
 /// Saved guest memory image inside a vm_full checkpoint's content dir.
 pub const MEMORY_BLOB: &str = "memory.bin";
 /// Cloned rootfs image inside any checkpoint's content dir.
@@ -328,6 +400,10 @@ pub struct CheckpointMeta {
     pub parent: Option<CheckpointDigest>,
     pub created_unix: u64,
     pub content: Vec<ContentBlob>,
+    /// Deduplication boundary for chunk objects. Host is omitted on the wire so
+    /// pre-chunk whole-file records retain their original digest shape.
+    #[serde(default, skip_serializing_if = "CheckpointKeyDomain::is_host")]
+    pub key_domain: CheckpointKeyDomain,
     pub supervisor_config_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
@@ -370,6 +446,7 @@ impl CheckpointMeta {
             parent: None,
             created_unix: 0,
             content: Vec::new(),
+            key_domain: CheckpointKeyDomain::host(),
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
             snapshot_id: None,
@@ -393,6 +470,7 @@ impl CheckpointMeta {
             parent: &self.parent,
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
+            key_domain: &self.key_domain,
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
@@ -418,6 +496,7 @@ impl CheckpointMeta {
             .parent(self.parent.clone())
             .created_unix(self.created_unix)
             .content(self.content.clone())
+            .key_domain(self.key_domain.clone())
             .supervisor_config_digest(self.supervisor_config_digest.clone())
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .snapshot_id(Some(snapshot_id.into()))
@@ -457,6 +536,8 @@ struct CheckpointDigestInput<'a> {
     /// Sorted by `name` (capture builds it in insertion order) so the digest is
     /// invariant to blob ordering.
     content: Vec<&'a ContentBlob>,
+    #[serde(skip_serializing_if = "CheckpointKeyDomain::is_host")]
+    key_domain: &'a CheckpointKeyDomain,
     supervisor_config_digest: &'a str,
     runtime_overlay_version: &'a Option<String>,
     snapshot_id: &'a Option<String>,
@@ -518,6 +599,7 @@ pub struct CheckpointMetaBuilder {
     parent: Option<CheckpointDigest>,
     created_unix: u64,
     content: Vec<ContentBlob>,
+    key_domain: CheckpointKeyDomain,
     supervisor_config_digest: String,
     runtime_overlay_version: Option<String>,
     snapshot_id: Option<String>,
@@ -543,6 +625,10 @@ impl CheckpointMetaBuilder {
     }
     pub fn content(mut self, content: Vec<ContentBlob>) -> Self {
         self.content = content;
+        self
+    }
+    pub fn key_domain(mut self, domain: CheckpointKeyDomain) -> Self {
+        self.key_domain = domain;
         self
     }
     pub fn supervisor_config_digest(mut self, d: impl Into<String>) -> Self {
@@ -584,6 +670,7 @@ impl CheckpointMetaBuilder {
             parent: &self.parent,
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
+            key_domain: &self.key_domain,
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
@@ -599,6 +686,7 @@ impl CheckpointMetaBuilder {
             parent: self.parent,
             created_unix: self.created_unix,
             content: self.content,
+            key_domain: self.key_domain,
             supervisor_config_digest: self.supervisor_config_digest,
             runtime_overlay_version: self.runtime_overlay_version,
             snapshot_id: self.snapshot_id,
@@ -666,6 +754,45 @@ mod tests {
         let b: ContentBlob = serde_json::from_str(r#"{"name":"x","sha256":"y"}"#).unwrap();
         assert_eq!(b.name, "x");
         assert!(serde_json::from_str::<ContentBlob>(r#"{"name":"x","sha256":"y","z":1}"#).is_err());
+    }
+
+    #[test]
+    fn checkpoint_key_domain_roundtrips_and_rejects_empty_tenants() {
+        let host = CheckpointKeyDomain::host();
+        let tenant = CheckpointKeyDomain::tenant("tenant-a").unwrap();
+        assert_eq!(
+            serde_json::from_str::<CheckpointKeyDomain>("\"host\"").unwrap(),
+            host
+        );
+        assert_eq!(
+            serde_json::to_string(&tenant).unwrap(),
+            "\"tenant:tenant-a\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckpointKeyDomain>("\"tenant:tenant-a\"").unwrap(),
+            tenant
+        );
+        assert!(CheckpointKeyDomain::tenant("").is_err());
+        assert!(serde_json::from_str::<CheckpointKeyDomain>("\"tenant:\"").is_err());
+        assert!(serde_json::from_str::<CheckpointKeyDomain>("\"other\"").is_err());
+    }
+
+    #[test]
+    fn key_domain_is_load_bearing_but_host_keeps_the_previous_digest_shape() {
+        let host = digest_fixture_meta(Vec::new());
+        let tenant =
+            CheckpointMeta::builder(CheckpointId::new("c1"), CheckpointClass::FsQuick, "vm")
+                .content(Vec::new())
+                .supervisor_config_digest("cfg")
+                .created_unix(7)
+                .key_domain(CheckpointKeyDomain::tenant("tenant-a").unwrap())
+                .build();
+
+        assert_ne!(host.meta_digest, tenant.meta_digest);
+        let host_json = serde_json::to_value(&host).unwrap();
+        assert!(host_json.get("key_domain").is_none());
+        assert_eq!(host.compute_meta_digest(), host.meta_digest);
+        assert_eq!(tenant.compute_meta_digest(), tenant.meta_digest);
     }
 
     #[test]
@@ -849,6 +976,7 @@ mod tests {
             parent: &sessionless.parent,
             created_unix: sessionless.created_unix,
             content: sorted_content(&sessionless.content),
+            key_domain: &sessionless.key_domain,
             supervisor_config_digest: &sessionless.supervisor_config_digest,
             runtime_overlay_version: &sessionless.runtime_overlay_version,
             snapshot_id: &sessionless.snapshot_id,

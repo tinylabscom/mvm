@@ -235,10 +235,10 @@ fn restore_resolved(
 ) -> Result<RevertOutcome> {
     match resolved {
         ResolvedTarget::Checkpoint(meta) => {
-            revert_checkpoint(cstore, meta, via, &opts)?;
+            revert_checkpoint(cstore, *meta, via, &opts)?;
             Ok(RevertOutcome::Done)
         }
-        ResolvedTarget::Image(node) => revert_image(istore, node, via, &opts),
+        ResolvedTarget::Image(node) => revert_image(istore, *node, via, &opts),
     }
 }
 
@@ -518,7 +518,7 @@ fn parent_of(
                 )
             })?;
             let record = verified_record(parent, "rewind")?;
-            Ok(ResolvedTarget::Checkpoint(record))
+            Ok(ResolvedTarget::Checkpoint(Box::new(record)))
         }
         ResolvedTarget::Image(node) => {
             let ancestry = image_ancestry(istore, &node.node_digest, anchor)?;
@@ -535,7 +535,7 @@ fn parent_of(
                 )
             })?;
             let record = verified_record(parent, "rewind")?;
-            Ok(ResolvedTarget::Image(record))
+            Ok(ResolvedTarget::Image(Box::new(record)))
         }
     }
 }
@@ -572,9 +572,9 @@ fn child_of(
                 to,
                 &format!("checkpoint {:?}", meta.id.as_str()),
             )?;
-            Ok(ResolvedTarget::Checkpoint(verified_record(
+            Ok(ResolvedTarget::Checkpoint(Box::new(verified_record(
                 picked, "advance",
-            )?))
+            )?)))
         }
         ResolvedTarget::Image(node) => {
             let children = image_children(istore, &node.node_digest, anchor)?;
@@ -585,7 +585,9 @@ fn child_of(
                 to,
                 &format!("image node {}", node.node_digest),
             )?;
-            Ok(ResolvedTarget::Image(verified_record(picked, "advance")?))
+            Ok(ResolvedTarget::Image(Box::new(verified_record(
+                picked, "advance",
+            )?)))
         }
     }
 }

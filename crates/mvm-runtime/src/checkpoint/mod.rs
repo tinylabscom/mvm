@@ -11,6 +11,7 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
+mod chunks;
 #[cfg(test)]
 mod durability_tests;
 mod params;
@@ -152,8 +153,93 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
     verify_content_except(store, meta, &[])
 }
 
-/// [`verify_content`], leaving the digest of each blob named in `deferred` to
-/// the restorer that loads it.
+/// Digest of the contiguous bytes a named blob materializes to. Whole-file
+/// checkpoints carry it directly; chunked checkpoints retain it in the
+/// authenticated index so callers can bind an admitted image without rereading
+/// a multi-gigabyte rootfs.
+pub fn materialized_blob_sha256(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    name: &str,
+) -> Result<String> {
+    let blob = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == name)
+        .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
+    chunks::materialized_sha256(&store.content_dir(&meta.id), blob)
+}
+
+/// Rebuild every chunked blob in `destination_dir` from the authenticated
+/// checkpoint index. Existing materialized copies are replaced so a snapshot
+/// copy cannot bypass chunk verification.
+pub fn materialize_chunked_blobs(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    destination_dir: &Path,
+) -> Result<()> {
+    let content_dir = store.content_dir(&meta.id);
+    for blob in &meta.content {
+        chunks::validate_blob_name(&blob.name)?;
+        if !chunks::is_chunked_blob(&content_dir, blob) {
+            continue;
+        }
+        let destination = destination_dir.join(&blob.name);
+        match std::fs::remove_file(&destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing snapshot blob {}", destination.display()));
+            }
+        }
+        chunks::materialize_blob(&content_dir, blob, &destination)
+            .with_context(|| format!("materializing checkpoint blob {:?}", blob.name))?;
+    }
+    Ok(())
+}
+
+/// Materialize every checkpoint blob into `destination_dir`.
+///
+/// Chunked blobs are rebuilt from their authenticated indexes; legacy and
+/// intentionally small whole-file blobs are cloned through the normal CoW
+/// path. All blob names are validated before any destination is changed.
+pub fn materialize_checkpoint_blobs(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    destination_dir: &Path,
+) -> Result<()> {
+    for blob in &meta.content {
+        chunks::validate_blob_name(&blob.name)?;
+    }
+
+    std::fs::create_dir_all(destination_dir).with_context(|| {
+        format!(
+            "creating checkpoint materialization directory {}",
+            destination_dir.display()
+        )
+    })?;
+    let content_dir = store.content_dir(&meta.id);
+    for blob in &meta.content {
+        let destination = destination_dir.join(&blob.name);
+        match std::fs::remove_file(&destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("removing stale checkpoint blob {}", destination.display())
+                });
+            }
+        }
+        clone_or_materialize_blob(&content_dir, blob, &destination)?;
+    }
+    Ok(())
+}
+
+/// [`verify_content`], leaving the digest of each whole-file blob named in
+/// `deferred` to the restorer that loads it. Chunked blobs are always verified
+/// here because the restorer only understands the materialized byte stream,
+/// not its index digest and object membership.
 ///
 /// Only for a restorer that verifies those blobs itself, against the same
 /// recorded digests, on the exact bytes it loads — hashing them here as well
@@ -165,32 +251,50 @@ fn verify_content_except(
     deferred: &[&str],
 ) -> Result<()> {
     let dir = store.content_dir(&meta.id);
-    let (deferred_blobs, hashed): (Vec<_>, Vec<_>) = meta
+    let tasks: Vec<_> = meta
         .content
         .iter()
-        .partition(|blob| deferred.contains(&blob.name.as_str()));
-    for blob in deferred_blobs {
-        anyhow::ensure!(
-            dir.join(&blob.name).is_file(),
-            "checkpoint '{}' blob {:?} is missing",
-            meta.id,
-            blob.name
-        );
-    }
-    let paths: Vec<PathBuf> = hashed.iter().map(|blob| dir.join(&blob.name)).collect();
-    let digests = sha256_files_parallel(paths.clone());
-    for ((blob, path), actual) in hashed.iter().zip(&paths).zip(digests) {
-        let actual =
-            actual.with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
-        if actual != blob.sha256 {
-            anyhow::bail!(
-                "checkpoint '{}' blob {:?} failed integrity (sha256): expected {}, got {}",
-                meta.id,
-                blob.name,
-                blob.sha256,
-                actual
-            );
+        .cloned()
+        .map(|blob| {
+            let is_deferred = deferred.contains(&blob.name.as_str());
+            (blob, is_deferred)
+        })
+        .collect();
+    let results = mvm_fs::parallel::par_map(tasks, |(blob, is_deferred)| {
+        chunks::validate_blob_name(&blob.name)?;
+        let path = dir.join(&blob.name);
+        if chunks::is_chunked_blob(&dir, &blob) {
+            return chunks::verify_blob(&dir, &blob).map_err(|error| {
+                anyhow::anyhow!(
+                    "verifying checkpoint '{}' blob {:?}: {error:#}",
+                    meta.id,
+                    blob.name
+                )
+            });
         }
+        if is_deferred {
+            anyhow::ensure!(
+                path.is_file(),
+                "checkpoint '{}' blob {:?} is missing",
+                meta.id,
+                blob.name
+            );
+            return Ok(());
+        }
+        let actual = sha256_file_hex(&path)
+            .with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
+        anyhow::ensure!(
+            actual == blob.sha256,
+            "checkpoint '{}' blob {:?} failed integrity (sha256): expected {}, got {}",
+            meta.id,
+            blob.name,
+            blob.sha256,
+            actual
+        );
+        Ok(())
+    });
+    for result in results {
+        result?;
     }
     Ok(())
 }
@@ -442,16 +546,7 @@ pub fn fork_checkpoint(
     // creation — refuse to branch from a checkpoint edited after it was audited.
     verify_checkpoint_against_chain(anchor, &parent)?;
 
-    std::fs::create_dir_all(&params.dest_dir)
-        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
-    let content_dir = store.content_dir(&parent.id);
-    for blob in &parent.content {
-        crate::base::cow::clone_rootfs_for_instance(
-            &content_dir.join(&blob.name),
-            &params.dest_dir.join(&blob.name),
-        )
-        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
-    }
+    materialize_checkpoint_blobs(store, &parent, &params.dest_dir)?;
 
     let child = CheckpointMeta::builder(
         params.child_id,
@@ -461,6 +556,7 @@ pub fn fork_checkpoint(
     .parent(Some(parent.meta_digest.clone()))
     .created_unix(params.created_unix)
     .content(parent.content.clone())
+    .key_domain(parent.key_domain.clone())
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
     // An fs_quick branch presents no plan of its own, so the child inherits
@@ -536,16 +632,7 @@ pub fn fork_vm_full(
 
     // Clone the captured triple into the child's state dir, then boot the child
     // from its OWN copies — never the parent's live blobs.
-    std::fs::create_dir_all(&params.dest_dir)
-        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
-    let content_dir = store.content_dir(&parent.id);
-    for blob in &parent.content {
-        crate::base::cow::clone_rootfs_for_instance(
-            &content_dir.join(&blob.name),
-            &params.dest_dir.join(&blob.name),
-        )
-        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
-    }
+    materialize_checkpoint_blobs(store, &parent, &params.dest_dir)?;
 
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
@@ -568,6 +655,7 @@ pub fn fork_vm_full(
     .parent(Some(parent.meta_digest.clone()))
     .created_unix(params.created_unix)
     .content(parent.content.clone())
+    .key_domain(parent.key_domain.clone())
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
     // The child's OWN grants, already checked to sit inside the parent's. A
@@ -815,23 +903,10 @@ fn capture_vm_full_inner(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
-    // The two large blobs, hashed together rather than one after the other.
-    let mut digests = sha256_files_parallel(vec![rootfs_dst.clone(), memory.clone()]).into_iter();
-    let mut next_digest = || {
-        digests
-            .next()
-            .expect("one digest per hashed blob")
-            .context("hashing captured blob")
-    };
+    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
     let mut content = vec![
-        ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: next_digest()?,
-        },
-        ContentBlob {
-            name: "memory.bin".into(),
-            sha256: next_digest()?,
-        },
+        chunks::chunk_blob(&object_pool, &content_dir, "rootfs.ext4", &rootfs_dst, true)?,
+        chunks::chunk_blob(&object_pool, &content_dir, "memory.bin", &memory, false)?,
     ];
 
     // Include the machine-id blob when the backend wrote one.
@@ -981,6 +1056,15 @@ fn capture_vm_full_inner(
             .flatten()
     };
 
+    // Snapshot backends still consume a materialized directory. Keep the two
+    // large files through that staging step, then remove only these redundant
+    // private staging copies. Their synced chunk objects and canonical indexes
+    // are the checkpoint representation published below.
+    std::fs::remove_file(&rootfs_dst)
+        .with_context(|| format!("removing chunked source {}", rootfs_dst.display()))?;
+    std::fs::remove_file(&memory)
+        .with_context(|| format!("removing chunked source {}", memory.display()))?;
+
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
         .tag(params.tag)
         .created_unix(params.created_unix)
@@ -1089,6 +1173,12 @@ pub fn restore_checkpoint(
     verify_checkpoint_against_chain(anchor, &meta)?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
     let dir = store.content_dir(&meta.id);
+    let materialized = tempfile::Builder::new()
+        .prefix(".restore-")
+        .tempdir_in(store.root())
+        .context("creating checkpoint restore materialization")?;
+    let rootfs = materialized_source(&dir, &meta, "rootfs.ext4", materialized.path())?;
+    let memory = materialized_source(&dir, &meta, "memory.bin", materialized.path())?;
 
     // The checkpoint carries the launch config (for checkpoints captured after
     // this landed). Hand it to the restore seam so the backend can rebuild the
@@ -1099,12 +1189,48 @@ pub fn restore_checkpoint(
 
     restore.restore(
         &params.target_vm,
-        &dir.join("rootfs.ext4"),
-        &dir.join("memory.bin"),
+        &rootfs,
+        &memory,
         &dir.join("machine-id"),
         config_src,
         &meta.content,
     )
+}
+
+fn clone_or_materialize_blob(
+    content_dir: &Path,
+    blob: &ContentBlob,
+    destination: &Path,
+) -> Result<()> {
+    chunks::validate_blob_name(&blob.name)?;
+    if chunks::is_chunked_blob(content_dir, blob) {
+        chunks::materialize_blob(content_dir, blob, destination)
+            .with_context(|| format!("materializing checkpoint blob {}", blob.name))
+    } else {
+        crate::base::cow::clone_rootfs_for_instance(&content_dir.join(&blob.name), destination)
+            .map(|_| ())
+            .with_context(|| format!("cloning checkpoint blob {}", blob.name))
+    }
+}
+
+fn materialized_source(
+    content_dir: &Path,
+    meta: &CheckpointMeta,
+    name: &str,
+    scratch: &Path,
+) -> Result<PathBuf> {
+    let blob = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == name)
+        .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
+    if !chunks::is_chunked_blob(content_dir, blob) {
+        return Ok(content_dir.join(name));
+    }
+    let destination = scratch.join(name);
+    chunks::materialize_blob(content_dir, blob, &destination)
+        .with_context(|| format!("materializing checkpoint blob {name}"))?;
+    Ok(destination)
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -1113,6 +1239,7 @@ fn sha256_file_hex(path: &Path) -> Result<String> {
 }
 
 /// [`sha256_file_hex`] over `paths` concurrently, results in input order.
+#[cfg(test)]
 fn sha256_files_parallel(paths: Vec<PathBuf>) -> Vec<Result<String>> {
     mvm_fs::parallel::par_map(paths, |path| sha256_file_hex(&path))
 }
@@ -1297,11 +1424,16 @@ pub fn capture_fs_quick(
         .context("cloning rootfs into checkpoint content")?;
 
     let name = file_name.to_string_lossy().into_owned();
-    let content_sha256 = sha256_file_hex(&dst)?;
-    let mut content = vec![ContentBlob {
-        name,
-        sha256: content_sha256,
-    }];
+    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
+    let mut content = vec![chunks::chunk_blob(
+        &object_pool,
+        &content_dir,
+        &name,
+        &dst,
+        true,
+    )?];
+    std::fs::remove_file(&dst)
+        .with_context(|| format!("removing chunked source {}", dst.display()))?;
 
     // When the source rootfs directory carries guest sidecars (mvm-meta.json,
     // rootfs.verity, rootfs.roothash), include them so that any
@@ -1515,6 +1647,38 @@ mod tests {
         .unwrap()
     }
 
+    fn blob_named<'a>(meta: &'a CheckpointMeta, name: &str) -> &'a ContentBlob {
+        meta.content
+            .iter()
+            .find(|blob| blob.name == name)
+            .unwrap_or_else(|| panic!("checkpoint has no {name} blob"))
+    }
+
+    fn first_stored_chunk(store: &CheckpointStore, meta: &CheckpointMeta, name: &str) -> PathBuf {
+        let content_dir = store.content_dir(&meta.id);
+        chunks::stored_chunk_paths(&content_dir, blob_named(meta, name))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("checkpoint blob {name} has no stored chunks"))
+    }
+
+    fn tamper_first_stored_chunk(store: &CheckpointStore, meta: &CheckpointMeta, name: &str) {
+        let path = first_stored_chunk(store, meta, name);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+        std::fs::write(path, b"tampered").unwrap();
+    }
+
     fn test_session_binding() -> SessionBinding {
         SessionBinding {
             session_id: mvm_contract::protocol::agent_session::AgentSessionId::parse(
@@ -1646,8 +1810,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
-        let blob = store.content_dir(&parent.id).join("rootfs.ext4");
-        std::fs::write(&blob, b"tampered").unwrap();
+        tamper_first_stored_chunk(&store, &parent, "rootfs.ext4");
         let err = fork_checkpoint(
             &store,
             ForkParams {
@@ -1800,9 +1963,7 @@ mod tests {
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
         verify_content(&store, &parent).unwrap();
-        // tamper the single blob
-        let blob = store.content_dir(&parent.id).join("rootfs.ext4");
-        std::fs::write(&blob, b"tampered").unwrap();
+        tamper_first_stored_chunk(&store, &parent, "rootfs.ext4");
         assert!(verify_content(&store, &parent).is_err());
     }
 
@@ -2068,6 +2229,7 @@ mod tests {
 
     struct MockRestore {
         seen: RefCell<Option<(String, PathBuf, PathBuf, PathBuf)>>,
+        payloads_seen: RefCell<Option<(Vec<u8>, Vec<u8>)>>,
         config_seen: RefCell<Option<PathBuf>>,
     }
     impl VmFullRestore for MockRestore {
@@ -2087,6 +2249,8 @@ mod tests {
                 machine_id.to_path_buf(),
             ));
             *self.config_seen.borrow_mut() = config_src.map(Path::to_path_buf);
+            *self.payloads_seen.borrow_mut() =
+                Some((std::fs::read(rootfs_src)?, std::fs::read(memory)?));
             Ok(())
         }
     }
@@ -2125,6 +2289,7 @@ mod tests {
         let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v1");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
             config_seen: RefCell::new(None),
         };
         restore_checkpoint(
@@ -2141,8 +2306,14 @@ mod tests {
         let (vm, r, m, mid) = restore.seen.borrow().clone().unwrap();
         let cdir = store.content_dir(&ckpt.id);
         assert_eq!(vm, "origin");
-        assert_eq!(r, cdir.join("rootfs.ext4"));
-        assert_eq!(m, cdir.join("memory.bin"));
+        assert_eq!(r.file_name().unwrap(), "rootfs.ext4");
+        assert_eq!(m.file_name().unwrap(), "memory.bin");
+        assert_ne!(r, cdir.join("rootfs.ext4"));
+        assert_ne!(m, cdir.join("memory.bin"));
+        assert_eq!(restore.payloads_seen.borrow().as_ref().unwrap().0, b"disk");
+        assert_eq!(restore.payloads_seen.borrow().as_ref().unwrap().1, b"mem");
+        assert!(!r.exists(), "temporary materialization must be removed");
+        assert!(!m.exists(), "temporary materialization must be removed");
         assert_eq!(mid, cdir.join("machine-id"));
         // The stored launch config is handed to the seam so the backend can
         // rebuild the reaped state dir.
@@ -2159,6 +2330,7 @@ mod tests {
         let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v-tenant");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
             config_seen: RefCell::new(None),
         };
         let error = restore_checkpoint(
@@ -2189,6 +2361,7 @@ mod tests {
         let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
             config_seen: RefCell::new(None),
         };
         let err = restore_checkpoint(
@@ -2214,10 +2387,10 @@ mod tests {
         let store = CheckpointStore::at(tmp.path().join("store"));
         let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v2");
         // Tamper a blob after capture.
-        let blob = store.content_dir(&ckpt.id).join("memory.bin");
-        std::fs::write(&blob, b"tampered").unwrap();
+        tamper_first_stored_chunk(&store, &ckpt, "memory.bin");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
             config_seen: RefCell::new(None),
         };
         let err = restore_checkpoint(
@@ -2256,8 +2429,16 @@ mod tests {
             grants: None,
         };
         let meta = capture_fs_quick(&store, params).unwrap();
-        let content_blob = store.content_dir(&meta.id).join("rootfs.ext4");
-        assert_eq!(std::fs::read(&content_blob).unwrap(), b"fake-ext4-bytes");
+        let content_dir = store.content_dir(&meta.id);
+        assert!(!content_dir.join("rootfs.ext4").exists());
+        let materialized = tmp.path().join("materialized-rootfs.ext4");
+        chunks::materialize_blob(
+            &content_dir,
+            blob_named(&meta, "rootfs.ext4"),
+            &materialized,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(materialized).unwrap(), b"fake-ext4-bytes");
         assert_eq!(meta.content.len(), 1);
         assert_eq!(meta.content[0].name, "rootfs.ext4");
         assert_eq!(meta.content[0].sha256.len(), 64);
@@ -2881,14 +3062,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-deferred");
-        let memory = store
-            .content_dir(&parent.id)
-            .join(mvm_core::checkpoint::MEMORY_BLOB);
+        let memory = first_stored_chunk(&store, &parent, mvm_core::checkpoint::MEMORY_BLOB);
 
-        std::fs::write(&memory, b"tampered").unwrap();
+        tamper_first_stored_chunk(&store, &parent, mvm_core::checkpoint::MEMORY_BLOB);
         verify_content(&store, &parent).expect_err("the full check hashes memory.bin");
         verify_content_except(&store, &parent, &[mvm_core::checkpoint::MEMORY_BLOB])
-            .expect("a deferred blob is left to the restorer's own check");
+            .expect_err("chunked blobs are verified before materialization");
 
         std::fs::remove_file(&memory).unwrap();
         let error = verify_content_except(&store, &parent, &[mvm_core::checkpoint::MEMORY_BLOB])
@@ -3536,8 +3715,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
-        let blob = store.content_dir(&parent.id).join("rootfs.ext4");
-        std::fs::write(&blob, b"flipped-bytes").unwrap();
+        tamper_first_stored_chunk(&store, &parent, "rootfs.ext4");
         assert!(verify_content(&store, &parent).is_err());
         assert_eq!(parent.meta_digest, parent.compute_meta_digest());
     }
