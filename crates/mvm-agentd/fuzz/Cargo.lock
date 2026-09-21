@@ -961,6 +961,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libkrun-sys"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1078,12 +1089,14 @@ dependencies = [
  "flate2",
  "hex",
  "libc",
+ "libkrun-sys",
  "lzma-rs",
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-http",
+ "mvm-net",
  "mvm-sdk",
  "mvm-vmm",
  "nix",
