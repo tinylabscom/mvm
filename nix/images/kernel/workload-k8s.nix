@@ -66,13 +66,14 @@ base.mkKernel {
     "BLK_CGROUP"
 
     # ── namespaces (USER_NS is the rootless control plane's floor) ──
+    # CGROUP_NS does not exist in 6.12: cgroup namespaces are implicit
+    # under CGROUPS, so there is nothing to request.
     "NAMESPACES"
     "UTS_NS"
     "IPC_NS"
     "USER_NS"
     "PID_NS"
     "NET_NS"
-    "CGROUP_NS"
     "TIME_NS"
 
     # ── in-guest pod/service datapath ──
@@ -90,7 +91,10 @@ base.mkKernel {
     "BRIDGE_NETFILTER"
 
     # ── container runtime basics base.nix cuts ──
-    "DEVPTS_FS"
+    # POSIX_MQUEUE rides the exemption below: base.nix disables it as
+    # sealed-workload dead weight, and container mqueue mounts need it.
+    # DEVPTS_FS needs no request in 6.12: the symbol is gone, and devpts
+    # builds whenever UNIX98_PTYS (default y) does.
     "POSIX_MQUEUE"
   ]
   ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];
@@ -128,9 +132,13 @@ base.mkKernel {
   # exactly what this variant exists to undo — pass none.
   requiredExtraDisables = [ ];
 
-  # BRIDGE is a base.nix *required* disable ("network plumbing outside the
-  # guest contract"). The CNI pod bridge is in-guest-only and this variant
-  # is the documented exception to that contract; the enable guard asserts
-  # it survives olddefconfig.
-  disableExemptions = [ "BRIDGE" ];
+  # BRIDGE and POSIX_MQUEUE are base.nix disables ("network plumbing
+  # outside the guest contract" / sealed-workload dead weight). The CNI pod
+  # bridge and container mqueue mounts are in-guest-only and this variant is
+  # the documented exception to that contract; the enable guard asserts both
+  # survive olddefconfig.
+  disableExemptions = [
+    "BRIDGE"
+    "POSIX_MQUEUE"
+  ];
 }
