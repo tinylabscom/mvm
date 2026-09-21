@@ -4,8 +4,10 @@ Backing: shipped-source
 Validation: check-sprint-append
 
 **Tracking:** tinylabscom/mvm#3554 (runtime), tinylabscom/mvm-templates#2
-(guest template PR), tinylabscom/mvm-images#9 (workload-kernel variant).
-Branch: `feat/kubernetes-in-microvm`.
+(guest template PR) and tinylabscom/mvm-templates#1 (template tracking).
+The shared image repositories carry no Kubernetes-specific artifacts —
+consumption is mvm kernel flake -> `mvmctl kernel build` -> launcher
+resolution. Branch: `feat/kubernetes-in-microvm` (merged).
 
 **Status: W1 (mvm runtime enabler) IMPLEMENTED, awaiting review; W2-W4
 NOT STARTED.**
@@ -90,9 +92,9 @@ Two gaps surfaced while designing against the real code, both now tracked:
 2. **The sealed workload kernel cannot run Kubernetes.** `CGROUPS`,
    `NAMESPACES`, and `NETFILTER` are required-disables in the workload
    kernel, and `BRIDGE` is disabled in shared base — all deliberate cuts for
-   the sealed single-workload posture. The image train's audit recommends a
-   second `workload-k8s` kernel variant rather than relaxing the sealed
-   kernel; the template pins it via mkGuest's `kernel` argument.
+   the sealed single-workload posture. Resolved by the `workload-k8s`
+   variant (mvm#3572, merged), consumed via `mvmctl kernel build --which
+   workload-k8s`; the template repository owns bring-up and validation.
 
 ## Workstreams
 
@@ -126,13 +128,13 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
 
 - [x] Template registry `templates/kubernetes/`: a `mkGuest` flake with the
       k3s rootless entrypoint service and its health check —
-      tinylabscom/mvm-templates#2 (experimental scaffold; bring-up validated
-      by W4)
-- [ ] `workload-k8s` kernel variant: `CGROUPS` + controllers, `NAMESPACES`
+      tinylabscom/mvm-templates#2 (experimental scaffold; bring-up and the
+      boot-image capability contract tracked in tinylabscom/mvm-templates#1)
+- [x] `workload-k8s` kernel variant: `CGROUPS` + controllers, `NAMESPACES`
       + per-ns symbols, `NETFILTER` + conntrack/iptables, `BRIDGE`/`VETH`/
-      `VXLAN` — tinylabscom/mvm-images#9. The sealed workload kernel's
+      `VXLAN` — mvm#3572, merged. The sealed workload kernel's
       required-disables are deliberate and stay; this is a second variant,
-      pinned by the template through mkGuest's `kernel` argument.
+      consumed via `mvmctl kernel build --which workload-k8s`.
 
 ### W4 — E2E validation, BDD, docs
 
