@@ -684,12 +684,26 @@ let
       # Symbols to re-enable that base.nix disables (audited cuts, and —
       # deliberately — requiredDisables too). An exemption is how a second,
       # non-sealed kernel posture keeps a subsystem the sealed workload
-      # posture cuts; every exemption must also appear in `extraEnables`,
-      # so the enable guard below asserts it survived olddefconfig, and
-      # must be named and justified in the caller. The caller's own
-      # `requiredExtraDisables` stay hard — exemptions never weaken them.
+      # posture cuts. The caller's own `requiredExtraDisables` stay hard —
+      # exemptions never weaken them.
+      #
+      # Every exemption MUST also appear in `extraEnables`: defconfig
+      # defaults are arch-dependent (arm64's multi-platform defconfig
+      # enables subsystems x86_64's leaves =m, which MODULES=n then drops),
+      # so an exemption without an explicit enable request silently rides
+      # on whatever the arch's defconfig happened to pick. Enforced at
+      # eval time below, before the olddefconfig enable guard re-checks it
+      # against the resolved config.
       disableExemptions ? [ ],
     }:
+    let
+      # Exemptions that name no enable request would be arch-dependent
+      # no-ops (see above) — refuse them at eval time, naming the orphans.
+      orphans = pkgs.lib.subtractLists extraEnables disableExemptions;
+    in
+    if orphans != [ ] then
+      throw "mkKernel: disableExemptions without a matching extraEnables entry (defconfig defaults are arch-dependent, so an exemption alone cannot request a symbol): ${pkgs.lib.concatStringsSep " " orphans}"
+    else
     pkgs.buildPackages.runCommandCC "mvm-kernel-config"
       {
         nativeBuildInputs = with pkgs.buildPackages; [

@@ -86,6 +86,12 @@ base.mkKernel {
     "IP_NF_NAT"
     "NF_NAT_MASQUERADE"
     "IP_NF_TARGET_MASQUERADE"
+    # BRIDGE rides disableExemptions below, and is also requested
+    # explicitly: defconfig defaults differ by arch (arm64's
+    # multi-platform defconfig turns BRIDGE on; x86_64's leaves it
+    # =m, which MODULES=n then drops), so an exemption alone would be
+    # arch-dependent.
+    "BRIDGE"
     "VETH"
     "VXLAN"
     "BRIDGE_NETFILTER"
@@ -136,7 +142,9 @@ base.mkKernel {
   # outside the guest contract" / sealed-workload dead weight). The CNI pod
   # bridge and container mqueue mounts are in-guest-only and this variant is
   # the documented exception to that contract; the enable guard asserts both
-  # survive olddefconfig.
+  # survive olddefconfig. Both are also requested in extraEnables — base.nix
+  # refuses an exemption without a matching enable request, because
+  # defconfig defaults are arch-dependent.
   disableExemptions = [
     "BRIDGE"
     "POSIX_MQUEUE"
