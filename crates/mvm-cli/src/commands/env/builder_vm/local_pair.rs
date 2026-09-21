@@ -214,7 +214,7 @@ mod tests {
             "deriving a key from an edited selection must refuse"
         );
 
-        let edited = Pair::new_with_image("# builder-vm image, edited\n");
+        let edited = Pair::from_builder_vm_image("# builder-vm image, edited\n");
         let second = pair_fingerprint(&edited.key(ImageBuildRole::BuilderVm, "default"));
         assert_ne!(
             first, second,

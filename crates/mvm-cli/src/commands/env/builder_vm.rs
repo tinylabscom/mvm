@@ -44,7 +44,6 @@ use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 #[cfg(feature = "builder-vm")]
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
-#[cfg(feature = "builder-vm")]
 pub(crate) use bootstrap::selected_local_checkout;
 
 /// Whether images are built from source here: the in-tree flakes, or a local

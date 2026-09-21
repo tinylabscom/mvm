@@ -423,6 +423,7 @@ fn ensure_pair_default_image(
 /// The pair fingerprint a cache dir was installed under, when it was
 /// installed from a pair. Anything else — an in-tree build, a fetched
 /// prebuilt — is not a pair answer and returns `None`.
+#[cfg(any(feature = "builder-vm", test))]
 fn installed_pair_fingerprint(cache_dir: &std::path::Path) -> Option<String> {
     let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(cache_dir).ok()??;
     (sidecar.source == "local-pair").then_some(sidecar.image_tag)

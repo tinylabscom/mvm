@@ -124,10 +124,10 @@ pub(crate) struct Pair {
 
 impl Pair {
     pub(crate) fn new() -> Self {
-        Self::new_with_image("# builder-vm image\n")
+        Self::from_builder_vm_image("# builder-vm image\n")
     }
 
-    pub(crate) fn new_with_image(builder_vm_image: &str) -> Self {
+    pub(crate) fn from_builder_vm_image(builder_vm_image: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let images_dir = tmp.path().join("mvm-images");
         images_checkout(&images_dir, builder_vm_image);
