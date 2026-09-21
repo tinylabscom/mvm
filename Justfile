@@ -723,6 +723,55 @@ release VERSION="auto":
 
 # version-mismatched on `cargo update`.
 _release-prep VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    V="{{ VERSION }}"
+    BRANCH="release/v$V"
+    git switch -c "$BRANCH"
+    sed -i.bak -E \
+        -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
+        -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
+    rm Cargo.toml.bak
+    # Stable release PRs also advance the installer's checked-in default. A
+    # prerelease must remain opt-in, matching GitHub's releases/latest
+    # behavior and the installer's historical contract.
+    if [[ "$V" != *-* ]]; then
+        sed -i.bak -E "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"v$V\"/" install.sh
+        rm install.sh.bak
+        grep -qxF "DEFAULT_VERSION=\"v$V\"" install.sh
+        git add install.sh
+    fi
+    cargo update -w
+    # The runtime overlay, SDK sidecar and initramfs take their VERSION from
+    # one pin (check-runtime-overlay-version fails closed on a mismatch), so
+    # bump it alongside Cargo.toml. The mvmctl and SDK cdylib nix packages
+    # read their version from Cargo.toml and need no edit.
+    sed -i.bak -E "s/^\"[^\"]*\"$/\"$V\"/" nix/images/version.nix
+    rm nix/images/version.nix.bak
+    grep -qxF "\"$V\"" nix/images/version.nix
+    git add nix/images/version.nix
+    # The cargo-fuzz crates are separate workspaces with their own lockfiles,
+    # each pinning the internal `mvm-*` crates by version. Re-resolve each lock
+    # so the release PR's locked fuzz checks see the bumped package versions.
+    for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
+        [ -f "$manifest" ] || continue
+        cargo metadata --manifest-path "$manifest" --format-version 1 >/dev/null
+        git add "$(dirname "$manifest")/Cargo.lock"
+    done
+    git-cliff --tag "v$V" --unreleased --prepend CHANGELOG.md
+    if ! grep -qE "^## \[$V\]" CHANGELOG.md; then
+        echo "ERROR: git-cliff did not add a '## [$V]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
+        exit 1
+    fi
+    git add Cargo.toml Cargo.lock CHANGELOG.md
+    # The pre-bump suite cannot witness the tree that will actually be pushed.
+    echo "==> re-running the workspace suite against the bumped tree"
+    cargo nextest run --workspace
+    git commit -m "release: v$V"
+    git push -u origin "$BRANCH"
+    gh pr create --base main --head "$BRANCH" --title "release: v$V" \
+        --body "Version bump + git-cliff changelog for v$V. Merge via the queue, then \`just release-tag $V\`."
+    echo "==> Opened release PR for v$V. Merge it via the queue, then run: just release-tag $V"
 # which triggers the build + publish pipeline. Tags are not branch-protected.
 release-tag VERSION:
     #!/usr/bin/env bash
@@ -771,6 +820,8 @@ release-image VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     V="{{ VERSION }}"
+    TAG="boot-image/v$V"
+    git fetch origin main --tags
     if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
     echo "ERROR: tag $TAG already exists." >&2
     exit 1
