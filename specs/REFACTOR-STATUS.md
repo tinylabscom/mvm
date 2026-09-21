@@ -4,6 +4,17 @@ Last updated: 2026-09-21
 
 ## In progress
 
+- [x] **Firecracker live-parent fork activation — issue #3552, PR #3581.**
+      `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
+      invariant retires the old TAP/MAC collision rationale: the fork guard
+      (`MVM_FORK_VMFULL_FC_EXPERIMENTAL`) and the `MustBeStopped` live-parent
+      refusal are dropped, the FC driver advertises
+      `SnapshotCapability::LiveMemory`, doctor/capability-matrix assertions
+      are updated, and a `#[ignore]`d KVM witness forks two children from one
+      running parent and asserts per-child vsock endpoints, name-keyed egress
+      paths, and divergent post-restore identity. Ready for merge-queue
+      delivery; the live witness runs manually on a KVM host.
+
 - [x] **Generic builder machinery — issue #3323.**
       `specs/plans/2026-09-21-generic-builder-machinery.md`. Generic builder
       image/cache, Stage 0 store, transport, overlay, egress, and shared

@@ -37,6 +37,25 @@
       tests, all-target lint, gated targets, and all 74 repository gates are
       green. See `specs/sprint/delivery/3323-generic-builder-machinery.md`.
 
+- [x] **Firecracker live-parent fork activation — issue #3552.**
+      `specs/plans/2026-09-21-live-fork-fc-netns.md`, PR #3581. Under the
+      vsock-only invariant (no NIC, no TAP/TUN anywhere in the guest device
+      model) the fork guard's TAP/MAC collision rationale was stale: the
+      experimental gate (`MVM_FORK_VMFULL_FC_EXPERIMENTAL`) and the
+      `MustBeStopped` live-parent refusal are dropped from the FC fork arm
+      (`fork_vm_full_arm_fc` now passes `ForkParentLiveness::MayBeRunning`),
+      the FC driver flips `snapshot_capability` to `LiveMemory`, and the
+      doctor/capability-matrix assertions (mvm-runtime, mvm-cli doctor) are
+      updated so advertised and wired tiers cannot drift. A Linux-gated
+      `#[ignore]`d KVM witness (`crates/mvm-runtime/tests/fc_fork_live.rs`)
+      forks two children from one running parent and asserts the whole family
+      serves at once: per-child state-dir-keyed vsock endpoints, name-keyed
+      egress paths, distinct generation tokens and post-restore kernel
+      randomness. Workspace clippy, touched-crate tests (mvm-backends 250,
+      mvm-runtime 1028+integration, mvm-cli 2089+integration), and
+      `just check-gated` are green; the recovery-path doc row now matches the
+      advertised tier.
+
 - [ ] **Kubernetes in a single microVM.**
       `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
       #3554, guest template in tinylabscom/mvm-templates#1, workload-kernel
