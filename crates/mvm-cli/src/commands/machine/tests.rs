@@ -715,6 +715,42 @@ fn detach_short_and_long_imply_persistence() {
 }
 
 #[test]
+fn persistent_run_refuses_environment_that_its_spec_cannot_carry() {
+    for argv in [
+        &["run", "--image", "alpine", "-d", "--env", "K=V"][..],
+        &["run", "--image", "alpine", "--up-json", "--env", "K=V"][..],
+        &["run", "--image", "alpine", "--ttl", "30", "--env", "K=V"][..],
+        &[
+            "run",
+            "--image",
+            "alpine",
+            "--healthcheck",
+            "true",
+            "--env",
+            "K=V",
+        ][..],
+        &[
+            "run", "--image", "alpine", "--port", "8080:80", "--env", "K=V",
+        ][..],
+    ] {
+        let args = parse_run(argv).expect("persistent run parses");
+        let err = args
+            .refuse_unsupported_persistent_env()
+            .expect_err("persistent environment must be refused");
+        assert!(
+            err.to_string().contains("declare environment in the image"),
+            "argv {argv:?}: {err}"
+        );
+    }
+
+    let transient = parse_run(&["run", "--image", "alpine", "--env", "K=V", "--", "true"])
+        .expect("transient run parses");
+    transient
+        .refuse_unsupported_persistent_env()
+        .expect("transient environment remains supported");
+}
+
+#[test]
 fn name_is_identity_not_persistence() {
     let args =
         parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");

@@ -536,15 +536,12 @@ def _lower_live_options(
     workload. Secret references also stay off argv by construction.
     """
     argv: list[str] = []
-    encoded_env = _encode_env_map(env)
-    for key in sorted(encoded_env):
-        value = encoded_env[key]
-        if set(value) != {"kind", "value"} or value.get("kind") != "literal":
-            _reject_live_option("env", "only literal values can be placed on CLI argv")
-        literal = value.get("value")
-        if not isinstance(literal, str):
-            _reject_live_option("env", "literal values must be strings")
-        argv.extend(["--env", f"{key}={literal}"])
+    if env:
+        _reject_live_option(
+            "env",
+            "persistent creation cannot deliver environment; declare it in the image "
+            "or pass env to Sandbox.commands.start",
+        )
 
     if include:
         _reject_live_option("include", "the live CLI has no source-bundle equivalent")
@@ -1405,7 +1402,10 @@ class Sandbox:
         ``template`` selects a manifest/template source; ``image`` selects an
         OCI source. Exactly one must be provided. ``command`` overrides the
         OCI image command in live mode and records the same entrypoint in
-        record mode.
+        record mode. Live mode refuses ``env`` because persistent creation
+        cannot carry it; declare environment in the image or pass ``env`` to
+        ``Sandbox.commands.start``. Record mode continues to encode ``env``
+        in the workload declaration.
 
         ``workload_id`` defaults to the resolved template (the CLI
         overrides with the script's basename when invoked via
