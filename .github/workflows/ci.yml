@@ -545,11 +545,11 @@ jobs:
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
-          cargo test -p mvm-build --features builder-vm --lib \
+          cargo test -p mvm-build --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
       - name: In-process pure-mkfs materialize tests
-        run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
+        run: cargo test -p mvm-build --lib rootfs::tests::pure
 
   # Split out of `lint-features`, which was 35 minutes and the critical path for
   # every code-touching pull request; this step alone was 19 of them. Nothing

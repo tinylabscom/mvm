@@ -137,6 +137,10 @@ pub fn run(workspace: &Path) -> Result<()> {
     )?;
     validate_mvm_build_features(&build_manifest)?;
 
+    let ci_workflow =
+        std::fs::read_to_string(workspace.join(".github").join("workflows").join("ci.yml"))?;
+    validate_mvm_build_feature_references(&ci_workflow)?;
+
     eprintln!(
         "check-two-surfaces: clean (exactly two product surfaces: host, user; \
          {} internal sub-features)",
@@ -159,6 +163,27 @@ fn validate_mvm_build_features(manifest: &str) -> Result<()> {
         bail!(
             "check-two-surfaces: mvm-build feature(s) {:?} are retired dead configuration; \
              builder orchestration and pure ext4 materialization are unconditional",
+            present
+        );
+    }
+    Ok(())
+}
+
+fn validate_mvm_build_feature_references(source: &str) -> Result<()> {
+    const RETIRED_REFERENCES: [&str; 4] = [
+        "mvm-build/builder-vm",
+        "mvm-build/pure-mkfs",
+        "-p mvm-build --features builder-vm",
+        "-p mvm-build --features pure-mkfs",
+    ];
+    let present: Vec<&str> = RETIRED_REFERENCES
+        .into_iter()
+        .filter(|reference| source.contains(reference))
+        .collect();
+    if !present.is_empty() {
+        bail!(
+            "check-two-surfaces: retired mvm-build feature reference(s) {:?}; builder \
+             orchestration and pure ext4 materialization are unconditional",
             present
         );
     }
@@ -391,5 +416,22 @@ manifest-verify = ["mvm-core/manifest-verify"]
 release-channel = []
 "#;
         validate_mvm_build_features(manifest).unwrap();
+    }
+
+    #[test]
+    fn mvm_build_rejects_retired_workflow_feature_references() {
+        let workflow = r#"
+run: cargo test -p mvm-build --features builder-vm --lib
+features = ["mvm-build/pure-mkfs"]
+"#;
+        let err = validate_mvm_build_feature_references(workflow).unwrap_err();
+        assert!(err.to_string().contains("builder-vm"));
+        assert!(err.to_string().contains("pure-mkfs"));
+    }
+
+    #[test]
+    fn mvm_build_accepts_unconditional_workflow_invocations() {
+        let workflow = "run: cargo test -p mvm-build --lib rootfs::tests::pure";
+        validate_mvm_build_feature_references(workflow).unwrap();
     }
 }
