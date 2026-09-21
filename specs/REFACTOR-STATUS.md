@@ -4,7 +4,7 @@ Last updated: 2026-09-21
 
 ## In progress
 
-- [x] **Firecracker live-parent fork activation — issue #3552, PR #3581.**
+- [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard
       (`MVM_FORK_VMFULL_FC_EXPERIMENTAL`) and the `MustBeStopped` live-parent

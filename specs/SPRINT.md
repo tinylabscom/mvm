@@ -38,7 +38,8 @@
       green. See `specs/sprint/delivery/3323-generic-builder-machinery.md`.
 
 - [x] **Firecracker live-parent fork activation — issue #3552.**
-      `specs/plans/2026-09-21-live-fork-fc-netns.md`, PR #3581. Under the
+      `specs/plans/2026-09-21-live-fork-fc-netns.md`, PR #3586 (the branch's earlier
+docs commit went out as #3581). Under the
       vsock-only invariant (no NIC, no TAP/TUN anywhere in the guest device
       model) the fork guard's TAP/MAC collision rationale was stale: the
       experimental gate (`MVM_FORK_VMFULL_FC_EXPERIMENTAL`) and the

@@ -67,4 +67,5 @@ the issue (patch the vmstate bitcode; per-child netns + TAP) are withdrawn.
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` clean (Linux
       builder env); touched-crate tests green; `just check-gated` clean.
 - [ ] Update `specs/SPRINT.md` + `specs/REFACTOR-STATUS.md`; tick these boxes.
-- [ ] Push `feat/live-fork`, PR open referencing #3552, acceptance list ticked.
+- [x] Push `feat/live-fork`, PR open referencing #3552, acceptance list ticked (PR #3586;
+the branch's earlier docs commit went out as #3581).
