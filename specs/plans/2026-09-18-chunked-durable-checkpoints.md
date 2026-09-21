@@ -195,7 +195,7 @@ it includes flushing whatever the kernel had not yet written back.
       against the chunked commit).
 
 **C2 measurements so far.** The synthetic 20-chunk test changes one chunk
-(5%) and proves that the new object plus the second index add under 10% of the
+(5%) and checks that the new object plus the second index add under 10% of the
 first pool's bytes. On a live 512 MiB HVF guest with a representative
 multi-layer rootfs, the first checkpoint stored 237,862,839 bytes and the
 immediate idle recapture added 15,364,023 bytes (6.459%). A deliberately tiny
