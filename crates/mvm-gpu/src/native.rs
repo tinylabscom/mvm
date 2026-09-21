@@ -425,13 +425,13 @@ impl GpuBackend for NativeCudaBackend {
 
     fn device_name(&mut self, ordinal: u32) -> Result<String, GpuError> {
         let device = self.device(ordinal)?;
-        let mut buf = [0_i8; 256];
+        let mut buf: [c_char; 256] = [0; 256];
         // SAFETY: `buf` is 256 bytes, its size is passed explicitly, and
         // `device` came from cuDeviceGet above.
         let code =
             unsafe { (self.cuda.device_get_name)(buf.as_mut_ptr(), buf.len() as c_int, device) };
         self.cuda.check(code, "cuDeviceGetName")?;
-        Ok(std::ffi::CStr::from_bytes_until_nul(bytemuck_i8(&buf))
+        Ok(std::ffi::CStr::from_bytes_until_nul(c_char_bytes(&buf))
             .map_err(|_| GpuError::new(wire::CUDA_ERROR_UNKNOWN, "device name not NUL-terminated"))?
             .to_string_lossy()
             .into_owned())
@@ -643,7 +643,7 @@ impl GpuBackend for NativeCudaBackend {
                 "NVML is not available in this endpoint",
             )
         })?;
-        let mut buf = vec![0_i8; 80];
+        let mut buf: Vec<c_char> = vec![0; 80];
         // SAFETY: `buf` is 80 bytes and its length is passed explicitly.
         let code =
             unsafe { (nvml.system_get_driver_version)(buf.as_mut_ptr(), buf.len() as c_uint) };
@@ -653,7 +653,7 @@ impl GpuBackend for NativeCudaBackend {
                 format!("nvmlSystemGetDriverVersion failed with code {code}"),
             ));
         }
-        Ok(std::ffi::CStr::from_bytes_until_nul(bytemuck_i8(&buf))
+        Ok(std::ffi::CStr::from_bytes_until_nul(c_char_bytes(&buf))
             .map_err(|_| {
                 GpuError::new(
                     wire::NVML_ERROR_UNKNOWN,
@@ -672,7 +672,7 @@ impl GpuBackend for NativeCudaBackend {
             )
         })?;
         let device = self.nvml_device(ordinal)?;
-        let mut buf = vec![0_i8; 64];
+        let mut buf: Vec<c_char> = vec![0; 64];
         // SAFETY: `buf` is 64 bytes and its length is passed; `device` is
         // a handle NVML minted.
         let code = unsafe { (nvml.device_get_name)(buf.as_mut_ptr(), buf.len() as c_uint, device) };
@@ -682,7 +682,7 @@ impl GpuBackend for NativeCudaBackend {
                 format!("nvmlDeviceGetName({ordinal}) failed with code {code}"),
             ));
         }
-        Ok(std::ffi::CStr::from_bytes_until_nul(bytemuck_i8(&buf))
+        Ok(std::ffi::CStr::from_bytes_until_nul(c_char_bytes(&buf))
             .map_err(|_| GpuError::new(wire::NVML_ERROR_UNKNOWN, "device name not NUL-terminated"))?
             .to_string_lossy()
             .into_owned())
@@ -754,11 +754,12 @@ impl GpuBackend for NativeCudaBackend {
     }
 }
 
-/// View an i8 buffer as bytes for NUL-scanning. `i8` and `u8` have the
-/// same layout and the buffer originates from a `*mut c_char` fill, so the
-/// reinterpretation is total.
-fn bytemuck_i8(buf: &[i8]) -> &[u8] {
-    // SAFETY: i8 and u8 are layout-compatible; the slice bounds are unchanged.
+/// View a C-char buffer as bytes for NUL-scanning. `c_char` may be signed or
+/// unsigned by target, but it is always one byte, so this is portable across
+/// the supported Linux architectures.
+fn c_char_bytes(buf: &[c_char]) -> &[u8] {
+    // SAFETY: c_char and u8 have the same size and alignment; the slice bounds
+    // are unchanged.
     unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), buf.len()) }
 }
 

@@ -74,7 +74,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 482 (was 485): routing the default workload image through the shared image
 /// source selector removes three obsolete nodes from the all-feature closure.
-const FEATURE_CLOSURE_BUDGET: usize = 482;
+///
+/// 487 (was 482): GPU API remoting adds five first-party workspace crates; all
+/// of their external dependencies were already present in the closure.
+const FEATURE_CLOSURE_BUDGET: usize = 487;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
