@@ -202,11 +202,14 @@
           };
         });
 
-      # Target overlay size: 16 MiB — a hard cap for the static-musl
+      # Target overlay size: 18 MiB — a hard cap for the static-musl
       # runtime overlay. The SDK glibc closure lives in the separate
       # sidecar, so the production overlay no longer needs the old
-      # 32 MiB allocation.
-      overlaySizeBytes = 16 * 1024 * 1024;
+      # 32 MiB allocation. 16 MiB stopped fitting when the mediated
+      # ping binary joined the staged set: mkfs ran out of blocks
+      # populating the x86_64 image, which was already within a few
+      # hundred kilobytes of full.
+      overlaySizeBytes = 18 * 1024 * 1024;
 
       mkSdkSidecar =
         system:
