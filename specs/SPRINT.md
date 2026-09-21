@@ -329,8 +329,10 @@
       derivations. Independent builds differ only in filesystem and verity
       metadata (#3499). The images boot on x86_64 Firecracker and on HVF from an
       isolated `MVM_HOME`, at the development tier, and the `mvm-images`
-      builder built and booted a workload on Firecracker. Outstanding: aarch64
-      Firecracker, and a build through the builder on HVF, which did not finish
+      builder built and booted a workload on Firecracker. The aarch64 image set
+      from `mvm-images` build 35462836122 also boots through `mvmctl` on
+      Firecracker/KVM and completes a transient command. Outstanding: a build
+      through the builder on physical Apple Silicon HVF, which did not finish
       on the loaded host.
       W5 (#3364) slice W5a: `MVM_IMAGES_DIR` names a local `mvm-images`
       checkout explicitly (canonical root, commit and dirty fingerprint

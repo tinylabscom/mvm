@@ -261,8 +261,9 @@ Last updated: 2026-09-21
             (tinylabscom/mvm-images#4).
       - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
             Comparison done, every difference explained; x86_64 Firecracker
-            boots and builds, HVF boots; outstanding: aarch64 Firecracker boot
-            and a completed HVF builder build. Found #3499, #3500, #3502.
+            boots and builds, HVF boots, and aarch64 Firecracker boots and runs
+            a transient command; outstanding: a completed physical Apple
+            Silicon HVF builder build. Found #3499, #3500, #3502.
       - [x] W5a #3364: explicit `MVM_IMAGES_DIR` selector, `local-dev` /
             `verified-release` tiers, release-build and production refusals,
             `doctor` image-source line; W5b–W5m sliced in the plan.

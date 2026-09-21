@@ -19,6 +19,13 @@ used as a second independent build), and `reproduce.yml` run 35434194000 from
 tinylabscom/mvm-images#5. Rootfs contents were compared with `debugfs rdump` and
 a per-file sha256 on a Linux host.
 
+The later aarch64 Firecracker witness uses `build.yml` run 35462836122 from
+`mvm-images` `main` at `4c0d55e562dc88032c6d1cd5a3c588dafbdcffc6`.
+That tree's `flake.lock` pins `mvm` exactly at
+`3720eeccefc959d273a4ce912c75ac56f54315f0`; the default-image metadata records
+the same revision as `generatorRev`. The run's `source-drift` job and every
+aarch64 producer job passed.
+
 ## Against `boot-image/v0.1.5`
 
 The file set matches on both architectures with two kinds of difference.
@@ -118,8 +125,21 @@ release:
   guest kept one CPU busy with no further console output. The run hit its
   90-minute limit (exit 124) on a host at load average 70 to 250. The same job
   took 248 s on the Firecracker host. The cause is not diagnosed.
-- **aarch64, Firecracker.** Not run. The Raspberry Pi KVM host did not resolve
-  from this machine, and no other aarch64 KVM host was available.
+- **aarch64, Firecracker v1.14.1 on KVM.** Run 35462836122's default microVM,
+  runtime overlay, initramfs, and workload kernel passed their producer
+  checksum manifests, then booted through the real `mvmctl run --hypervisor
+  firecracker` path in the approved Lima KVM test environment. The sealed prod
+  default image was mirrored into the development cache slot that the no-image
+  `run` path resolves; its verity sidecars were retained. Admission recorded
+  rootfs SHA-256 `341f27c597aa587ceb0f344e48533ff59ec00f9380d798feacccbaf4f997ccc6`,
+  the universal initramfs and runtime overlay attached, Firecracker reached the
+  serving guest agent in 1,046 ms, activation completed in 401 ms, `/bin/true`
+  exited 0, and teardown completed. The chain recorded `plan.launched` for plan
+  `sha256:f0c2875b9f55c16ae07d2bf955e330b89e98bf0852f74d681e8f996f9bf07928`.
+  The signed receipt SHA-256 is
+  `d0e35877cf0552f789ce0614c9f3bdedca62fa480810e20499b4fb11bd81994f`;
+  the JSON boot log SHA-256 is
+  `045542a3008ac76f0213a8e2caf94a6614d18545b23262ac26524e7b42a46157`.
 
 Two more findings from the boots: a Firecracker transient run rewrites the
 cached dev rootfs, which changes its digest on every launch (#3502); and
@@ -128,6 +148,6 @@ Firecracker tier now refuses as an unenforceable wall-clock grant.
 
 ## Not yet
 
-W4c stays open until the aarch64 image set boots on Firecracker, and until a
-build completes through the `mvm-images` builder on HVF. #3499 decides
-whether the publication gate can compare digests, or has to compare file trees.
+W4c stays open until a build completes through the `mvm-images` builder on
+physical Apple Silicon HVF. #3499 decides whether the publication gate can
+compare digests, or has to compare file trees.

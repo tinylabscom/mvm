@@ -557,7 +557,8 @@ Delivery slices, one PR each:
 - [ ] W4c (`mvm-images`) — compare the outputs against the published
       `boot-image/v0.1.5` set: file set, digests, closures, and boot on
       Firecracker (x86_64 and aarch64) and HVF, with every difference explained.
-      Comparison done; aarch64 Firecracker boot outstanding
+      Comparison and the workload boot matrix are done; a physical Apple
+      Silicon HVF builder build remains outstanding
       (`specs/sprint/delivery/3362-w4c-image-comparison.md`). Every byte
       difference from `v0.1.5` traces to a named `mvm` commit or to the
       `generatorRev` rewrite. None is unexplained, and none comes from the build
@@ -570,10 +571,12 @@ Delivery slices, one PR each:
       the dev and prod default images, and built and booted a sealed workload
       through the `mvm-images` builder. On HVF the dev and prod default images
       ran, and the `mvm-images` builder booted, but its build did not finish
-      within 90 minutes on the loaded host. The aarch64 Firecracker host was
-      unreachable. Also found: #3500 (the Nix initramfs
-      says `VERSION` `0.18.0`, which an rc CLI refuses) and #3502 (a Firecracker
-      run rewrites the cached dev rootfs).
+      within 90 minutes on the loaded host. The aarch64 image set from
+      `mvm-images` build 35462836122 subsequently booted through `mvmctl` on
+      Firecracker/KVM, reached the guest agent, activated, ran `/bin/true`, and
+      exited 0. Also found: #3500 (the Nix initramfs says `VERSION` `0.18.0`,
+      which an rc CLI refuses) and #3502 (a Firecracker run rewrites the cached
+      dev rootfs).
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 
