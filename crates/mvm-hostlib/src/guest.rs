@@ -187,9 +187,10 @@ impl GuestOps for LocalGuest {
 
 // ── requests ─────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartRequest {
+pub(crate) struct StartRequest {
     id: String,
     argv: Vec<String>,
     #[serde(default)]
@@ -198,47 +199,53 @@ struct StartRequest {
     cwd: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MachineRequest {
+pub(crate) struct MachineRequest {
     id: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SignalRequest {
+pub(crate) struct SignalRequest {
     id: String,
     token: String,
     signum: i32,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProcessRequest {
+pub(crate) struct ProcessRequest {
     id: String,
     token: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StdinRequest {
+pub(crate) struct StdinRequest {
     id: String,
     token: String,
     data_b64: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WaitRequest {
+pub(crate) struct WaitRequest {
     id: String,
     token: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadRequest {
+pub(crate) struct ReadRequest {
     id: String,
     path: String,
     #[serde(default)]
@@ -248,9 +255,10 @@ struct ReadRequest {
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WriteRequest {
+pub(crate) struct WriteRequest {
     id: String,
     path: String,
     data_b64: String,
@@ -262,25 +270,28 @@ struct WriteRequest {
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PathRequest {
+pub(crate) struct PathRequest {
     id: String,
     path: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatRequest {
+pub(crate) struct StatRequest {
     id: String,
     path: String,
     #[serde(default = "follow_by_default")]
     follow_symlinks: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MkdirRequest {
+pub(crate) struct MkdirRequest {
     id: String,
     path: String,
     #[serde(default)]
@@ -289,18 +300,20 @@ struct MkdirRequest {
     parents: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RemoveRequest {
+pub(crate) struct RemoveRequest {
     id: String,
     path: String,
     #[serde(default)]
     recursive: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RenameRequest {
+pub(crate) struct RenameRequest {
     id: String,
     from: String,
     to: String,
@@ -312,51 +325,60 @@ fn follow_by_default() -> bool {
 
 // ── replies ──────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct Empty {}
+pub(crate) struct Empty {}
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct StartedReply {
+pub(crate) struct StartedReply {
     token: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct AcceptedReply {
+pub(crate) struct AcceptedReply {
     accepted: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct DataReply {
+pub(crate) struct DataReply {
     data_b64: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct WrittenReply {
+pub(crate) struct WrittenReply {
     bytes_written: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct ListReply {
+pub(crate) struct ListReply {
     entries: Vec<FsEntry>,
     truncated: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct RemovedReply {
+pub(crate) struct RemovedReply {
     entries_removed: u64,
 }
 
 /// How a waited-on process ended.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Exited { code: i32 },
     Killed { signal: i32 },
     TimedOut,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct WaitReply {
+pub(crate) struct WaitReply {
     stdout_b64: String,
     stderr_b64: String,
     /// Output past [`WAIT_OUTPUT_CAP`] on either stream was dropped.

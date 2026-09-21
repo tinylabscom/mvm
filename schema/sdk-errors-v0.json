@@ -289,7 +289,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -303,7 +304,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -317,7 +319,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -331,7 +334,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -345,7 +349,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -359,7 +364,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -373,7 +379,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -387,7 +394,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -401,7 +409,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -415,7 +424,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -429,7 +439,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
@@ -443,7 +454,8 @@
       "status": null,
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     }
   ],

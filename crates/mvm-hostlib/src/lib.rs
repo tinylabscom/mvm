@@ -53,6 +53,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub mod dispatch;
 mod embedder;
 pub mod guest;
+#[cfg(feature = "schema")]
+pub mod registry;
 pub mod status;
 
 use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_INTERNAL, Outcome};

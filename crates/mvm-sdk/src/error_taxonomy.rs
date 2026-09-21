@@ -350,7 +350,7 @@ const fn host_library_base() -> SdkErrorType {
         doc: "Base of every error the host library reports.",
         status: None,
         code: None,
-        surfaces: &[Surface::Rust, Surface::Python],
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
     }
@@ -367,7 +367,7 @@ const fn host_library_error(
         doc,
         status: None,
         code: Some(code),
-        surfaces: &[Surface::Rust, Surface::Python],
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
         fields: &[],
         message_format: None,
     }

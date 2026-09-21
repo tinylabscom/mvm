@@ -145,6 +145,24 @@ fn artifacts() -> &'static [StubArtifact] {
             class_name: "Runtime",
             stem: "runtime-v0",
         },
+        StubArtifact {
+            label: "host ABI",
+            emit_args: &[
+                "run",
+                "-q",
+                "-p",
+                "mvm-hostlib",
+                "--features",
+                "schema",
+                "--bin",
+                "emit_host_abi_schema",
+            ],
+            schema_path: "schema/host-abi-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_hostabi/host_abi.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/hostabi/host_abi.ts",
+            class_name: "HostAbi",
+            stem: "host-abi-v0",
+        },
     ]
 }
 
@@ -185,6 +203,8 @@ enum ConstKind {
     Errors,
     /// `schema/sdk-ctors-v0.json` — the constructor surface.
     Ctors,
+    /// `schema/host-abi-methods-v0.json` — the host-ABI method table.
+    HostAbiMethods,
 }
 
 /// Constant-bearing artifacts, regenerated and drift-checked alongside
@@ -223,6 +243,24 @@ fn const_artifacts() -> &'static [ConstArtifact] {
             ts_path: "crates/mvm-sdk/sdks/typescript/src/_ctors/generated.ts",
             stem: "sdk-ctors-v0",
         },
+        ConstArtifact {
+            kind: ConstKind::HostAbiMethods,
+            label: "host-ABI method table",
+            emit_args: &[
+                "run",
+                "-q",
+                "-p",
+                "mvm-hostlib",
+                "--features",
+                "schema",
+                "--bin",
+                "emit_host_abi_methods",
+            ],
+            manifest_path: "schema/host-abi-methods-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_hostabi/methods.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/hostabi/methods.ts",
+            stem: "host-abi-methods-v0",
+        },
     ]
 }
 
@@ -248,6 +286,13 @@ fn render_const(kind: ConstKind, manifest: &[u8]) -> Result<(String, String)> {
             (
                 crate::gen_sdk_surface::render_python_ctors(&m),
                 crate::gen_sdk_surface::render_typescript_ctors(&m),
+            )
+        }
+        ConstKind::HostAbiMethods => {
+            let m = crate::gen_sdk_surface::HostAbiManifest::parse(manifest)?;
+            (
+                crate::gen_sdk_surface::render_python_host_abi_methods(&m)?,
+                crate::gen_sdk_surface::render_typescript_host_abi_methods(&m)?,
             )
         }
     })

@@ -145,6 +145,34 @@ schema → datamodel-codegen (Python)           ← uvx, zero-install
 schema → json-schema-to-typescript (Node)     ← npx, zero-install
 ```
 
+## The host-ABI stubs
+
+The host library's machine-readable contract lives once in
+`mvm-hostlib`'s method registry (`crates/mvm-hostlib/src/registry.rs`):
+one row per dotted method with its request and reply types, admission
+classification, and a one-line summary. Two emitters derive the SDK
+artifacts from it, so no binding hand-maintains a method list:
+
+- `cargo run -q -p mvm-hostlib --features schema --bin
+  emit_host_abi_schema` renders every method's request/reply types into
+  `schema/host-abi-v0.json`, which the pinned generators turn into
+  `python/mvm/_hostabi/host_abi.py` and
+  `typescript/src/hostabi/host_abi.ts`.
+- `cargo run -q -p mvm-hostlib --features schema --bin
+  emit_host_abi_methods` renders the method table (dotted name, schema
+  key, classification, ABI version) into
+  `schema/host-abi-methods-v0.json`, which the xtask surface renderers
+  turn into `python/mvm/_hostabi/methods.py` and
+  `typescript/src/hostabi/methods.ts`.
+
+Both run as part of `cargo xtask gen-stubs` and are drift-checked by
+`cargo xtask check-stubs` like every other stub set. The hand-written
+parts of each binding are thin on purpose: library resolution, the FFI
+declarations, and request/reply marshalling (`python/mvm/_hostlib.py`,
+`typescript/src/_hostlib.ts`). Everything the bindings export about the
+method surface — names, classifications, ABI version, DTO shapes — is
+generated from the registry.
+
 ## Layout
 
 ```

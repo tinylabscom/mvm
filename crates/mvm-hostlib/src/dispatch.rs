@@ -40,30 +40,34 @@ pub(crate) fn is_known(method: &str) -> bool {
 }
 
 /// A request naming one machine.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MachineRef {
+pub(crate) struct MachineRef {
     id: String,
 }
 
 /// A `machine.logs` request. There is no `follow`: following a log is a
 /// stream, and a single call returns once.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LogsRequest {
+pub(crate) struct LogsRequest {
     id: String,
     #[serde(default)]
     tail_lines: Option<u32>,
 }
 
 /// A request that carries nothing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Empty {}
+pub(crate) struct Empty {}
 
 /// Console bytes, which need not be UTF-8.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-struct LogsReply {
+pub(crate) struct LogsReply {
     data_b64: String,
 }
 

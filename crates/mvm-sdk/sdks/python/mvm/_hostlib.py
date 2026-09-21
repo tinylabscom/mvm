@@ -32,14 +32,14 @@ from mvm._errors.types import (
     HostLibraryError,
     MvmTransportError,
 )
+from mvm._hostabi.methods import ABI_MAJOR, ABI_MINOR
 
 #: Environment variable naming the library file.
 LIB_PATH_ENV = "MVM_HOSTLIB_PATH"
 
-#: The ABI this binding was written against. A library with another major,
-#: or an older minor, refuses it.
-ABI_MAJOR = 1
-ABI_MINOR = 0
+#: The ABI this binding was written against, generated from the host
+#: registry (`mvm._hostabi.methods`). A library with another major, or an
+#: older minor, refuses it.
 
 
 def library_file_name(platform: str = sys.platform) -> str:

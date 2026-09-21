@@ -29,6 +29,25 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+# Build-time only: the ABI schema and method-table emitters. The schema
+# feature keeps schemars out of the shipped cdylib, mirroring mvm-agentd.
+schemars = { version = "0.8", optional = true }
+
+[features]
+# Derives JsonSchema on the ABI request/reply types so the emitters can write
+# the SDK-codegen input. Never enabled for the library artifact itself.
+schema = ["dep:schemars", "mvm-agentd/schema", "mvm-core/schema"]
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "emit_host_abi_schema"
+path = "src/bin/emit_host_abi_schema.rs"
+required-features = ["schema"]
+
+[[bin]]
+name = "emit_host_abi_methods"
+path = "src/bin/emit_host_abi_methods.rs"
+required-features = ["schema"]
+
