@@ -146,8 +146,50 @@ cached dev rootfs, which changes its digest on every launch (#3502); and
 `examples/exit_code/flake.nix` still documents `--timeout 120`, which the
 Firecracker tier now refuses as an unenforceable wall-clock grant.
 
+## aarch64 Firecracker on real hardware (rpi1, 2026-09-21)
+
+The Lima aarch64 run above uses a virtual `/dev/kvm` under the approved
+test-environment exception; W4c also asked for the boot on a real aarch64
+KVM host. `rpi1.local` (Raspberry Pi 4, GICv2, kernel `6.18.34+rpt`,
+Firecracker v1.14.1, `/dev/kvm` usable) provided one.
+
+Setup mirrors the Lima run: the `build.yml` run 35462836122 aarch64 set
+(default microVM, runtime overlay, initramfs — its `VERSION` already reads
+`0.18.0-rc.2`, workload kernel, builder image), checksums verified on the
+host, in the isolated `MVM_HOME` layout above. `mvmctl` was cross-built
+from `f03bcfb435` for `aarch64-unknown-linux-gnu` on macOS (the repo's
+zig filter-linker wrappers; host helpers built alongside per the release
+layout), with one local deviation documented below.
+
+- **Default-image boot: witnessed.** `mvmctl run --hypervisor firecracker
+  --no-detect` printed `hello-from-mvm-images-aarch64-rpi1`, `aarch64`,
+  `6.12.110`, `witness-done` — the mvm-images default image bytes booted
+  end to end through the real `mvmctl` path on real aarch64 KVM hardware.
+- **Builder build: blocked by the host kernel, not the images.** Two
+  findings, both filed:
+  - #3577 — `mvmctl` launches Firecracker with a hardcoded `--enable-pci`;
+    on GICv2 hosts the PCI device model leaves every virtio device probing
+    `-524`, so no unpatched `mvmctl` Firecracker boot runs on this Pi at
+    all. The witness build drops the flag (one line); plain-Firecracker
+    replays of mvm's exact API config with and without the flag pin the
+    diagnosis.
+  - #3578 — the substitution endpoint confines itself with Landlock and
+    the Pi OS kernel has `CONFIG_SECURITY_LANDLOCK` unset, so the endpoint
+    refuses to run (`ruleset status NotEnforced; refusing partial
+    confinement`), the guest egress proxy never binds, and
+    `mvm-host-vm-init` refuses the build ~7s in. No supported opt-out
+    exists; the guest-side error names nothing useful.
+  With the flag dropped, the builder VM itself boots on the Pi
+  (`mvm-host-vm-init` mounts the overlay and forks agent and egress
+  client); the build stops only where the endpoint's absence is felt.
+
+So the aarch64 Firecracker *boot* leg of W4c is witnessed on real
+hardware. The aarch64 builder *build* is witnessed on x86_64 Firecracker
+above; on this Pi it waits on #3578 (or a Landlock-capable kernel).
+
 ## Not yet
 
 W4c stays open until a build completes through the `mvm-images` builder on
-physical Apple Silicon HVF. #3499 decides whether the publication gate can
-compare digests, or has to compare file trees.
+physical Apple Silicon HVF — unblocked by the #3522 fix landing, still to
+be re-run. #3499 decides whether the publication gate can compare digests,
+or has to compare file trees.

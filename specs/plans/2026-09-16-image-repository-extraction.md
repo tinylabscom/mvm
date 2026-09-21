@@ -573,10 +573,17 @@ Delivery slices, one PR each:
       the dev and prod default images, and built and booted a sealed workload
       through the `mvm-images` builder. On HVF the dev and prod default images
       ran, and the `mvm-images` builder booted, but its build did not finish
-      within 90 minutes on the loaded host. The aarch64 image set from
+      within 90 minutes on the loaded host (diagnosed as #3522, since fixed).
+      The aarch64 image set from
       `mvm-images` build 35462836122 subsequently booted through `mvmctl` on
       Firecracker/KVM, reached the guest agent, activated, ran `/bin/true`, and
-      exited 0. Also found: #3500 (the Nix initramfs says `VERSION` `0.18.0`,
+      exited 0. On real aarch64 KVM hardware (rpi1, a Pi 4), the default image
+      booted end to end through Firecracker; the builder build there is blocked
+      by #3577 (a hardcoded `--enable-pci` that breaks GICv2 hosts, worked
+      around in the witness build) and #3578 (the endpoint's Landlock
+      confinement refuses the Pi OS kernel), both filed from the witness. The
+      aarch64 builder build on physical Apple Silicon HVF remains open. Also
+      found: #3500 (the Nix initramfs says `VERSION` `0.18.0`,
       which an rc CLI refuses) and #3502 (a Firecracker run rewrites the cached
       dev rootfs).
 
