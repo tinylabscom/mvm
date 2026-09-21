@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use cucumber::{then, when};
+use mvm_conformance::IsolatedHome;
 
 use crate::steps::cli::mvmctl_command;
 use crate::world::CliWorld;
@@ -29,11 +30,13 @@ fn fixture_path(name: &str) -> PathBuf {
 #[when(expr = "I compute the workload address of fixture {string}")]
 fn compute_address(world: &mut CliWorld, fixture: String) {
     let path = fixture_path(&fixture);
+    let home = tempfile::tempdir().expect("create isolated workload-address home");
     let mut cmd = mvmctl_command();
     let output = cmd
         .args(["build", "address", "--from-ir"])
         .arg(&path)
         .arg("--json")
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
 

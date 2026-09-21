@@ -8,8 +8,6 @@
 //! server-binding patterns and would flag the bind otherwise — the
 //! grep deliberately excludes `**/tests/**` for exactly this case.
 
-#![cfg(feature = "builder-vm")]
-
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 

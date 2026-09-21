@@ -1,4 +1,3 @@
-#[cfg(feature = "builder-vm")]
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -168,25 +167,11 @@ pub fn dev_build(
         });
     }
 
-    #[cfg(feature = "builder-vm")]
-    {
-        env.log_info("Building via the Linux builder VM; host-side Nix is not used.");
-        dev_build_via_builder_vm(env, flake_ref, profile, mode)
-    }
-
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        let _ = (env, flake_ref, profile, mode);
-        anyhow::bail!(
-            "Builder VM support was compiled out (feature `builder-vm` disabled). \
-             Use the default mvmctl build or rebuild with `--features builder-vm` \
-             so Nix evaluation and image builds can run inside the project builder VM."
-        );
-    }
+    env.log_info("Building via the Linux builder VM; host-side Nix is not used.");
+    dev_build_via_builder_vm(env, flake_ref, profile, mode)
 }
 
 /// Build path that always runs Nix inside the project builder VM.
-#[cfg(feature = "builder-vm")]
 fn dev_build_via_builder_vm(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
@@ -233,7 +218,6 @@ fn dev_build_via_builder_vm(
 /// absent, no record is written at all: an absent record reads back as a
 /// cold miss, so we never serve a cache hit we cannot re-verify (fail
 /// closed: never trust the path over a verified digest).
-#[cfg(feature = "builder-vm")]
 fn write_cache_record_for_result(fingerprint: &str, result: &DevBuildResult) -> Result<()> {
     let build_dir = Path::new(&result.build_dir);
     if !build_dir.join("rootfs.ext4").is_file() {
@@ -267,7 +251,6 @@ fn write_cache_record_for_result(fingerprint: &str, result: &DevBuildResult) -> 
 /// Compute the host-side build fingerprint for the cache, or `None` when
 /// the cache is disabled (`MVM_NO_BUILD_CACHE`) or the inputs can't be
 /// fingerprinted (in which case we fall through to a normal build).
-#[cfg(feature = "builder-vm")]
 fn build_cache_fingerprint(
     flake_ref: &str,
     profile: Option<&str>,
@@ -302,7 +285,6 @@ fn build_cache_fingerprint(
 /// on-disk verification is a miss *and* evicts the stale entry (both the
 /// record and the build dir it named), so a tampered or partially-collected
 /// cache entry is never served twice and a fresh build runs unconditionally.
-#[cfg(feature = "builder-vm")]
 fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
     let record = crate::pipeline::build_cache::read_cache_record(fingerprint)?;
     let build_dir = dev_build_dir(&record.revision);
@@ -343,7 +325,6 @@ fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
 /// Resolve a flake-ref argument to a concrete directory path (`.` →
 /// current dir). Shared by the cache fingerprint and the build dispatch
 /// so both reason about the same user flake.
-#[cfg(feature = "builder-vm")]
 fn resolve_user_flake(flake_ref: &str) -> std::path::PathBuf {
     if flake_ref == "." {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -356,7 +337,6 @@ fn resolve_user_flake(flake_ref: &str) -> std::path::PathBuf {
 /// else a single-shot builder VM). Split out from
 /// [`dev_build_via_builder_vm`] so the host-side cache short-circuit wraps
 /// it without entangling the dispatch logic.
-#[cfg(feature = "builder-vm")]
 fn dev_build_via_builder_vm_uncached(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
@@ -486,7 +466,6 @@ fn dev_build_via_builder_vm_uncached(
 /// --no-persistent-builder`; this env-var check is the bridge so
 /// `dev_build`'s public signature doesn't need a new parameter
 /// threaded through every caller (mvmctl, test harnesses, mvmd).
-#[cfg(feature = "builder-vm")]
 fn persistent_dispatch_disabled() -> bool {
     std::env::var_os("MVM_NO_PERSISTENT_BUILDER")
         .map(|v| !v.is_empty())
@@ -496,7 +475,6 @@ fn persistent_dispatch_disabled() -> bool {
 /// Whether a build may route to the persistent builder: the user has not opted
 /// out (`MVM_NO_PERSISTENT_BUILDER`) and the residency policy is not `cold`
 /// (cold builds boot a single-shot builder that boots and tears down per build).
-#[cfg(feature = "builder-vm")]
 fn persistent_routing_allowed(
     policy: &mvm_core::residency::ResidencyPolicy,
     dispatch_disabled: bool,
@@ -516,7 +494,6 @@ fn persistent_routing_allowed(
 ///   (b) the user flake pins `mvm` to GitHub — so `--override-input mvm`
 ///       has an input to replace and we're genuinely swapping a remote
 ///       fetch for the local checkout.
-#[cfg(feature = "builder-vm")]
 fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBuf> {
     let workspace = find_mvm_workspace_root(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
         .or_else(|| find_mvm_workspace_root(user_flake))?;
@@ -528,7 +505,6 @@ fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBu
 
 /// Walk up from `start` until we find a directory containing
 /// `nix/flake.nix`, which marks the root of the mvm source tree.
-#[cfg(feature = "builder-vm")]
 fn find_mvm_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
@@ -541,7 +517,6 @@ fn find_mvm_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
@@ -668,7 +643,6 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 /// error (the caller logs and falls back to the single-shot builder).
 ///
 /// Builds `/work#<attr>`.
-#[cfg(feature = "builder-vm")]
 fn try_typed_persistent_build(
     env: &dyn ShellEnvironment,
     record: &crate::persistent_builder::SessionRecord,
@@ -740,7 +714,6 @@ fn try_typed_persistent_build(
 /// build cache dir and assemble the [`DevBuildResult`]. `store_path` is the
 /// daemon-reported `/nix/store/...` out-path, from which the cache revision hash
 /// is derived (matching the legacy persistent path's sidecar-derived hash).
-#[cfg(feature = "builder-vm")]
 fn finalize_typed_persistent_build(
     env: &dyn ShellEnvironment,
     host_out: &std::path::Path,
@@ -791,7 +764,6 @@ fn finalize_typed_persistent_build(
     })
 }
 
-#[cfg(feature = "builder-vm")]
 fn copy_staged_artifacts(staging: &str, final_dir: &str) -> Result<()> {
     let mut copied = 0usize;
     for entry in
@@ -817,7 +789,6 @@ fn copy_staged_artifacts(staging: &str, final_dir: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn copy_staged_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     if src.file_name().is_some_and(|name| name == "rootfs.ext4") {
         return copy_sparse_file(src, dst);
@@ -827,7 +798,6 @@ fn copy_staged_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<
         .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))
 }
 
-#[cfg(feature = "builder-vm")]
 fn copy_sparse_file(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -866,12 +836,10 @@ fn copy_sparse_file(src: &std::path::Path, dst: &std::path::Path) -> Result<()> 
 }
 
 /// Return the dev build directory for a given revision hash.
-#[cfg(any(test, feature = "builder-vm"))]
 fn dev_build_dir(revision_hash: &str) -> String {
     format!("{}/{}", dev_builds_dir(), revision_hash)
 }
 
-#[cfg(feature = "builder-vm")]
 fn unique_dev_staging_dir() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -895,13 +863,11 @@ fn unique_dev_staging_dir() -> String {
 /// files behind forever. Tying removal to `Drop` makes every exit path —
 /// present and future — clean up structurally instead of needing a matching
 /// `remove_dir_all` at each `return`/`?`/`bail!`.
-#[cfg(feature = "builder-vm")]
 struct StagingDirGuard {
     path: std::path::PathBuf,
     armed: bool,
 }
 
-#[cfg(feature = "builder-vm")]
 impl StagingDirGuard {
     fn new(path: std::path::PathBuf) -> Self {
         Self { path, armed: true }
@@ -914,7 +880,6 @@ impl StagingDirGuard {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 impl Drop for StagingDirGuard {
     fn drop(&mut self) {
         if self.armed {
@@ -929,7 +894,6 @@ impl Drop for StagingDirGuard {
 /// just wrote), so this reads it directly rather than shelling through
 /// whichever `ShellEnvironment` happens to be active — on macOS 26+ that
 /// environment dials a VM that has no view of the host filesystem.
-#[cfg(any(test, feature = "builder-vm"))]
 fn measure_artifact_sizes(build_dir: &str, has_initrd: bool) -> mvm_core::pool::ArtifactSizes {
     let file_size = |path: &str| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
@@ -950,7 +914,6 @@ fn measure_artifact_sizes(build_dir: &str, has_initrd: bool) -> mvm_core::pool::
 }
 
 /// Check whether an initrd exists in the build directory (a host path).
-#[cfg(any(test, feature = "builder-vm"))]
 fn detect_initrd(build_dir: &str) -> Option<String> {
     let path = format!("{}/initrd", build_dir);
     std::path::Path::new(&path).exists().then_some(path)
@@ -962,7 +925,6 @@ fn detect_initrd(build_dir: &str) -> Option<String> {
 /// The root flake's `mkGuest` copies the runner to `$out/bin/microvm-run`
 /// when the microvm.nix runner is available. If found, returns the runner
 /// directory path (parent of `bin/`).
-#[cfg(any(test, feature = "builder-vm"))]
 fn detect_runner(build_dir: &str) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -986,7 +948,7 @@ fn nix_system() -> &'static str {
     }
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod typed_export_tests {
     use super::*;
 
@@ -1090,7 +1052,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn finalize_typed_build_derives_hash_and_copies_exported_artifacts() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1119,7 +1080,6 @@ mod tests {
         assert!(!host_out.exists());
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn finalize_typed_build_rejects_a_malformed_store_path() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1131,7 +1091,6 @@ mod tests {
         assert!(finalize_typed_persistent_build(&env, &host_out, "not-a-store-path").is_err());
     }
 
-    #[cfg(feature = "builder-vm")]
     struct RecordingBuilderVm {
         seen: Mutex<
             Vec<(
@@ -1142,7 +1101,6 @@ mod tests {
         revision_hash: String,
     }
 
-    #[cfg(feature = "builder-vm")]
     impl RecordingBuilderVm {
         fn new(revision_hash: &str) -> Self {
             Self {
@@ -1152,7 +1110,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "builder-vm")]
     impl crate::builder_vm::BuilderVm for RecordingBuilderVm {
         fn run_stage0(
             &self,
@@ -1274,7 +1231,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "builder-vm", unix))]
+    #[cfg(unix)]
     #[test]
     fn fallback_copy_preserves_sparse_rootfs_artifact() {
         use std::io::{Read, Seek, SeekFrom, Write};
@@ -1313,7 +1270,6 @@ mod tests {
         assert_eq!(&tail, b"tail");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_uses_vm_job_shape_without_host_nix() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1381,7 +1337,6 @@ mod tests {
         std::fs::remove_dir_all(&final_dir).expect("clean fake builder artifacts");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_fails_closed_when_builder_errors() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1429,7 +1384,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn staging_dir_guard_removes_dir_on_drop_without_disarm() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1445,7 +1399,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn staging_dir_guard_leaves_dir_when_disarmed() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1461,7 +1414,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn cache_hit_verifies_and_serves() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1493,7 +1445,6 @@ mod tests {
         assert_eq!(result.build_dir, build_dir_path.to_str().unwrap());
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn tampered_cache_entry_is_evicted() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1560,7 +1511,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn missing_record_is_cold_miss() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1577,7 +1527,6 @@ mod tests {
         assert!(cached_build_result(&fingerprint).is_none());
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn legacy_plaintext_record_is_cold_miss() {
         let temp = tempfile::tempdir().expect("create temp MVM_HOME");
@@ -1833,7 +1782,6 @@ mod tests {
         assert!(!BuildMode::Prod.injects_dev_override());
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn persistent_routing_blocked_by_cold_or_opt_out() {
         use mvm_core::residency::ResidencyPolicy;

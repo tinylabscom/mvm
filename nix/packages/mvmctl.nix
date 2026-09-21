@@ -46,7 +46,6 @@ let
     [ ]
     ++ lib.optionals withBuilderVm [
       "mvm-cli/builder-vm"
-      "mvm-build/builder-vm"
     ]
     ++ lib.optionals withNativeLibkrun [
       "mvm-cli/libkrun-sys"

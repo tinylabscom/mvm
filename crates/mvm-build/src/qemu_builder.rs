@@ -26,9 +26,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::builder_vm::{
     BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
 };
-#[cfg(feature = "builder-vm")]
 use crate::builder_vm_runtime::acquire_nix_store_image_lock_named;
-#[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
     BuilderEndpointTransport, BuilderRuntimeOverlayAttachment, BuilderShellJob, BuilderShellResult,
     BuilderVmImage, BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB,
@@ -59,7 +57,6 @@ impl QemuBuilderVm {
     /// materialization: `/work` is the input tree, `/out` is the artifact
     /// directory, `/job/cmd.sh` is executed by `mvm-host-vm-init`, and caller
     /// extra disks enumerate after the persistent Nix-store disk.
-    #[cfg(feature = "builder-vm")]
     pub fn run_shell_script(
         &self,
         job: &BuilderShellJob,
@@ -70,25 +67,12 @@ impl QemuBuilderVm {
 
 impl BuilderVm for QemuBuilderVm {
     /// Delegates to the implementation; the trait method is what the generic
-    /// call sites reach. Feature-gated the same way that implementation is, so
-    /// a build without `builder-vm` refuses by name rather than failing to
-    /// compile.
+    /// call sites reach.
     fn run_shell_script(
         &self,
         job: &crate::builder_vm::BuilderShellJob,
     ) -> Result<crate::builder_vm::BuilderShellResult, BuilderVmError> {
-        #[cfg(feature = "builder-vm")]
-        {
-            run_shell_script_qemu(job)
-        }
-        #[cfg(not(feature = "builder-vm"))]
-        {
-            let _ = job;
-            Err(BuilderVmError::VmmUnavailable {
-                requested: "qemu-builder-shell-job".to_string(),
-                reason: "the QEMU builder backend requires the `builder-vm` feature".to_string(),
-            })
-        }
+        run_shell_script_qemu(job)
     }
 
     fn capabilities(&self) -> BuilderCapabilities {
@@ -103,13 +87,8 @@ impl BuilderVm for QemuBuilderVm {
         job: &BuilderJob,
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
-        // Steady-state builds. The real impl lives in
-        // `run_build_qemu` behind the `builder-vm` feature (it reaches into
-        // `libkrun_builder`'s cache/image helpers, which link `libkrun-sys`).
-        // `qemu_builder` itself is ungated so it compiles everywhere; the
-        // backend is only ever *constructed* under `builder-vm` (via
-        // `builder_backend_select`), so the non-feature arm is dead in
-        // practice but keeps the default build green.
+        // Steady-state builds share the cache/image helpers used by the other
+        // builder backends.
         run_build_qemu(job, mounts)
     }
 
@@ -207,7 +186,6 @@ fn run_stage0_qemu(
 ) -> Result<(), BuilderVmError> {
     let qemu_bin = locate_qemu()?;
     let (kernel, initrd) = locate_host_kernel()?;
-    #[cfg(feature = "builder-vm")]
     let nix_store_lock = {
         let image = BuilderVmImage::new_root_dir(guest_root_dir.to_path_buf(), entry_path);
         let lock = acquire_nix_store_image_lock_named(
@@ -276,10 +254,8 @@ fn run_stage0_qemu(
     // exists with `builder-vm`, and so does the identity it needs. Gating only
     // one of them compiles on a dev host and fails on the feature-gated
     // target, which is exactly what happened the first time.
-    #[cfg(feature = "builder-vm")]
     let (identity_material, identity_drive) =
         crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
-    #[cfg(feature = "builder-vm")]
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
@@ -307,7 +283,6 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
-    #[cfg(feature = "builder-vm")]
     attach_stage0_identity_and_store(&mut cmd, &identity_drive, nix_store_lock.path());
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
@@ -319,7 +294,6 @@ fn run_stage0_qemu(
     let status = cmd
         .status()
         .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
-    #[cfg(feature = "builder-vm")]
     drop(egress_endpoint);
 
     // 3. Decide success from the serial log (the qemu exit code is just the
@@ -361,7 +335,6 @@ fn run_stage0_qemu(
 
 /// Attach the two host-owned Stage 0 data disks exactly once and in a stable
 /// order: the read-only FlowMux identity followed by the writable Nix store.
-#[cfg(any(feature = "builder-vm", test))]
 fn attach_stage0_identity_and_store(cmd: &mut Command, identity_drive: &Path, nix_store: &Path) {
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw,readonly=on",
@@ -954,19 +927,6 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 const QEMU_BUILD_MEMORY_MIB: u32 = 6144;
 const QEMU_BUILD_VCPUS: u8 = 4;
 
-#[cfg(not(feature = "builder-vm"))]
-fn run_build_qemu(
-    job: &BuilderJob,
-    mounts: &BuilderMounts,
-) -> Result<BuilderArtifacts, BuilderVmError> {
-    let _ = (job, mounts);
-    Err(BuilderVmError::VmmUnavailable {
-        requested: "qemu-run-build".to_string(),
-        reason: "the QEMU builder backend requires the `builder-vm` feature".to_string(),
-    })
-}
-
-#[cfg(feature = "builder-vm")]
 fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
     use crate::builder_disk_transport::InputTree;
     use crate::builder_vm_runtime::{
@@ -1175,7 +1135,6 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     })
 }
 
-#[cfg(feature = "builder-vm")]
 fn validate_shell_job(job: &BuilderShellJob) -> Result<(), BuilderVmError> {
     for disk in &job.extra_disks {
         if disk.id.trim().is_empty() {
@@ -1206,7 +1165,6 @@ fn validate_shell_job(job: &BuilderShellJob) -> Result<(), BuilderVmError> {
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn run_build_qemu(
     job: &BuilderJob,
     mounts: &BuilderMounts,
@@ -1437,7 +1395,6 @@ fn run_build_qemu(
 /// Validate the caller's mount paths before launching QEMU. Mirrors
 /// `LibkrunBuilderVm::validate_mounts` minus the libkrun-specific
 /// non-UTF-8/CString guard (QEMU takes paths as process args).
-#[cfg(feature = "builder-vm")]
 fn validate_build_mounts(mounts: &BuilderMounts) -> Result<(), BuilderVmError> {
     if !mounts.flake_src.is_dir() {
         return Err(BuilderVmError::ExtractionFailed(format!(
@@ -1458,7 +1415,6 @@ fn validate_build_mounts(mounts: &BuilderMounts) -> Result<(), BuilderVmError> {
 
 /// Validate the job description. Same checks as
 /// `LibkrunBuilderVm::validate_job`.
-#[cfg(feature = "builder-vm")]
 fn validate_build_job(job: &BuilderJob) -> Result<(), BuilderVmError> {
     match job {
         BuilderJob::Flake {
@@ -1504,7 +1460,6 @@ fn allocate_qemu_builder_egress_port() -> u32 {
         .saturating_add(NEXT_QEMU_BUILDER_EGRESS_PORT.fetch_add(1, Ordering::Relaxed))
 }
 
-#[cfg(feature = "builder-vm")]
 fn qemu_runtime_overlay_attachment<'a>(
     image: &'a BuilderVmImage,
     runtime_overlay: Option<&'a Path>,
@@ -1532,12 +1487,10 @@ fn qemu_runtime_overlay_attachment<'a>(
 /// writes only to the `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.)
 ///
 /// Idempotent: running it on its own output is a no-op.
-#[cfg(any(feature = "builder-vm", test))]
 fn qemu_build_cmdline(image_cmdline: &str, egress_port: u32) -> String {
     qemu_build_cmdline_for_arch(image_cmdline, egress_port, std::env::consts::ARCH)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn qemu_build_cmdline_for_arch(image_cmdline: &str, egress_port: u32, arch: &str) -> String {
     let mut s = image_cmdline.trim().to_string();
     let serial_console = qemu_console_for_arch(arch);
@@ -1569,14 +1522,12 @@ fn qemu_build_cmdline_for_arch(image_cmdline: &str, egress_port: u32, arch: &str
 mod vsock_module_tests {
     use super::*;
 
-    #[cfg(feature = "builder-vm")]
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
 
     /// The overlay device and the transport tokens are one decision, not two:
     /// the input/output disks take vdc and vdd, so the overlay must be named
     /// vde. A cmdline that says vdc while the disks are attached in the new
     /// order points the guest's runtime overlay at the input tar.
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn qemu_runtime_overlay_rides_the_disk_transport_at_vde() {
         let image = BuilderVmImage::new(
@@ -1696,7 +1647,6 @@ mod vsock_module_tests {
         assert!(out.contains("mvm.runtime_data=/dev/vdc"), "got: {out}");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn shell_job_validation_rejects_missing_extra_disk_before_launch() {
         let work = tempfile::tempdir().expect("work");
@@ -1755,7 +1705,6 @@ mod vsock_module_tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     #[ignore = "live: needs Linux with qemu-system + a bootstrapped rootfs-backed builder image"]
     fn live_qemu_builder_runtime_overlay_is_read_only() {

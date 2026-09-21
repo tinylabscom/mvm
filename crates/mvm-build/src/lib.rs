@@ -91,10 +91,8 @@ pub mod runtime_identity;
 pub mod stage0;
 /// Host-side Stage 0 pieces that belong to no particular VMM.
 ///
-/// Gated with `builder-vm` because it materializes the seed root through the
-/// pure ext4 writer and re-exports the persistent-store helpers, exactly the
-/// closure the code had while it lived inside `libkrun_builder`.
-#[cfg(feature = "builder-vm")]
+/// It materializes the seed root through the pure ext4 writer and re-exports
+/// the persistent-store helpers formerly housed in `libkrun_builder`.
 pub mod stage0_host;
 /// The one kernel Stage 0 can neither build nor resolve by the ordinary policy.
 pub mod stage0_kernel;
@@ -104,18 +102,13 @@ pub mod template_reuse;
 /// Persistent ext4 image materialization for user-attached block volumes.
 pub mod volume_image;
 
-/// Acquiring and running the builder-VM bootstrap helper (gated by
-/// `builder-vm`). See module-level docs.
-#[cfg(feature = "builder-vm")]
+/// Acquiring and running the builder-VM bootstrap helper.
 pub mod builder_vm_bootstrap;
-/// libkrun-backed builder VM (gated by `builder-vm`). See module-level
-/// docs.
-#[cfg(feature = "builder-vm")]
+/// Libkrun-backed builder VM. Native FFI linkage remains separately opt-in.
 pub mod libkrun_builder;
 
 /// The libkrun `NetworkProvider` impl.
 /// Gated with `libkrun_builder`: it wraps that module's gateway selection.
-#[cfg(feature = "builder-vm")]
 pub mod libkrun_network_provider;
 
 /// QEMU-backed builder VM (the Linux dev/builder substrate). Boots the
@@ -135,12 +128,9 @@ pub mod qemu_builder;
 /// contributor-only override. The caller receives a `Box<dyn BuilderVm>` so
 /// the dispatch site doesn't depend on which concrete driver the env-var
 /// resolved to.
-#[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
 /// Per-host builder-VM health cache (skip a libkrun backend that can't create
-/// its VM here). Gated with `builder_backend_select` — its only consumers are
-/// the builder-selection paths behind `builder-vm`.
-#[cfg(feature = "builder-vm")]
+/// its VM here).
 pub mod builder_health;
 
 /// Host-side cross-compile + cache of the guest agent/netinit binaries

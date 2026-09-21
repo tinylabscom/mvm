@@ -424,8 +424,8 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     assert!(
         content.contains("assert withNativeLibkrun -> withBuilderVm")
             && content.contains("\"mvm-cli/builder-vm\"")
-            && content.contains("\"mvm-build/builder-vm\""),
-        "feature flags must stay package-qualified when mvmctl and sidecars build together"
+            && !content.contains("\"mvm-build/builder-vm\""),
+        "the Nix package must enable the CLI surface without reviving mvm-build's removed feature"
     );
     assert!(
         content.contains("lib.optionals withTpm2 [ \"mvmctl/attestation-tpm2\" ]"),

@@ -13,7 +13,6 @@
 //!   ext4 creation inside the Linux builder boundary for trees the
 //!   pure writer structurally can't represent.
 
-#[cfg(any(test, feature = "builder-vm"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -28,10 +27,8 @@ const DEFAULT_GUEST_OUTPUT_DEVICE: &str = "/dev/vdc";
 /// ext4 volume label stamped on the libkrun Stage 0 `/work` disk
 /// (`libkrun_builder::run_stage0_impl`) so `stage0-init` can find it by
 /// content instead of by device-enumeration order. ext4's on-disk
-/// `s_volume_name` field caps at 16 bytes; kept well under that. Lives here
-/// (ungated) rather than behind `pure-mkfs` so the Stage 0 guest binary,
-/// which only needs the string and not the writer, can reference it
-/// regardless of which features its own build enables.
+/// `s_volume_name` field caps at 16 bytes; kept well under that. The Stage 0
+/// guest binary shares this string with the host-side writer.
 pub const STAGE0_WORK_EXT4_LABEL: &str = "mvm-work";
 
 /// ext4 volume label on the persistent Stage 0 Nix store image.
@@ -387,12 +384,6 @@ pub enum RootfsError {
         source: std::io::Error,
     },
 
-    #[error("builder-vm feature is required for ext4 materialization")]
-    BuilderVmFeatureDisabled,
-
-    #[error("dm-verity sidecar emission requires the `pure-mkfs` feature")]
-    VerityFeatureDisabled,
-
     #[error(
         "the builder-VM materializer copies the host tree, so it cannot supply the {count} \
          path(s) the host filesystem could not hold; {}", route.remedy()
@@ -423,11 +414,9 @@ pub enum RootfsError {
         source: std::io::Error,
     },
 
-    #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
 
-    #[cfg(feature = "pure-mkfs")]
     #[error("walking directory tree at {path}: {source}")]
     PureWalk {
         path: PathBuf,
@@ -435,17 +424,14 @@ pub enum RootfsError {
         source: std::io::Error,
     },
 
-    #[cfg(feature = "pure-mkfs")]
     #[error(
         "host path {0} is a device, FIFO, or socket special file the ext4 writer cannot represent"
     )]
     UnsupportedNodeType(PathBuf),
 
-    #[cfg(feature = "pure-mkfs")]
     #[error("building ext4 image in-process: {0}")]
     PureBuild(#[from] mvm_fs::ext4::Ext4Error),
 
-    #[cfg(feature = "pure-mkfs")]
     #[error("reading rootfs image {path}: {source}")]
     ReadOutput {
         path: PathBuf,
@@ -453,7 +439,6 @@ pub enum RootfsError {
         source: std::io::Error,
     },
 
-    #[cfg(feature = "pure-mkfs")]
     #[error("writing rootfs image {path}: {source}")]
     WriteOutput {
         path: PathBuf,
@@ -462,7 +447,6 @@ pub enum RootfsError {
     },
 }
 
-#[cfg(feature = "pure-mkfs")]
 impl RootfsError {
     /// Whether a pure-path failure is a *capacity limit* of the in-process ext4
     /// writer (the image is too big / too fragmented, or an inode's xattrs
@@ -482,7 +466,6 @@ impl RootfsError {
     }
 }
 
-#[cfg(feature = "pure-mkfs")]
 impl From<mvm_fs::rootfs::MaterializeError> for RootfsError {
     fn from(err: mvm_fs::rootfs::MaterializeError) -> Self {
         use mvm_fs::rootfs::MaterializeError;
@@ -518,13 +501,10 @@ pub fn estimate_ext4_size(
 
 /// Materialize `input.unpacked_root` into `input.output`.
 ///
-/// The host allocates the sparse file, but never formats it. When
-/// compiled with the `builder-vm` feature, the host archives the tree
-/// ([`write_rootfs_archive`]) and hands the builder VM that archive as its
-/// `/work` input and the sparse output image as a writable disk; the guest runs
-/// `mkfs.ext4` and extracts the archive onto it. Default builds return
-/// [`RootfsError::BuilderVmFeatureDisabled`] because they do not link
-/// the libkrun builder launcher.
+/// The host allocates the sparse file, but never formats it. The host archives
+/// the tree ([`write_rootfs_archive`]) and hands the builder VM that archive as
+/// its `/work` input and the sparse output image as a writable disk; the guest
+/// runs `mkfs.ext4` and extracts the archive onto it.
 ///
 /// `route` is how the caller got here, and is only ever read to explain a
 /// refusal. It is a parameter rather than a default so a caller cannot reach
@@ -543,29 +523,20 @@ pub fn materialize_ext4(
     refuse_tree_only_materialization_loss(input, route)?;
     let size_bytes = estimate_ext4_size(input.uncompressed_size_bytes, options)?;
 
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        let _ = size_bytes;
-        Err(RootfsError::BuilderVmFeatureDisabled)
+    allocate_sparse_image(&input.output, size_bytes)?;
+
+    if let Err(err) = materialize_ext4_in_builder_vm(input, options, size_bytes) {
+        let _ = std::fs::remove_file(&input.output);
+        return Err(err);
     }
 
-    #[cfg(feature = "builder-vm")]
-    {
-        allocate_sparse_image(&input.output, size_bytes)?;
+    let verity_root_hash = maybe_emit_verity_sidecars(input)?;
 
-        if let Err(err) = materialize_ext4_in_builder_vm(input, options, size_bytes) {
-            let _ = std::fs::remove_file(&input.output);
-            return Err(err);
-        }
-
-        let verity_root_hash = maybe_emit_verity_sidecars(input)?;
-
-        Ok(MaterializedExt4 {
-            path: input.output.clone(),
-            size_bytes,
-            verity_root_hash,
-        })
-    }
+    Ok(MaterializedExt4 {
+        path: input.output.clone(),
+        size_bytes,
+        verity_root_hash,
+    })
 }
 
 /// The builder-VM materializer copies the host tree into the image, so
@@ -617,7 +588,6 @@ fn refuse_tree_only_materialization_loss(
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn allocate_sparse_image(path: &Path, size_bytes: u64) -> Result<(), RootfsError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| RootfsError::AllocateSparseImage {
@@ -642,7 +612,6 @@ fn allocate_sparse_image(path: &Path, size_bytes: u64) -> Result<(), RootfsError
 /// archive onto the output disk. The tree itself is never the job's input —
 /// the generic staging a work directory passes through drops names and reads
 /// special files.
-#[cfg(feature = "builder-vm")]
 fn builder_rootfs_job(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
@@ -670,7 +639,6 @@ fn builder_rootfs_job(
     })
 }
 
-#[cfg(feature = "builder-vm")]
 fn materialize_ext4_in_builder_vm(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
@@ -712,7 +680,6 @@ fn materialize_ext4_in_builder_vm(
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
     // Use the resolved builder backend (override → env → auto-detect: macOS 26+
     // Apple Silicon → hvf builder, Linux native → qemu builder, everywhere
@@ -730,17 +697,14 @@ fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendCh
 /// view matches but panics with "bad geometry: block count … exceeds
 /// size of device" on one that reports fewer blocks. A 1 MiB margin
 /// safely absorbs the discrepancy on every backend.
-#[cfg(any(test, feature = "builder-vm"))]
 const EXT4_DEVICE_MARGIN_BYTES: u64 = 1024 * 1024;
 
 /// ext4 block size used when formatting with an explicit block count.
-#[cfg(any(test, feature = "builder-vm"))]
 const EXT4_BLOCK_SIZE_BYTES: u64 = 4096;
 
 /// Number of `EXT4_BLOCK_SIZE_BYTES` blocks to format, given the host
 /// sparse-file size. Subtracts the device margin, then rounds down to a
 /// whole block count.
-#[cfg(any(test, feature = "builder-vm"))]
 fn ext4_block_count(device_size_bytes: u64) -> u64 {
     device_size_bytes.saturating_sub(EXT4_DEVICE_MARGIN_BYTES) / EXT4_BLOCK_SIZE_BYTES
 }
@@ -765,7 +729,6 @@ fn ext4_block_count(device_size_bytes: u64) -> u64 {
 /// component of the path it is given. That is safe here only because the host
 /// refused, before injection, any tree in which a component leading to a
 /// claimed path is a link.
-#[cfg(any(test, feature = "builder-vm"))]
 pub(crate) fn ext4_materialization_script(
     guest_output_device: &str,
     device_size_bytes: u64,
@@ -805,7 +768,6 @@ trap - EXIT
 
 /// The one file the builder VM's `/work` holds for a rootfs job: the tree as a
 /// tar the host wrote itself.
-#[cfg(any(test, feature = "builder-vm"))]
 const ROOTFS_ARCHIVE_NAME: &str = "mvm-rootfs.tar";
 
 /// Archive the tree at `root` into `out` for the builder VM to extract.
@@ -828,7 +790,6 @@ const ROOTFS_ARCHIVE_NAME: &str = "mvm-rootfs.tar";
 ///   `devtmpfs` supplies `/dev` at boot.
 ///
 /// Entries are sorted, so the archive is a function of the tree.
-#[cfg(any(test, feature = "builder-vm"))]
 pub(crate) fn write_rootfs_archive(root: &Path, out: &Path) -> Result<(), RootfsError> {
     let archive_err = |path: &Path| {
         let path = path.to_path_buf();
@@ -869,7 +830,6 @@ pub(crate) fn write_rootfs_archive(root: &Path, out: &Path) -> Result<(), Rootfs
 
 /// Append the node at `root/rel` to `builder`. Returns whether it is a
 /// directory the walk should descend into.
-#[cfg(any(test, feature = "builder-vm"))]
 fn append_archive_entry<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
@@ -923,7 +883,6 @@ fn append_archive_entry<W: std::io::Write>(
 /// is widened only on a path that `lstat` has just shown to be a regular
 /// file, so a `chmod` — which does follow links — cannot reach a file outside
 /// the tree.
-#[cfg(any(test, feature = "builder-vm"))]
 fn open_for_archive(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -956,7 +915,6 @@ fn open_for_archive(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// One `chown_root` line per claimed path and one `chown_root_tree` line per
 /// claimed tree, each under the image mount point.
-#[cfg(any(test, feature = "builder-vm"))]
 fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> String {
     let path_lines = root_owned.paths().map(|path| ("chown_root", path));
     let tree_lines = root_owned.trees().map(|tree| ("chown_root_tree", tree));
@@ -971,7 +929,6 @@ fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> Str
         .collect()
 }
 
-#[cfg(feature = "pure-mkfs")]
 /// Materialize `input.unpacked_root` into `input.output` **in-process** — no
 /// builder VM, no `mkfs`, no subprocess. Delegates the tree walk + streamed
 /// emission to [`mvm_fs::rootfs::materialize_ext4_pure`] (the single
@@ -998,7 +955,6 @@ pub fn materialize_ext4_pure(
 ///
 /// Stage-0 `/work` is mounted by label; every other caller leaves
 /// `volume_label` unset and gets the unchanged default-options image.
-#[cfg(feature = "pure-mkfs")]
 fn pure_materialize_options(
     input: &MaterializeExt4Input,
     walk: mvm_fs::rootfs::WalkOptions,
@@ -1020,7 +976,6 @@ fn pure_materialize_options(
 /// Immutable OCI roots use [`mvm_fs::rootfs::WalkOptions::default`]. Live
 /// directory snapshots may instead omit entries that vanish during capture
 /// while preserving the same ext4 construction path.
-#[cfg(feature = "pure-mkfs")]
 pub fn materialize_ext4_pure_with_walk_options(
     input: &MaterializeExt4Input,
     walk: mvm_fs::rootfs::WalkOptions,
@@ -1066,7 +1021,6 @@ pub fn materialize_ext4_pure_with_walk_options(
     })
 }
 
-#[cfg(feature = "pure-mkfs")]
 fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError> {
     std::fs::write(path, body).map_err(|source| RootfsError::WriteOutput {
         path: path.to_path_buf(),
@@ -1074,7 +1028,6 @@ fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError>
     })
 }
 
-#[cfg(all(feature = "pure-mkfs", feature = "builder-vm"))]
 fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
     if !input.emit_verity {
         return Ok(None);
@@ -1087,15 +1040,6 @@ fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<Str
     Ok(Some(emit_verity_sidecars_for_image(&input.output, &image)?))
 }
 
-#[cfg(all(feature = "builder-vm", not(feature = "pure-mkfs")))]
-fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
-    if input.emit_verity {
-        return Err(RootfsError::VerityFeatureDisabled);
-    }
-    Ok(None)
-}
-
-#[cfg(feature = "pure-mkfs")]
 fn emit_verity_sidecars_for_image(
     image_path: &std::path::Path,
     image: &[u8],
@@ -1123,7 +1067,6 @@ fn emit_verity_sidecars_for_image(
     Ok(root_hex)
 }
 
-#[cfg(any(test, feature = "builder-vm"))]
 fn shell_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
@@ -1132,7 +1075,6 @@ fn shell_single_quote_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_capacity_limit_is_retryable_but_malformed_is_not() {
         let capacity = RootfsError::PureBuild(mvm_fs::ext4::Ext4Error::FileTooFragmented {
@@ -1155,7 +1097,6 @@ mod tests {
         assert!(!io.is_pure_capacity_limit());
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn oversized_xattr_falls_back_to_builder_vm() {
         let src = tempfile::tempdir().unwrap();
@@ -1177,12 +1118,9 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     use crate::builder_backend_select::{BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV};
-    #[cfg(feature = "builder-vm")]
     use mvm_core::util::test_env::TestEnv;
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_writes_a_valid_ext4_from_a_dir_tree() {
         let src = tempfile::tempdir().unwrap();
@@ -1217,7 +1155,6 @@ mod tests {
         assert!(!out.path().join("rootfs.roothash").exists());
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_without_a_label_leaves_volume_name_zeroed() {
         // Regression guard for the `with_volume_label` plumbing: a caller that
@@ -1234,7 +1171,6 @@ mod tests {
         assert_eq!(&img[1024 + 0x78..1024 + 0x88], &[0u8; 16]);
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_with_a_label_stamps_the_ext4_volume_name() {
         let src = tempfile::tempdir().unwrap();
@@ -1251,7 +1187,6 @@ mod tests {
         assert_eq!(&img[1024 + 0x78..1024 + 0x88], &expected);
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_matches_dense_writer_bytes() {
         let src = tempfile::tempdir().unwrap();
@@ -1273,7 +1208,6 @@ mod tests {
         assert_eq!(materialized.size_bytes, dense.len() as u64);
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_with_verity_writes_sidecars() {
         let src = tempfile::tempdir().unwrap();
@@ -1296,7 +1230,6 @@ mod tests {
         assert_eq!(roothash, format!("{root_hex}\n"));
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn emit_verity_sidecars_can_seal_an_existing_image() {
         let src = tempfile::tempdir().unwrap();
@@ -1318,7 +1251,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn emit_verity_sidecars_uses_the_pinned_boot_contract_block_sizes() {
         let src = tempfile::tempdir().unwrap();
@@ -1347,7 +1279,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_rejects_non_directory() {
         let f = tempfile::NamedTempFile::new().unwrap();
@@ -1359,7 +1290,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_creates_missing_output_parent() {
         // The run path's cache dir may not exist yet; the pure writer must
@@ -1635,7 +1565,6 @@ mod tests {
 
     /// The job the builder runs gets the archive as its whole `/work`, never
     /// the tree, and its script extracts exactly that archive.
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn the_builder_job_is_handed_the_archive_not_the_tree() {
         let tree = tempfile::tempdir().unwrap();
@@ -1684,7 +1613,6 @@ mod tests {
         assert!(ext4_block_count(dev) * 4096 + EXT4_DEVICE_MARGIN_BYTES <= dev + 4096);
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn materializer_defaults_to_resolved_backend() {
         let mut env = TestEnv::new();
@@ -1698,7 +1626,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn materializer_honors_explicit_qemu_backend() {
         let mut env = TestEnv::new();
@@ -1706,27 +1633,9 @@ mod tests {
 
         assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Qemu);
     }
-
-    #[cfg(not(feature = "builder-vm"))]
-    #[test]
-    fn materialize_without_builder_vm_feature_reports_feature_disabled_without_output() {
-        let unpacked = tempfile::tempdir().unwrap();
-        let output_dir = tempfile::tempdir().unwrap();
-        let output = output_dir.path().join("rootfs.ext4");
-        let input = MaterializeExt4Input::new(unpacked.path().to_path_buf(), output.clone(), 1);
-
-        let err = materialize_ext4(
-            &input,
-            &MaterializeExt4Options::default(),
-            &BuilderVmRoute::Selected,
-        )
-        .unwrap_err();
-        assert!(matches!(err, RootfsError::BuilderVmFeatureDisabled));
-        assert!(!output.exists());
-    }
 }
 
-#[cfg(all(test, feature = "pure-mkfs"))]
+#[cfg(test)]
 mod injected_ownership_tests {
     use super::*;
     use mvm_fs::ext4::Owner;

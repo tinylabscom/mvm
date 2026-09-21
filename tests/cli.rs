@@ -250,9 +250,13 @@ fn pack_help_lists_all_subcommands() {
 /// `pack list --json` parses and exits cleanly on a fresh/empty pack cache.
 #[test]
 fn pack_list_json_parses_cleanly() {
+    let mvm_home = tempfile::tempdir().unwrap();
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .unwrap()
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
         .args(["pack", "list", "--json"])
         .output()
         .unwrap();

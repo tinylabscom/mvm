@@ -562,7 +562,6 @@ fn seal_run_rootfs_for_runtime_with(
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
     use crate::builder_vm::BuilderShellJob;
 
@@ -593,15 +592,6 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "builder-vm"))]
-fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
-    anyhow::bail!(
-        "dm-verity sealing for {} requires the `builder-vm` feature on hosts without local veritysetup support",
-        rootfs_ext4.display()
-    )
-}
-
-#[cfg(any(test, feature = "builder-vm"))]
 fn verity_seal_script(rootfs_ext4: &Path) -> Result<String> {
     let rootfs_name = rootfs_ext4
         .file_name()
@@ -723,9 +713,6 @@ pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
 /// What the in-process attempt settled: either the image is written, or the
 /// builder VM runs next and this is why.
 enum InProcessOutcome {
-    // Unreachable without the in-process writer compiled in, where the builder
-    // VM is the only materializer there is.
-    #[cfg_attr(not(feature = "pure-mkfs"), allow(dead_code))]
     Materialized,
     UseBuilderVm(crate::rootfs::BuilderVmRoute),
 }
@@ -736,7 +723,6 @@ enum InProcessOutcome {
 /// never retried. Only a structural limit of the in-process writer routes on,
 /// and it carries its own message so the refusal that may follow can name the
 /// real cause instead of a setting nobody touched.
-#[cfg(feature = "pure-mkfs")]
 fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
     if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_some() {
         return Ok(InProcessOutcome::UseBuilderVm(
@@ -768,16 +754,6 @@ fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcess
     }
 }
 
-/// Without the in-process writer compiled in, the builder VM is the only
-/// materializer there is.
-#[cfg(not(feature = "pure-mkfs"))]
-fn run_in_process_materializer(_input: &MaterializeExt4Input) -> Result<InProcessOutcome> {
-    Ok(InProcessOutcome::UseBuilderVm(
-        crate::rootfs::BuilderVmRoute::Selected,
-    ))
-}
-
-#[cfg(feature = "builder-vm")]
 fn materialize_run_rootfs_builder_vm(
     input: &MaterializeExt4Input,
     route: &crate::rootfs::BuilderVmRoute,
@@ -789,16 +765,6 @@ fn materialize_run_rootfs_builder_vm(
     )
     .map(|_| ())
     .with_context(|| format!("materialize {} via builder VM", input.output.display()))
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn materialize_run_rootfs_builder_vm(
-    _input: &MaterializeExt4Input,
-    _route: &crate::rootfs::BuilderVmRoute,
-) -> Result<()> {
-    anyhow::bail!(
-        "no rootfs materializer compiled in: enable the `pure-mkfs` or `builder-vm` feature"
-    )
 }
 
 /// Sum of regular-file sizes under `root` (symlink-aware, never follows) — the

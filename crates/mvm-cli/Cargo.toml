@@ -121,13 +121,15 @@ contributor-bootstrap = [
     "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
 ]
-builder-vm = ["mvm-build/builder-vm"]
+# The CLI surface remains optional on Linux; mvm-build's builder orchestration
+# and pure ext4 writer are unconditional.
+builder-vm = []
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the
 # memory-safe `mvm-fs` writer instead of shelling out to a builder VM. The
 # `builder-vm` feature stays default for `dev up`, and `MVM_MATERIALIZE_BUILDER_VM`
 # routes the run path back through the builder VM when set.
-pure-mkfs = ["mvm-build/pure-mkfs"]
+pure-mkfs = []
 # Extract libkrunfw's bundled
 # TSI-patched kernel at runtime so Stage 0 boots a kernel where
 # libkrun's AF_INET-over-vsock (TSI) path actually works. The feature
