@@ -662,6 +662,16 @@ Design, taken 2026-09-19 against `main` at `fd555b5ef9`.
   image staging and Stage 0 work directories from the pair's two canonical
   roots, and VM, TAP and socket names from `MVM_HOME` as today, so two pairs
   never share mutable state.
+- **One base image, every Linux-direct backend.** The image repository's
+  primary product is a single base Linux image per guest architecture —
+  workload kernel + verity-sealed rootfs, `linux_direct` — that any backend
+  declaring the set's boot protocol and capabilities boots, without
+  per-backend rebuilds or per-backend image members. Backend-specific needs
+  (kernel format conversion, boot floors) are the host's adaptation layer,
+  not separate products; a backend that cannot satisfy the declaration
+  refuses before boot. The wasm/WebLinux tier does not boot a Linux kernel
+  and is not a target of the base image. Tracked on the `mvm-images` side
+  by tinylabscom/mvm-images#8.
 - **The in-tree window.** From W5a to W8 the in-tree flakes keep working
   unchanged for a contributor build that leaves the selector unset. A consumer
   moved onto the selector builds only from the checkout it names when set; a
@@ -719,7 +729,16 @@ Delivery slices, one PR each:
       auto-detect input is "images buildable from source" through one shared
       predicate. The dev variant keeps the in-tree build: the sibling
       repository publishes no dev attribute yet.
-- [ ] W5h (`mvm`) — kernel acquisition and the initramfs.
+- [x] W5h (`mvm`) — kernel acquisition and the initramfs.
+      Landed as pair-sourced kernel resolution: `ensure_workload_kernel`,
+      the `--kernel-pin` path and the kernel-less-image fallback answer the
+      pair's `default-tenant` `workload_kernel` member, verified against the
+      set's manifest digests. The universal initramfs is a deterministic
+      cargo artifact of the mvm sources, not an image repository product,
+      so it has nothing to route; it joins the set in W6. The plan also
+      gains the one-base-image design constraint (every Linux-direct
+      backend boots the same set) tracked on the `mvm-images` side by
+      tinylabscom/mvm-images#8.
 - [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
       the duplicate checkout detection in `commands/runtime_overlay.rs` and
       `mvm-build/src/runtime_overlay.rs` collapsed into the selector.
@@ -734,7 +753,10 @@ Delivery slices, one PR each:
       a paired-change CI job checking out both repositories at explicit SHAs.
 - [ ] W5m — the acceptance witnesses: cache reuse and single-sided
       invalidation, two concurrent pairs, stale manifest, wrong architecture,
-      and a live boot from a sibling checkout.
+      a live boot from a sibling checkout, and the same pair-built base image
+      booted by every Linux-direct backend the host can run — refused, never
+      mis-booted, where a backend cannot satisfy the declaration (the
+      one-base-image constraint above).
 
 ### W6 — Publish from `mvm-images` and migrate consumer trust (#3369)
 

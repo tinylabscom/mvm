@@ -88,6 +88,34 @@ pub(crate) fn ensure_pair_built(
     .with_context(|| format!("building {target_label} from the local image checkout"))
 }
 
+/// Resolve the workload kernel from the pair's `default-tenant` set. The set
+/// carries the `workload_kernel` member, so an unchanged pair answers from
+/// the local image cache and a changed pair builds once; the returned path
+/// is the file the set's manifest digests were verified over.
+///
+/// The verity-capability check the in-tree path applies reads an optional
+/// config sidecar the set does not carry; the pair kernel is the same
+/// kernel the sealed default image boots, so the absence of that witness
+/// is not a rejection here either.
+pub(crate) fn ensure_pair_workload_kernel(
+    checkout: &LocalImageCheckout,
+) -> Result<std::path::PathBuf> {
+    let target = ImageBuildTarget {
+        role: mvm_build::image_source::ImageBuildRole::DefaultTenant,
+        attr: mvm_build::image_source::FlakeAttr::new("default")
+            .expect("default is a valid flake attribute"),
+    };
+    let build = ensure_pair_built(checkout, target)?;
+    let artifact = build
+        .entry
+        .set
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
+        .context("the pair's default-tenant set has no workload_kernel member")?;
+    Ok(artifact.path.clone())
+}
+
 /// Install a pair-built `builder-vm` entry into the builder-VM cache that
 /// `up` and the build paths read, staging and promoting through the same
 /// sidecar-validated swap Stage 0 uses.

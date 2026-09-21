@@ -20,6 +20,26 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
 
+    // A selected checkout is the kernel's source: the pair's
+    // `default-tenant` set carries the workload kernel, built from the
+    // checkout it names. An unusable configured path is an error here,
+    // never a quiet fall-through to a download.
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
+        let path = super::local_pair::ensure_pair_workload_kernel(&checkout)?;
+        let path = path.display().to_string();
+        assert_workload_kernel_supports_verity(&path)?;
+        ui::info(&format!("Workload kernel: pair-built at {path}"));
+        return Ok(path);
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    if mvm_build::image_source::configured_images_dir().is_some() {
+        anyhow::bail!(
+            "{} names a local image checkout, but this mvmctl was built without the              `builder-vm` feature and cannot build the workload kernel from it",
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+        );
+    }
+
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = builder_vm_host_arch();
     let source_checkout = find_builder_vm_flake().is_ok();
@@ -643,103 +663,12 @@ fn download_default_microvm_image(
 #[cfg(all(test, feature = "builder-vm"))]
 mod pair_default_image_tests {
     use super::*;
-    use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact, produced_sidecar};
+    use crate::commands::env::builder_vm::test_pair::{Pair, produced_sidecar};
     use mvm_build::image_source::ImageBuildRole;
     use mvm_core::util::test_env::TestEnv;
 
     /// The five default-tenant artifacts, with the sizes and ext4 magic the
     /// artifact validator requires, and a producer-shaped sidecar.
-    fn default_tenant_files() -> Vec<TestArtifact> {
-        const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
-        let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
-        vmlinux.extend_from_slice(b"\n");
-        let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
-        rootfs[EXT4_MAGIC_OFFSET] = 0x53;
-        rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        vec![
-            TestArtifact {
-                name: "vmlinux",
-                bytes: vmlinux,
-                format: "kernel:image",
-            },
-            TestArtifact {
-                name: "rootfs.ext4",
-                bytes: rootfs,
-                format: "ext4",
-            },
-            TestArtifact {
-                name: "rootfs.verity",
-                bytes: b"verity tree\n".to_vec(),
-                format: "verity_hash_tree",
-            },
-            TestArtifact {
-                name: "rootfs.roothash",
-                bytes: b"root hash\n".to_vec(),
-                format: "verity_root_hash",
-            },
-            TestArtifact {
-                name: "mvm-meta.json",
-                bytes: produced_sidecar().as_bytes().to_vec(),
-                format: "json",
-            },
-        ]
-    }
-
-    /// Publish the pair's default-tenant set into the current MVM_HOME's
-    /// local image cache (set `MVM_HOME` before calling). The set is keyed on
-    /// the mvm checkout this test binary was compiled from, the same input
-    /// the build path derives, so the later lookup hits.
-    fn publish_default_tenant(pair: &Pair) -> mvm_build::image_source::CachedImageSet {
-        use mvm_core::arch::GuestArch;
-        let target = Pair::target(ImageBuildRole::DefaultTenant, "default");
-        let mvm_root = mvm_build::image_source::mvm_source_checkout(
-            mvm_build::artifact_acquisition::compiled_channel(),
-        )
-        .expect("the compiled-from mvm checkout is on disk");
-        let key = mvm_build::image_source::LocalImageCacheKey::derive(
-            &mvm_build::image_source::KeyInputs {
-                images: &pair.images,
-                mvm_checkout: &mvm_root,
-                target: &target,
-                arch: GuestArch::host(),
-            },
-        )
-        .expect("key derives");
-        let cache = mvm_build::image_source::LocalImageCache::open_default();
-        let contract =
-            mvm_build::image_source::contract_for(&target).expect("default-tenant contract");
-        let ctx = mvm_build::image_source::EntryContext {
-            images: &pair.images,
-            mvm_checkout: &mvm_root,
-            roles: contract.set_roles,
-        };
-        let staged = cache.stage(&key).expect("stage");
-        Pair::emit_set(
-            staged.dir(),
-            &key.checkouts,
-            key.arch,
-            &[
-                (
-                    "workload_kernel",
-                    Some("linux_direct"),
-                    vec![default_tenant_files().remove(0)],
-                    &["virtio_vsock"],
-                ),
-                (
-                    "workload_rootfs",
-                    None,
-                    default_tenant_files().split_off(1),
-                    &["virtio_blk", "dm_verity"],
-                ),
-            ],
-        );
-        cache
-            .publish(staged, &ctx)
-            .expect("publish")
-            .entry()
-            .clone()
-    }
-
     #[test]
     fn the_probe_reads_only_a_pair_installed_sidecar() {
         let dir = tempfile::tempdir().unwrap();
@@ -773,7 +702,7 @@ mod pair_default_image_tests {
         let pair = Pair::new();
         env.set("MVM_HOME", pair.tmp.path().join("home"));
         std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
-        let _entry = publish_default_tenant(&pair);
+        let _entry = pair.publish_default_tenant();
         let cache_dir = pair.tmp.path().join("default-image");
 
         let (kernel, rootfs) = ensure_pair_default_image(
@@ -815,6 +744,45 @@ mod pair_default_image_tests {
         .expect("an unchanged pair answers from the install");
         assert_eq!(kernel, again_kernel);
         assert_eq!(rootfs, again_rootfs);
+    }
+
+    #[test]
+    fn the_pair_workload_kernel_is_the_verified_set_artifact() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        let entry = pair.publish_default_tenant();
+        let kernel = super::super::local_pair::ensure_pair_workload_kernel(&pair.images)
+            .expect("the pair resolves a workload kernel");
+        let artifact = entry
+            .set
+            .artifacts
+            .iter()
+            .find(|a| a.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
+            .expect("the set carries a workload kernel");
+        assert_eq!(
+            kernel, artifact.path,
+            "the resolved kernel is the verified file"
+        );
+    }
+
+    #[test]
+    fn ensure_workload_kernel_answers_from_the_pair_under_a_selector() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            pair.images.root(),
+        );
+        pair.publish_default_tenant();
+        let path = ensure_workload_kernel().expect("the kernel resolves from the pair");
+        assert!(
+            path.ends_with("vmlinux"),
+            "the pair kernel path names the kernel artifact: {path}"
+        );
     }
 
     #[test]
