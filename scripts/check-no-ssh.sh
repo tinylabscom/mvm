@@ -51,6 +51,12 @@ ALLOWED_FILES=(
   "nix/tests/mk-guest-eval.nix"
   # Explicit `services.openssh.enable = false` on the minimal profile.
   "nix/profiles/minimal.nix"
+  # Image-assembly tests: a decoy `id_ed25519` on the host plus a symlink
+  # naming it prove staging and rootfs archiving carry a link as a link and
+  # never read the host key into the image. Detection fixtures, not SSH
+  # capability.
+  "crates/mvm-build/src/builder_vm_runtime.rs"
+  "crates/mvm-build/src/rootfs.rs"
   # Docs asserting the no-SSH promise / listing airgapped file-transfer
   # options unrelated to guest communication.
   "public/src/content/docs/guides/airgapped-bootstrap.md"

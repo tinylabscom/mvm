@@ -668,6 +668,17 @@ mod tests {
         assert_eq!(back, grants);
     }
 
+    /// The serde roundtrip above exercises the private field, not the reader a
+    /// receipt consumer actually calls — a getter that stopped returning the
+    /// stored value would leave every roundtrip green.
+    #[test]
+    fn an_enforced_ceiling_reads_back_its_limit_through_the_getter() {
+        let memory = EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368);
+        assert_eq!(memory.limit(), Some(805_306_368));
+        let tasks = EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024);
+        assert_eq!(tasks.limit(), Some(1024));
+    }
+
     #[test]
     fn a_declared_ceiling_serializes_without_a_value() {
         let json = serde_json::to_string(&EnforcedGrants::all_declared()).expect("serialize");

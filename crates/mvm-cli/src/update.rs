@@ -945,6 +945,35 @@ pub(crate) fn boot_image_asset_base_url(tag: &str) -> String {
     )
 }
 
+/// Which install line `update` announces once `decide_update` has settled on
+/// `Install`. Pure, and therefore unit-testable at its boundaries, because the
+/// three cases differ only in wording — and wording that drifts (a downgrade
+/// announced as an upgrade) is the bug this classification exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallAnnouncement {
+    /// `latest == current`: reachable only with `--force`, which alone turns
+    /// "already current" from `UpToDate` into `Install`.
+    ForceReinstall,
+    /// `latest < current` in the lenient ordering: reachable only under
+    /// `--force`.
+    DowngradeOverNewer,
+    /// A strictly newer release, or a pair whose versions cannot be ordered.
+    NewVersion,
+}
+
+fn install_announcement(current: &str, latest: &str) -> InstallAnnouncement {
+    if latest == current {
+        return InstallAnnouncement::ForceReinstall;
+    }
+    if ReleaseVersion::parse(latest, VersionSyntax::Lenient)
+        .zip(ReleaseVersion::parse(current, VersionSyntax::Lenient))
+        .is_some_and(|(latest, running)| latest < running)
+    {
+        return InstallAnnouncement::DowngradeOverNewer;
+    }
+    InstallAnnouncement::NewVersion
+}
+
 pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let current = current_version();
     ui::info(&format!("Current version: {}", current));
@@ -970,26 +999,27 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
         UpdateAction::Install => {}
     }
 
-    if latest_version == current {
-        ui::info(&format!(
-            "Already at {} but --force specified, reinstalling.",
-            current
-        ));
-    } else if ReleaseVersion::parse(latest_version, VersionSyntax::Lenient)
-        .zip(ReleaseVersion::parse(current, VersionSyntax::Lenient))
-        .is_some_and(|(latest, running)| latest < running)
-    {
-        // Reachable only under --force. Announcing a downgrade as a "new
-        // version" is what this whole change is about.
-        ui::info(&format!(
-            "Installing {} over the newer {} (--force).",
-            latest_version, current
-        ));
-    } else {
-        ui::info(&format!(
-            "New version available: {} -> {}",
-            current, latest_version
-        ));
+    match install_announcement(current, latest_version) {
+        InstallAnnouncement::ForceReinstall => {
+            ui::info(&format!(
+                "Already at {} but --force specified, reinstalling.",
+                current
+            ));
+        }
+        InstallAnnouncement::DowngradeOverNewer => {
+            // Reachable only under --force. Announcing a downgrade as a "new
+            // version" is what this whole change is about.
+            ui::info(&format!(
+                "Installing {} over the newer {} (--force).",
+                latest_version, current
+            ));
+        }
+        InstallAnnouncement::NewVersion => {
+            ui::info(&format!(
+                "New version available: {} -> {}",
+                current, latest_version
+            ));
+        }
     }
 
     if check_only {
@@ -1463,5 +1493,322 @@ mod tests {
             assert!(hint.contains("vmlinux-x86_64-builder"), "{hint}");
             assert!(hint.contains("--source compile"), "{hint}");
         }
+    }
+
+    // --- release-fetch seam tests ---
+    //
+    // `github_api_base`/`github_download_base` read `MVM_UPDATE_API_URL` and
+    // `MVM_UPDATE_DOWNLOAD_URL`, so a loopback HTTP server is the hermetic
+    // stand-in for the release host. These tests are the owning crate's
+    // witnesses that a tampered fetch, digest comparison, or install step is
+    // detected; without them a mutant that returns a canned version, inverts a
+    // digest comparison, or skips a failure bail passes the whole suite.
+
+    /// Answer `requests` HTTP GETs with bodies chosen from the request line,
+    /// then go quiet. Returns the base URL the loopback listener ended up on.
+    fn loopback_release_server(
+        requests: usize,
+        body: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let base = format!("http://{}", listener.local_addr().expect("listener addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let mut stream = stream.expect("accept");
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while head.len() < 16 * 1024 {
+                    if stream.read(&mut byte).expect("read request") == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&head);
+                let line = request.lines().next().unwrap_or_default();
+                let payload = body(line);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    payload.len()
+                );
+                stream.write_all(header.as_bytes()).expect("write head");
+                stream.write_all(&payload).expect("write body");
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn fetch_latest_version_reads_the_tag_the_api_returned() {
+        let server = loopback_release_server(1, |line| {
+            assert!(
+                line.contains("/releases/latest"),
+                "the query must hit the latest-release endpoint: {line}"
+            );
+            br#"{"tag_name":"v9.9.9","draft":false}"#.to_vec()
+        });
+        let mut env = TestEnv::new();
+        env.set("MVM_UPDATE_API_URL", &server);
+
+        assert_eq!(
+            fetch_latest_version().expect("fetch the latest tag"),
+            "v9.9.9"
+        );
+    }
+
+    #[test]
+    fn verify_checksum_holds_the_archive_to_the_manifest_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("mvmctl-unit.tar.gz");
+        std::fs::write(&archive, b"release bytes").unwrap();
+        let matching = hex_encode(&Sha256::digest(b"release bytes"));
+
+        let mut env = TestEnv::new();
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            loopback_release_server(1, {
+                let matching = matching.clone();
+                move |_| format!("{matching}  mvmctl-unit.tar.gz\n").into_bytes()
+            }),
+        );
+        verify_checksum("v9.9.9", "mvmctl-unit.tar.gz", &archive)
+            .expect("a matching digest verifies");
+
+        let wrong = "0".repeat(64);
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            loopback_release_server(1, {
+                let wrong = wrong.clone();
+                move |_| format!("{wrong}  mvmctl-unit.tar.gz\n").into_bytes()
+            }),
+        );
+        let error = verify_checksum("v9.9.9", "mvmctl-unit.tar.gz", &archive)
+            .expect_err("a mismatched digest must refuse the archive")
+            .to_string();
+        assert!(error.contains("Checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    fn download_kernel_refuses_a_manifest_digest_that_does_not_match() {
+        let kernel = b"kernel bytes for the unit test";
+        // Deliberately not the digest of `kernel`.
+        let wrong_digest = "ab".repeat(32);
+        let (asset, checksums) =
+            boot_image_kernel_assets("aarch64", "workload").expect("known assets");
+        let closure_asset = asset.clone();
+        let server = loopback_release_server(2, move |line| {
+            if line.contains(&checksums) {
+                format!("{wrong_digest}  {closure_asset}\n").into_bytes()
+            } else {
+                assert!(
+                    line.contains(&closure_asset),
+                    "the asset download must name the asset: {line}"
+                );
+                kernel.to_vec()
+            }
+        });
+        let mut env = TestEnv::new();
+        env.set("MVM_UPDATE_DOWNLOAD_URL", &server);
+        // The manifest signature is a separate rung with its own tests; this
+        // test pins the digest comparison below it.
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out").join(&asset);
+        let error = download_kernel("aarch64", "workload", &dest)
+            .expect_err("a mismatched manifest digest must refuse the kernel")
+            .to_string();
+        assert!(error.contains("checksum mismatch"), "{error}");
+        assert!(
+            !dest.exists(),
+            "a rejected download must never be published into the cache"
+        );
+    }
+
+    #[test]
+    fn run_sudo_cp_and_mv_bail_when_sudo_cannot_run_them() {
+        let scratch = tempfile::tempdir().unwrap();
+        let fake_sudo = scratch.path().join("sudo");
+        std::fs::write(&fake_sudo, b"#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = TestEnv::new();
+        env.set("PATH", scratch.path());
+        let from = scratch.path().join("from");
+        std::fs::write(&from, b"bytes").unwrap();
+        let to = scratch.path().join("to");
+
+        let cp_error = run_sudo_cp(&from, &to)
+            .expect_err("sudo cp failed")
+            .to_string();
+        assert!(cp_error.contains("sudo cp failed"), "{cp_error}");
+        let mv_error = run_sudo_mv(&from, &to)
+            .expect_err("sudo mv failed")
+            .to_string();
+        assert!(mv_error.contains("sudo mv failed"), "{mv_error}");
+    }
+
+    /// Build a real release tarball the way the publish pipeline does: a
+    /// `mvmctl-<target>/` directory holding a smoke-testable `mvmctl` script
+    /// (plus optional helper and resources), archived with the same `tar`
+    /// `extract_and_install` shells out to.
+    #[cfg(target_os = "linux")]
+    fn build_release_archive(
+        root: &std::path::Path,
+        target: &str,
+        with_helper: bool,
+        with_resources: bool,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let staged = root.join("staged");
+        let release = staged.join(format!("mvmctl-{target}"));
+        std::fs::create_dir_all(&release).unwrap();
+        let write_script = |path: &std::path::Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_script(&release.join("mvmctl"), "#!/bin/sh\necho 'mvmctl 9.9.9'\n");
+        if with_helper {
+            write_script(&release.join("mvm-hvf-supervisor"), "#!/bin/sh\nexit 0\n");
+        }
+        if with_resources {
+            std::fs::create_dir_all(release.join("resources")).unwrap();
+            std::fs::write(release.join("resources/config.toml"), b"x").unwrap();
+        }
+        let archive = root.join(format!("mvmctl-{target}.tar.gz"));
+        let status = std::process::Command::new("tar")
+            .arg("czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&staged)
+            .arg(".")
+            .status()
+            .expect("run tar to build the fixture");
+        assert!(status.success(), "tar fixture: {status}");
+        archive
+    }
+
+    /// The swap is the claim: a complete, smoke-testable release replaces the
+    /// running binary and its adjacent helper. A mutant that bails when the
+    /// extracted binary *is* present (or that takes the sudo branch on a
+    /// writable install dir) fails this end to end.
+    ///
+    /// Linux-only because the macOS arm of the flow runs real codesigning
+    /// against the running test executable's install, which a unit test must
+    /// never touch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extract_and_install_swaps_in_the_release_binary_and_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let archive = build_release_archive(tmp.path(), "unit-test", true, true);
+        std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
+
+        let install_dir = tmp.path().join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let current_exe = install_dir.join("mvmctl");
+        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
+
+        extract_and_install("unit-test", &work, &current_exe).expect("the update installs");
+
+        let updated = std::fs::read_to_string(&current_exe).unwrap();
+        assert!(
+            updated.contains("9.9.9"),
+            "the release binary must be the one installed"
+        );
+        assert!(
+            install_dir.join("mvm-hvf-supervisor").is_file(),
+            "an adjacent helper in the archive is installed beside the binary"
+        );
+        assert!(
+            install_dir.join("resources/config.toml").is_file(),
+            "the release resources ship with the binary"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extract_and_install_refuses_a_broken_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("mvmctl-unit-test.tar.gz"), b"not a tarball").unwrap();
+        let install_dir = tmp.path().join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let current_exe = install_dir.join("mvmctl");
+        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
+
+        let error = extract_and_install("unit-test", &work, &current_exe)
+            .expect_err("a broken archive must not reach the install step")
+            .to_string();
+        assert!(error.contains("Failed to extract archive"), "{error}");
+        assert!(
+            !current_exe.with_extension("old").exists(),
+            "a failed extract must not have touched the installed binary"
+        );
+    }
+
+    /// An install dir the user does not own sends the flow down the sudo arm;
+    /// the non-sudo file operations would fail there, so a mutant that picks
+    /// the arm by writability the wrong way round dies on this case and the
+    /// previous one together.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extract_and_install_uses_sudo_for_a_host_owned_install_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let archive = build_release_archive(tmp.path(), "unit-test", true, false);
+        std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
+
+        let install_dir = tmp.path().join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let current_exe = install_dir.join("mvmctl");
+        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
+        std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = extract_and_install("unit-test", &work, &current_exe);
+
+        std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("the sudo arm installs into a host-owned directory");
+        assert!(
+            std::fs::read_to_string(&current_exe)
+                .unwrap()
+                .contains("9.9.9")
+        );
+    }
+
+    #[test]
+    fn install_announcement_classifies_equal_downgrade_and_upgrade() {
+        use super::InstallAnnouncement::*;
+        assert_eq!(
+            install_announcement("0.18.0", "0.18.0"),
+            ForceReinstall,
+            "only --force reaches Install at equality"
+        );
+        assert_eq!(
+            install_announcement("0.18.0", "0.17.0"),
+            DowngradeOverNewer,
+            "installing an older release over a newer one is a downgrade and must say so"
+        );
+        assert_eq!(install_announcement("0.18.0", "0.19.0"), NewVersion);
+        assert_eq!(
+            install_announcement("0.18.0", "nightly"),
+            NewVersion,
+            "an unorderable latest must not read as a downgrade"
+        );
+        assert_eq!(
+            install_announcement("nightly", "0.18.0"),
+            NewVersion,
+            "an unorderable current must not read as a downgrade either"
+        );
     }
 }

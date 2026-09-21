@@ -534,6 +534,76 @@ mod tests {
         ));
     }
 
+    /// The allow path is the claim: only the pinned program, inside the
+    /// workspace roots, passes. Every existing refusal test would stay green
+    /// if the gate refused everything, so the positive path has to be named.
+    #[test]
+    fn drive_open_with_the_pinned_program_inside_roots_is_allowed() {
+        let grant = verb_grant_with_drive();
+        let request = GuestRequest::DriveOpen {
+            program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
+            cwd: "/workspace".to_string(),
+            env: Vec::new(),
+        };
+        assert!(enforce_drive_grant(&request, Some(&grant)).is_none());
+    }
+
+    /// The byte limits are inclusive at exactly the granted maximum and refuse
+    /// one byte past it. Off-by-one mutations (`>` to `>=`, `>` to `==`) flip
+    /// exactly these boundary cases, so the boundary itself is what must be
+    /// pinned.
+    #[test]
+    fn drive_file_byte_limits_are_inclusive_at_the_granted_maximum() {
+        let grant = verb_grant_with_drive(); // max 16 in, 32 out
+
+        let at_input_limit = GuestRequest::DriveFile {
+            operation: DriveFileOperation::Write {
+                path: "/workspace/file".to_string(),
+                content: vec![0u8; 16],
+                mode: 0o644,
+                create_parents: false,
+                follow_symlinks: true,
+                offset: None,
+                truncate: true,
+            },
+        };
+        assert!(
+            enforce_drive_grant(&at_input_limit, Some(&grant)).is_none(),
+            "a write of exactly max_bytes_in is inside the grant"
+        );
+
+        let over_input_limit = GuestRequest::DriveFile {
+            operation: DriveFileOperation::Write {
+                path: "/workspace/file".to_string(),
+                content: vec![0u8; 17],
+                mode: 0o644,
+                create_parents: false,
+                follow_symlinks: true,
+                offset: None,
+                truncate: true,
+            },
+        };
+        assert!(matches!(
+            enforce_drive_grant(&over_input_limit, Some(&grant)),
+            Some(GuestResponse::DriveRefused {
+                reason: DriveRefusal::InputLimitExceeded
+            })
+        ));
+
+        let at_output_limit = GuestRequest::DriveFile {
+            operation: DriveFileOperation::Read {
+                path: "/workspace/file".to_string(),
+                offset: None,
+                length: 32,
+                follow_symlinks: true,
+            },
+        };
+        assert!(
+            enforce_drive_grant(&at_output_limit, Some(&grant)).is_none(),
+            "a read of exactly max_bytes_out is inside the grant"
+        );
+    }
+
     // ---- enforce_verb_grant ----
 
     #[test]

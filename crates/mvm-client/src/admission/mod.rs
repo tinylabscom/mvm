@@ -1182,6 +1182,42 @@ mod host_signer_pubkey_config_tests {
         assert!(!policy.access.console);
     }
 
+    /// The policy attach must replace a stale policy file, keep every
+    /// unrelated config file, and never duplicate the policy. The retain
+    /// predicate is the whole guarantee: inverted, every sibling config file
+    /// is dropped and the policy multiplies.
+    #[test]
+    fn attaching_the_security_policy_replaces_only_the_policy_file() {
+        let mut start_config = VmStartConfig::default();
+        start_config
+            .config_files
+            .push(mvm_core::vm_backend::VmFile {
+                name: "other-config".to_string(),
+                content: "keep".to_string(),
+                mode: 0o444,
+            });
+
+        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
+        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
+
+        assert_eq!(
+            start_config
+                .config_files
+                .iter()
+                .filter(|file| file.name == SECURITY_POLICY_FILENAME)
+                .count(),
+            1,
+            "a second attach replaces the stale policy instead of stacking another"
+        );
+        assert!(
+            start_config
+                .config_files
+                .iter()
+                .any(|file| file.name == "other-config" && file.content == "keep"),
+            "an unrelated config file must survive the policy attach"
+        );
+    }
+
     #[test]
     fn attaches_dev_security_policy_for_dev_boots() {
         let mut start_config = VmStartConfig::default();
