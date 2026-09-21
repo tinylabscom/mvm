@@ -1,7 +1,7 @@
 # The libkrun supervisor auto-build keys on the checkout, not the image flakes
 
 Backing: shipped-source
-Validation: cargo nextest run -p mvm-build --features builder-vm -E 'test(supervisor_auto_build_keys) | test(mvm_checkout_is_the_workspace_manifest)'
+Validation: cargo nextest run -p mvm-build -E 'test(supervisor_auto_build_keys) | test(mvm_checkout_is_the_workspace_manifest)'
 
 Slice W5j of the image-repository extraction (#3364). The libkrun
 supervisor auto-build decided "is this a source checkout?" by looking for
