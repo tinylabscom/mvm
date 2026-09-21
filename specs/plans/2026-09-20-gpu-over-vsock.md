@@ -67,6 +67,11 @@ torch / CUDA binary
 - **Backend selection** (host side, `--backend auto|native|stub`):
   `auto` probes for `libcuda.so.1` and falls back to the stub, so the
   transport is exercisable end to end on any host.
+- **No GPU is ever required.** Nothing links a vendor library at build
+  time; launches without `--gpu` are bit-for-bit the launches mvm always
+  had; a `--gpu` launch on a GPU-less host boots and answers through the
+  stub (or refuses with `--backend native`). The entire plane runs and is
+  tested GPU-free — CI included.
 - **NVML shim** answers the device-detection queries frameworks like
   vLLM issue, backed by the remoted driver — without it a remoted GPU
   is invisible to the frameworks that want it.
@@ -100,8 +105,10 @@ that allocate, copy, load a module, and launch kernels:
 Out of v1 (named follow-ups, not silent gaps): `cuGetProcAddress`-based
 resolution (CUDA 12 cudart's full symbol path), CUDA graphs and
 contexted fork-reconnect (warm device memory handoff), peer/multi-GPU,
-streams and events, and the paravirtual-display question (ADR-029's
-option A) which this plan does not touch.
+streams and events, the MLX backend for Apple Silicon hosts (second
+backend family behind the same endpoint and transport), and the
+paravirtual-display question (ADR-029's option A) which this plan does
+not touch.
 
 ## Work items
 

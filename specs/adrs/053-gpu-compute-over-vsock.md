@@ -59,6 +59,14 @@ on the host.
    device otherwise, so the entire transport is testable on a GPU-less host
    and a `--gpu` guest on such a host fails loudly at the endpoint, never
    silently inside the workload.
+   **No GPU is required to run mvm, at any point on any tier:** nothing in
+   the build links a GPU vendor library (the driver is `dlopen`'d at
+   runtime, never a link-time or cargo dependency); launches that do not
+   pass `--gpu` carry no GPU channel, no endpoint process, and no shim
+   libraries; and a `--gpu` launch on a GPU-less host still boots and
+   answers — the stub device reports itself as a stub by name, and
+   `--backend native` refuses outright when no driver library exists. CI
+   and every development host exercise the whole plane GPU-free today.
 3. **Guest handles are opaque `u64`s minted by the endpoint.** Contexts,
    device pointers, modules, and functions leave the host only as numbers;
    a forged handle is a lookup miss, never a host address.
@@ -71,11 +79,14 @@ on the host.
    apply to beginner-facing docs.
 6. **v1 scope is a named subset, not a silent gap:** Driver API
    (init/enumeration/contexts/memory/modules/launch/sync), Runtime API
-   (device/malloc/memcpy/memset/sync), and NVML device queries. Named
-   follow-ups: `cuGetProcAddress` resolution, CUDA graphs and warm
-   device-memory handoff across fork, streams/events, cubin param metadata,
-   multi-GPU, and — separately, under ADR-029's option (A) rules — any
-   paravirtual display question.
+   (device/malloc/memcpy/memset/sync), and NVML device queries. The host
+   ABI is NVIDIA-only in v1; **MLX is the named roadmap direction for
+   Apple Silicon hosts** — a second backend family behind the same
+   endpoint/transport, not a fork of it. Named follow-ups:
+   `cuGetProcAddress` resolution, CUDA graphs and warm device-memory
+   handoff across fork, streams/events, cubin param metadata, multi-GPU,
+   the MLX backend, and — separately, under ADR-029's option (A) rules —
+   any paravirtual display question.
 
 ## Consequences
 
