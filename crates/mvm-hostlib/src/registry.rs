@@ -289,9 +289,9 @@ pub fn schema_document() -> anyhow::Result<serde_json::Value> {
     let mut definitions = serde_json::Map::new();
     let mut required = Vec::new();
 
-    let mut insert_def = |name: String,
-                          schema: serde_json::Value,
-                          definitions: &mut serde_json::Map<String, serde_json::Value>|
+    let insert_def = |name: String,
+                      schema: serde_json::Value,
+                      definitions: &mut serde_json::Map<String, serde_json::Value>|
      -> anyhow::Result<()> {
         match definitions.get(&name) {
             Some(existing) if *existing == schema => Ok(()),
