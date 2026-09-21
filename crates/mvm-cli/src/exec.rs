@@ -1431,7 +1431,14 @@ pub fn resolve_launch(
 
     let t_overlay = std::time::Instant::now();
     sub.start(SubPhase::AttachOverlay);
-    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            backend.name(),
+            None,
+            pair,
+        )
+    })?;
     sub.finish(SubPhase::AttachOverlay);
     tracing::debug!(
         ms = t_overlay.elapsed().as_secs_f64() * 1000.0,

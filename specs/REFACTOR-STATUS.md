@@ -299,8 +299,12 @@ Last updated: 2026-09-21
       - [x] W5j #3364: the libkrun supervisor auto-build keys on the mvm
             checkout, not the in-tree image flakes — deleting `nix/images`
             no longer flips a contributor build to installed behavior.
-      - [ ] W5i, W5k–W5m #3364: each remaining in-tree image consumer
-            moved onto the selector.
+      - [x] W5i #3364: the guest runtime path (launch-time overlay and both
+            SDK sidecars, plus both build verbs) reads the selector through
+            the pair, with the pair identity stamped beside each install;
+            the duplicate checkout probes collapsed into one shared helper.
+      - [ ] W5k–W5m #3364: tier at admission, docs and paired CI, and the
+            acceptance witnesses.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

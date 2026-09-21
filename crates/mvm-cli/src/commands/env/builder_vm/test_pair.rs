@@ -157,16 +157,72 @@ impl Pair {
 
     /// Publish this pair's `default-tenant.default` set into the current
     /// `MVM_HOME`'s local image cache (set `MVM_HOME` before calling). The
-    /// set is keyed on the mvm checkout the test binary was compiled from,
-    /// the same input the build path derives, so a later lookup hits. The
     /// five artifacts are the default-tenant contract; the sidecar is a
     /// producer-shaped `mvm-meta.json`.
     pub(crate) fn publish_default_tenant(&self) -> mvm_build::image_source::CachedImageSet {
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
-        let target = Self::target(
+        let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
+        vmlinux.extend_from_slice(b"\n");
+        let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
+        rootfs[EXT4_MAGIC_OFFSET] = 0x53;
+        rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
+        let rootfs_sidecar = TestArtifact {
+            name: "mvm-meta.json",
+            bytes: produced_sidecar().as_bytes().to_vec(),
+            format: "json",
+        };
+        self.publish(
             mvm_build::image_source::ImageBuildRole::DefaultTenant,
             "default",
-        );
+            &[
+                (
+                    "workload_kernel",
+                    Some("linux_direct"),
+                    vec![TestArtifact {
+                        name: "vmlinux",
+                        bytes: vmlinux,
+                        format: "kernel:image",
+                    }],
+                    &["virtio_vsock"],
+                ),
+                (
+                    "workload_rootfs",
+                    None,
+                    vec![
+                        TestArtifact {
+                            name: "rootfs.ext4",
+                            bytes: rootfs,
+                            format: "ext4",
+                        },
+                        TestArtifact {
+                            name: "rootfs.verity",
+                            bytes: b"verity tree\n".to_vec(),
+                            format: "verity_hash_tree",
+                        },
+                        TestArtifact {
+                            name: "rootfs.roothash",
+                            bytes: b"root hash\n".to_vec(),
+                            format: "verity_root_hash",
+                        },
+                        rootfs_sidecar,
+                    ],
+                    &["virtio_blk", "dm_verity"],
+                ),
+            ],
+        )
+    }
+
+    /// Publish a set for any target into the current `MVM_HOME`'s local
+    /// image cache (set `MVM_HOME` before calling). The set is keyed on the
+    /// mvm checkout the test binary was compiled from, the same input the
+    /// build path derives, so a later lookup hits.
+    pub(crate) fn publish(
+        &self,
+        role: mvm_build::image_source::ImageBuildRole,
+        attr: &str,
+        members: &[TestMember],
+    ) -> mvm_build::image_source::CachedImageSet {
+        let target = Self::target(role, attr);
         let mvm_root = mvm_build::image_source::mvm_source_checkout(
             mvm_build::artifact_acquisition::compiled_channel(),
         )
@@ -182,66 +238,14 @@ impl Pair {
         .expect("key derives");
         let cache = mvm_build::image_source::LocalImageCache::open_default();
         let contract =
-            mvm_build::image_source::contract_for(&target).expect("default-tenant contract");
+            mvm_build::image_source::contract_for(&target).expect("contract for the role");
         let ctx = mvm_build::image_source::EntryContext {
             images: &self.images,
             mvm_checkout: &mvm_root,
             roles: contract.set_roles,
         };
-
-        let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
-        vmlinux.extend_from_slice(b"\n");
-        let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
-        rootfs[EXT4_MAGIC_OFFSET] = 0x53;
-        rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let kernel = TestArtifact {
-            name: "vmlinux",
-            bytes: vmlinux,
-            format: "kernel:image",
-        };
-        let rootfs_sidecar = TestArtifact {
-            name: "mvm-meta.json",
-            bytes: produced_sidecar().as_bytes().to_vec(),
-            format: "json",
-        };
-        let rootfs_files = vec![
-            TestArtifact {
-                name: "rootfs.ext4",
-                bytes: rootfs,
-                format: "ext4",
-            },
-            TestArtifact {
-                name: "rootfs.verity",
-                bytes: b"verity tree\n".to_vec(),
-                format: "verity_hash_tree",
-            },
-            TestArtifact {
-                name: "rootfs.roothash",
-                bytes: b"root hash\n".to_vec(),
-                format: "verity_root_hash",
-            },
-            rootfs_sidecar,
-        ];
         let staged = cache.stage(&key).expect("stage");
-        Self::emit_set(
-            staged.dir(),
-            &key.checkouts,
-            key.arch,
-            &[
-                (
-                    "workload_kernel",
-                    Some("linux_direct"),
-                    vec![kernel],
-                    &["virtio_vsock"],
-                ),
-                (
-                    "workload_rootfs",
-                    None,
-                    rootfs_files,
-                    &["virtio_blk", "dm_verity"],
-                ),
-            ],
-        );
+        Self::emit_set(staged.dir(), &key.checkouts, key.arch, members);
         cache
             .publish(staged, &ctx)
             .expect("publish")

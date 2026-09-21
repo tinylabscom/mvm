@@ -414,6 +414,15 @@
       checkout itself — the workspace manifest, release-channel aware — not
       on the in-tree image flakes' presence, so deleting `nix/images` at W8
       cannot turn a contributor build into an installed one.
+      W5 (#3364) slice W5i: the guest runtime path reads the selector — the
+      launch-time overlay and both SDK sidecars install from the pair's
+      `runtime-overlay` targets under the version-matched caches, with the
+      pair cache-key digest recorded beside each install so an unchanged
+      pair answers and a changed pair reinstalls; the pair arm resolves and
+      returns, so the in-tree build and the published download never run
+      under a selector; both build verbs build the pair's targets; and the
+      two private "in-tree overlay flake present?" probes collapse into one
+      shared `image_source` helper.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

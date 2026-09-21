@@ -1084,11 +1084,14 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         memory_mib: mem_mib as u32,
         ..Default::default()
     };
-    super::up::attach_runtime_overlay_if_cached_version(
-        &mut start_config,
-        &effective_hypervisor,
-        parent_meta.runtime_overlay_version.as_deref(),
-    )?;
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        super::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            &effective_hypervisor,
+            parent_meta.runtime_overlay_version.as_deref(),
+            pair,
+        )
+    })?;
     super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;

@@ -29,9 +29,9 @@ pub(crate) use mvm_client::launch::persistent::{
 };
 
 pub(crate) use mvm_client::launch::runtime_source::{
-    SdkSidecarAttachment, attach_runtime_overlay_if_cached,
-    attach_runtime_overlay_if_cached_version, attach_universal_initramfs_if_cached,
-    emit_runtime_source_status, resolve_sdk_sidecar_attachment_for_host,
+    SdkSidecarAttachment, attach_runtime_overlay_if_cached_version,
+    attach_universal_initramfs_if_cached, emit_runtime_source_status,
+    resolve_sdk_sidecar_attachment_for_host,
 };
 
 #[derive(ClapArgs, Debug, Clone)]

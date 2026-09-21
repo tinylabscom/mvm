@@ -323,6 +323,47 @@ pub(crate) fn mvm_source_checkout_at(root: &Path) -> Option<PathBuf> {
         .then(|| root.to_path_buf())
 }
 
+/// Resolve the image source for this process: the checkout the selector
+/// names, the in-tree flakes, or the released set. The one entry point for
+/// consumers below the CLI, so "which source" is answered the same way
+/// everywhere.
+pub fn resolve_current_source() -> Result<ImageSource, ImageSourceError> {
+    resolve_image_source(
+        crate::artifact_acquisition::compiled_channel(),
+        configured_images_dir().as_deref(),
+    )
+}
+
+/// The compiled-from mvm checkout while it still carries the in-tree image
+/// flakes. In-tree image consumers — the runtime overlay and SDK sidecar
+/// source builds — probe this in one place instead of each re-deriving it:
+/// the override hook, the workspace layout, and the flake's presence are one
+/// fact, not three. Deliberately independent of the selector: a configured
+/// checkout routes those consumers through the pair instead, and this probe
+/// stays the answer for the selector-unset window.
+pub fn in_tree_overlay_checkout_root() -> Option<PathBuf> {
+    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
+        return None;
+    }
+    if let Ok(override_root) = std::env::var("MVM_RUNTIME_OVERLAY_SOURCE_ROOT") {
+        let path = PathBuf::from(override_root);
+        if in_tree_overlay_at(&path) {
+            return Some(path);
+        }
+    }
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?;
+    in_tree_overlay_at(workspace_root).then(|| workspace_root.to_path_buf())
+}
+
+fn in_tree_overlay_at(root: &Path) -> bool {
+    root.join("nix")
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix")
+        .is_file()
+}
+
 fn canonical_directory(requested: &Path) -> Result<PathBuf, ImageSourceError> {
     let root =
         std::fs::canonicalize(requested).map_err(|source| ImageSourceError::Unresolvable {
