@@ -4369,4 +4369,18 @@ writes the plan:
       Worker deployment.
 - [x] Complete focused installer, release-workflow, compatibility, workspace,
       gated-target, Clippy, repository-gate, and BDD validation.
-- [ ] Merge the repair through the queue and close epic #3277.
+- [x] Merge the repair through the queue and close epic #3277 (#3549).
+
+## 2026-09-20 unconditional builder capabilities
+
+- [x] Prove the builder selector and Stage 0 host API compile and behave under
+      `mvm-build --no-default-features`.
+- [x] Retire the unreachable `mvm-build/builder-vm` and `pure-mkfs` switches,
+      their compile-out refusals, and every downstream feature forward while
+      keeping native libkrun linkage opt-in.
+- [x] Preserve the independent `mvm-cli` surface and Nix package composition,
+      and reject reintroduction of either retired member feature in a repository
+      gate.
+- [x] Complete the full workspace, Clippy, gated-target, repository-gate, and
+      BDD validation matrix; record the delivery evidence.
+- [ ] Merge through the queue and close #3322.

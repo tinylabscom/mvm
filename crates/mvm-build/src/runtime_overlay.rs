@@ -36,7 +36,6 @@ pub use mvm_fs::overlay::{
     RuntimeOverlayResolver, read_overlay_artifact_from_dir,
 };
 
-#[cfg(feature = "pure-mkfs")]
 use crate::guest_agent_build::RuntimeOverlayGuestBinaries;
 
 /// Failure building, downloading, installing, or resolving the runtime
@@ -133,16 +132,12 @@ pub enum RuntimeOverlayError {
     },
 
     /// The direct in-process overlay assembly failed.
-    #[cfg(feature = "pure-mkfs")]
     #[error("direct runtime overlay build failed: {reason}")]
     DirectBuildFailed { reason: String },
 }
 
-#[cfg(feature = "pure-mkfs")]
 const DIRECT_OVERLAY_VERITY_SALT: [u8; 32] = [0u8; 32];
-#[cfg(feature = "pure-mkfs")]
 const DIRECT_OVERLAY_DATA_BLOCK_SIZE: u32 = 4096;
-#[cfg(feature = "pure-mkfs")]
 const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // Bump whenever the packaging logic in this file changes in a way the source
 // fingerprint doesn't cover (that hash only walks crate sources, not this
@@ -191,7 +186,6 @@ fn seed_from_default_cache(
     )
 }
 
-#[cfg(feature = "pure-mkfs")]
 pub fn build_runtime_overlay_from_guest_binaries(
     cache_root: &Path,
     version: &str,
@@ -256,7 +250,6 @@ pub fn build_runtime_overlay_from_guest_binaries(
     )
 }
 
-#[cfg(feature = "pure-mkfs")]
 fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
     if !src.is_file() {
         return Err(RuntimeOverlayError::DirectBuildFailed {
@@ -275,7 +268,6 @@ fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOve
     Ok(())
 }
 
-#[cfg(feature = "pure-mkfs")]
 fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, RuntimeOverlayError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -313,7 +305,6 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
     Ok(out)
 }
 
-#[cfg(feature = "pure-mkfs")]
 fn overlay_guest_path(root: &Path, path: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(rel) => format!("/{}", rel.to_string_lossy()),
@@ -321,7 +312,6 @@ fn overlay_guest_path(root: &Path, path: &Path) -> String {
     }
 }
 
-#[cfg(feature = "pure-mkfs")]
 fn overlay_mode_of(path: &Path, default: u16) -> u16 {
     #[cfg(unix)]
     {
@@ -385,7 +375,6 @@ pub fn resolve_or_build_local_runtime_overlay(
     }
 }
 
-#[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
 fn write_local_source_fingerprint(
     cache_root: &Path,
     version: &str,
@@ -400,7 +389,6 @@ fn write_local_source_fingerprint(
     Ok(())
 }
 
-#[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
 fn write_local_build_epoch(
     cache_root: &Path,
     version: &str,
@@ -649,54 +637,24 @@ fn build_runtime_overlay_from_source_checkout(
     arch: GuestArch,
     workspace_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    #[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
     let source_fingerprint =
         crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(workspace_root)
             .map_err(|e| RuntimeOverlayError::NixBuildFailed {
                 reason: format!("compute runtime-overlay source fingerprint: {e}"),
             })?;
-    #[cfg(feature = "pure-mkfs")]
-    {
-        let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
-            cache_root,
-            version,
-            arch,
-            workspace_root,
-        )
-        .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
-            reason: format!("build guest binaries for runtime overlay: {e}"),
-        })?;
-        let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
-        write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
-        write_local_build_epoch(cache_root, version, arch)?;
-        Ok(artifact)
-    }
-    #[cfg(all(not(feature = "pure-mkfs"), target_os = "linux"))]
-    {
-        let temp = tempfile::tempdir()?;
-        let spec = OverlayBuildSpec::new(
-            workspace_root.to_path_buf(),
-            arch,
-            temp.path().join("result"),
-        );
-        let built = build_overlay_with_nix(&spec)?;
-        let _installed =
-            install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
-        write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
-        write_local_build_epoch(cache_root, version, arch)?;
-        resolve_or_seed_from_default_cache(
-            &RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string()),
-            arch,
-        )
-    }
-    #[cfg(all(not(feature = "pure-mkfs"), not(target_os = "linux")))]
-    {
-        let _ = (cache_root, version, arch, workspace_root);
-        Err(RuntimeOverlayError::HostUnsupported {
-            operation: "runtime overlay local rebuild",
-            reason: "direct runtime-overlay rebuild requires either the pure-mkfs feature or a Linux nix build path",
-        })
-    }
+    let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
+        cache_root,
+        version,
+        arch,
+        workspace_root,
+    )
+    .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
+        reason: format!("build guest binaries for runtime overlay: {e}"),
+    })?;
+    let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
+    write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
+    write_local_build_epoch(cache_root, version, arch)?;
+    Ok(artifact)
 }
 
 // =================================================================
@@ -2201,7 +2159,6 @@ mod tests {
         hex::encode(h.finalize())
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn direct_overlay_build_writes_cache_layout() {
         let cache = TempDir::new().unwrap();
@@ -2249,7 +2206,6 @@ mod tests {
     /// admitted are not cosmetic: turning the mask `&` into `|` yields
     /// 0o7777 for *every* file in the overlay — world-writable, setuid,
     /// setgid, sticky — and `^` inverts whatever the real mode was.
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn overlay_mode_is_the_files_own_permission_bits() {
         use std::os::unix::fs::PermissionsExt;
@@ -2280,7 +2236,6 @@ mod tests {
     /// The guest path is the staged path made absolute relative to the
     /// overlay root. A constant here silently collapses every file in the
     /// overlay onto one guest path.
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn overlay_guest_path_is_rooted_and_distinct_per_file() {
         let root = Path::new("/stage/overlay");

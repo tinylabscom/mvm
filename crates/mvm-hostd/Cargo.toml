@@ -112,10 +112,8 @@ mvm-agentd.workspace = true
 # `plan_admission` uses `mvm-fs::hash::hash_source` for admitted-share
 # content identities on every platform, so the dep itself is not optional.
 mvm-fs = { workspace = true }
-# builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
-# server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
-# per-VM supervisor process, not in library users.
-mvm-build = { workspace = true, features = ["builder-vm"] }
+# The supervisor consumes the unconditional builder network provider.
+mvm-build.workspace = true
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow.workspace = true

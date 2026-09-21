@@ -38,13 +38,6 @@
 //! 10. Validate the artifact dir now contains `rootfs.ext4` (and
 //!     optionally `vmlinux`); return `BuilderArtifacts`.
 //!
-//! ## Feature gate
-//!
-//! Gated behind `builder-vm`. Default-off until the cutover flips
-//! `ensure_dev_image` to dispatch through `LibkrunBuilderVm`.
-//! Library consumers that don't need the libkrun builder build with
-//! `default-features = false`.
-//!
 //! ## Not the runtime backend
 //!
 //! `LibkrunBackend` (`crates/mvm-runtime/src/libkrun.rs`) is for
@@ -1552,9 +1545,8 @@ impl BuilderVm for LibkrunBuilderVm {
         self.validate_mounts(mounts)?;
         self.validate_job(job)?;
 
-        // 2. Refuse to proceed on a host without libkrun. The
-        //    `builder-vm` feature being compiled
-        //    in doesn't imply the runtime library is installed.
+        // 2. Refuse to proceed on a host without libkrun. Compiling the Rust
+        //    facade does not imply the runtime library is installed.
         if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
@@ -2588,40 +2580,6 @@ fn prepopulate_stage0_nix_store_image_with_mkfs(
     Ok(())
 }
 
-/// Reset a failed or seed-mismatched Stage 0 store to a blank sparse device.
-/// The Linux Stage 0 guest formats it with e2fsprogs before copying the verified
-/// seed closure. Truncating before restoring the device size discards every
-/// block from a previously damaged filesystem without materializing 64 GiB of
-/// zeros on the host.
-#[cfg(not(feature = "pure-mkfs"))]
-fn reset_stage0_store_for_guest_format(store_image: &Path) -> Result<(), BuilderVmError> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(store_image)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
-        })?;
-    let device_size = file
-        .metadata()
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
-        })?
-        .len();
-    file.set_len(0).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
-    })?;
-    file.set_len(device_size).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
-    })?;
-    tracing::info!(
-        image = %store_image.display(),
-        device_size,
-        "reset Stage 0 Nix store for in-guest e2fsprogs format"
-    );
-    Ok(())
-}
-
-#[cfg(feature = "pure-mkfs")]
 fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
     let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
     let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
@@ -2662,11 +2620,6 @@ fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), Build
         "formatted Stage 0 Nix store image in-process"
     );
     Ok(())
-}
-
-#[cfg(not(feature = "pure-mkfs"))]
-fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
-    reset_stage0_store_for_guest_format(store_image)
 }
 
 fn find_host_mkfs_ext4() -> Option<PathBuf> {
@@ -3610,7 +3563,6 @@ fn drain_builder_observations(
 /// build's exit code. This helper's job is purely
 /// observational: log what arrives, warn on mismatch against the
 /// file, never gate the build on the vsock outcome.
-#[cfg(feature = "builder-vm")]
 pub fn spawn_vsock_response_listener(
     vm_state_dir: &Path,
 ) -> std::sync::mpsc::Receiver<crate::builder_protocol::HostVmResponseRead> {
@@ -3655,14 +3607,12 @@ pub fn spawn_vsock_response_listener(
     rx
 }
 
-#[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VsockSocketObservation {
     Seen,
     Timeout,
 }
 
-#[cfg(feature = "builder-vm")]
 fn spawn_vsock_socket_observer(
     vm_state_dir: &Path,
     port: u32,
@@ -3693,7 +3643,6 @@ fn spawn_vsock_socket_observer(
     rx
 }
 
-#[cfg(feature = "builder-vm")]
 fn describe_vsock_socket_observation(
     rx: std::sync::mpsc::Receiver<VsockSocketObservation>,
     port: u32,
@@ -3727,7 +3676,6 @@ fn describe_vsock_socket_observation(
 /// the read-deadline-bounded thread to deliver any in-flight
 /// response; longer waits would hurt UX without buying meaningful
 /// signal.
-#[cfg(feature = "builder-vm")]
 pub fn log_vsock_response_outcome(
     rx: std::sync::mpsc::Receiver<crate::builder_protocol::HostVmResponseRead>,
     file_exit_code: Option<i32>,
@@ -3736,7 +3684,6 @@ pub fn log_vsock_response_outcome(
     tracing::info!(summary = %summary, "vsock dispatch outcome");
 }
 
-#[cfg(feature = "builder-vm")]
 pub fn describe_vsock_response_outcome(
     rx: std::sync::mpsc::Receiver<crate::builder_protocol::HostVmResponseRead>,
     file_exit_code: Option<i32>,
@@ -4135,7 +4082,6 @@ pub use crate::builder_vm_runtime::{
 /// - The builder VM bootstrap integration is what actually constructs one of
 ///   these against the dev session's lifecycle.
 /// - Per-job namespace isolation inside the dispatch loop.
-#[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone)]
 pub struct LibkrunPersistentHostVm {
     vcpus: u8,
@@ -4148,7 +4094,6 @@ pub struct LibkrunPersistentHostVm {
     host_bin_dir: Option<PathBuf>,
 }
 
-#[cfg(feature = "builder-vm")]
 impl LibkrunPersistentHostVm {
     /// Construct a persistent builder VM rooted at `workspace_root`.
     /// Defaults match [`LibkrunBuilderVm::default`] for vCPUs / RAM /
@@ -4407,7 +4352,6 @@ impl LibkrunPersistentHostVm {
 /// [`Self::wait_for_shutdown`] or [`Self::kill`] leaks the
 /// supervisor process (and the VM behind it) — callers should
 /// always one of the two before dropping.
-#[cfg(feature = "builder-vm")]
 #[derive(Debug)]
 pub struct PersistentVmHandle {
     vm_state_dir: PathBuf,
@@ -4420,7 +4364,6 @@ pub struct PersistentVmHandle {
     egress_endpoint: Option<BuilderVsockEgressEndpoint>,
 }
 
-#[cfg(feature = "builder-vm")]
 impl PersistentVmHandle {
     /// Path libkrun uses for the per-VM state (vsock sockets,
     /// console log, PID file). Pass this to
@@ -5448,36 +5391,6 @@ mod tests {
         assert_eq!(host_file_4k_blocks_for_ext4(&image).unwrap(), 16);
     }
 
-    /// The no-host-mkfs path leaves a blank sparse device so the Linux guest's
-    /// established e2fsprogs formatter owns the long-lived filesystem.
-    #[cfg(not(feature = "pure-mkfs"))]
-    #[test]
-    fn stage0_store_reset_leaves_blank_sparse_device_for_guest_format() {
-        let scratch = TempDir::new().unwrap();
-        let image = scratch.path().join("nix-store-stage0-test.img");
-        std::fs::File::create(&image)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
-            .unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&image)
-            .unwrap()
-            .write_all(b"stale-filesystem")
-            .unwrap();
-
-        reset_stage0_store_for_guest_format(&image).unwrap();
-
-        assert_eq!(std::fs::metadata(&image).unwrap().len(), 64 * 1024 * 1024);
-        let mut prefix = [0u8; 16];
-        std::fs::File::open(&image)
-            .unwrap()
-            .read_exact(&mut prefix)
-            .unwrap();
-        assert_eq!(prefix, [0; 16]);
-    }
-
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn stage0_store_without_host_mkfs_writes_labeled_ext4() {
         use std::io::{Read, Seek, SeekFrom};
@@ -5547,14 +5460,7 @@ mod tests {
             f.read_exact(&mut b).unwrap();
             u16::from_le_bytes(b)
         };
-        #[cfg(feature = "pure-mkfs")]
         assert_eq!(read_magic(&store_image), EXT4_SUPERBLOCK_MAGIC);
-        #[cfg(not(feature = "pure-mkfs"))]
-        assert_eq!(
-            read_magic(&store_image),
-            0,
-            "guest must receive a blank disk"
-        );
 
         // Model the guest's e2fsprogs format and clean unmount by writing the
         // superblock fields the host-side health check consumes.
@@ -5582,10 +5488,7 @@ mod tests {
         // Pass 2: marker matches, but filesystem health does not, so the
         // damaged state must be replaced rather than mounted again.
         prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
-        #[cfg(feature = "pure-mkfs")]
         assert_eq!(read_state(&store_image), EXT4_VALID_FS);
-        #[cfg(not(feature = "pure-mkfs"))]
-        assert_eq!(read_state(&store_image), 0);
     }
 
     #[test]

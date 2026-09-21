@@ -1170,11 +1170,8 @@ fn shell_single_quote(s: &str) -> String {
 
 /// Extract the leading hash from a Nix store path. Mirror of the
 /// single-shot helper in `libkrun_builder.rs`. Shared with the typed
-/// builder-dispatch path in `pipeline::dev_build`, which derives a
-/// build's revision hash from the daemon-reported store out-path.
-/// Gated on the `builder-vm` feature to keep no-feature builds free of
-/// dead-code warnings.
-#[cfg(any(test, feature = "builder-vm"))]
+/// builder-dispatch path in `pipeline::dev_build`, which derives a build's
+/// revision hash from the daemon-reported store out-path.
 pub(crate) fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
     let name = store_path.strip_prefix("/nix/store/")?;
     let (hash, _rest) = name.split_once('-')?;
@@ -1199,19 +1196,16 @@ pub(crate) fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
 /// Install variant (`BuilderJob::Install`) returns
 /// `BuilderVmError::NotYetImplemented` — reconciling the sealed-volume
 /// invariants with persistent-mode is follow-up work.
-#[cfg(feature = "builder-vm")]
 pub struct PersistentBuilderVm {
     session: SessionRecord,
 }
 
-#[cfg(feature = "builder-vm")]
 impl PersistentBuilderVm {
     pub fn new(session: SessionRecord) -> Self {
         Self { session }
     }
 }
 
-#[cfg(feature = "builder-vm")]
 impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
     /// A persistent builder is one that has already been bootstrapped, so
     /// Stage 0 is not its job — it is the operation that would have produced
@@ -1347,7 +1341,6 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 impl PersistentBuilderVm {
     /// `BuilderJob::Install` arm of
     /// [`BuilderVm::run_build`]. Copies the host-side install spec
@@ -1441,7 +1434,6 @@ impl PersistentBuilderVm {
 /// convention) and copy the caller's install spec into
 /// `<job_id>/install_spec.json`. Returns the `job_id` the host passes
 /// as `HostVmRequest::Run::job_dir_relpath`.
-#[cfg(feature = "builder-vm")]
 fn stage_install_dispatch_job(
     session_job_dir: &Path,
     host_spec_path: &Path,
@@ -1461,7 +1453,6 @@ fn stage_install_dispatch_job(
 /// (single-shot path) sees the same shape it would for a fresh-
 /// VM build. Doesn't try to be clever about symlinks — the install
 /// pipeline emits plain files + dirs.
-#[cfg(feature = "builder-vm")]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1909,7 +1900,6 @@ mod tests {
     // install dispatch helpers
     // -----------------------------------------------------------
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn stage_install_dispatch_job_copies_spec_and_creates_out_dir() {
         let scratch = tempfile::tempdir().expect("tempdir");
@@ -1933,7 +1923,6 @@ mod tests {
         assert!(out_dir.is_dir(), "expected out/ at {}", out_dir.display());
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn copy_dir_recursive_copies_files_and_subdirs() {
         let scratch = tempfile::tempdir().expect("tempdir");
@@ -1949,7 +1938,6 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("nested/b.txt")).unwrap(), b"beta");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn copy_dir_recursive_rejects_missing_src() {
         let scratch = tempfile::tempdir().expect("tempdir");

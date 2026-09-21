@@ -56,10 +56,10 @@ mvm-agentd.workspace = true
 # The per-boot drive files the start config carries. Already in this crate's
 # closure through mvm-runtime.
 mvm-vmm.workspace = true
-# Shared run-path orchestration (`run_image::inject_and_materialize`) — the same
-# pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-fs's
-# ext4 writer, already in the mvmctl closure via the CLI, so this adds no default crates.
-mvm-build = { workspace = true, default-features = false, features = ["pure-mkfs"] }
+# Shared run-path orchestration (`run_image::inject_and_materialize`) and its
+# unconditional pure-Rust ext4 writer — the same path the CLI's `run --image`
+# uses. mvm-fs is already in the mvmctl closure via the CLI.
+mvm-build = { workspace = true, default-features = false }
 # OCI pull + hardened unpack for registry-ref resolution. Already in the mvmctl
 # closure (the CLI links it); mvm-fs carries no back-edge to this crate.
 mvm-fs = { workspace = true }

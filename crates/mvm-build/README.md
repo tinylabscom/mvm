@@ -39,10 +39,11 @@ provenance so admission can bind the files that are later booted.
 
 ## Features
 
-The default feature set is empty for the library. Notable opt-ins are
-`builder-vm`, `pure-mkfs`, `manifest-verify`, `contributor-bootstrap`, and
-`release-channel`. Platform-specific builder implementations compile only on
-their supported targets.
+Builder orchestration and pure ext4 materialization are unconditional library
+capabilities. The remaining opt-ins are `manifest-verify`,
+`contributor-bootstrap`, and `release-channel`; native libkrun linkage remains
+behind the `libkrun-sys` crate's own feature. Platform-specific operations still
+run only on supported hosts.
 
 ## Developing
 

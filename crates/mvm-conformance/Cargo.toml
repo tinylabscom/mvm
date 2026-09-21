@@ -55,10 +55,7 @@ mvm-fs = { workspace = true, features = ["test-support"] }
 # writes next to its synthetic parent rootfs, so the runner's overlay-contract
 # gate admits the cloned child exactly like a cold boot would. Same feature
 # set mvm-runtime already builds it with, so this adds no new closure.
-mvm-build = { workspace = true, default-features = false, features = [
-    "builder-vm",
-    "pure-mkfs",
-] }
+mvm-build = { workspace = true, default-features = false }
 # Signs the warm-claim scenario's synthetic child `ExecutionPlan` the same way
 # `admit_plan_for_boot` does in production.
 ed25519-dalek.workspace = true

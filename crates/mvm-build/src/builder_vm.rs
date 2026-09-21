@@ -737,8 +737,7 @@ pub fn clear_builder_store(dry_run: bool) -> std::io::Result<BuilderStoreRepair>
 /// The architecture tag used in cached builder artifact filenames
 /// (`nix-store-<arch>.img`).
 ///
-/// Lives here rather than in `libkrun_builder` because that module is gated
-/// behind the `builder-vm` feature, and store recovery must work without it.
+/// Lives here because store recovery belongs to the VMM-neutral cache layer.
 pub fn host_arch_tag() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"

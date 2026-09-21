@@ -72,11 +72,10 @@ mvm-core.workspace = true
 mvm-http.workspace = true
 mvm-fs.workspace = true
 mvm-agentd.workspace = true
-# `LibkrunNetworkProvider` impls the `NetworkProvider`
-# seam. mvm-net deps only mvm-core + mvm-sdk, so this edge is acyclic.
-# Optional + folded into `builder-vm`: the provider is gated with
-# `libkrun_builder`, so a default build pulls neither.
-mvm-net = { workspace = true, optional = true }
+# `LibkrunNetworkProvider` impls the `NetworkProvider` seam. mvm-net deps only
+# mvm-core + mvm-sdk, so this edge is acyclic. Builder orchestration is an
+# unconditional part of mvm-build, so the provider is always compiled too.
+mvm-net.workspace = true
 mvm-vmm = { workspace = true }
 # `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
@@ -88,10 +87,10 @@ mvm-sdk.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
-# Optional libkrun FFI dep for the in-tree builder VM
-# launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
-# `builder-vm`; default-off until the cutover flips polarity.
-libkrun-sys = { workspace = true, optional = true }
+# Libkrun FFI facade used by the in-tree builder VM launcher. Native C linkage
+# remains behind libkrun-sys's own opt-in feature; naming the Rust facade here
+# does not link libkrun.
+libkrun-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # JCS canonicalization for the in-rootfs provenance mark and the
@@ -184,11 +183,6 @@ release-channel = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
-# In-process, pure-Rust ext4 materialization (no builder VM / mkfs),
-# delegating the walk + emission to `mvm_fs::rootfs`. Off by default so the
-# mvmctl default closure keeps the pure path opt-in until it is the run-path
-# default; enabled where `materialize_ext4_pure` is used.
-pure-mkfs = []
 # Folded in with the mvm-egress-proxy bin. Off by default;
 # tests/dev enable it so the `mvm-egress-proxy` bin honors a
 # `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
@@ -197,15 +191,7 @@ pure-mkfs = []
 # (inside `mod linux`), so this missing feature was a Linux-only error
 # invisible on a macOS dev host.
 interactive = []
-# libkrun-direct builder VM launcher. Pulls the
-# `mvm-libkrun` FFI crate which itself gates the underlying
-# `libkrun-sys` bindings. Implies `pure-mkfs`: Stage 0 packs its `/work`
-# share onto an in-process ext4 disk (`libkrun_builder::run_stage0_impl`)
-# rather than virtio-fs, so any crate compiling this module needs the pure
-# writer too — including an isolated `-p` build that never asks for
-# `pure-mkfs` on its own (e.g. the per-VM supervisor crate).
 contributor-bootstrap = []
-builder-vm = ["dep:libkrun-sys", "dep:mvm-net", "pure-mkfs"]
 
 [lints]
 workspace = true

@@ -4,6 +4,13 @@ Last updated: 2026-09-20
 
 ## In progress
 
+- [ ] **Unconditional builder capabilities — issue #3322.**
+      `specs/plans/2026-09-20-unconditional-builder-capabilities.md`. The
+      no-feature witness is green and the dead `mvm-build/builder-vm` plus
+      `pure-mkfs` composition switches and compile-out stubs are removed.
+      `mvm-cli` retains its distinct command/diagnostic surface. Full workspace,
+      gated, repository, and BDD validation is green; queued delivery remains.
+
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
       70 lexical public `f` / `f_with_*` sibling pairs. The first per-module
