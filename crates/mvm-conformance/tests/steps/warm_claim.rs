@@ -22,10 +22,10 @@ use mvm_core::vm_backend::{
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick,
+    materialized_blob_sha256,
 };
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
-use mvm_runtime::workload_runner::claim::parent_rootfs_digest;
 use mvm_runtime::workload_runner::{
     ChildGrantIssuer, ClaimContext, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
     RealBrokerRegistrar, WorkloadRunner,
@@ -262,9 +262,9 @@ fn when_claim_parent(world: &mut CliWorld) {
         .expect("a Given step must seed a warm parent first");
 
     let anchor = WarmClaimAnchor::new(parent_meta, world.warm_claim_parent_audited);
-    let parent_digest = parent_rootfs_digest(parent_meta)
-        .expect("the seeded parent carries a rootfs content blob")
-        .to_string();
+    let parent_digest =
+        materialized_blob_sha256(checkpoints, parent_meta, mvm_core::checkpoint::ROOTFS_BLOB)
+            .expect("the seeded parent carries an authenticated materialized rootfs digest");
 
     // A fresh, signed child `ExecutionPlan` bound to the parent's own
     // verified content-address — the same shape the CLI mints via

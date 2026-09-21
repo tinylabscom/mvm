@@ -157,7 +157,7 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
 /// checkpoints carry it directly; chunked checkpoints retain it in the
 /// authenticated index so callers can bind an admitted image without rereading
 /// a multi-gigabyte rootfs.
-pub(crate) fn materialized_blob_sha256(
+pub fn materialized_blob_sha256(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
     name: &str,
