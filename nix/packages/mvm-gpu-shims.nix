@@ -17,6 +17,7 @@
 
 let
   toolchainPkgs = if static then pkgs.pkgsStatic else pkgs;
+  variant = if static then "musl" else "glibc";
   crateFor =
     {
       crate,
@@ -73,10 +74,19 @@ let
     "mvm-gpu-cudart-shim" = "libcudart.so";
     "mvm-gpu-nvml-shim" = "libnvidia-ml.so.1";
   };
+
+  each = lib.mapAttrs (crate: soname: crateFor { inherit crate soname; }) shims;
 in
-lib.mapAttrs (
-  crate: soname:
-  crateFor {
-    inherit crate soname;
-  }
-) shims
+# One derivation per variant: flake `packages` outputs must be derivations,
+# and consumers (the runtime overlay in mvm-images) want the whole shim set
+# at once anyway. symlinkJoin merges each shim's $out/lib/<soname>.
+pkgs.symlinkJoin {
+  name = "mvm-gpu-shims-${variant}";
+  paths = lib.attrValues each;
+  meta = with lib; {
+    description = "mvm guest GPU shim libraries (libcuda.so.1, libcudart.so, libnvidia-ml.so.1), ${variant} variant";
+    homepage = "https://github.com/tinylabscom/mvm";
+    license = licenses.asl20;
+    platforms = platforms.linux;
+  };
+}

@@ -60,17 +60,16 @@ in
     inherit lib mvmSrc;
   };
 
-  # Guest GPU shims (libcuda.so.1 / libcudart.so / libnvidia-ml.so.1),
-  # one derivation per shim, in glibc and musl-static variants. mvm-images
-  # composes them into the runtime overlay; image composition is not owned
-  # here.
-  mvm-gpu-shims-glibc = import ./mvm-gpu-shims.nix {
-    inherit pkgs lib mvmSrc;
+  # Guest GPU shims (libcuda.so.1 / libcudart.so / libnvidia-ml.so.1) as a
+  # single derivation per libc variant. mvm-images composes them into the
+  # runtime overlay; image composition is not owned here.
+  mvm-gpu-shims-glibc = pkgs.callPackage ./mvm-gpu-shims.nix {
+    inherit mvmSrc;
     static = false;
   };
 
-  mvm-gpu-shims-musl = import ./mvm-gpu-shims.nix {
-    inherit pkgs lib mvmSrc;
+  mvm-gpu-shims-musl = pkgs.callPackage ./mvm-gpu-shims.nix {
+    inherit mvmSrc;
     static = true;
   };
 
