@@ -39,8 +39,9 @@
 
 - [ ] **Kubernetes in a single microVM.**
       `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
-      #3554, guest template in tinylabscom/mvm-templates#1, workload-kernel
-      audit in tinylabscom/mvm-images#9. Goal: one microVM boots a complete
+      #3554 (W1/W2 merged as #3555), guest template and validation in
+      tinylabscom/mvm-templates#1/#2 — the shared image repositories carry
+      no Kubernetes-specific artifacts. Goal: one microVM boots a complete
       single-node k3s cluster, so a whole cluster is a disposable, fork-able,
       digest-pinned artifact. W1 is the mvm runtime enabler: `/dev/kmsg`
       (char 1:11) — a hard kubelet requirement — is allow-listed in the OCI

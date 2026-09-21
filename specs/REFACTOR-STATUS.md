@@ -22,11 +22,12 @@ Last updated: 2026-09-21
       merge-queue delivery.
 
 - [ ] **Kubernetes in a single microVM** —
-      `specs/plans/2026-09-20-kubernetes-in-microvm.md` (#3554; template
-      tinylabscom/mvm-templates#1; kernel audit tinylabscom/mvm-images#9).
-      W1 device allow-list enabler and W2 cgroup2 mount + workload-uid
-      delegation implemented on `feat/kubernetes-in-microvm`; template
-      integration, E2E, and docs pending.
+      `specs/plans/2026-09-20-kubernetes-in-microvm.md` (#3554; template and
+      validation tinylabscom/mvm-templates#1/#2; the shared image repos carry
+      no Kubernetes-specific artifacts). W1 device allow-list enabler and W2
+      cgroup2 mount + workload-uid delegation merged as #3555; the
+      workload-k8s kernel variant merged as #3572; template integration,
+      E2E, and docs pending in tinylabscom/mvm-templates#1.
 
 - [ ] **GPU compute by API remoting over vsock.**
       Epic #3560; `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029's
