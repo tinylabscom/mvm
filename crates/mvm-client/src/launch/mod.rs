@@ -240,7 +240,7 @@ impl LocalBackend {
             // one.
             _ => {
                 let (resolution, label) =
-                    mvm_build::kernel_fetch::resolve_workload_kernel(&cache, &arch, false);
+                    mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
                 match resolution {
                     mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
                         Ok(Some(verified.path().to_path_buf()))

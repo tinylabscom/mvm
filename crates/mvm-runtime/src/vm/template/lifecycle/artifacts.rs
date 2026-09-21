@@ -27,7 +27,7 @@ pub(super) fn slot_kernel_source(
         .join("vmlinux");
     let verified_workload_kernel = || {
         let (resolution, _label) =
-            mvm_build::kernel_fetch::resolve_workload_kernel(cache_root, &arch_str, false);
+            mvm_build::kernel_fetch::resolve_kernel_for_workload(cache_root, &arch_str, false);
         match resolution {
             mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
                 Some(verified.path().to_path_buf())

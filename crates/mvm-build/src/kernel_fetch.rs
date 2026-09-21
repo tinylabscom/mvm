@@ -266,7 +266,7 @@ pub fn workload_kernel_label() -> &'static str {
 /// [`workload_kernel_label`]. Returns the resolution together with the
 /// label that produced it, so error messages can name the cache path the
 /// operator actually needs to populate.
-pub fn resolve_workload_kernel(
+pub fn resolve_kernel_for_workload(
     cache_dir: &Path,
     arch: &str,
     allow_build: bool,

@@ -278,7 +278,7 @@ impl StartHost for EmbedderStartHost {
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let arch = mvm_core::arch::GuestArch::host().to_string();
         let (resolution, label) =
-            mvm_build::kernel_fetch::resolve_workload_kernel(&cache, &arch, false);
+            mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
         match resolution {
             mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
                 Ok(verified.path().display().to_string())
