@@ -10,13 +10,21 @@ use std::path::{Path, PathBuf};
 use super::RefusalReason;
 
 /// Character-device allow-list, expressed as tar-relative paths plus
-/// Linux major/minor pairs.
+/// Linux major/minor pairs and the mode the node is materialized with.
 const ALLOWED_DEVICE_NODES: &[AllowedDeviceNode] = &[
     AllowedDeviceNode::new(b"dev/console", 5, 1),
     AllowedDeviceNode::new(b"dev/null", 1, 3),
     AllowedDeviceNode::new(b"dev/zero", 1, 5),
     AllowedDeviceNode::new(b"dev/random", 1, 8),
     AllowedDeviceNode::new(b"dev/urandom", 1, 9),
+    // The kubelet (k3s and most other in-guest Kubernetes distros) opens
+    // /dev/kmsg during startup and refuses to run without it. A guest
+    // kernel creates it via devtmpfs, but an OCI image that carries the
+    // node must not be refused at unpack time. Unlike the r/w
+    // pseudo-devices above, the kernel log is not world-writable: any
+    // guest process could otherwise inject forged kernel log lines, so
+    // it materializes read-only for the owner.
+    AllowedDeviceNode::with_mode(b"dev/kmsg", 1, 11, 0o644),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,11 +32,21 @@ struct AllowedDeviceNode {
     path: &'static [u8],
     major: u32,
     minor: u32,
+    mode: u32,
 }
 
 impl AllowedDeviceNode {
     const fn new(path: &'static [u8], major: u32, minor: u32) -> Self {
-        Self { path, major, minor }
+        Self::with_mode(path, major, minor, 0o666)
+    }
+
+    const fn with_mode(path: &'static [u8], major: u32, minor: u32, mode: u32) -> Self {
+        Self {
+            path,
+            major,
+            minor,
+            mode,
+        }
     }
 }
 
@@ -71,7 +89,7 @@ impl<'a> super::fs_ops::Rooted<'a> {
             parent.as_fd(),
             &leaf,
             FileType::CharacterDevice,
-            Mode::from_raw_mode(0o666),
+            Mode::from_raw_mode(allowed.mode),
             makedev(allowed.major, allowed.minor),
         )
         .map_err(|_| RefusalReason::MalformedHeader)?;
@@ -201,6 +219,34 @@ mod tests {
         );
     }
 
+    // ── /dev/kmsg (kubelet requirement) ─────────────────
+
+    #[test]
+    fn kmsg_is_allowlisted_read_only_for_the_owner() {
+        let kmsg = ALLOWED_DEVICE_NODES
+            .iter()
+            .find(|node| node.path == b"dev/kmsg")
+            .expect("dev/kmsg must be in the allow-list");
+        assert_eq!((kmsg.major, kmsg.minor), (1, 11));
+        // World-writable would let any unpacked process forge kernel log
+        // lines; the kubelet only needs to read.
+        assert_eq!(kmsg.mode, 0o644);
+        assert_eq!(
+            classify_device_node(tar::EntryType::Char, b"dev/kmsg", Some(1), Some(11)),
+            Ok(*kmsg)
+        );
+        // Same path with the wrong pair, or the right pair as a block
+        // device, stays refused.
+        assert_eq!(
+            classify_device_node(tar::EntryType::Char, b"dev/kmsg", Some(1), Some(3)),
+            Err(RefusalReason::DeviceNodeRefused)
+        );
+        assert_eq!(
+            classify_device_node(tar::EntryType::Block, b"dev/kmsg", Some(1), Some(11)),
+            Err(RefusalReason::DeviceNodeRefused)
+        );
+    }
+
     #[test]
     fn disallowed_character_device_is_refused() {
         let tar_bytes = build_tar(|b| {
@@ -315,5 +361,40 @@ mod tests {
         assert!(report.refused.is_empty(), "{:?}", report.refused);
         let meta = std::fs::symlink_metadata(tmp.path().join("dev/null")).unwrap();
         assert!(meta.file_type().is_char_device());
+    }
+
+    /// The kubelet's required node materializes with its own mode rather
+    /// than the r/w pseudo-device default.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kmsg_materializes_read_only_when_host_permits_mknod() {
+        use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+        let tmp = TempDir::new().unwrap();
+        let probe = tmp.path().join("probe-kmsg");
+        let mode = Mode::from_raw_mode(0o600);
+        let dev = makedev(1, 11);
+        if mknodat(CWD, &probe, FileType::CharacterDevice, mode, dev).is_err() {
+            eprintln!("skipping kmsg mode assertion: mknod not permitted");
+            return;
+        }
+        std::fs::remove_file(&probe).unwrap();
+
+        let tar_bytes = build_tar(|b| {
+            add_device_node(b, "dev/kmsg", tar::EntryType::Char, 1, 11);
+        });
+        let report = super::super::unpack_layer(
+            Cursor::new(tar_bytes),
+            tmp.path(),
+            &UnpackOptions::default(),
+        )
+        .expect("unpack ok");
+
+        assert_eq!(report.device_nodes_written, 1);
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        let meta = std::fs::symlink_metadata(tmp.path().join("dev/kmsg")).unwrap();
+        assert!(meta.file_type().is_char_device());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o644);
     }
 }

@@ -61,6 +61,11 @@ pub const CRNG_RESEED_HELPER_GID: u32 = 988;
 mod capability_sets;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
+mod cgroup2;
+pub use cgroup2::{
+    CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
+    mount_and_delegate_cgroup2,
+};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
