@@ -742,10 +742,15 @@ Delivery slices, one PR each:
 - [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
       the duplicate checkout detection in `commands/runtime_overlay.rs` and
       `mvm-build/src/runtime_overlay.rs` collapsed into the selector.
-- [ ] W5j (`mvm`) — key the libkrun supervisor auto-build on
+- [x] W5j (`mvm`) — key the libkrun supervisor auto-build on
       `mvm_source_checkout` instead of `builder_vm_source_checkout_root`, so
       deleting `nix/images` does not turn a contributor build into an
       installed one.
+      Landed as `supervisor_source_checkout_root`: both supervisor paths
+      probe the workspace manifest through `image_source::mvm_source_checkout`,
+      release-channel aware; `mvm_source_checkout_at(root)` makes the
+      flake-free probe testable. `builder_vm_source_checkout_root` keeps its
+      bootstrap-helper callers, which genuinely concern the in-tree flake.
 - [ ] W5k (`mvm`) — `image boot update`, `up` and admission read the tier
       recorded with the image they boot; production refuses `local-dev`; the
       `doctor` line adds artifact digests.
