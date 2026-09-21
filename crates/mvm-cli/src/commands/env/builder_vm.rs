@@ -25,7 +25,7 @@ mod shell_job;
 mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
-mod test_pair;
+pub(crate) mod test_pair;
 #[cfg(test)]
 mod tests;
 mod vm_helpers;
@@ -92,6 +92,8 @@ pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::ensure_pair_built;
+#[cfg(feature = "builder-vm")]
+pub(crate) use local_pair::ensure_pair_workload_kernel;
 #[cfg(feature = "builder-vm")]
 pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 #[cfg(feature = "builder-vm")]

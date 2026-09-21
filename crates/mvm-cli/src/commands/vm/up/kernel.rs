@@ -28,6 +28,16 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     if !matches!(hypervisor, "hvf" | "firecracker") {
         return Ok(vmlinux_path.to_string());
     }
+    // A selected checkout is the fallback's source too: the pair's
+    // `default-tenant` set carries the workload kernel.
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
+        return Ok(
+            crate::commands::env::builder_vm::ensure_pair_workload_kernel(&checkout)?
+                .display()
+                .to_string(),
+        );
+    }
     let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let fallback = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, &arch, "workload");
@@ -125,6 +135,16 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     } else {
         "x86_64"
     };
+    // A selected checkout pins to the pair's kernel: the same
+    // `workload_kernel` member the default image boots.
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
+        return Ok(Some(
+            crate::commands::env::builder_vm::ensure_pair_workload_kernel(&checkout)?
+                .display()
+                .to_string(),
+        ));
+    }
     let source_checkout =
         crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
     Ok(Some(resolve_pinned_kernel(
@@ -315,6 +335,41 @@ mod resolve_pinned_kernel_tests {
             mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "x86_64", "workload");
         assert_eq!(result, expected.display().to_string());
         assert_eq!(std::fs::read(expected).unwrap(), b"downloaded-vmlinux");
+    }
+
+    /// Under a selected checkout the kernel-less-image fallback answers from
+    /// the pair's `default-tenant` set, not the in-tree cache or a download.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn the_kernel_less_fallback_and_the_pin_answer_from_the_pair_under_a_selector() {
+        use mvm_core::util::test_env::TestEnv;
+        let mut env = TestEnv::new();
+        let pair = crate::commands::env::builder_vm::test_pair::Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            pair.images.root(),
+        );
+        let entry = pair.publish_default_tenant();
+        let kernel = entry
+            .set
+            .artifacts
+            .iter()
+            .find(|a| a.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
+            .unwrap()
+            .path
+            .display()
+            .to_string();
+
+        let fallback = super::resolve_workload_kernel("/no/such/vmlinux", "hvf")
+            .expect("the fallback resolves from the pair");
+        assert_eq!(fallback, kernel);
+
+        let pinned = super::resolve_kernel_pin_path(true)
+            .expect("the pin resolves from the pair")
+            .expect("a pin was requested");
+        assert_eq!(pinned, kernel);
     }
 
     #[test]

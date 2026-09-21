@@ -261,7 +261,11 @@ Last updated: 2026-09-20
       - [x] W5g #3364: the prod default workload image reads the selector —
             the pair's `default-tenant` target installs under a stamped pair
             identity; fetch under a selected checkout is refused.
-      - [ ] W5h–W5m #3364: each remaining in-tree image consumer moved onto
+      - [x] W5h #3364: kernel acquisition reads the selector — the launch,
+            kernel-pin and kernel-less-fallback paths answer the pair's
+            `default-tenant` workload kernel. (The initramfs is an mvm-source
+            cargo artifact, not an image product; it joins the set in W6.)
+      - [ ] W5i–W5m #3364: each remaining in-tree image consumer moved onto
             the selector.
 
 - [x] **Hermetic published-documentation link gate.**

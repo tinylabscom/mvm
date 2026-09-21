@@ -330,6 +330,14 @@
       predicate that `image boot update` also uses. The dev variant keeps
       the in-tree build until the sibling repository publishes a dev
       attribute.
+      W5 (#3364) slice W5h: kernel acquisition reads the selector — the
+      launch, `--kernel-pin` and kernel-less-fallback paths answer the
+      pair's `default-tenant` workload kernel, the file the set's manifest
+      digests verified; the universal initramfs is a deterministic cargo
+      artifact of the mvm sources and joins the published set in W6. The
+      plan gains the one-base-image constraint: a single base Linux image
+      per architecture boots on every Linux-direct backend, with host-side
+      adaptation as translation, not separate products (mvm-images#8).
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
