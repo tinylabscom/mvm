@@ -4383,4 +4383,5 @@ writes the plan:
       gate.
 - [x] Complete the full workspace, Clippy, gated-target, repository-gate, and
       BDD validation matrix; record the delivery evidence.
-- [ ] Merge through the queue and close #3322.
+- [x] Pass protected head CI on PR #3550 and prepare the issue-closing change
+      for protected merge-queue delivery.

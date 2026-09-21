@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS**
+**Status: COMPLETE**
 
 ## Outcome
 
@@ -27,7 +27,8 @@ admission, and security behavior are unchanged.
       repository gate that refuses either retired member feature.
 - [x] Pass formatting, focused and workspace tests, Clippy, gated targets,
       repository gates, and BDD; publish the delivery record.
-- [ ] Merge through the queue and close #3322.
+- [x] Pass protected head CI on PR #3550 and prepare the issue-closing change
+      for protected merge-queue delivery.
 
 ## Validation
 
