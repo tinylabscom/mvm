@@ -24,8 +24,7 @@ const DEFAULT_SIZE_MULTIPLIER_NUMERATOR: u64 = 3;
 const DEFAULT_SIZE_MULTIPLIER_DENOMINATOR: u64 = 2;
 const DEFAULT_GUEST_OUTPUT_DEVICE: &str = "/dev/vdc";
 
-/// ext4 volume label stamped on the libkrun Stage 0 `/work` disk
-/// (`libkrun_builder::run_stage0_impl`) so `stage0-init` can find it by
+/// ext4 volume label stamped on the Stage 0 `/work` disk so `stage0-init` can find it by
 /// content instead of by device-enumeration order. ext4's on-disk
 /// `s_volume_name` field caps at 16 bytes; kept well under that. The Stage 0
 /// guest binary shares this string with the host-side writer.

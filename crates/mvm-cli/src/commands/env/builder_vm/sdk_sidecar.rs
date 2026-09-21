@@ -68,7 +68,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
             boundary.name(),
             workspace_root.display()
         ));
-        let job = mvm_build::libkrun_builder::BuilderShellJob {
+        let job = mvm_build::builder_vm::BuilderShellJob {
             work_dir: workspace_root.to_path_buf(),
             artifact_out: staging_dir.clone(),
             script: sdk_sidecar_builder_script(arch, libc),
@@ -145,7 +145,7 @@ impl SidecarBuildBoundary {
         }
     }
 
-    fn run_shell_job(self, job: &mvm_build::libkrun_builder::BuilderShellJob) -> Result<()> {
+    fn run_shell_job(self, job: &mvm_build::builder_vm::BuilderShellJob) -> Result<()> {
         match self {
             Self::Hvf => super::ShellJobBuilder::Hvf.run(job),
             Self::Firecracker => super::ShellJobBuilder::Firecracker.run(job),
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn stage0_has_no_shell_job_to_run() {
-        let job = mvm_build::libkrun_builder::BuilderShellJob {
+        let job = mvm_build::builder_vm::BuilderShellJob {
             work_dir: std::path::PathBuf::from("/nonexistent"),
             artifact_out: std::path::PathBuf::from("/nonexistent"),
             script: String::new(),

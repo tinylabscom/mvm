@@ -123,7 +123,7 @@ contributor-bootstrap = [
 ]
 # The CLI surface remains optional on Linux; mvm-build's builder orchestration
 # and pure ext4 writer are unconditional.
-builder-vm = []
+builder-vm = ["mvm-build/builder-libkrun"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the
 # memory-safe `mvm-fs` writer instead of shelling out to a builder VM. The

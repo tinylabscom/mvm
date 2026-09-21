@@ -633,16 +633,10 @@ fn json_string_escape(s: &str) -> String {
 
 /// Monotonic-with-pid scratch ID for the per-invocation
 /// `in-progress/<id>/` dir. Same pattern as
-/// `libkrun_builder::unique_job_id` — kept local because this scratch namespace
+/// the builder VM job id — kept local because this scratch namespace
 /// is an implementation detail of dependency installation.
 fn unique_scratch_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    format!("{stamp:013}-{pid}")
+    crate::builder_vm_image::unique_job_id()
 }
 
 /// Derive the stable cache key from the lockfile sha256 + the

@@ -10,7 +10,7 @@ use crate::builder_vm::BuilderVmError;
 /// The endpoint is deliberately terminated after its builder VM exits. That
 /// lifecycle event is not a build failure and belongs at debug level rather
 /// than on the contributor's stderr stream.
-pub(super) fn builder_egress_endpoint_was_terminated(status: &ExitStatus) -> bool {
+pub(crate) fn builder_egress_endpoint_was_terminated(status: &ExitStatus) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -27,7 +27,7 @@ pub(super) fn builder_egress_endpoint_was_terminated(status: &ExitStatus) -> boo
 /// The egress supervisor command for `host`: the current executable re-run as
 /// `mvmctl`. A library embedder's executable is not `mvmctl`, so it is refused
 /// before any command exists.
-pub(super) fn builder_egress_supervisor_command_for(
+pub(crate) fn builder_egress_supervisor_command_for(
     host: &HostProcess,
     endpoint_path: &Path,
 ) -> Result<Command, BuilderVmError> {
@@ -43,7 +43,7 @@ pub(super) fn builder_egress_supervisor_command_for(
     ))
 }
 
-pub(super) fn builder_egress_supervisor_command(
+pub(crate) fn builder_egress_supervisor_command(
     mvmctl_path: &Path,
     endpoint_path: &Path,
 ) -> Command {

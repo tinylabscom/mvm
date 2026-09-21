@@ -41,8 +41,8 @@ const SYMBOL: &str = "trusted_build_egress";
 const ALLOWED_CALLERS: &[&str] = &[
     // The builder VM's own launch policy.
     "crates/mvm-runtime/src/builder_runner/runner.rs",
-    // The libkrun builder's supervisor config.
-    "crates/mvm-build/src/libkrun_builder.rs",
+    // The VMM-neutral builder egress endpoint.
+    "crates/mvm-build/src/builder_vm_transport.rs",
     // The persistent HVF builder's endpoint. Same trusted builder tier as
     // `runner.rs` above, and it lives in the *supervisor* rather than a
     // launcher because a session outlives the command that starts it: the

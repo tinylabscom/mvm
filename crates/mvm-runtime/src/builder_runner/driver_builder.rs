@@ -16,12 +16,12 @@
 //! an HVF failure.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvm_build::builder_vm::{
     BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
-    builder_vm_cache_dir,
+    DEFAULT_MEMORY_MIB, DEFAULT_NIX_STORE_MIB, DEFAULT_VCPUS, builder_vm_cache_dir,
 };
+use mvm_build::builder_vm_image::unique_job_id;
 use mvm_build::builder_vm_runtime::{
     acquire_nix_store_image_lock, finalize_flake_job, read_job_result_with_diagnostics,
     shell_job_exit_error, stage_job_dir, stage_shell_job_dir,
@@ -30,14 +30,8 @@ use mvm_build::builder_vm_runtime::{
 use super::runner::{BuilderBuild, BuilderRunner};
 use crate::driver::VmmDriver;
 
-/// Default persistent nix-store disk size (GiB → MiB). Matches the other
-/// builders' generous sparse allocation; the guest formats + seeds it.
-const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
 /// Default output-disk size (MiB): must exceed the built rootfs + sidecars tar.
 const DEFAULT_OUTPUT_MIB: u32 = 4 * 1024;
-/// Default builder resources.
-const DEFAULT_VCPUS: u32 = 4;
-const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// The HVF builder VM, exposed through the `BuilderVm` seam.
 pub struct DriverBuilderVm<D: VmmDriver + Clone> {
@@ -69,7 +63,7 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
             closure_nar: None,
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             output_mib: DEFAULT_OUTPUT_MIB,
-            vcpus: DEFAULT_VCPUS,
+            vcpus: u32::from(DEFAULT_VCPUS),
             memory_mib: DEFAULT_MEMORY_MIB,
         }
     }
@@ -89,8 +83,8 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
     /// runs under the builder guest's `mvm-host-vm-init`.
     pub fn run_shell_script(
         &self,
-        job: &mvm_build::libkrun_builder::BuilderShellJob,
-    ) -> Result<mvm_build::libkrun_builder::BuilderShellResult, BuilderVmError> {
+        job: &mvm_build::builder_vm::BuilderShellJob,
+    ) -> Result<mvm_build::builder_vm::BuilderShellResult, BuilderVmError> {
         validate_shell_job(job)?;
 
         let cache = builder_vm_cache_dir();
@@ -155,7 +149,7 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
             })?;
         }
 
-        Ok(mvm_build::libkrun_builder::BuilderShellResult {
+        Ok(mvm_build::builder_vm::BuilderShellResult {
             job_dir: outcome.output_dir,
             vm_state_dir,
         })
@@ -170,16 +164,6 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
         self.closure_nar = closure_nar;
         self
     }
-}
-
-/// A unique per-build job id (pid + monotonic-ish nanos); mirrors the other
-/// builders' `unique_job_id`, which is `pub(crate)` to mvm-build.
-pub(super) fn unique_job_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{nanos}", std::process::id())
 }
 
 /// Boot / disk-transport / power-off failures are VMM-level (the builder VM
@@ -199,13 +183,11 @@ fn map_runner_failure(detail: String) -> BuilderVmError {
 /// [`BuilderVmError::RuntimeOverlayUnavailable`] (not a VMM-level failure), so
 /// it surfaces unchanged with no auto-fallback to another builder backend.
 pub(super) fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
-    mvm_build::libkrun_builder::require_runtime_overlay_ext4()
+    mvm_build::builder_vm_transport::require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))
 }
 
-fn validate_shell_job(
-    job: &mvm_build::libkrun_builder::BuilderShellJob,
-) -> Result<(), BuilderVmError> {
+fn validate_shell_job(job: &mvm_build::builder_vm::BuilderShellJob) -> Result<(), BuilderVmError> {
     if !job.work_dir.is_dir() {
         return Err(BuilderVmError::ExtractionFailed(format!(
             "shell job work_dir must be a directory: {}",
@@ -372,7 +354,7 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
 mod tests {
     use super::*;
     use mvm_backends::driver::hvf::HvfDriver;
-    use mvm_build::libkrun_builder::BuilderShellJob;
+    use mvm_build::builder_vm::BuilderShellJob;
 
     #[test]
     fn an_install_job_is_refused_by_name_and_matches_the_declared_capability() {
@@ -485,9 +467,9 @@ mod tests {
     }
 
     #[test]
-    fn unique_job_id_carries_the_pid() {
+    fn shared_unique_job_id_carries_the_pid() {
         let id = unique_job_id();
-        assert!(id.starts_with(&std::process::id().to_string()));
+        assert!(id.ends_with(&std::process::id().to_string()));
         assert!(id.contains('-'));
     }
 
@@ -537,7 +519,7 @@ mod tests {
             work_dir: work.path().to_path_buf(),
             artifact_out: out.path().to_path_buf(),
             script: "true".to_string(),
-            extra_disks: vec![mvm_build::libkrun_builder::BuilderExtraDisk {
+            extra_disks: vec![mvm_build::builder_vm::BuilderExtraDisk {
                 id: "x".to_string(),
                 path: disk,
                 read_only: true,

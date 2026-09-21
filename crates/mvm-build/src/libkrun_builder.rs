@@ -55,24 +55,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
-use mvm_vmm::host::network_endpoint_spawn::{
-    HandshakeContext, handshake_timeout, read_handshake_line,
-};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-use crate::builder_disk_transport::{
-    INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
-    read_output_disk,
-};
+#[cfg(test)]
+use crate::builder_disk_transport::pack_input_disk;
+use crate::builder_disk_transport::{InputTree, OUTPUT_DISK_BYTES, read_output_disk};
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
 };
-
-mod egress_process;
-mod host_binaries;
+use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
 
 use crate::stage0_host::{
     materialize_stage0_root_disk, read_console_tail, stage0_guest_halt_completed_successfully,
@@ -80,18 +70,17 @@ use crate::stage0_host::{
 };
 // Exercised only by this module's tests; the code itself moved to
 // `stage0_host` when Stage 0 stopped being libkrun-only.
+use crate::builder_host_binaries::supervisor_target_roots;
 #[cfg(test)]
 use crate::stage0_host::{Stage0HaltOutcome, stage0_console_halt_outcome, stage0_root_mount_nodes};
-use egress_process::{
-    builder_egress_endpoint_was_terminated, builder_egress_supervisor_command_for,
-};
-use host_binaries::{
-    endpoint_in_host_binary_dir, endpoint_predates_running_exe, supervisor_target_roots,
-};
-use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
+use mvm_vmm::host::aux_bin::HostProcess;
 // Moved to `builder_vm` (nothing about them is libkrun-shaped); re-exported
 // here so existing callers keep compiling while they migrate.
-pub use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob, BuilderShellResult};
+pub use crate::builder_vm::{
+    BuilderExtraDisk, BuilderShellJob, BuilderShellResult, BuilderVmImage, DEFAULT_MEMORY_MIB,
+    DEFAULT_NIX_STORE_MIB, DEFAULT_VCPUS, GUEST_JOB_DIR, GUEST_NIX_DIR, GUEST_OUT_DIR,
+    GUEST_WORK_DIR,
+};
 
 // These items previously lived in this file; they migrated to
 // `builder_vm_runtime` so the future VzBuilderVm path can reuse the
@@ -148,26 +137,6 @@ impl Drop for PendingChild {
     }
 }
 
-/// Default vCPU count for the builder VM. Nix builds are
-/// embarrassingly parallel at the derivation level; 4 cores is the
-/// sweet spot on M-series Macs without saturating the host.
-pub const DEFAULT_VCPUS: u8 = 4;
-
-/// Default RAM in MiB. Originally 8 GiB (in-VM nix builds peak
-/// ~5-6 GiB). Raised to 16 GiB for headroom
-/// when several derivations' build working sets overlap. Before the
-/// persistent-store cutover this also had to cover a 14 GiB in-RAM
-/// `/nix` tmpfs; the Stage 0 store now lives on a virtio-blk ext4 disk
-/// (`nix-store-stage0-<arch>.img`), so this RAM only has to cover the
-/// compiles themselves, not the store.
-pub const DEFAULT_MEMORY_MIB: u32 = 16384;
-
-/// Default size of the persistent `/nix`-store virtio-blk image,
-/// in MiB. 64 GiB sparse — the file only consumes the bytes the
-/// in-VM ext4 actually writes, but capacity caps growth so a
-/// runaway build can't fill the host disk.
-pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
-
 /// Builder persistent /nix store auto-GC threshold (GiB of *used* space).
 /// When the in-guest store exceeds this after a build, the build script runs
 /// `nix-collect-garbage --delete-older-than 14d`. Override: MVM_BUILDER_STORE_GC_GIB.
@@ -178,540 +147,31 @@ pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
 /// Re-exported here next to [`DEFAULT_NIX_STORE_MIB`] for discoverability.
 pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_gc_cap_kib};
 
-/// Where the workspace is staged inside the builder VM from the read-only
-/// input transport disk.
-/// Explicit path URL prevents Nix from treating the mounted checkout as a
-/// Git flake and reaching for host-side worktree metadata that is not mounted.
-pub const GUEST_WORK_DIR: &str = "path:/work";
-
-/// Where artifacts are collected before being archived onto the writable
-/// output transport disk.
-pub const GUEST_OUT_DIR: &str = "/out";
-
-/// Where the persistent Nix store lives inside the builder VM. The
-/// `mvm-host-vm-init` PID-1 bind-mounts the virtio-blk device at
-/// this path before exec-ing the build script.
-pub const GUEST_NIX_DIR: &str = "/nix";
-
-/// Where the per-build job spec lives inside the builder VM. The
-/// host stages `cmd.sh`, `env`, and the eventual `result` file
-/// under this path through the input transport disk.
-pub const GUEST_JOB_DIR: &str = "/job";
-const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
-const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
-const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
-const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
-const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
+#[cfg(test)]
+use crate::builder_egress_process as egress_process;
 pub use crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION;
-/// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
-/// its guest binaries from, failing closed when it cannot be produced.
-///
-/// A lean builder image bakes no guest binaries — every one is sourced from
-/// this overlay mounted at `/mvm/runtime` — so booting without it silently
-/// strands the guest agent. Callers that boot a lean `Rootfs` builder MUST
-/// treat a resolution failure as fatal; see [`builder_runtime_overlay_or_bail`]
-/// for the image-gated wrapper the boot paths use.
-pub fn require_runtime_overlay_ext4() -> anyhow::Result<PathBuf> {
-    use anyhow::Context as _;
-    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let version = env!("CARGO_PKG_VERSION");
-    let arch = mvm_core::arch::GuestArch::host();
-    let artifact =
-        crate::runtime_overlay::resolve_or_build_local_runtime_overlay(&cache_root, version, arch)
-            .with_context(|| {
-                format!(
-                    "builder VM requires the runtime overlay but it could not be resolved or \
-                     built (cache_root={}, version={version}, arch={arch})",
-                    cache_root.display()
-                )
-            })?;
-    Ok(artifact.overlay_ext4)
-}
-
-/// Resolve the runtime overlay for a builder boot, gating on the image shape.
-///
-/// A lean [`BuilderVmImage::Rootfs`] builder requires the overlay and fails
-/// closed when it is unavailable. A [`BuilderVmImage::RootDir`] (Stage 0
-/// bootstrap) image boots from libkrun's bundled kernel and sources no guest
-/// binaries from the overlay, so it legitimately returns `None`.
-pub(crate) fn builder_runtime_overlay_or_bail(
-    image: &BuilderVmImage,
-) -> Result<Option<PathBuf>, BuilderVmError> {
-    builder_runtime_overlay_or_bail_with(image, require_runtime_overlay_ext4)
-}
-
-/// Injectable core of [`builder_runtime_overlay_or_bail`] — takes the resolver
-/// as a closure so the image-gating and fail-closed mapping are unit-testable
-/// without touching the on-disk cache or triggering a source-checkout rebuild.
-fn builder_runtime_overlay_or_bail_with(
-    image: &BuilderVmImage,
-    resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> Result<Option<PathBuf>, BuilderVmError> {
-    match image {
-        BuilderVmImage::Rootfs { .. } => resolve()
-            .map(Some)
-            .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}"))),
-        BuilderVmImage::RootDir { .. } => Ok(None),
-    }
-}
-
-fn append_cmdline_token(base_cmdline: &str, token: &str) -> String {
-    if base_cmdline
-        .split_whitespace()
-        .any(|existing| existing == token)
-    {
-        return base_cmdline.to_string();
-    }
-    if base_cmdline.trim().is_empty() {
-        return token.to_string();
-    }
-    format!("{base_cmdline} {token}")
-}
-
-fn builder_vsock_egress_cmdline(base_cmdline: &str) -> String {
-    append_cmdline_token(base_cmdline, BUILDER_VSOCK_EGRESS_TOKEN)
-}
-
-fn builder_boot_contract_cmdline(base_cmdline: &str) -> String {
-    let cmdline = append_cmdline_token(base_cmdline, "rootwait");
-    let cmdline = append_cmdline_token(&cmdline, "panic=-1");
-    append_cmdline_token(&cmdline, "loglevel=8")
-}
-
-fn builder_disk_transport_cmdline(base_cmdline: &str) -> String {
-    let cmdline = builder_boot_contract_cmdline(base_cmdline);
-    let cmdline = append_cmdline_token(&cmdline, "mvm.builder_transport=disk");
-    let cmdline = append_cmdline_token(
-        &cmdline,
-        &format!("mvm.builder_input={BUILDER_INPUT_DEVICE}"),
-    );
-    let cmdline = append_cmdline_token(
-        &cmdline,
-        &format!("mvm.builder_output={BUILDER_OUTPUT_DEVICE}"),
-    );
-    builder_vsock_egress_cmdline(&cmdline)
-}
-
-fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
-    let cmdline = builder_disk_transport_cmdline(base_cmdline);
-    append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
-}
-
-pub(crate) struct BuilderRuntimeOverlayAttachment<'a> {
-    pub(crate) cmdline: String,
-    pub(crate) disk_path: &'a Path,
-    pub(crate) read_only: bool,
-}
-
-fn builder_runtime_overlay_guest_agent_enabled(
-    image: &BuilderVmImage,
-    runtime_overlay: Option<&Path>,
-) -> bool {
-    matches!(
-        (image, runtime_overlay),
-        (BuilderVmImage::Rootfs { .. }, Some(_))
-    )
-}
-
-fn builder_uses_vsock_egress(image: &BuilderVmImage) -> bool {
-    matches!(image, BuilderVmImage::Rootfs { .. })
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum BuilderEndpointTransport {
-    Uds { path: PathBuf },
-    Vsock { port: u32 },
-}
-
-#[derive(Debug)]
-pub(crate) struct BuilderVsockEgressEndpoint {
-    state_dir: PathBuf,
-}
-
-/// Mint this builder boot's FlowMux identity and write the drive its guest
-/// reads the keys off. Returned so the caller can attach the drive to the VM.
-///
-/// The session id is the per-VM state dir's own name, which is unique per boot
-/// and in scope at every builder spawn site — the alternative was threading a
-/// name through call sites that variously have one, have a differently-named
-/// one, or have none.
-pub(crate) fn stage_builder_flowmux_identity(
-    state_dir: &Path,
-) -> Result<
-    (
-        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial,
-        PathBuf,
-    ),
-    BuilderVmError,
-> {
-    let vm_name = state_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("builder");
-    let material =
-        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(vm_name)
-            .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!("mint the builder FlowMux identity: {e}"))
-            })?;
-    let drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
-    material.write_drive(&drive).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("write the builder FlowMux identity drive: {e}"))
-    })?;
-    Ok((material, drive))
-}
-
-impl BuilderVsockEgressEndpoint {
-    fn spawn(
-        state_dir: &Path,
-        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
-    ) -> Result<Self, BuilderVmError> {
-        let socket_dir = builder_vsock_socket_dir(state_dir)?;
-        let transport_path = socket_dir.join(mvm_core::config::vsock_socket_filename(
-            mvm_agentd::vsock::EGRESS_PORT,
-        ));
-        Self::spawn_with_transport(
-            state_dir,
-            BuilderEndpointTransport::Uds {
-                path: transport_path,
-            },
-            identity,
-        )
-    }
-
-    pub(crate) fn spawn_with_transport(
-        state_dir: &Path,
-        transport: BuilderEndpointTransport,
-        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
-    ) -> Result<Self, BuilderVmError> {
-        // Refused before the endpoint is resolved, which may build it.
-        let host = HostProcess::current();
-        host.refuse_cli_spawn(CliSpawn::BuilderEgressSupervisor)?;
-        let endpoint_path = resolve_network_endpoint_path()?;
-        let config = serde_json::json!({
-            "tenant_id": "builder",
-            "secrets": [],
-            "transport": transport,
-            "redaction": mvm_core::policy::RedactionPolicy::default(),
-            "network_policy": mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress(),
-            // One authenticated session, same as every other tier. The guest's
-            // egress client speaks nothing else.
-            "egress_mode": "flow_mux",
-            "flowmux_identity": {
-                "session_id": identity.session_id,
-                "host_signing_key_base64": identity.host_signing_key_base64,
-                "guest_verifying_key_base64": identity.guest_verifying_key_base64,
-            },
-        });
-
-        let mut endpoint_command = builder_egress_supervisor_command_for(&host, &endpoint_path)?;
-        let stderr_log_path = state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE);
-        let stderr_log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stderr_log_path)
-            .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "open persistent builder egress log {}: {e}",
-                    stderr_log_path.display()
-                ))
-            })?;
-        let child = endpoint_command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(stderr_log))
-            .spawn()
-            .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "spawn persistent builder egress supervisor for {}: {e}",
-                    endpoint_path.display()
-                ))
-            })?;
-        let mut child = PendingChild::new(child);
-
-        child
-            .child_mut()
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                BuilderVmError::ExtractionFailed(
-                    "builder egress endpoint stdin was not piped".to_string(),
-                )
-            })?
-            .write_all(config.to_string().as_bytes())
-            .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "pipe builder egress endpoint config: {e}"
-                ))
-            })?;
-
-        let stdout = child.child_mut().stdout.take().ok_or_else(|| {
-            BuilderVmError::ExtractionFailed(
-                "builder egress endpoint stdout was not piped".to_string(),
-            )
-        })?;
-        // The shared reader, not a local copy: the builder's own version
-        // accepted any non-empty line as a handshake and reported a bare
-        // duration on timeout, which is not enough to tell a slow endpoint from
-        // a dead one.
-        read_handshake_line(
-            stdout,
-            child.child_mut().id(),
-            handshake_timeout(),
-            &HandshakeContext {
-                endpoint: &endpoint_path,
-                stderr_log: Some(&stderr_log_path),
-            },
-        )
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))?;
-
-        let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
-        std::fs::write(&pid_file, child.child_mut().id().to_string()).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("write {}: {e}", pid_file.display()))
-        })?;
-
-        let mut child = child.into_child();
-        let child_pid = child.id();
-        std::thread::spawn(move || match child.wait() {
-            Ok(status) if builder_egress_endpoint_was_terminated(&status) => {
-                tracing::debug!(
-                    pid = child_pid,
-                    %status,
-                    "builder egress endpoint stopped during teardown"
-                );
-            }
-            Ok(status) => eprintln!(
-                "builder egress endpoint pid={} exited unexpectedly with status {}",
-                child_pid, status
-            ),
-            Err(e) => eprintln!("builder egress endpoint pid={} wait failed: {e}", child_pid),
-        });
-
-        Ok(Self {
-            state_dir: state_dir.to_path_buf(),
-        })
-    }
-
-    fn reap(&self) {
-        reap_builder_vsock_egress_endpoint(&self.state_dir);
-    }
-}
-
-fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
-    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
-    std::fs::create_dir_all(&socket_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating builder vsock socket dir {}: {e}",
-            socket_dir.display()
-        ))
-    })?;
-    Ok(socket_dir)
-}
-
-impl Drop for BuilderVsockEgressEndpoint {
-    fn drop(&mut self) {
-        self.reap();
-    }
-}
-
-fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
-    if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "MVM_SUBSTITUTION_ENDPOINT_PATH points at {} which is not a file",
-            path.display()
-        )));
-    }
-
-    if let Some(candidate) = endpoint_in_host_binary_dir(&HostProcess::current()) {
-        return Ok(candidate);
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) else {
-        return Err(BuilderVmError::ExtractionFailed(
-            "resolve workspace root for mvm-network-endpoint".to_string(),
-        ));
-    };
-
-    let mut target_roots = vec![workspace_root.join("target")];
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR")
-        && !target_dir.is_empty()
-    {
-        let candidate = PathBuf::from(target_dir);
-        let normalized = if candidate.is_absolute() {
-            candidate
-        } else {
-            workspace_root.join(candidate)
-        };
-        if !target_roots.iter().any(|root| root == &normalized) {
-            target_roots.push(normalized);
-        }
-    }
-
-    for root in &target_roots {
-        for variant in ["release", "debug"] {
-            let candidate = root.join(variant).join("mvm-network-endpoint");
-            if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut build = Command::new(cargo);
-    build.current_dir(workspace_root).args([
-        "build",
-        "-p",
-        "mvm-hostd",
-        "--bin",
-        "mvm-network-endpoint",
-    ]);
-    if !build
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-    {
-        return Err(BuilderVmError::ExtractionFailed(
-            "build mvm-network-endpoint".to_string(),
-        ));
-    }
-
-    for root in &target_roots {
-        let built = root.join("debug").join("mvm-network-endpoint");
-        if built.is_file() {
-            // Deliberately no mtime re-check here. The comparison above is a
-            // cheap trigger for "might be stale, try a rebuild"; it is not a
-            // verdict, because it compares two artifacts' mtimes rather than
-            // the sources they came from.
-            //
-            // `cargo build` has just confirmed this binary is current with its
-            // sources in this workspace. When it was already current, cargo
-            // does not relink and the mtime does not move — so re-testing it
-            // against the running `mvmctl` failed forever with "even after
-            // rebuilding it". `cargo build --workspace --bins` links `mvmctl`
-            // last, so a normal build leaves the endpoint older every time and
-            // no amount of rebuilding could satisfy the check.
-            return Ok(built);
-        }
-    }
-    Err(BuilderVmError::ExtractionFailed(format!(
-        "mvm-network-endpoint not found after build (searched: {})",
-        target_roots
-            .iter()
-            .map(|root| root.join("debug").join("mvm-network-endpoint"))
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
-}
-
-fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {
-    let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
-    if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
-    {
-        kill_pid(pid, libc::SIGTERM);
-    }
-    let _ = std::fs::remove_file(pid_file);
-}
-
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn pid_alive(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {
-    unsafe {
-        libc::kill(pid, sig);
-    }
-}
-
-/// Pack the inbound trees onto an input disk and create the output disk the
-/// guest writes its artifact tar onto — the host half of the disk transport,
-/// shared by every one-shot builder VMM.
-///
-/// `closure_nar` is the resolved builder image's optional seeded Nix store
-/// closure: a single file that rides the same input disk at
-/// `closure-seed/<CLOSURE_FILE>`. The guest imports that fixed path and does
-/// not care which builder backend populated it.
-pub(crate) fn prepare_builder_transport_disks(
-    vm_state_dir: &Path,
-    input_trees: &[InputTree<'_>],
-    closure_nar: Option<&Path>,
-    output_size: u64,
-) -> Result<(PathBuf, PathBuf), BuilderVmError> {
-    let input_disk = vm_state_dir.join("input.img");
-    let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(input_trees, closure_nar, &input_disk, INPUT_DISK_MIN_BYTES).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "pack builder input disk {}: {e}",
-            input_disk.display()
-        ))
-    })?;
-    create_output_disk(&output_disk, output_size).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "create builder output disk {}: {e}",
-            output_disk.display()
-        ))
-    })?;
-    Ok((input_disk, output_disk))
-}
-
-pub(crate) fn extract_builder_transport_output(
-    output_disk: &Path,
-    artifact_out: &Path,
-    job_dir: &Path,
-) -> Result<(), BuilderVmError> {
-    read_output_disk(output_disk, artifact_out).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "extract builder output disk {} into {}: {e}",
-            output_disk.display(),
-            artifact_out.display()
-        ))
-    })?;
-    for name in [
-        "result",
-        "nix-stderr.log",
-        "nix-stdout.log",
-        "boot-timings.json",
-    ] {
-        let src = artifact_out.join(name);
-        if src.is_file() {
-            let dst = job_dir.join(name);
-            std::fs::copy(&src, &dst).map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "copy extracted builder artifact {} -> {}: {e}",
-                    src.display(),
-                    dst.display()
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn builder_runtime_overlay_attachment<'a>(
-    image: &'a BuilderVmImage,
-    runtime_overlay: Option<&'a Path>,
-) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
-    match (image, runtime_overlay) {
-        (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
-            Some(BuilderRuntimeOverlayAttachment {
-                cmdline: builder_runtime_overlay_cmdline(cmdline, BUILDER_RUNTIME_DEVICE),
-                disk_path: runtime_overlay,
-                read_only: true,
-            })
-        }
-        _ => None,
-    }
-}
+#[cfg(test)]
+use crate::builder_vm_image::{
+    EXT4_ERROR_FS, EXT4_SUPERBLOCK_MAGIC, EXT4_SUPERBLOCK_MAGIC_OFFSET, EXT4_VALID_FS,
+    format_empty_stage0_store as format_stage0_store_without_host_mkfs,
+    host_file_4k_blocks as host_file_4k_blocks_for_ext4,
+    marker_path as stage0_nix_store_host_marker_path,
+    prepopulate_with_mkfs as prepopulate_stage0_nix_store_image_with_mkfs,
+    stage0_marker as stage0_nix_store_host_marker,
+};
+pub use crate::builder_vm_transport::require_runtime_overlay_ext4;
+#[cfg(test)]
+use crate::builder_vm_transport::{
+    BUILDER_RUNTIME_DEVICE, BUILDER_SUBST_STDERR_LOG_FILE, BUILDER_VSOCK_EGRESS_TOKEN,
+    builder_runtime_overlay_cmdline, builder_runtime_overlay_or_bail_with,
+};
+pub(crate) use crate::builder_vm_transport::{
+    BuilderVsockEgressEndpoint, builder_disk_transport_cmdline, builder_runtime_overlay_attachment,
+    builder_runtime_overlay_guest_agent_enabled, builder_runtime_overlay_or_bail,
+    builder_uses_vsock_egress, builder_vsock_egress_cmdline, builder_vsock_socket_dir,
+    extract_builder_transport_output, prepare_builder_transport_disks,
+    stage_builder_flowmux_identity,
+};
 
 /// Libkrun-backed builder VM driver.
 ///
@@ -1012,10 +472,9 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
+            // This supervisor retains the legacy non-bridge path. The
+            // authenticated builder egress endpoint is launched separately,
+            // so no bridge policy crosses this configuration boundary.
             network_policy: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
@@ -1217,10 +676,9 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
+            // This supervisor retains the legacy non-bridge path. The
+            // authenticated builder egress endpoint is launched separately,
+            // so no bridge policy crosses this configuration boundary.
             network_policy: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
@@ -1723,10 +1181,9 @@ impl BuilderVm for LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
+            // This supervisor retains the legacy non-bridge path. The
+            // authenticated builder egress endpoint is launched separately,
+            // so no bridge policy crosses this configuration boundary.
             network_policy: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
@@ -1974,10 +1431,9 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
+            // This supervisor retains the legacy non-bridge path. The
+            // authenticated builder egress endpoint is launched separately,
+            // so no bridge policy crosses this configuration boundary.
             network_policy: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
@@ -2043,49 +1499,6 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
 // than scattered through `impl` blocks so the run_build pipeline
 // reads top-down.
 // ─────────────────────────────────────────────────────────────────
-
-/// Resolved builder VM image. One of two boot shapes:
-///
-/// - **Rootfs**: kernel + rootfs.ext4 + cmdline. The steady-state
-///   builder VM path produced by the builder-vm flake.
-/// - **RootDir**: verified host seed directory + guest entrypoint. The Stage 0
-///   bootstrap path materializes it into an ext4 root before launch.
-#[derive(Debug, Clone)]
-pub enum BuilderVmImage {
-    /// Steady-state builder VM image.
-    Rootfs {
-        kernel_path: PathBuf,
-        rootfs_path: PathBuf,
-        cmdline: String,
-    },
-    /// Host-side Stage 0 seed. `entry_path` is the guest PID 1 path preserved
-    /// when this directory is materialized as an ext4 root.
-    RootDir {
-        root_dir: PathBuf,
-        entry_path: String,
-    },
-}
-
-impl BuilderVmImage {
-    /// Image that boots from a rootfs ext4 disk + the supervisor's
-    /// canonical `init=` cmdline.
-    pub fn new(kernel_path: PathBuf, rootfs_path: PathBuf, cmdline: String) -> Self {
-        Self::Rootfs {
-            kernel_path,
-            rootfs_path,
-            cmdline,
-        }
-    }
-
-    /// Stage 0 host seed. The libkrun boot path converts it to an ext4 image
-    /// and supplies an explicit kernel before entering the guest.
-    pub fn new_root_dir(root_dir: PathBuf, entry_path: impl Into<String>) -> Self {
-        Self::RootDir {
-            root_dir,
-            entry_path: entry_path.into(),
-        }
-    }
-}
 
 /// Build a steady-state disk-root `KrunContext` for a [`BuilderVmImage`].
 /// Stage 0 consumes `RootDir` through its dedicated materialization path and
@@ -2280,517 +1693,14 @@ fn stage0_krun_context(
 /// per-arch builder VM images. `aarch64` on Apple Silicon /
 /// ARM Linux, `x86_64` everywhere else. The builder-vm flake
 /// emits both per release.
-pub(crate) fn host_arch_tag() -> &'static str {
-    crate::builder_vm::host_arch_tag()
-}
+pub use crate::builder_vm::{builder_vm_cache_dir, host_arch_tag};
+use crate::builder_vm_image::invalidate_stage0_store_after_ext4_error;
+pub use crate::builder_vm_image::{
+    builder_vm_source_checkout_root, ensure_builder_vm_image, prepopulate_stage0_nix_store_image,
+    stage0_nix_store_image_name, unique_job_id,
+};
 
-/// `~/.mvm/cache/builder-vm/`. Wrapper around
-/// `mvm_core::config::mvm_cache_dir()` to keep the per-arch
-/// subdirs in one place. Created lazily by callers — this
-/// function does not touch the filesystem.
-pub(crate) fn builder_vm_cache_dir() -> PathBuf {
-    crate::builder_vm::builder_vm_cache_dir()
-}
-
-#[derive(Debug, Deserialize)]
-struct BuilderVmCacheManifest {
-    #[serde(default)]
-    cache_contract_version: u32,
-    #[serde(default)]
-    runtime_overlay_ready: bool,
-    #[serde(default)]
-    vsock_egress_ready: bool,
-}
-
-fn read_builder_vm_cache_manifest(
-    manifest_path: &Path,
-    arch_dir: &Path,
-) -> Result<BuilderVmCacheManifest, BuilderVmError> {
-    let body = std::fs::read_to_string(manifest_path).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
-            manifest_path.display(),
-            arch_dir.display(),
-        ))
-    })?;
-    serde_json::from_str(&body).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "{} is malformed ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
-            manifest_path.display(),
-            arch_dir.display(),
-        ))
-    })
-}
-
-pub(crate) fn builder_vm_source_checkout_root() -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
-    workspace_root
-        .join("nix")
-        .join("images")
-        .join("builder-vm")
-        .join("flake.nix")
-        .is_file()
-        .then_some(workspace_root)
-}
-
-fn default_builder_vm_cache_dir() -> PathBuf {
-    crate::cache_install::default_cache_root().join("builder-vm")
-}
-
-fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, BuilderVmError> {
-    crate::cache_install::seed_on_miss(
-        &builder_vm_cache_dir().join(host_arch_tag()),
-        &default_builder_vm_cache_dir().join(host_arch_tag()),
-        |source_arch_dir| {
-            // Seeding from the default cache is opportunistic. If the host's
-            // shared cache is stale or malformed, skip it and let
-            // source-checkout auto-bootstrap build a fresh image into the
-            // isolated target cache. A missing dir fails validation too.
-            validate_builder_vm_image_cache(source_arch_dir).ok()?;
-            // Same policy for a shared cache whose recorded digests no longer
-            // describe its bytes: decline the seed rather than propagate it.
-            // Declining (not erroring) matters — an error here would abort the
-            // build instead of falling through to a fresh local build.
-            if !shared_cache_digests_are_trustworthy(source_arch_dir) {
-                return None;
-            }
-            Some(source_arch_dir.to_path_buf())
-        },
-        |source_arch_dir| copy_builder_vm_image_files(&source_arch_dir, arch_dir),
-    )
-}
-
-/// Does the host's shared cache still match the digests it recorded?
-///
-/// This is the admission boundary — the one moment bytes cross from the shared
-/// cache into an isolated root — so it is where the check belongs. It is
-/// deliberately not in `validate_builder_vm_image_cache`, which runs on every
-/// builder VM start: re-hashing a multi-hundred-megabyte rootfs per start is
-/// not a trade worth making on a host the threat model already trusts.
-///
-/// A cache carrying no manifest at all predates the sidecar or came from
-/// another populator. Absence is not evidence of tampering, so it passes.
-fn shared_cache_digests_are_trustworthy(source_arch_dir: &Path) -> bool {
-    let check = crate::cache_install::verify_digest_manifest(
-        source_arch_dir,
-        crate::cache_install::BUILDER_VM_ARTIFACT_DIGEST_FILE,
-        crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
-    );
-    match check {
-        crate::cache_install::DigestManifestCheck::Match
-        | crate::cache_install::DigestManifestCheck::ManifestAbsent => true,
-        rejected => {
-            // A silently declined seed is invisible otherwise, and this one
-            // means someone's shared cache is damaged.
-            tracing::debug!(
-                source = %source_arch_dir.display(),
-                verdict = ?rejected,
-                "declining to seed builder image from shared cache: recorded digests do not match"
-            );
-            false
-        }
-    }
-}
-
-fn copy_builder_vm_image_files(
-    source_arch_dir: &Path,
-    arch_dir: &Path,
-) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(arch_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("create {}: {e}", arch_dir.display()))
-    })?;
-
-    for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
-        let src = source_arch_dir.join(name);
-        let dst = arch_dir.join(name);
-        std::fs::copy(&src, &dst).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "seed builder image cache {} -> {}: {e}",
-                src.display(),
-                dst.display(),
-            ))
-        })?;
-    }
-    // Sidecars are best-effort: a source lacking them still yields a bootable
-    // image, and failing the seed over an absent provenance file would be
-    // worse than seeding without it.
-    for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
-        let src = source_arch_dir.join(name);
-        if src.is_file() {
-            let _ = std::fs::copy(&src, arch_dir.join(name));
-        }
-    }
-    Ok(())
-}
-
-fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
-    let kernel_path = arch_dir.join("vmlinux");
-    let rootfs_path = arch_dir.join("rootfs.ext4");
-    let cmdline_path = arch_dir.join("cmdline.txt");
-    let manifest_path = arch_dir.join("manifest.json");
-
-    if !kernel_path.is_file() || !rootfs_path.is_file() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM image not found at {}. \
-             Populate the cache by running `nix build ./nix/images/builder-vm#packages.{}-linux.default` \
-             on a host with Nix and copying `result/{{vmlinux,rootfs.ext4,cmdline.txt}}` to {}/.",
-            arch_dir.display(),
-            host_arch_tag(),
-            arch_dir.display(),
-        )));
-    }
-
-    let cmdline = std::fs::read_to_string(&cmdline_path)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
-                cmdline_path.display(),
-                arch_dir.display(),
-            ))
-        })?
-        .trim()
-        .to_string();
-    // Ride the host wall clock onto the base cmdline for every backend that boots
-    // this image (libkrun + hvf are RTC-less): PID 1 seeds the guest clock from it
-    // so a cold Nix store's HTTPS fetch doesn't fail cert validation. Fresh per
-    // run, and preserved through the later per-boot token appends.
-    let cmdline = append_cmdline_token(
-        &cmdline,
-        &crate::builder_vm::builder_hostepoch_cmdline_token(),
-    );
-
-    let manifest = read_builder_vm_cache_manifest(&manifest_path, arch_dir)?;
-    if manifest.cache_contract_version != BUILDER_VM_CACHE_CONTRACT_VERSION
-        || !manifest.runtime_overlay_ready
-        || !manifest.vsock_egress_ready
-    {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
-            arch_dir.display(),
-            BUILDER_VM_CACHE_CONTRACT_VERSION,
-            arch_dir.display(),
-        )));
-    }
-
-    Ok(cmdline)
-}
-
-fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
-    let kernel_path = arch_dir.join("vmlinux");
-    let rootfs_path = arch_dir.join("rootfs.ext4");
-    let cmdline = validate_builder_vm_image_cache(arch_dir)?;
-
-    Ok(BuilderVmImage::new(kernel_path, rootfs_path, cmdline))
-}
-
-/// Filename of Stage 0's dedicated persistent Nix-store image,
-/// `nix-store-stage0-<arch>.img`. Distinct from the steady-state
-/// builder's `nix-store-<arch>.img` so a builder VM bootstrap and a
-/// concurrent `mvmctl build` never contend on the same flock — see
-/// [`acquire_nix_store_image_lock_named`]. Lives in
-/// [`builder_vm_cache_dir`] and matches `cache info`'s
-/// `nix-store-*.img` sparse-footprint report.
-pub fn stage0_nix_store_image_name() -> String {
-    crate::builder_vm::stage0_store_image_name_for(host_arch_tag())
-}
-
-pub fn prepopulate_stage0_nix_store_image(
-    image: &BuilderVmImage,
-    store_image: &Path,
-) -> Result<(), BuilderVmError> {
-    let host_mkfs = find_host_mkfs_ext4();
-    prepopulate_stage0_nix_store_image_with_mkfs(image, store_image, host_mkfs.as_deref())
-}
-
-fn prepopulate_stage0_nix_store_image_with_mkfs(
-    image: &BuilderVmImage,
-    store_image: &Path,
-    host_mkfs: Option<&Path>,
-) -> Result<(), BuilderVmError> {
-    let BuilderVmImage::RootDir { root_dir, .. } = image else {
-        return Ok(());
-    };
-    let seed_nix = root_dir.join("nix");
-    let seed_store = seed_nix.join("store");
-    if !seed_store.is_dir() {
-        return Ok(());
-    }
-
-    let marker = stage0_nix_store_host_marker(&seed_store)?;
-    let marker_path = stage0_nix_store_host_marker_path(store_image);
-    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
-        && stage0_store_superblock_is_recoverable(store_image)?
-    {
-        return Ok(());
-    }
-
-    // The marker binds the image to the seed closure, but it is deliberately
-    // outside the filesystem and therefore cannot attest filesystem health.
-    // Drop it before rebuilding so an interrupted format can never make a
-    // damaged image look reusable on the next invocation.
-    if marker_path.exists() {
-        std::fs::remove_file(&marker_path).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("remove {}: {e}", marker_path.display()))
-        })?;
-    }
-
-    let Some(mkfs) = host_mkfs else {
-        // macOS has no host mkfs.ext4, and the minimal verified Stage 0 seed
-        // intentionally does not carry e2fsprogs. Format a valid labeled ext4
-        // image in-process when that capability is compiled in; otherwise
-        // leave a blank device and let a richer Linux seed format it.
-        format_stage0_store_without_host_mkfs(store_image)?;
-        std::fs::write(&marker_path, marker).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
-        })?;
-        return Ok(());
-    };
-
-    let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
-    tracing::info!(
-        image = %store_image.display(),
-        seed = %seed_nix.display(),
-        blocks_4k,
-        "prepopulating Stage 0 Nix store image with host mkfs.ext4"
-    );
-    let status = Command::new(mkfs)
-        // `-L` so the guest can find this disk by label instead of by device
-        // letter, which shifts whenever a backend attaches another drive.
-        .args(["-F", "-q", "-b", "4096", "-L"])
-        .arg(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
-        .args(["-d"])
-        .arg(&seed_nix)
-        .arg(store_image)
-        .arg(blocks_4k.to_string())
-        .status()
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("spawn {}: {e}", mkfs.display())))?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "{} -d {} -> {} exited {}",
-            mkfs.display(),
-            seed_nix.display(),
-            store_image.display(),
-            status.code().unwrap_or(-1)
-        )));
-    }
-    std::fs::write(&marker_path, marker).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
-    })?;
-    Ok(())
-}
-
-fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
-    let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
-    let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(store_image)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
-        })?;
-    let device_size = file
-        .metadata()
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
-        })?
-        .len();
-    file.set_len(0).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
-    })?;
-    file.set_len(device_size).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
-    })?;
-    let summary = mvm_fs::ext4::mkfs::format_empty_ext4_labeled(
-        &mut file,
-        size_bytes,
-        crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes(),
-    )
-    .map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "pure-Rust ext4 format of {}: {e}",
-            store_image.display()
-        ))
-    })?;
-    tracing::info!(
-        image = %store_image.display(),
-        free_blocks = summary.free_blocks,
-        groups = summary.groups,
-        "formatted Stage 0 Nix store image in-process"
-    );
-    Ok(())
-}
-
-fn find_host_mkfs_ext4() -> Option<PathBuf> {
-    [
-        "/sbin/mkfs.ext4",
-        "/usr/sbin/mkfs.ext4",
-        "/bin/mkfs.ext4",
-        "/usr/bin/mkfs.ext4",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.is_file())
-    .or_else(|| which::which("mkfs.ext4").ok())
-}
-
-fn host_file_4k_blocks_for_ext4(store_image: &Path) -> Result<u64, BuilderVmError> {
-    let len = std::fs::metadata(store_image)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
-        })?
-        .len();
-    let blocks = len / 4096;
-    if blocks <= 16 {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "Stage 0 store image {} is too small for ext4 prepopulation ({len} bytes)",
-            store_image.display()
-        )));
-    }
-    // Leave the same 64 KiB safety margin used by the in-guest formatter path;
-    // it avoids libkrun virtio-blk geometry rounding at mount time.
-    Ok(blocks - 16)
-}
-
-fn stage0_nix_store_host_marker_path(store_image: &Path) -> PathBuf {
-    store_image.with_extension("stage0-seed")
-}
-
-fn invalidate_stage0_store_after_ext4_error(
-    console_log: &Path,
-    store_image: &Path,
-) -> Result<(), BuilderVmError> {
-    const EXT4_ERROR_REPORT: &str = "persistent Stage 0 ext4 store reported";
-    let console = std::fs::read_to_string(console_log).unwrap_or_default();
-    if !console.contains(EXT4_ERROR_REPORT) {
-        return Ok(());
-    }
-
-    let marker_path = stage0_nix_store_host_marker_path(store_image);
-    match std::fs::remove_file(&marker_path) {
-        Ok(()) => {
-            tracing::warn!(
-                image = %store_image.display(),
-                console = %console_log.display(),
-                "invalidated Stage 0 Nix store after guest ext4 error report"
-            );
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
-            "remove invalid Stage 0 store marker {}: {error}",
-            marker_path.display()
-        ))),
-    }
-}
-
-const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
-const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
-#[cfg(test)]
-const EXT4_VALID_FS: u16 = 0x0001;
-const EXT4_ERROR_FS: u16 = 0x0002;
-
-/// The external seed marker remains reusable after an interrupted mount when
-/// ext4 has a valid superblock and has not recorded filesystem errors. A dirty
-/// journal is recoverable: the next guest mount replays it before Nix reads the
-/// store. Only an invalid superblock or the explicit error bit forces a reset.
-fn stage0_store_superblock_is_recoverable(store_image: &Path) -> Result<bool, BuilderVmError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(store_image).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
-    })?;
-    file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("seek {}: {e}", store_image.display()))
-        })?;
-    let mut fields = [0u8; 4];
-    file.read_exact(&mut fields).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "read ext4 state from {}: {e}",
-            store_image.display()
-        ))
-    })?;
-    let magic = u16::from_le_bytes([fields[0], fields[1]]);
-    let state = u16::from_le_bytes([fields[2], fields[3]]);
-    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state & EXT4_ERROR_FS == 0)
-}
-
-fn stage0_nix_store_host_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
-    Ok(format!(
-        "schema_version=2\nseed_store_entries_sha256={}\n",
-        seed_store_entries_hash(seed_store)?
-    ))
-}
-
-fn seed_store_entries_hash(seed_store: &Path) -> Result<String, BuilderVmError> {
-    let mut entries = std::fs::read_dir(seed_store)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("read {}: {e}", seed_store.display()))
-        })?
-        .map(|entry| {
-            entry
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .map_err(|e| {
-                    BuilderVmError::ExtractionFailed(format!(
-                        "read entry under {}: {e}",
-                        seed_store.display()
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_unstable();
-
-    let mut hasher = Sha256::new();
-    for entry in entries {
-        hasher.update(entry.as_bytes());
-        hasher.update(b"\n");
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-/// Find the builder VM image (kernel + rootfs + cmdline) in
-/// the host cache. The builder-vm flake's `packages.<system>.default`
-/// produces exactly the `vmlinux` / `rootfs.ext4` / `cmdline.txt`
-/// files this loads. The build-or-download step populates this
-/// cache; today it errors when missing with an actionable hint.
-pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
-    let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
-    match load_builder_vm_image_from_cache(&arch_dir) {
-        Ok(image) => Ok(image),
-        Err(initial_error) => {
-            if seed_builder_vm_image_from_default_cache(&arch_dir)? {
-                return load_builder_vm_image_from_cache(&arch_dir);
-            }
-            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
-                return Err(initial_error);
-            }
-            load_builder_vm_image_from_cache(&arch_dir)
-        }
-    }
-}
-
-/// Monotonic per-process job ID. Combines a UNIX timestamp
-/// with the current PID so two concurrent invocations on one
-/// host don't clobber each other's job dirs even if they hit
-/// the same second.
-///
-/// `pub(crate)` so a parallel builder driver could reuse the same
-/// per-job ID shape; backends share a cache root, so collisions on it
-/// would corrupt each
-/// other's job dirs.
-pub(crate) fn unique_job_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    format!("{now:013}-{pid}")
-}
-
-// `INSTALL_SPEC_FILENAME` moved to `crate::builder_vm_runtime`; the
+// `INSTALL_SPEC_FILENAME`
 // `use` at the top of this file pulls it back in for the existing
 // callers.
 
@@ -4310,10 +3220,9 @@ impl LibkrunPersistentHostVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
+            // This supervisor retains the legacy non-bridge path. The
+            // authenticated builder egress endpoint is launched separately,
+            // so no bridge policy crosses this configuration boundary.
             network_policy: None,
             egress_relay_socket: None,
             // The supervisor holds this for its whole life. This process starts

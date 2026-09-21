@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Generic builder machinery — issue #3323.**
+      `specs/plans/2026-09-21-generic-builder-machinery.md`. VMM-neutral image
+      cache, Stage 0 store, disk transport, runtime-overlay, egress, job ID,
+      seed identity, and builder defaults now live outside
+      `libkrun_builder`. Generic capability remains unconditional while the
+      optional `builder-libkrun` feature owns `libkrun-sys`; 14,706 workspace
+      tests, all-target lint, gated targets, and all 74 repository gates are
+      green. See `specs/sprint/delivery/3323-generic-builder-machinery.md`.
+
 - [ ] **Kubernetes in a single microVM.**
       `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
       #3554, guest template in tinylabscom/mvm-templates#1, workload-kernel

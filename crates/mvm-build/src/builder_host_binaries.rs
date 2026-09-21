@@ -2,7 +2,9 @@
 //! process: the network endpoint beside the host binaries, and the cargo target
 //! roots a libkrun supervisor may have been built into.
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "builder-libkrun")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use mvm_vmm::host::aux_bin::HostProcess;
 
@@ -19,7 +21,7 @@ use mvm_vmm::host::aux_bin::HostProcess;
 /// running it cannot have been built from this source. Unknowable times mean
 /// no opinion — rebuild rather than refuse, since a false stale reading costs
 /// a build and a false fresh one costs a mystery.
-pub(super) fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool {
+pub(crate) fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool {
     let modified = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
     let Some(exe) = std::env::current_exe().ok().as_deref().and_then(modified) else {
         return false;
@@ -31,15 +33,17 @@ pub(super) fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool
 }
 
 /// A current `mvm-network-endpoint` in `host`'s host binary directory.
-pub(super) fn endpoint_in_host_binary_dir(host: &HostProcess) -> Option<PathBuf> {
+pub(crate) fn endpoint_in_host_binary_dir(host: &HostProcess) -> Option<PathBuf> {
     host.binary_named("mvm-network-endpoint")
         .filter(|candidate| !endpoint_predates_running_exe(candidate))
 }
 
-pub(super) fn supervisor_target_roots(workspace_root: &Path) -> Vec<PathBuf> {
+#[cfg(feature = "builder-libkrun")]
+pub(crate) fn supervisor_target_roots(workspace_root: &Path) -> Vec<PathBuf> {
     supervisor_target_roots_for(workspace_root, &HostProcess::current())
 }
 
+#[cfg(feature = "builder-libkrun")]
 fn supervisor_target_roots_for(workspace_root: &Path, host: &HostProcess) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
@@ -69,9 +73,11 @@ fn supervisor_target_roots_for(workspace_root: &Path, host: &HostProcess) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "builder-libkrun")]
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
+    #[cfg(feature = "builder-libkrun")]
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -90,6 +96,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder-libkrun")]
     fn a_declared_cargo_profile_dir_contributes_its_target_root() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();

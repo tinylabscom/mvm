@@ -1307,9 +1307,8 @@ pub use mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract;
 //
 // Moved here from `libkrun_builder` because nothing about them is
 // libkrun-shaped: they are three plain records every backend consumes. While
-// they lived in that module the HVF builder's own public signature spelled
-// `mvm_build::libkrun_builder::BuilderShellJob`, which is how libkrun's name
-// reached callers that never touch it.
+// they lived there the HVF builder's own public signature named a backend it
+// never touched.
 // ──────────────────────────────────────────────────────────────────
 
 /// job. Devices appear after the builder VM's persistent Nix-store
@@ -1331,6 +1330,62 @@ pub struct BuilderExtraDisk {
 /// The builder image cache layout this host reads; a builder image built for
 /// another layout is refused rather than booted.
 pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
+
+/// Default vCPU count for a builder VM.
+pub const DEFAULT_VCPUS: u8 = 4;
+
+/// Default RAM in MiB for steady-state builder jobs.
+pub const DEFAULT_MEMORY_MIB: u32 = 16_384;
+
+/// Default sparse persistent Nix-store image capacity, in MiB.
+pub const DEFAULT_NIX_STORE_MIB: u32 = 65_536;
+
+/// Where the workspace is staged inside every builder VM.
+pub const GUEST_WORK_DIR: &str = "path:/work";
+
+/// Where builder artifacts are collected in the guest.
+pub const GUEST_OUT_DIR: &str = "/out";
+
+/// Where the persistent Nix store is mounted in the guest.
+pub const GUEST_NIX_DIR: &str = "/nix";
+
+/// Where the per-build job specification is mounted in the guest.
+pub const GUEST_JOB_DIR: &str = "/job";
+
+/// Resolved builder VM image, independent of the VMM that boots it.
+#[derive(Debug, Clone)]
+pub enum BuilderVmImage {
+    /// Steady-state builder VM image.
+    Rootfs {
+        kernel_path: PathBuf,
+        rootfs_path: PathBuf,
+        cmdline: String,
+    },
+    /// Host-side Stage 0 seed and its guest PID 1 path.
+    RootDir {
+        root_dir: PathBuf,
+        entry_path: String,
+    },
+}
+
+impl BuilderVmImage {
+    /// Image that boots from a kernel and ext4 rootfs.
+    pub fn new(kernel_path: PathBuf, rootfs_path: PathBuf, cmdline: String) -> Self {
+        Self::Rootfs {
+            kernel_path,
+            rootfs_path,
+            cmdline,
+        }
+    }
+
+    /// Stage 0 host seed to materialize before launch.
+    pub fn new_root_dir(root_dir: PathBuf, entry_path: impl Into<String>) -> Self {
+        Self::RootDir {
+            root_dir,
+            entry_path: entry_path.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderShellJob {

@@ -1,8 +1,16 @@
 # Refactor status
 
-Last updated: 2026-09-20
+Last updated: 2026-09-21
 
 ## In progress
+
+- [x] **Generic builder machinery — issue #3323.**
+      `specs/plans/2026-09-21-generic-builder-machinery.md`. Generic builder
+      image/cache, Stage 0 store, transport, overlay, egress, and shared
+      identities/defaults no longer require a libkrun-named API. The
+      no-default-feature build excludes `libkrun-sys`; full workspace, lint,
+      gated-target, and 74-gate validation is green. The issue-closing change
+      is ready for protected merge-queue delivery.
 
 - [x] **Unconditional builder capabilities — issue #3322, PR #3550.**
       `specs/plans/2026-09-20-unconditional-builder-capabilities.md`. The

@@ -10,6 +10,8 @@ pub mod backend;
 pub mod boot_image_select;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
+mod builder_egress_process;
+mod builder_host_binaries;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
@@ -19,9 +21,15 @@ pub mod builder_pack;
 pub mod builder_protocol;
 pub mod builder_route;
 pub mod builder_vm;
+/// Builder image cache discovery and Stage 0 store preparation shared by all
+/// VMM backends.
+pub mod builder_vm_image;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
 /// `VmBackendForBuilder` implementation (libkrun and HVF).
 pub mod builder_vm_runtime;
+/// Builder disk transport, runtime-overlay, and egress helpers shared by all
+/// one-shot VMM backends.
+pub mod builder_vm_transport;
 /// Request-handling core of the resident `mvm-builderd` builder-VM
 /// daemon: stateless request dispatch + the framed connection serve
 /// loop. The bin entrypoint and AF_VSOCK listener land with boot wiring.
@@ -88,6 +96,7 @@ pub mod rootfs_inject;
 /// used by the CLI's `run --image` and the `mvm-client` local backend.
 pub mod run_image;
 pub mod runtime_identity;
+pub mod seed_store_entries;
 pub mod stage0;
 /// Host-side Stage 0 pieces that belong to no particular VMM.
 ///
@@ -105,10 +114,12 @@ pub mod volume_image;
 /// Acquiring and running the builder-VM bootstrap helper.
 pub mod builder_vm_bootstrap;
 /// Libkrun-backed builder VM. Native FFI linkage remains separately opt-in.
+#[cfg(feature = "builder-libkrun")]
 pub mod libkrun_builder;
 
 /// The libkrun `NetworkProvider` impl.
 /// Gated with `libkrun_builder`: it wraps that module's gateway selection.
+#[cfg(feature = "builder-libkrun")]
 pub mod libkrun_network_provider;
 
 /// QEMU-backed builder VM (the Linux dev/builder substrate). Boots the

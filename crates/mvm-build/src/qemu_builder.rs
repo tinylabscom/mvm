@@ -24,15 +24,19 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::builder_vm::{
-    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderShellJob,
+    BuilderShellResult, BuilderVm, BuilderVmError, BuilderVmImage, DEFAULT_NIX_STORE_MIB,
+    builder_vm_cache_dir,
+};
+use crate::builder_vm_image::{
+    ensure_builder_vm_image, prepopulate_stage0_nix_store_image, stage0_nix_store_image_name,
+    unique_job_id,
 };
 use crate::builder_vm_runtime::acquire_nix_store_image_lock_named;
-use crate::libkrun_builder::{
-    BuilderEndpointTransport, BuilderRuntimeOverlayAttachment, BuilderShellJob, BuilderShellResult,
-    BuilderVmImage, BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB,
-    builder_runtime_overlay_attachment, builder_vm_cache_dir, extract_builder_transport_output,
-    prepare_builder_transport_disks, prepopulate_stage0_nix_store_image,
-    require_runtime_overlay_ext4, stage0_nix_store_image_name,
+use crate::builder_vm_transport::{
+    BuilderEndpointTransport, BuilderRuntimeOverlayAttachment, BuilderVsockEgressEndpoint,
+    builder_runtime_overlay_attachment, extract_builder_transport_output,
+    prepare_builder_transport_disks, require_runtime_overlay_ext4,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
 use mvm_fs::overlay::CHECKSUM_MANIFEST_FILE;
@@ -255,8 +259,8 @@ fn run_stage0_qemu(
     // one of them compiles on a dev host and fails on the feature-gated
     // target, which is exactly what happened the first time.
     let (identity_material, identity_drive) =
-        crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
-    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
+        crate::builder_vm_transport::stage_builder_flowmux_identity(&work)?;
+    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_on_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
         identity_material.spawn_config(),
@@ -929,13 +933,10 @@ const QEMU_BUILD_VCPUS: u8 = 4;
 
 fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
     use crate::builder_disk_transport::InputTree;
+    use crate::builder_vm::{BuilderVmImage, DEFAULT_NIX_STORE_MIB, host_arch_tag};
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
         shell_job_exit_error, stage_filtered_work_input, stage_shell_job_dir,
-    };
-    use crate::libkrun_builder::{
-        BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
-        host_arch_tag, unique_job_id,
     };
     use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -1081,8 +1082,8 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         ));
     }
     let (identity_material, identity_drive) =
-        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
-    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
+        crate::builder_vm_transport::stage_builder_flowmux_identity(&vm_state_dir)?;
+    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_on_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
         identity_material.spawn_config(),
@@ -1170,13 +1171,10 @@ fn run_build_qemu(
     mounts: &BuilderMounts,
 ) -> Result<BuilderArtifacts, BuilderVmError> {
     use crate::builder_disk_transport::InputTree;
+    use crate::builder_vm::{BuilderVmImage, DEFAULT_NIX_STORE_MIB, host_arch_tag};
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job, finalize_install_job,
         stage_filtered_work_input, stage_job_dir,
-    };
-    use crate::libkrun_builder::{
-        BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
-        host_arch_tag, unique_job_id,
     };
     use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -1346,8 +1344,8 @@ fn run_build_qemu(
         runtime_overlay.display()
     ));
     let (identity_material, identity_drive) =
-        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
-    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
+        crate::builder_vm_transport::stage_builder_flowmux_identity(&vm_state_dir)?;
+    let egress_endpoint = BuilderVsockEgressEndpoint::spawn_on_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
         identity_material.spawn_config(),
@@ -1522,7 +1520,7 @@ fn qemu_build_cmdline_for_arch(image_cmdline: &str, egress_port: u32, arch: &str
 mod vsock_module_tests {
     use super::*;
 
-    use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
+    use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob};
 
     /// The overlay device and the transport tokens are one decision, not two:
     /// the input/output disks take vdc and vdd, so the overlay must be named
@@ -1708,7 +1706,8 @@ mod vsock_module_tests {
     #[test]
     #[ignore = "live: needs Linux with qemu-system + a bootstrapped rootfs-backed builder image"]
     fn live_qemu_builder_runtime_overlay_is_read_only() {
-        use crate::libkrun_builder::{BuilderVmImage, ensure_builder_vm_image};
+        use crate::builder_vm::BuilderVmImage;
+        use crate::builder_vm_image::ensure_builder_vm_image;
 
         let image =
             ensure_builder_vm_image().expect("builder VM image must already be bootstrapped");
