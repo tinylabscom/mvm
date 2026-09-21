@@ -37,7 +37,9 @@ use mvm_core::platform::{Platform, current};
 
 #[cfg(not(feature = "builder-libkrun"))]
 #[derive(Debug, Default)]
-struct LibkrunBuilderVm;
+struct LibkrunBuilderVm {
+    _unavailable: (),
+}
 
 #[cfg(not(feature = "builder-libkrun"))]
 impl LibkrunBuilderVm {
@@ -1265,6 +1267,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder-libkrun")]
     fn libkrun_stage0_has_capacity_for_the_tmpfs_compatibility_path() {
         let backend = libkrun_stage0_backend(false);
         assert_eq!(backend.vcpus, DEFAULT_VCPUS);

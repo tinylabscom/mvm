@@ -1,3 +1,5 @@
+#![cfg(feature = "builder-libkrun")]
+
 //! Integration tests for the host-side vsock response listener in
 //! `mvm_build::libkrun_builder`.
 //!

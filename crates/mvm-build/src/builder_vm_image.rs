@@ -365,7 +365,7 @@ pub(crate) fn stage0_marker(seed_store: &Path) -> Result<String, BuilderVmError>
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builder-libkrun"))]
 pub(crate) const EXT4_VALID_FS: u16 = 0x0001;
 pub(crate) const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
 pub(crate) const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;

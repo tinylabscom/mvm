@@ -73,9 +73,11 @@ fn supervisor_target_roots_for(workspace_root: &Path, host: &HostProcess) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "builder-libkrun")]
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
+    #[cfg(feature = "builder-libkrun")]
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -94,6 +96,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder-libkrun")]
     fn a_declared_cargo_profile_dir_contributes_its_target_root() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();

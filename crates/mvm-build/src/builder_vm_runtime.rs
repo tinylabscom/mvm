@@ -1058,7 +1058,7 @@ fn drain_appended(file: &mut std::fs::File, sink: &mut impl std::io::Write) -> b
 /// equivalent signal at this layer. Crate-visible: both the nix-stream
 /// streamer here and the host-side supervisor rebuild in `libkrun_builder`
 /// read the same signal.
-#[cfg(any(feature = "builder-libkrun", test))]
+#[cfg(feature = "builder-libkrun")]
 pub(crate) fn verbose_from_env() -> bool {
     std::env::var_os("RUST_LOG").is_some()
 }
@@ -1071,13 +1071,13 @@ pub(crate) fn verbose_from_env() -> bool {
 /// host only read it *after* a failure; this tails it to stderr while the build
 /// runs, but only when verbose (`-v`/`RUST_LOG`). Quiet builds spawn no thread
 /// and pay nothing. Stops + drains on drop, so the closing lines aren't lost.
-#[cfg(any(feature = "builder-libkrun", test))]
+#[cfg(feature = "builder-libkrun")]
 pub(crate) struct JobLogStreamer {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(any(feature = "builder-libkrun", test))]
+#[cfg(feature = "builder-libkrun")]
 impl JobLogStreamer {
     /// Start streaming `nix_stderr_log` to stderr if verbose; otherwise a no-op
     /// guard (no thread).
@@ -1101,7 +1101,7 @@ impl JobLogStreamer {
     }
 }
 
-#[cfg(any(feature = "builder-libkrun", test))]
+#[cfg(feature = "builder-libkrun")]
 impl Drop for JobLogStreamer {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1114,7 +1114,7 @@ impl Drop for JobLogStreamer {
 /// Tail loop: open `log_path` (retrying each poll until the in-guest build
 /// creates it on first write), forward freshly-appended bytes until `stop`,
 /// then one final drain to capture the tail written after the last poll.
-#[cfg(any(feature = "builder-libkrun", test))]
+#[cfg(feature = "builder-libkrun")]
 fn tail_forward(
     log_path: &std::path::Path,
     stop: &std::sync::atomic::AtomicBool,
