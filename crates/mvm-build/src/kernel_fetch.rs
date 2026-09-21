@@ -215,6 +215,66 @@ pub fn cached_kernel_path(cache_dir: &Path, arch: &str, variant: &str) -> PathBu
     kernel_cache_dir(cache_dir, arch, variant).join("vmlinux")
 }
 
+/// Workload-kernel cache labels a launch may select. `workload` is the
+/// sealed default; `workload-k8s` is the in-guest-orchestrator variant.
+/// Kept in one place so the build command, the cache layout, and the
+/// launch override agree on the spelling.
+pub const WORKLOAD_KERNEL_LABELS: &[&str] = &["workload", "workload-k8s"];
+
+/// Pure half of [`workload_kernel_label`]: map the raw env value to a
+/// label. `None`/empty means the default; an unknown label is refused
+/// (falling back to the default) so a typo boots the sealed kernel rather
+/// than a half-configured experiment.
+#[must_use]
+pub fn parse_workload_kernel_label(raw: Option<&str>) -> &'static str {
+    let Some(raw) = raw.map(str::trim) else {
+        return "workload";
+    };
+    if raw.is_empty() {
+        return "workload";
+    }
+    // Return the static entry rather than the input: the caller's string
+    // may live shorter than the label the launch path threads through.
+    match raw {
+        "workload-k8s" => "workload-k8s",
+        _ => "workload",
+    }
+}
+
+/// Which workload-kernel cache label a launch should boot.
+///
+/// `MVM_WORKLOAD_KERNEL_VARIANT` selects the label (`workload-k8s` for the
+/// in-guest-orchestrator kernel). This is a dev-tier host-side override and
+/// deliberately loud about it: the durable mechanism is an image-declared
+/// boot-image capability contract (the image names its kernel requirement,
+/// admission satisfies it), which does not exist yet. An unknown value is
+/// refused with a warning rather than silently honoured.
+#[must_use]
+pub fn workload_kernel_label() -> &'static str {
+    let label =
+        parse_workload_kernel_label(std::env::var("MVM_WORKLOAD_KERNEL_VARIANT").ok().as_deref());
+    if label != "workload" {
+        tracing::warn!(
+            label,
+            "MVM_WORKLOAD_KERNEL_VARIANT override active (dev tier; the durable              mechanism is an image-declared boot-image capability contract)"
+        );
+    }
+    label
+}
+
+/// Resolve the workload kernel a launch should boot, honoring
+/// [`workload_kernel_label`]. Returns the resolution together with the
+/// label that produced it, so error messages can name the cache path the
+/// operator actually needs to populate.
+pub fn resolve_workload_kernel(
+    cache_dir: &Path,
+    arch: &str,
+    allow_build: bool,
+) -> (KernelResolution, &'static str) {
+    let label = workload_kernel_label();
+    (resolve_kernel(cache_dir, arch, label, allow_build), label)
+}
+
 /// Where a kernel entry lived before it was moved out of the Stage 0 blast
 /// radius. Read only by [`migrate_legacy_kernel_entry`].
 fn legacy_kernel_cache_dir(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
@@ -300,6 +360,42 @@ pub fn resolve_kernel(
 
 #[cfg(test)]
 mod tests {
+    use super::{WORKLOAD_KERNEL_LABELS, parse_workload_kernel_label};
+
+    #[test]
+    fn workload_kernel_label_defaults_and_trims() {
+        assert_eq!(parse_workload_kernel_label(None), "workload");
+        assert_eq!(parse_workload_kernel_label(Some("")), "workload");
+        assert_eq!(parse_workload_kernel_label(Some("   ")), "workload");
+        assert_eq!(parse_workload_kernel_label(Some("workload")), "workload");
+        assert_eq!(
+            parse_workload_kernel_label(Some("  workload-k8s  ")),
+            "workload-k8s"
+        );
+    }
+
+    #[test]
+    fn workload_kernel_label_refuses_unknown_values() {
+        // A typo must boot the sealed default, never a half-configured
+        // experiment — the override is dev-tier, so failing safe beats
+        // failing loud enough to wake an operator.
+        for bad in ["k8s", "WORKLOAD-K8S", "workload_k8s", "../workload"] {
+            assert_eq!(parse_workload_kernel_label(Some(bad)), "workload", "{bad}");
+        }
+    }
+
+    #[test]
+    fn workload_kernel_labels_are_static_and_lowercase() {
+        assert_eq!(WORKLOAD_KERNEL_LABELS, &["workload", "workload-k8s"]);
+        for label in WORKLOAD_KERNEL_LABELS {
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            );
+        }
+    }
+
     use super::*;
 
     use crate::kernel_artifact::compute_artifact_hash;

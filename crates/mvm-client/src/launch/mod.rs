@@ -238,18 +238,21 @@ impl LocalBackend {
             // fails to verify is evicted by the resolve — so the hint below is
             // the right next step for a rejected kernel as much as a missing
             // one.
-            _ => match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
-                mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                    Ok(Some(verified.path().to_path_buf()))
+            _ => {
+                let (resolution, label) =
+                    mvm_build::kernel_fetch::resolve_workload_kernel(&cache, &arch, false);
+                match resolution {
+                    mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                        Ok(Some(verified.path().to_path_buf()))
+                    }
+                    _ => Err(crate::local::backend_err(format!(
+                        "{} needs a verified workload kernel at {} — create it once with \
+                         `mvmctl kernel build --which {label}`, then retry",
+                        backend.name(),
+                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
+                    ))),
                 }
-                _ => Err(crate::local::backend_err(format!(
-                    "{} needs a verified workload kernel at {} — create it once with \
-                     `mvmctl kernel build --which workload`, then retry",
-                    backend.name(),
-                    mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
-                        .display()
-                ))),
-            },
+            }
         }
     }
 
