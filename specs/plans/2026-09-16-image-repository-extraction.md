@@ -378,17 +378,19 @@ Acceptance:
 
 ### W2 — Bootstrap and govern `tinylabscom/mvm-images` (#3367)
 
-- [ ] Create the public repository with ownership, branch protection, release
+- [x] Create the public repository with ownership, branch protection, release
       environments, CODEOWNERS, security policy, dependency update policy, and
       least-privilege Actions permissions.
-- [ ] Document artifact roles, supported architectures, release cadence,
+- [x] Document artifact roles, supported architectures, release cadence,
       retention, incident response, and the no-secrets/no-customer-data rule.
-- [ ] Pin every third-party action by immutable commit where the current image
+- [x] Pin every third-party action by immutable commit where the current image
       producer does so.
-- [ ] Add a no-publish dry run and a protected tag namespace for image releases.
+- [x] Add a no-publish dry run and a protected tag namespace for image releases.
 
 Acceptance: an empty/synthetic release cannot publish an incomplete set, and an
-untrusted branch cannot mint the allow-listed release identity.
+untrusted branch cannot mint the allow-listed release identity. Live repository
+settings, the no-publish workflow boundary, and validation are recorded in
+`specs/sprint/delivery/3367-mvm-images-governance.md`.
 
 ### W3 — Define the manifest, lock, and compatibility contract (#3365)
 

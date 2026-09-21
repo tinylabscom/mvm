@@ -249,6 +249,12 @@ Last updated: 2026-09-21
       - [x] W1 #3363: two post-merge runs compared against the 2026-09-15
             baseline: 118 min → 92 and 106 min. The 25-minute hypothesis is
             rejected as stated; the SDK sidecar build is the remaining cost.
+      - [x] W2 #3367: public `mvm-images` repository governance is live: PR-only
+            `main`, immutable image tags, reviewed tag-only release environment,
+            read-only workflows, CODEOWNERS, action-pin gate, dependency and
+            security policies, and the documented image release contract. The
+            build lane cannot sign or publish; evidence is in
+            `specs/sprint/delivery/3367-mvm-images-governance.md`.
       - [x] W3a #3365: image-set manifest and lock types with pure validation.
       - [x] W3b #3365: offline signed verification and revocation.
       - [x] W3c #3365: checked-in lock and generated pins.
