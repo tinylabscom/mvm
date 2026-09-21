@@ -15,6 +15,7 @@ pub mod egress_bridge;
 pub mod egress_shared;
 pub mod fc_kernel;
 pub mod flowmux_identity;
+pub mod gpu_endpoint_spawn;
 pub mod helper_contract;
 pub mod host_agent_spawn;
 pub mod hvf_supervisor;

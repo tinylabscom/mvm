@@ -151,7 +151,11 @@ pub fn factory_parent_config(
         network_policy: _,
         dev_console: _,
         // ── The guest's boot shape: carried verbatim, because a child inherits
-        // all of it from the parent's restored memory.
+        // all of it from the parent's restored memory. `gpu` rides here for
+        // the same reason: the GPU channel is part of the device model a
+        // warm child restores, so a parent that will serve GPU claims must
+        // have wired it.
+        gpu,
         initrd_path,
         verity_path,
         roothash,
@@ -191,6 +195,7 @@ pub fn factory_parent_config(
         runtime_overlay_roothash: runtime_overlay_roothash.clone(),
         runtime_overlay_version: runtime_overlay_version.clone(),
         mem_initial_mib: *mem_initial_mib,
+        gpu: *gpu,
         revision_hash: String::new(),
         flake_ref: String::new(),
         profile: None,
@@ -288,6 +293,7 @@ fn factory_parent_spec_inner(
         exit: &exit,
         broker: Some(&broker),
         display: None,
+        gpu: None,
         console_data: Vec::new(),
     };
     VmmSpec {
@@ -403,6 +409,7 @@ mod tests {
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 display: None,
+                gpu: None,
                 console_data: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),

@@ -227,6 +227,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -263,6 +264,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -296,6 +298,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };

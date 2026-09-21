@@ -183,6 +183,10 @@ pub struct LaunchShape<'a> {
     /// materialized rootfs turns out to record; it never selects.
     pub declared_libc: mvm_contract::guest_libc::GuestLibc,
     pub hypervisor: Option<&'a str>,
+    /// `--gpu` carried from the request: the start config takes it, and the
+    /// resolved backend must advertise the `gpu` capability or selection
+    /// refuses before anything boots.
+    pub gpu: bool,
 }
 
 /// All inputs to the orchestrator.
@@ -256,6 +260,10 @@ pub struct ExecRequest {
     /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
     /// admit/build sites that read it off `RunArgs`.
     pub hypervisor: Option<String>,
+    /// `--gpu`: forward the guest's CUDA/NVML calls to the host GPU
+    /// endpoint over vsock. Carried here so the launch shape and the
+    /// backend's required capabilities both see the same answer.
+    pub gpu: bool,
 }
 
 impl ExecRequest {
@@ -278,6 +286,7 @@ impl ExecRequest {
             sdk_host_services: &self.sdk_host_services,
             declared_libc: self.declared_libc,
             hypervisor: self.hypervisor.as_deref(),
+            gpu: self.gpu,
         }
     }
 }
@@ -1209,6 +1218,7 @@ fn build_start_config(
         },
         roothash: if is_wasm { None } else { boot.roothash.clone() },
         dev_console,
+        gpu: shape.gpu,
         revision_hash: resolved.revision.clone(),
         flake_ref: resolved.flake_ref.clone(),
         profile: resolved.profile.clone(),
@@ -1493,6 +1503,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         }
@@ -1623,6 +1634,7 @@ mod tests {
             sdk_host_services: &[],
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("wasm"),
+            gpu: false,
         };
         let mut marks = LaunchResolveMarks::new(false);
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
@@ -1726,6 +1738,7 @@ mod tests {
             stdin: b"ignored".to_vec(),
             healthcheck: None,
             hypervisor: Some("mock".into()),
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1798,6 +1811,7 @@ mod tests {
             sdk_host_services: &[],
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
+            gpu: false,
         };
 
         let resolved = resolve_launch(
@@ -1881,6 +1895,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1910,6 +1925,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1947,6 +1963,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2003,6 +2020,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2039,6 +2057,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2085,6 +2104,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            gpu: false,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };

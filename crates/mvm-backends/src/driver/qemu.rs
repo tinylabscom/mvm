@@ -331,6 +331,9 @@ impl VmmDriver for QemuDriver {
             snapshot_capability: mvm_core::vm_backend::SnapshotCapability::Unsupported,
             standby_pool: false,
             vsock: true,
+            // GPU remoting rides real AF_VSOCK here; the endpoint binds the
+            // port directly.
+            gpu: true,
             // User-mode (slirp) networking — no host TAP device.
             tap_networking: false,
             no_routable_guest_nic: true,

@@ -592,6 +592,7 @@ mod tests {
             last_started_at: None,
             health_check,
             grants: None,
+            gpu: false,
         }
     }
 

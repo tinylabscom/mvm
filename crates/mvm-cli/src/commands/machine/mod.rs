@@ -647,6 +647,7 @@ fn machine_run_spec(
             args.health_start_period,
         ),
         grants: resolved.plan_grants,
+        gpu: args.run.gpu,
     })
 }
 
@@ -673,6 +674,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Bind a peer route this machine may dial (repeatable).
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
+    /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
+    #[arg(long)]
+    pub gpu: bool,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -772,6 +776,9 @@ pub(in crate::commands) struct MachineStartCreateFlags {
     /// Bind a peer route this machine may dial (repeatable).
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
+    /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
+    #[arg(long)]
+    pub gpu: bool,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -1070,6 +1077,8 @@ struct MachineSpecInputs<'a> {
     net: bool,
     allow_host: &'a [String],
     peer: &'a [String],
+    /// `--gpu` (or the manifest's `gpu = true`): the GPU remoting plane.
+    gpu: bool,
     ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
@@ -1097,6 +1106,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         }
     };
     let net = inputs.net || workflow.is_some_and(|workflow| workflow.net);
+    let gpu = inputs.gpu || workflow.is_some_and(|workflow| workflow.gpu);
     let allow_host = if inputs.allow_host.is_empty() {
         workflow
             .map(|workflow| workflow.allow_hosts.clone())
@@ -1170,6 +1180,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         last_started_at: None,
         health_check: None,
         grants: resolved.plan_grants,
+        gpu,
     })
 }
 
@@ -1212,6 +1223,7 @@ impl MachineCreateArgs {
             net: self.net,
             allow_host: &self.allow_host,
             peer: &self.peer,
+            gpu: self.gpu,
             ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,

@@ -269,6 +269,10 @@ fn relay_supervisor_config_with_handoff(
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
         broker_socket: spec.host_socket_for_service(GuestService::Broker),
         display_socket: spec.host_socket_for_service(GuestService::DisplayFrame),
+        // The GPU channel is declared in the spec only when the launch asked
+        // for the plane, so a plain boot's supervisor carries no socket here
+        // and the in-VM relay refuses dials (fail-closed).
+        gpu_socket: spec.host_socket_for_service(GuestService::Gpu),
         console_data_sockets,
         builder_control_sockets,
         exclusive_image_lock: exclusive_image_lock.map(Path::to_path_buf),
@@ -437,6 +441,9 @@ impl VmmDriver for HvfDriver {
             // security gates before a parent can be created or claimed.
             standby_pool: true,
             vsock: true,
+            // GPU remoting rides the same per-port vsock relay as every
+            // other guest-dialed channel; the host endpoint binds the UDS.
+            gpu: true,
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
             // Both are unconditional so the backend fails closed: a degraded host
@@ -604,6 +611,11 @@ impl VmmDriver for HvfDriver {
                 mask | mvm_vmm::hvf_handoff::HANDOFF_TELEMETRY
             } else if channel.service == GuestService::DisplayFrame {
                 mask | mvm_vmm::hvf_handoff::HANDOFF_DISPLAY
+            } else if channel.service == GuestService::Gpu {
+                // GPU remoting is fork-safe: the child reconnects to the same
+                // host endpoint over its own channel, so the mask carries it
+                // exactly like display.
+                mask | mvm_vmm::hvf_handoff::HANDOFF_GPU
             } else if matches!(
                 channel.service,
                 GuestService::ConsoleData { port }

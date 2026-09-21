@@ -12,6 +12,7 @@ pub mod capability_negotiation;
 pub mod dns;
 pub mod extension_controller;
 pub mod extension_pack;
+pub mod gpu;
 pub mod handler;
 pub mod host_audit;
 pub mod host_beacon;

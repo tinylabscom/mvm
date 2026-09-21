@@ -57,6 +57,8 @@ pub struct VsockHostBindings {
     pub broker_endpoint: Option<PathBuf>,
     /// Host view-only display frame sink path.
     pub display_endpoint: Option<PathBuf>,
+    /// Host GPU endpoint path (the per-VM `mvm-gpu-endpoint` socket).
+    pub gpu_endpoint: Option<PathBuf>,
     /// Additional host-dial listeners (telemetry and admitted console ports).
     pub console_sockets: Vec<(u32, PathBuf)>,
 }
@@ -81,6 +83,7 @@ impl VsockHostBindings {
             .chain(self.network_endpoint.iter().map(PathBuf::as_path))
             .chain(self.broker_endpoint.iter().map(PathBuf::as_path))
             .chain(self.display_endpoint.iter().map(PathBuf::as_path))
+            .chain(self.gpu_endpoint.iter().map(PathBuf::as_path))
             .chain(self.console_sockets.iter().map(|(_, path)| path.as_path()))
             .collect()
     }
@@ -116,6 +119,9 @@ fn canonical_child_bindings(
         mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::DISPLAY_PORT);
     let display_endpoint =
         (mask & crate::hvf_handoff::HANDOFF_DISPLAY != 0).then_some(display_path);
+    let gpu_path =
+        mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT);
+    let gpu_endpoint = (mask & crate::hvf_handoff::HANDOFF_GPU != 0).then_some(gpu_path);
     let mut console_sockets = if mask & HANDOFF_CONSOLE != 0 {
         mvm_agentd::vsock::dev_console_data_ports()
             .map(|port| {
@@ -140,6 +146,7 @@ fn canonical_child_bindings(
         network_endpoint,
         broker_endpoint,
         display_endpoint,
+        gpu_endpoint,
         console_sockets,
     })
 }
@@ -256,6 +263,10 @@ impl VsockShared {
 
     pub fn set_display_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_display_endpoint(path);
+    }
+
+    pub fn set_gpu_endpoint(&mut self, path: &std::path::Path) {
+        self.handlers.set_gpu_endpoint(path);
     }
 
     pub fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
@@ -479,6 +490,12 @@ impl VirtioVsock {
         self.notify_io();
     }
 
+    pub fn set_gpu_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_gpu_endpoint(path);
+        self.host_runtime.bindings.gpu_endpoint = Some(path.to_path_buf());
+        self.notify_io();
+    }
+
     pub fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_display_activity(Arc::clone(&counter));
         self.host_runtime.display_activity = Some(counter);
@@ -574,6 +591,9 @@ impl VirtioVsock {
             }
             if let Some(path) = &bindings.display_endpoint {
                 self.set_display_endpoint(path);
+            }
+            if let Some(path) = &bindings.gpu_endpoint {
+                self.set_gpu_endpoint(path);
             }
             if !bindings.console_sockets.is_empty() {
                 self.set_host_dial_sockets(

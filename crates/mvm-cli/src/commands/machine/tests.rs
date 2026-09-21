@@ -923,6 +923,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     }
 }
 
@@ -1907,6 +1908,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
     mark_machine_started(&mut spec, "sha256:abc".to_string());
     assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
@@ -1923,6 +1925,7 @@ fn create_persists_machine_spec_under_data_dir() {
         net: true,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
+        gpu: false,
         cpus: Some(4),
         cpu_limit: None,
         timeout: None,
@@ -1955,6 +1958,7 @@ fn create_auto_generates_a_name_when_omitted() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2004,6 +2008,7 @@ volumes = ["./src:/work:rw"]
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2042,6 +2047,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2075,6 +2081,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2096,6 +2103,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2141,6 +2149,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
 
     let summary = machine_start_preflight_summary(
@@ -2234,6 +2243,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
 
     let summary = machine_start_preflight_summary(&spec, Some("libkrun"), None)
@@ -2257,6 +2267,7 @@ fn create_rejects_unsafe_machine_name() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        gpu: false,
         cpus: Some(2),
         cpu_limit: None,
         timeout: None,
@@ -2299,6 +2310,7 @@ fn create_refuses_overwrite_without_force() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
     save_machine_spec(&spec, false).expect("first save");
     let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -2334,6 +2346,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
     save_machine_spec(&spec, false).expect("save");
     let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -2371,6 +2384,7 @@ fn seed_machine_spec(name: &str) {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     };
     save_machine_spec(&spec, false).expect("save");
 }
@@ -2926,6 +2940,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
     }
 }
 
@@ -2994,6 +3009,7 @@ fn patch_allow_host_replace_and_clear() {
     let base = MachineSpec {
         allow_host: vec!["old:443".into()],
         peer: Vec::new(),
+        gpu: false,
         ai: None,
         ports: vec![],
         ..reconfigure_spec_fixture()
@@ -3563,6 +3579,7 @@ fn start_resolver_creates_missing_machine_when_source_given() {
     let args = start_args_with_create_flags(
         "web",
         MachineStartCreateFlags {
+            gpu: false,
             image: Some("nginx".to_string()),
             cpus: Some(2),
             memory: Some("512M".to_string()),
@@ -3606,6 +3623,7 @@ fn start_resolver_errors_on_changed_config_without_force() {
     let args = start_args_with_create_flags(
         "web",
         MachineStartCreateFlags {
+            gpu: false,
             image: Some("ubuntu:24.04".to_string()),
             ..MachineStartCreateFlags::default()
         },
@@ -3623,6 +3641,7 @@ fn start_resolver_recreates_with_force() {
     let args = start_args_with_create_flags(
         "web",
         MachineStartCreateFlags {
+            gpu: false,
             image: Some("ubuntu:24.04".to_string()),
             force: true,
             ..MachineStartCreateFlags::default()

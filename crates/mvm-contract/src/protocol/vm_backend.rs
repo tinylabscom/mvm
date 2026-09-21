@@ -478,6 +478,14 @@ pub struct VmCapabilities {
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
     /// for every production backend; a plan requiring it is rejected.
     pub production_ssh: bool,
+    /// Backend can serve a guest's GPU calls by API remoting over vsock:
+    /// a host endpoint owns the GPU (or the deterministic stub) and answers
+    /// the guest shim libraries on the dedicated GPU channel. True for every
+    /// microVM tier — the GPU never enters the guest, so the VMM is not the
+    /// constraint — and false for the wasm/browser/mock tiers, which have no
+    /// vsock for the shim to ride.
+    #[serde(default)]
+    pub gpu: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]
@@ -507,13 +515,16 @@ pub struct RequiredCapabilities {
     pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
     pub pty_exec: bool,
+    /// The launch asks for the GPU remoting plane: guest shim libraries plus
+    /// the host endpoint on the GPU channel. Refused by tiers with no vsock.
+    pub gpu: bool,
 }
 
 impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
     pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 9] = [
+        let checks: [(bool, bool, &'static str); 10] = [
             (
                 required.eager_cow_restore,
                 self.eager_cow_restore,
@@ -551,6 +562,7 @@ impl VmCapabilities {
                 "host_vsock_proxy",
             ),
             (required.pty_exec, self.pty_exec, "pty_exec"),
+            (required.gpu, self.gpu, "gpu"),
         ];
         checks
             .into_iter()

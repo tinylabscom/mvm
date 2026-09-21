@@ -237,6 +237,7 @@ mod tests {
             warm_pool_size: 0,
             network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             dev_console: false,
+            gpu: false,
         }
     }
 

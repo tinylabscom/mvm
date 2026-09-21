@@ -144,6 +144,10 @@ pub struct WorkloadSockets<'a> {
     /// View-only guest-to-host display frame sink. Present only with the
     /// signed display-view grant.
     pub display: Option<&'a Path>,
+    /// Host GPU endpoint: the guest's shims dial `GPU_PORT` and the
+    /// per-VM `mvm-gpu-endpoint` process binds here. Present only when the
+    /// launch asked for the GPU remoting plane.
+    pub gpu: Option<&'a Path>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -192,6 +196,15 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
         ports.push(VsockPort {
             service: GuestService::DisplayFrame,
             host_uds: display.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
+    // Only a launch that asked for the GPU plane carries the channel; an
+    // ordinary boot has none, so a stray guest dial stays ECONNREFUSED.
+    if let Some(gpu) = socks.gpu {
+        ports.push(VsockPort {
+            service: GuestService::Gpu,
+            host_uds: gpu.into(),
             direction: VsockDirection::GuestDials,
         });
     }
@@ -850,6 +863,7 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             display: None,
+            gpu: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -880,6 +894,7 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             display: None,
+            gpu: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -909,8 +924,34 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             display: None,
+            gpu: None,
             console_data: Vec::new(),
         }
+    }
+
+    #[test]
+    fn workload_vsock_ports_emit_the_gpu_channel_only_when_requested() {
+        let with_gpu = WorkloadSockets {
+            gpu: Some(Path::new("/run/gpu.sock")),
+            ..sample_sockets()
+        };
+        let gpu = workload_vsock_ports(&with_gpu)
+            .into_iter()
+            .find(|port| port.service == GuestService::Gpu)
+            .expect("a GPU launch carries the GPU channel");
+        assert_eq!(gpu.direction, VsockDirection::GuestDials);
+        assert_eq!(gpu.host_uds, PathBuf::from("/run/gpu.sock"));
+        assert_eq!(
+            gpu.service.port(),
+            mvm_contract::protocol::gpu::GPU_RPC_PORT
+        );
+
+        assert!(
+            workload_vsock_ports(&sample_sockets())
+                .iter()
+                .all(|port| port.service != GuestService::Gpu),
+            "a launch without the GPU plane must carry no GPU channel"
+        );
     }
 
     #[test]
@@ -939,6 +980,7 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
             display: None,
+            gpu: None,
             console_data: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
@@ -966,6 +1008,7 @@ mod tests {
     fn workload_vsock_ports_emit_display_as_guest_dials_only_when_granted() {
         let granted = WorkloadSockets {
             display: Some(Path::new("/run/display.sock")),
+            gpu: None,
             ..sample_sockets()
         };
         let display = workload_vsock_ports(&granted)
@@ -1146,6 +1189,7 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             display: None,
+            gpu: None,
             console_data,
         };
         let ports = workload_vsock_ports(&socks);
@@ -1176,6 +1220,7 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             display: None,
+            gpu: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -1200,6 +1245,7 @@ mod tests {
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 display: None,
+                gpu: None,
                 console_data,
             },
             cmdline: String::new(),

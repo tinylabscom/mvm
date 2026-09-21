@@ -96,6 +96,11 @@ pub struct MachineSpec {
     /// hence `#[serde(default)]`, without which those specs stop loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// GPU remoting plane (`run --gpu`): guest CUDA/NVML shims plus the host
+    /// endpoint on the GPU vsock channel. Persisted like `net` so a
+    /// stop/start answers the same question the operator asked.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gpu: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -225,6 +230,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.init == b.init
         && a.agent_verb == b.agent_verb
         && a.grants == b.grants
+        && a.gpu == b.gpu
 }
 
 /// Human summary of which boot-affecting fields differ, for the loud
@@ -252,6 +258,9 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.ports != desired.ports {
         changed.push("ports");
+    }
+    if current.gpu != desired.gpu {
+        changed.push("gpu");
     }
     if current.cpus != desired.cpus {
         changed.push("cpus");
@@ -428,6 +437,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            gpu: false,
         }
     }
 
@@ -712,6 +722,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            gpu: false,
         }
     }
 

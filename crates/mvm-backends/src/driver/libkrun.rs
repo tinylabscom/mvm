@@ -304,6 +304,9 @@ impl VmmDriver for LibkrunDriver {
             snapshot_capability: SnapshotCapability::DiskOnly,
             standby_pool: true,
             vsock: true,
+            // GPU remoting is a per-port vsock channel plus a host process;
+            // libkrun terminates vsock exactly like the other VMM tiers.
+            gpu: true,
             tap_networking: false,
             // Stronger than the field name asks for: the guest has no NIC at
             // all, not a NIC without a route. `VsockDirect` configures a

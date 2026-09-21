@@ -2569,6 +2569,7 @@ mod tests {
             health_check: None,
             deployment: None,
             grants: None,
+            gpu: false,
             ports: vec![],
             ai: None,
         };

@@ -26,6 +26,8 @@ pub const HANDOFF_ACCEPTED: &[u8] = b"OK\n";
 pub const HANDOFF_TELEMETRY: u8 = 1 << 4;
 /// Channel-mask bit for the guest-to-host view-only display relay.
 pub const HANDOFF_DISPLAY: u8 = 1 << 5;
+/// The GPU remoting channel survives a live handoff (HVF fork).
+pub const HANDOFF_GPU: u8 = 1 << 6;
 
 /// Longest reply line either side of the handoff socket will handle, newline
 /// included. The parent writes within it and the host reads no further, so an

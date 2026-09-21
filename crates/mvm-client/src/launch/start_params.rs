@@ -38,6 +38,10 @@ pub struct VmStartParams<'a> {
     /// gateway-bridge backends enforce the chosen posture instead of
     /// fail-closing to deny-all regardless of the request.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// GPU remoting plane (`--gpu`). Optional at the builder: callers that
+    /// never mention it get the `false` default, which is the answer every
+    /// launch gave before the flag existed.
+    pub gpu: bool,
 }
 
 impl<'a> VmStartParams<'a> {
@@ -71,6 +75,7 @@ pub struct VmStartParamsBuilder<'a> {
     port_mappings: Option<&'a [config::PortMapping]>,
     warm_pool_size: Option<u32>,
     network_policy: Option<mvm_core::network_policy::NetworkPolicy>,
+    gpu: Option<bool>,
 }
 
 impl<'a> VmStartParamsBuilder<'a> {
@@ -96,6 +101,7 @@ impl<'a> VmStartParamsBuilder<'a> {
             port_mappings: None,
             warm_pool_size: None,
             network_policy: None,
+            gpu: None,
         }
     }
 
@@ -234,6 +240,13 @@ impl<'a> VmStartParamsBuilder<'a> {
         self
     }
 
+    /// Set `gpu`. Takes a value or an `Option`; unset means `false`.
+    #[must_use]
+    pub fn gpu(mut self, gpu: impl Into<Option<bool>>) -> Self {
+        self.gpu = gpu.into();
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<VmStartParams<'a>, BuilderError> {
         Ok(VmStartParams {
@@ -281,6 +294,7 @@ impl<'a> VmStartParamsBuilder<'a> {
             network_policy: self
                 .network_policy
                 .ok_or(BuilderError::missing("VmStartParams", "network_policy"))?,
+            gpu: self.gpu.unwrap_or_default(),
         })
     }
 }
@@ -353,6 +367,7 @@ impl VmStartParams<'_> {
                 })
                 .collect(),
             runner_dir: None,
+            gpu: self.gpu,
             // Runtime overlay wiring lives behind the `mvmctl run
             // --runtime-overlay` opt-in surface, not this generic
             // params struct. Leaving the three overlay fields at

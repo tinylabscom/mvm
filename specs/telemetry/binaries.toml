@@ -355,6 +355,20 @@ category = "artifact-tool"
 reason = "Standalone local artifact construction or verification command, not an installed VM producer."
 
 [[binary]]
+package = "mvm-gpu"
+name = "mvm-gpu-endpoint"
+source = "crates/mvm-gpu/src/bin/mvm-gpu-endpoint.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM host GPU endpoint"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "GPU endpoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
 package = "mvm-hostd"
 name = "mvm-apfs-snapshot-helper"
 source = "crates/mvm-hostd/src/bin/mvm-apfs-snapshot-helper.rs"

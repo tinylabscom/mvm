@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted.
+Accepted, amended by [ADR-053](053-gpu-compute-over-vsock.md): the
+"no GPU support today" ruling below was made against passthrough (B) and
+paravirtual display (A) only. Compute by API remoting over vsock — a
+third shape this ADR did not consider — is supported from 2026-09-20.
+Decisions 2–5 stand; decision 1 is superseded for the remoted-compute
+shape only, and decision 4's "no" to compute passthrough is unchanged.
 
 ## Context
 
@@ -23,9 +28,12 @@ until it earns its way in.
 
 ## Decision
 
-1. **mvm ships no GPU support today.** No backend wires a virtio-gpu
-   device; the workspace has no `gpu`, `virgl`, or `venus` feature flag
-   or dependency.
+1. **mvm ships no *device-model* GPU support.** No backend wires a
+   virtio-gpu device; the workspace has no `gpu`, `virgl`, or `venus`
+   feature flag or dependency. (Amended by ADR-053: compute by API
+   remoting over vsock needs no device model at all — the GPU stays on
+   the host and the guest carries shim libraries — and is supported on
+   that basis.)
 2. **libkrun's C API exposes paravirtual-GPU hooks** (`krun_set_gpu_options`,
    the `KRUN_FEATURE_GPU` flag) at the FFI-binding layer
    (`crates/deps/libkrun-sys`) that mvm links against but never calls.

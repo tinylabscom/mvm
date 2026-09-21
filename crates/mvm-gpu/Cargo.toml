@@ -1,0 +1,38 @@
+[package]
+name = "mvm-gpu"
+description = "Host-side GPU endpoint for mvm: serves the guest CUDA/NVML shim RPCs over vsock/UDS/TCP against the real driver or a deterministic stub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Architectural invariant #1 (.github/workflows/architecture.yml): the
+# mvm-gpu-endpoint is a per-VM host process, one per guest that asked for a
+# GPU — the same per-VM substrate shape as mvm-network-endpoint, never an
+# orchestration control-plane server.
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM host GPU endpoint (guest CUDA/NVML shim RPC server, one per GPU-enabled guest)"
+
+[dependencies]
+mvm-contract = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# The guest shim client core: the endpoint's integration test drives the
+# very RPC path the in-guest shims use, over a unix socket standing in
+# for vsock.
+mvm-gpu-shim-core = { path = "../mvm-gpu-shim-core" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mvm-gpu-endpoint"
+path = "src/bin/mvm-gpu-endpoint.rs"

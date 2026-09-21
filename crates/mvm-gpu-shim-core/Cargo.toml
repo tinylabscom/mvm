@@ -1,0 +1,19 @@
+[package]
+name = "mvm-gpu-shim-core"
+description = "Shared client core for the mvm guest GPU shim libraries: transport dial, framed RPC, panic containment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-contract = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

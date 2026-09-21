@@ -258,6 +258,10 @@ pub struct HvfSupervisorConfig {
     /// Per-VM view-only display sink. The guest can only dial out to it.
     #[serde(default)]
     pub display_socket: Option<PathBuf>,
+    /// Per-VM host GPU endpoint the guest's CUDA/NVML shims dial. `None`
+    /// when the boot did not ask for the GPU plane.
+    #[serde(default)]
+    pub gpu_socket: Option<PathBuf>,
     /// Additional host-dial sockets: telemetry, dev-only console channels and
     /// declared TCP ingress forwards. Telemetry does not require console or
     /// ingress grants. An empty list binds no extra guest ports.
@@ -405,6 +409,7 @@ mod tests {
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
             display_socket: Some("/state/hvf-display.sock".into()),
+            gpu_socket: None,
             console_data_sockets: vec![],
             builder_control_sockets: vec![],
             exclusive_image_lock: None,
@@ -534,6 +539,7 @@ mod tests {
             egress_relay_socket: None,
             broker_socket: None,
             display_socket: None,
+            gpu_socket: None,
             builder_control_sockets: vec![],
             exclusive_image_lock: None,
             console_data_sockets: vec![

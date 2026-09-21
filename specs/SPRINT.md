@@ -70,6 +70,23 @@
       (delegating to the entrypoint uid) — on a kernel without cgroups the
       mount skips quietly, so sealed guests boot identically.
 
+- [ ] **GPU compute inside microVMs by API remoting over vsock.**
+      Epic #3560 (follow-ups #3561-#3567).
+      `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029).
+      Guest shim libraries forward CUDA/NVML calls over vsock port 5256 to a
+      per-VM host endpoint owning the real driver or a deterministic stub;
+      one `--gpu` flag turns on the whole plane. Implemented end to end:
+      wire protocol (`mvm-contract`), host endpoint crate (`mvm-gpu`),
+      guest shims (cuda/cudart/nvml cdylibs + shared core), capability
+      admission (`gpu` on VmCapabilities/RequiredCapabilities), CLI/config
+      surface (`--gpu`, manifest `gpu = true`, persisted machine spec),
+      the `GuestService::Gpu` channel across all four VMM tiers, the
+      runner-spawned per-VM endpoint with reap, and the Nix package
+      recipes. Runtime-overlay composition of the shims is follow-up work
+      in the mvm-images repository. Named v2 follow-ups (CUDA graphs and
+      fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
+      plan and ADR.
+
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.
       The first reviewable slice clears all five pairs from

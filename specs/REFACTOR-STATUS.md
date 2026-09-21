@@ -28,6 +28,22 @@ Last updated: 2026-09-21
       delegation implemented on `feat/kubernetes-in-microvm`; template
       integration, E2E, and docs pending.
 
+- [ ] **GPU compute by API remoting over vsock.**
+      Epic #3560; `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029's
+      "no GPU support today" ruling for the remoted-compute shape only).
+      W1–W10 implemented on `feat/gpu-over-vsock`: the
+      `mvm_contract::protocol::gpu` wire protocol (port 5256), the
+      `mvm-gpu` host crate (stub + native-dlopen backends, per-VM
+      `mvm-gpu-endpoint`), the guest shim cdylibs (libcuda/libcudart/NVML)
+      with `MVM_GPU_RPC` transport selection, the `gpu` capability +
+      `--gpu` flag threading CLI → spec → `VmStartConfig`, the
+      `GuestService::Gpu` channel across HVF (supervisor + relay + live
+      handoff), libkrun, Firecracker and QEMU, the runner-spawned per-VM
+      endpoint, and the shim package recipes (overlay composition is
+      mvm-images work). Open follow-ups named in the plan: CUDA-graph
+      fork-reconnect, `cuGetProcAddress`, cubin param metadata, overlay
+      image composition.
+
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
       70 lexical public `f` / `f_with_*` sibling pairs. The first per-module

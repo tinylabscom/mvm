@@ -201,6 +201,17 @@ impl VsockHandlerRegistry {
                 EgressBudget::new(),
             )),
         );
+        // The GPU channel is registered unconditionally and bound only when
+        // the launch sets an endpoint — same shape as egress and broker, so
+        // a non-GPU boot carries a handler that refuses dials for want of a
+        // host socket (fail-closed) rather than no handler at all.
+        guest_ports.insert(
+            mvm_agentd::vsock::GPU_PORT,
+            Box::new(StreamRelayHandler::with_budget(
+                mvm_agentd::vsock::GPU_PORT,
+                EgressBudget::new(),
+            )),
+        );
 
         let host_initiated: Vec<Box<dyn HostInitiatedHandler>> = vec![
             Box::new(AgentVsockHandler::new()),
@@ -276,6 +287,13 @@ impl VsockHandlerRegistry {
             .expect("broker handler present")
             .bridge
             .set_activity(counter);
+    }
+
+    pub(crate) fn set_gpu_endpoint(&mut self, path: &Path) {
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::GPU_PORT)
+            .expect("gpu handler present")
+            .bridge
+            .set_endpoint(path);
     }
 
     pub(crate) fn set_display_endpoint(&mut self, path: &Path) {

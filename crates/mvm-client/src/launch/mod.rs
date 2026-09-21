@@ -503,6 +503,10 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        // The daemon launch surface does not carry the GPU flag yet; the
+        // CLI persistent path (`machine create/start --gpu`) is the
+        // supported route for GPU machines.
+        gpu: false,
         caller_commitment: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,

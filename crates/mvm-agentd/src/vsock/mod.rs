@@ -124,6 +124,11 @@ pub const EGRESS_PORT: u32 = mvm_contract::protocol::network_flow::NETWORK_FLOW_
 /// View-only display frames dial this host port. The host exposes it only for
 /// a plan carrying `host.display.view.v1`; no host-to-guest listener shares it.
 pub const DISPLAY_PORT: u32 = mvm_contract::stream::DISPLAY_FRAME_PORT;
+/// GPU compute by API remoting: the guest shims dial this port to reach the
+/// per-VM host GPU endpoint. Mirrored from `mvm-contract` like the ports
+/// above; `mvm_net::GuestService::Gpu` maps to the same constant.
+pub const GPU_PORT: u32 = mvm_contract::protocol::gpu::GPU_RPC_PORT;
+const _: () = assert!(GPU_PORT == 5256);
 
 const _: () = assert!(DISPLAY_PORT == 5255);
 

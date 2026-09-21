@@ -166,6 +166,15 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
         // running entrypoint; it is not a terminal and cannot become one.
         "pty_exec" => CapabilityAlternative::WorkloadStdinRoute,
 
+        // GPU compute by API remoting. The GPU lives on the host and the
+        // guest only needs a vsock channel to reach it, so a tier that has
+        // any vsock-terminated channel can in principle serve it — but a
+        // tier with no vsock at all has nothing for the shim to dial, and
+        // no substitute call invents one.
+        "gpu" => CapabilityAlternative::None {
+            why: "this tier has no vsock channel for the guest GPU shims to                   reach the host endpoint on — choose a microVM backend; the                   GPU itself never enters the guest",
+        },
+
         // Grant dimensions. Which mechanism a tier has is
         // `ResourceControls::for_backend`, so the substitute is derived from
         // that same answer rather than from a second per-backend table that
@@ -671,11 +680,12 @@ mod tests {
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
             pty_exec: true,
+            gpu: true,
         };
         let gaps = barren()
             .negotiate(&required, BackendKind::Firecracker)
             .expect_err("a barren backend serves nothing");
-        assert_eq!(gaps.len(), 9, "every capability must produce a gap");
+        assert_eq!(gaps.len(), 10, "every capability must produce a gap");
         for gap in &gaps {
             assert!(
                 !gap.alternative

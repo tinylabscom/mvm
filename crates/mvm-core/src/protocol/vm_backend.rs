@@ -205,6 +205,14 @@ pub struct VmStartConfig {
     /// interactive access to a sealed prod guest regardless of this flag, so
     /// the extra listeners are inert there.
     pub dev_console: bool,
+    /// Request the GPU remoting plane: drop-in CUDA/NVML shim libraries in
+    /// the guest plus a per-VM host GPU endpoint on the dedicated GPU vsock
+    /// channel ([`mvm_contract::protocol::gpu::GPU_RPC_PORT`]). The endpoint
+    /// runs the real driver when the host has one and the deterministic
+    /// stub otherwise — the guest gets well-formed answers either way, and
+    /// the GPU itself never enters the guest. Default `false`: no GPU
+    /// channel, no host endpoint, no guest shims.
+    pub gpu: bool,
 }
 
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.

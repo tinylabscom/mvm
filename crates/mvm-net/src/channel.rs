@@ -32,6 +32,10 @@ pub enum GuestService {
     Telemetry,
     /// View-only screencast frames sent from the guest to the host.
     DisplayFrame,
+    /// GPU compute by API remoting: the guest's CUDA/NVML shims dial the
+    /// host GPU endpoint on this channel. The endpoint owns the real driver
+    /// (or the deterministic stub); the guest carries neither.
+    Gpu,
     /// One dev-only interactive console data stream.
     ///
     /// The guest allocates these ports from its console session range. The
@@ -63,6 +67,10 @@ impl GuestService {
             Self::NetworkFlow => mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
             Self::Telemetry => mvm_core::protocol::telemetry::TELEMETRY_PORT,
             Self::DisplayFrame => mvm_contract::stream::DISPLAY_FRAME_PORT,
+            // The constant lives in `mvm-contract` so the guest shims —
+            // which link only that crate — name the same number. Pinned by
+            // the tests below exactly like NetworkFlow above.
+            Self::Gpu => mvm_contract::protocol::gpu::GPU_RPC_PORT,
             Self::Broker => 5300,
             Self::ConsoleData { port } => port,
             // Pinned literals, mirroring `mvm_agentd::builder_agent`'s
@@ -82,6 +90,7 @@ impl GuestService {
             Self::NetworkFlow => "network-flow",
             Self::Telemetry => "telemetry",
             Self::DisplayFrame => "display-frame",
+            Self::Gpu => "gpu",
             Self::ConsoleData { .. } => "console-data",
             Self::BuilderDispatch => "builder-dispatch",
             Self::BuilderdControl => "builderd-control",
@@ -128,6 +137,10 @@ mod tests {
         assert_eq!(GuestService::Broker.port(), 5300);
         assert_eq!(GuestService::Telemetry.port(), 5254);
         assert_eq!(GuestService::DisplayFrame.port(), 5255);
+        // Pins the wire value. The constant it derives from lives in
+        // `mvm-contract` so the guest shims — which cannot depend on this
+        // crate — name the same number.
+        assert_eq!(GuestService::Gpu.port(), 5256);
         // Both ends of the builder control plane pin these literals: the guest
         // side in `mvm_agentd::builder_agent`, which this crate sits below.
         assert_eq!(GuestService::BuilderDispatch.port(), 21471);

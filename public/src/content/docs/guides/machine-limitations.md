@@ -77,9 +77,12 @@ supported runtime target.
 ## GPU Status
 
 GPU passthrough or virtual GPU acceleration is not part of the default
-`mvmctl machine` surface. Do not depend on GPU access from a machine unless a
-future capability page documents the backend, admission, audit, and security
-semantics for that path.
+`mvmctl machine` surface. A non-default, opt-in compute remoting
+capability forwards the guest's CUDA/NVML calls to a host accelerator over
+vsock when a launch explicitly asks for it; this is a different path from
+passthrough, which remains unsupported. Do not depend on GPU access from a
+machine that did not explicitly opt in: without the opt-in, an
+accelerator is not available to the guest.
 
 ## Host And Guest Architecture Support
 

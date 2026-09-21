@@ -87,6 +87,8 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
+    pub gpu: bool,
 }
 
 /// The network mode every newly admitted networked workload uses: the
@@ -180,6 +182,7 @@ pub fn start_persistent_oci_machine(
         caller_commitment,
         has_ad_hoc_argv,
         grants,
+        gpu,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
@@ -272,6 +275,7 @@ pub fn start_persistent_oci_machine(
         // auto-named launches and are never claimed from the warm standby pool.
         .warm_pool_size(0)
         .network_policy(network_policy)
+        .gpu(gpu)
         .build()?
         .into_start_config();
     // Only dev-profile machines can be attached to later with `machine shell`

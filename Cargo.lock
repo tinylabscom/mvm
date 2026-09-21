@@ -3206,6 +3206,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-gpu"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-contract",
+ "mvm-gpu-shim-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mvm-gpu-cuda-shim"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-contract",
+ "mvm-gpu-shim-core",
+]
+
+[[package]]
+name = "mvm-gpu-cudart-shim"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-contract",
+ "mvm-gpu-shim-core",
+]
+
+[[package]]
+name = "mvm-gpu-nvml-shim"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-contract",
+ "mvm-gpu-shim-core",
+]
+
+[[package]]
+name = "mvm-gpu-shim-core"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
+ "mvm-contract",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mvm-host-services"
 version = "0.18.0-rc.2"
 dependencies = [
