@@ -637,6 +637,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        gpu: false,
         ports: vec![],
         ai: None,
     };
@@ -1079,6 +1080,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
         last_started_at: None,
         health_check: None,
         grants: Some(egress_grants("api.example.com", 443)),
+        gpu: false,
         ports: vec![],
         ai: None,
     };

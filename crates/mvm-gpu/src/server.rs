@@ -185,7 +185,7 @@ fn run_vsock(
 #[cfg(target_os = "linux")]
 mod vsock {
     use std::io::{self, Read, Write};
-    use std::os::fd::{FromRawFd as _, RawFd};
+    use std::os::fd::RawFd;
 
     /// A connected host-side AF_VSOCK stream, adapted to `Read + Write` so
     /// the generic `serve_connection` can treat it like any byte stream.

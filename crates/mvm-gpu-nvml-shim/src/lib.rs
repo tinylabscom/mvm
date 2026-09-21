@@ -40,12 +40,35 @@ pub struct NvmlMemory {
     pub used: u64,
 }
 
+// Layout pinned against the nvml.h definition (fixed-width fields, so the
+// contract is total): three u64s at offsets 0/8/16, size 24, align 8.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<NvmlMemory>() == 24);
+    assert!(align_of::<NvmlMemory>() == 8);
+    assert!(offset_of!(NvmlMemory, total) == 0);
+    assert!(offset_of!(NvmlMemory, free) == 8);
+    assert!(offset_of!(NvmlMemory, used) == 16);
+};
+
 /// `nvmlUtilization_t`.
 #[repr(C)]
 pub struct NvmlUtilization {
     pub gpu: c_uint,
     pub memory: c_uint,
 }
+
+// Layout pinned against the nvml.h definition: two u32s at offsets 0/4,
+// size 8, align 4.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<NvmlUtilization>() == 8);
+    assert!(align_of::<NvmlUtilization>() == 4);
+    assert!(offset_of!(NvmlUtilization, gpu) == 0);
+    assert!(offset_of!(NvmlUtilization, memory) == 4);
+};
 
 ///
 /// # Safety
