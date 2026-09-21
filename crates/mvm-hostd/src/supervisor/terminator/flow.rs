@@ -1842,6 +1842,133 @@ mod tests {
         );
     }
 
+    /// A response header that carries a bare CR or LF must be dropped even when
+    /// it is not one of the framing headers: the `||` between the two
+    /// conditions is what stops an upstream from ending the head early and
+    /// injecting a header of its own. The framing header is dropped too — the
+    /// terminator re-frames what it writes back.
+    #[test]
+    fn a_crlf_smuggling_response_header_is_stripped_even_when_not_framing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build test runtime");
+        let harness = harness(BOUND_HOST, b"");
+        let flow = TerminatedFlow::builder()
+            .service(Arc::clone(&harness.service))
+            .runtime(runtime.handle().clone())
+            .leaves(Arc::new(LeafCache::default()))
+            .authority(BOUND_HOST, 443)
+            .mode(TerminationMode::Tls)
+            .build()
+            .expect("build terminated flow");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let response = ForwardStreamResponse {
+            status: 200,
+            headers: vec![
+                ("x-clean".to_string(), "keep".to_string()),
+                (
+                    "x-smuggled".to_string(),
+                    "evil\r\ninjected: yes".to_string(),
+                ),
+                ("content-length".to_string(), "99".to_string()),
+            ],
+            body_len: None,
+            body: rx,
+        };
+        tx.try_send(Ok(b"data".to_vec())).expect("one chunk");
+        drop(tx);
+
+        let mut out = Vec::new();
+        flow.write_stream_response(&mut out, "GET", response)
+            .expect("write the response");
+        let text = String::from_utf8(out).expect("response is utf-8");
+
+        assert!(text.contains("x-clean: keep\r\n"), "{text}");
+        assert!(
+            !text.contains("x-smuggled") && !text.contains("injected: yes"),
+            "a header that smuggles CRLF must not reach the guest: {text}"
+        );
+        assert!(
+            !text.contains("content-length"),
+            "the upstream framing header must be re-framed, not carried: {text}"
+        );
+        assert!(text.contains("transfer-encoding: chunked\r\n"), "{text}");
+    }
+
+    /// A response that may not carry a body (HEAD here) still has its body
+    /// channel drained, but no chunk may be written: framing one anyway would
+    /// leave a terminating chunk in the stream that the guest reads as the
+    /// start of its next response. The empty-chunk half of the same `||` is
+    /// pinned by counting terminators on a framed body that carries one.
+    #[test]
+    fn a_bodyless_response_drains_its_channel_but_writes_no_chunks() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build test runtime");
+        let harness = harness(BOUND_HOST, b"");
+        let flow = TerminatedFlow::builder()
+            .service(Arc::clone(&harness.service))
+            .runtime(runtime.handle().clone())
+            .leaves(Arc::new(LeafCache::default()))
+            .authority(BOUND_HOST, 443)
+            .mode(TerminationMode::Tls)
+            .build()
+            .expect("build terminated flow");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let bodyless = ForwardStreamResponse {
+            status: 200,
+            headers: Vec::new(),
+            body_len: None,
+            body: rx,
+        };
+        tx.try_send(Ok(b"must-not-appear".to_vec()))
+            .expect("one chunk");
+        drop(tx);
+
+        let mut out = Vec::new();
+        flow.write_stream_response(&mut out, "HEAD", bodyless)
+            .expect("write the response");
+        let text = String::from_utf8(out).expect("response is utf-8");
+        assert!(
+            !text.contains("must-not-appear"),
+            "a bodyless response must not frame chunks: {text}"
+        );
+        assert!(
+            !text.contains("transfer-encoding: chunked"),
+            "a bodyless response is not chunked: {text}"
+        );
+
+        // Framed body with an empty chunk in the middle: the empty chunk is
+        // skipped, so exactly one terminating chunk is written, at the end.
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let framed = ForwardStreamResponse {
+            status: 200,
+            headers: Vec::new(),
+            body_len: None,
+            body: rx,
+        };
+        tx.try_send(Ok(Vec::new())).expect("empty chunk");
+        tx.try_send(Ok(b"data".to_vec())).expect("data chunk");
+        drop(tx);
+
+        let mut out = Vec::new();
+        flow.write_stream_response(&mut out, "GET", framed)
+            .expect("write the response");
+        let text = String::from_utf8(out).expect("response is utf-8");
+        assert!(
+            !text.contains("must-not-appear"),
+            "chunks from the bodyless half must not leak into this response: {text}"
+        );
+        let terminators = text.matches("0\r\n\r\n").count();
+        assert_eq!(
+            terminators, 1,
+            "an empty chunk is skipped, not written as a mid-body terminator: {text}"
+        );
+        assert!(text.ends_with("0\r\n\r\n"), "{text}");
+    }
+
     #[test]
     fn the_builder_names_the_field_it_is_missing() {
         assert!(matches!(

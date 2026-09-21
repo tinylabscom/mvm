@@ -1936,6 +1936,68 @@ mod tests {
         );
     }
 
+    /// The gap is `mechanism_launcher().err()` — a mutant answering `None`
+    /// unconditionally reads as "this host can bound a VM" everywhere the
+    /// probe is consulted. Stand up exactly the launcher half of the
+    /// mechanism so the bus half is deterministically the gap.
+    #[test]
+    fn mechanism_gap_reports_the_missing_bus_when_the_launcher_exists() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let bin_dir = scratch.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake = bin_dir.join(SYSTEMD_RUN);
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set("PATH", &bin_dir);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+
+        assert_eq!(
+            mechanism_gap(),
+            Some(MechanismGap::NoUserSessionBus),
+            "the launcher is present, so the gap must name the missing bus"
+        );
+    }
+
+    /// The recorded pre-exec name is the fallback signal for "still
+    /// launching", so it must never record the launcher's own name or an
+    /// empty read: either would make the first classification wrong. The
+    /// filter is `!empty && != systemd-run`; loosening it to `||` admits
+    /// both, so both are pinned here.
+    #[test]
+    fn before_spawn_never_records_the_launcher_name_or_an_empty_read() {
+        let proc_root = tempfile::tempdir().expect("proc root");
+        std::fs::create_dir_all(proc_root.path().join("thread-self")).unwrap();
+
+        std::fs::write(proc_root.path().join("thread-self/comm"), "systemd-run\n").unwrap();
+        assert_eq!(
+            LauncherComm::before_spawn(proc_root.path()).pre_exec,
+            None,
+            "the launcher's own name must not be mistaken for the payload's"
+        );
+
+        std::fs::write(proc_root.path().join("thread-self/comm"), "\n").unwrap();
+        assert_eq!(
+            LauncherComm::before_spawn(proc_root.path()).pre_exec,
+            None,
+            "an empty read is not a name"
+        );
+
+        std::fs::write(proc_root.path().join("thread-self/comm"), "mvmctl\n").unwrap();
+        assert_eq!(
+            LauncherComm::before_spawn(proc_root.path())
+                .pre_exec
+                .as_deref(),
+            Some("mvmctl"),
+            "an ordinary payload name is recorded"
+        );
+    }
+
     /// The flake this guards: the first read after `spawn` returns can still
     /// see the name inherited from the spawning thread, and reading that as
     /// "exec'd" skipped the creation deadline altogether.

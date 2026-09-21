@@ -71,6 +71,14 @@ struct VerifiedSavedState {
     frame: VerifiedRestoreFile,
 }
 
+/// Whether preparing this blob fell back to a byte copy because the state
+/// directory's filesystem cannot clone. Named as its own predicate — the
+/// fallback costs a full rewrite of the saved image on every restore, so the
+/// condition is part of the operator-facing contract, not a logging detail.
+fn is_byte_copy_fallback(copy: PrivateCopy) -> bool {
+    copy == PrivateCopy::Copied
+}
+
 impl VerifiedSavedState {
     fn prepare(cfg: &HvfSupervisorConfig, req: &HvfRestoreRequest<'_>) -> Result<Self> {
         let prepare = |path: &Option<PathBuf>, blob: &str| -> Result<VerifiedRestoreFile> {
@@ -80,7 +88,7 @@ impl VerifiedSavedState {
             let expected = recorded_digest(req.content, blob)?;
             let verified = VerifiedRestoreFile::prepare(path, req.state_dir, expected)
                 .with_context(|| format!("verifying saved machine state {blob}"))?;
-            if verified.copy() == PrivateCopy::Copied {
+            if is_byte_copy_fallback(verified.copy()) {
                 tracing::warn!(
                     vm = req.vm_name,
                     blob,
@@ -607,6 +615,16 @@ mod tests {
             cpu_grant: None,
             content: &[],
         }
+    }
+
+    /// The predicate decides whether the operator is warned that every restore
+    /// pays a full byte-for-byte rewrite. Only `Copied` is the fallback;
+    /// inverting or relaxing the comparison silences that warning on the
+    /// expensive path, so the truth table is pinned directly.
+    #[test]
+    fn only_a_byte_copy_fallback_warns_about_the_full_rewrite() {
+        assert!(is_byte_copy_fallback(PrivateCopy::Copied));
+        assert!(!is_byte_copy_fallback(PrivateCopy::Cloned));
     }
 
     #[test]

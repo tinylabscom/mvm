@@ -373,6 +373,11 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field balloon from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "provably equivalent: `balloon: false` sits next to `..Default::default()` in the same expression, and `VmCapabilities` derives `Default` with `bool::default() == false`, so the field-delete mutant is bit-identical to the original — no test, integration or otherwise, can distinguish them."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "delete field host_vsock_proxy from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
       "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
     },
@@ -912,6 +917,11 @@
       "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
     },
     {
+      "file": "crates/mvm-cli/src/update.rs",
+      "mutant": "replace < with <= in is_some_and",
+      "reason": "provably equivalent: the `latest == current` equality short-circuits to `ForceReinstall` before this closure runs, so inside it `latest != current` holds and `latest <= current` coincides exactly with `latest < current`. No input can distinguish the two comparisons."
+    },
+    {
       "file": "crates/mvm-contract/src/plan/types.rs",
       "mutant": "replace | with ^ in CallerCommitment::from_hex",
       "reason": "equivalent mutant — no test can kill it. `caller_commitment_nibble` returns a value in 0..=15, so `high << 4` occupies bits 4-7 and `low` occupies bits 0-3. The bit sets are disjoint, which makes `|` and `^` the same function over every input the expression can receive; checked exhaustively over all 256 nibble pairs, and the whole 1007-test mvm-contract suite passes with the mutation applied. Accepted rather than scoped out, because the surrounding decoder is claim surface and is witnessed by caller_commitment_hex_decodes_to_the_bytes_it_names."
@@ -930,6 +940,11 @@
       "file": "crates/mvm-core/src/plan/synthesis.rs",
       "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
+      "mutant": "replace TerminatedFlow::builder -> TerminatedFlowBuilder with Default::default()",
+      "reason": "provably equivalent: `TerminatedFlow::builder` returns `TerminatedFlowBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` rejects the flow until every field is set."
     },
     {
       "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
