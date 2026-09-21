@@ -622,7 +622,7 @@ fn make_read_only(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::io::SeekFrom;
     #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
