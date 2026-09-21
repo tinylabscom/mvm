@@ -2205,23 +2205,18 @@ mod tests {
     /// The reason every CPU reports itself instead of being read by the boot
     /// CPU at the end.
     ///
-    /// A thread's CPU accounting dies with the thread: `thread_info` on the
-    /// port of an exited thread fails, and the failure is charged as zero. This
-    /// witnesses both halves against the real Mach API — the value the thread
-    /// published survives it, and a read of the same handle after the join does
-    /// not. Deterministic in both directions: the busy loop guarantees a
-    /// non-zero reading, and a joined thread's port is unconditionally invalid.
+    /// The vCPU reads its Mach clock while it still owns a live thread and
+    /// publishes that duration before returning. A retained send right can
+    /// sometimes keep the Mach thread object readable after `join`, so a late
+    /// read is kernel-timing-dependent and is not part of this contract.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_vcpus_time_survives_the_thread_that_earned_it() {
         let published: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
-        let retained: Arc<Mutex<Option<Arc<ThreadCpuHandle>>>> = Arc::new(Mutex::new(None));
         let published_w = Arc::clone(&published);
-        let retained_w = Arc::clone(&retained);
 
         std::thread::spawn(move || {
             let clock = Arc::new(ThreadCpuHandle::for_current_thread().unwrap());
-            *retained_w.lock().unwrap() = Some(Arc::clone(&clock));
             let started = Instant::now();
             let mut x = 0u64;
             while started.elapsed() < Duration::from_millis(50) {
@@ -2238,14 +2233,6 @@ mod tests {
         assert!(
             published > Duration::ZERO,
             "a busy thread's own reading must be non-zero, got {published:?}"
-        );
-
-        let handle = retained.lock().unwrap().clone().expect("handle retained");
-        assert_eq!(
-            handle.consumed(),
-            Duration::ZERO,
-            "reading a joined thread's clock fails and is charged as zero — which \
-             is exactly why the reading is published rather than collected"
         );
     }
 

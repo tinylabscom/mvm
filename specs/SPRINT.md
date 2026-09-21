@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **HVF vCPU accounting test no longer depends on Mach teardown timing — issues #3446 and #3452.**
+      The macOS-only witness now asserts the production contract: a busy vCPU
+      reads and publishes non-zero CPU time before its thread exits, and that
+      published value survives the join. It no longer assumes a retained Mach
+      send right must become unreadable immediately after `join`, which is not
+      guaranteed on macOS 26. The focused native macOS regression passes. See
+      `specs/sprint/delivery/3446-hvf-thread-clock-test.md`.
+
 - [x] **Generic builder machinery — issue #3323.**
       `specs/plans/2026-09-21-generic-builder-machinery.md`. VMM-neutral image
       cache, Stage 0 store, disk transport, runtime-overlay, egress, job ID,
