@@ -435,16 +435,11 @@ function formatAllowHost(host: unknown, port: unknown): string {
 
 function lowerLiveOptions(options: SandboxCreateOptions): string[] {
   const argv: string[] = [];
-  const env = encodeEnvMap(options.env);
-  for (const key of Object.keys(env).sort()) {
-    const value = env[key];
-    if (value?.kind !== "literal" || Object.keys(value).some((field) => field !== "kind" && field !== "value")) {
-      rejectLiveOption("env", "only literal values can be placed on CLI argv");
-    }
-    if (typeof value.value !== "string") {
-      rejectLiveOption("env", "literal values must be strings");
-    }
-    argv.push("--env", `${key}=${value.value}`);
+  if (options.env !== undefined && Object.keys(options.env).length > 0) {
+    rejectLiveOption(
+      "env",
+      "persistent creation cannot deliver environment; declare it in the image or pass env to Sandbox.commands.start",
+    );
   }
   if (options.include && options.include.length > 0) {
     rejectLiveOption("include", "the live CLI has no source-bundle equivalent");
