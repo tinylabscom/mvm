@@ -25,6 +25,9 @@ pub struct HostChannels {
     pub broker_socket: Option<PathBuf>,
     /// Per-VM view-only display frame sink.
     pub display_socket: Option<PathBuf>,
+    /// Per-VM host GPU endpoint UDS (`mvm-gpu-endpoint`), present only on
+    /// GPU launches.
+    pub gpu_socket: Option<PathBuf>,
     /// Additional host-dial listeners, including telemetry and admitted console
     /// data channels. Telemetry is present independently of console grants.
     pub console_data_sockets: Vec<(u32, PathBuf)>,

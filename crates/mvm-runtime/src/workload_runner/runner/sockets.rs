@@ -19,6 +19,9 @@ pub(super) struct StandingSockets {
     pub(super) broker: Option<PathBuf>,
     /// View-only display sink socket, present only when the signed plan grants it.
     pub(super) display: Option<PathBuf>,
+    /// Host GPU endpoint socket, present only when the launch asked for the
+    /// GPU remoting plane (`VmStartConfig.gpu`).
+    pub(super) gpu: Option<PathBuf>,
     pub(super) console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -38,6 +41,7 @@ impl StandingSockets {
             exit: &self.exit,
             broker: self.broker.as_deref(),
             display: self.display.as_deref(),
+            gpu: self.gpu.as_deref(),
             console_data: self.console_data.clone(),
         }
     }
@@ -64,6 +68,11 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
         )
         .then(|| {
             mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::DISPLAY_PORT)
+        }),
+        // The GPU plane is a launch flag, not a plan grant: the launch asked
+        // for it or the channel simply does not exist.
+        gpu: config.gpu.then(|| {
+            mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT)
         }),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),

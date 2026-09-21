@@ -708,6 +708,9 @@ impl VmmDriver for FcDriver {
             snapshot_capability: SnapshotCapability::Unsupported,
             standby_pool: true,
             vsock: true,
+            // GPU remoting rides the multiplexed vsock device; the
+            // guest-dial bridge lands the GPU port on its host UDS.
+            gpu: true,
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,

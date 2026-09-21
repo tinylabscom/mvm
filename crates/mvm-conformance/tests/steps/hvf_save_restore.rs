@@ -94,6 +94,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         substitution_socket: Some(PathBuf::from("/parent/state/substitution.sock")),
         egress_relay_socket: Some(PathBuf::from("/parent/state/egress.sock")),
         broker_socket: Some(PathBuf::from("/parent/state/broker.sock")),
+        gpu_socket: None,
         display_socket: None,
         console_data_sockets: vec![HostDialSocket {
             guest_port: 20001,

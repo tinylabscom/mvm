@@ -1,0 +1,22 @@
+[package]
+name = "mvm-gpu-nvml-shim"
+description = "Guest drop-in libnvidia-ml.so.1 shim: forwards NVML device queries to the mvm host GPU endpoint over vsock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+name = "nvidia_ml"
+crate-type = ["cdylib"]
+
+[dependencies]
+mvm-gpu-shim-core = { path = "../mvm-gpu-shim-core" }
+mvm-contract = { workspace = true }
+libc.workspace = true
+
+[lints]
+workspace = true

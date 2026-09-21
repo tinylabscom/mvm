@@ -96,6 +96,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         // The rootfs-inject helper VM runs no workload, so no host-services broker.
         broker_socket: None,
         display_socket: None,
+        gpu_socket: None,
         // The rootfs-inject helper VM has no egress tunnel.
         console_data_sockets: vec![],
         // The rootfs patcher runs an initramfs to completion; it serves no

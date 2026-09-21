@@ -22,7 +22,7 @@
 /// Helpers compiled from the same tree answer the
 /// [`CONTRACT_PROBE_FLAG`] probe with this value; `mvmctl` refuses to spawn
 /// a helper that answers differently.
-pub const HOST_HELPER_CONTRACT_VERSION: u32 = 3;
+pub const HOST_HELPER_CONTRACT_VERSION: u32 = 4;
 
 /// CLI flag every host helper answers by printing its contract version and
 /// exiting 0. Binaries built before the probe existed exit non-zero instead,
@@ -79,7 +79,7 @@ pub fn parse_probe_version(stdout: &str) -> Option<u32> {
 /// fields without updating this pin (and bumping the contract version)
 /// fails the test suite. Test-only because it exists solely for that test.
 #[cfg(test)]
-pub(crate) const HVF_CONFIG_SHAPE_HASH: u64 = 0x5dc2_d1f6_a9f2_05cf;
+pub(crate) const HVF_CONFIG_SHAPE_HASH: u64 = 0x2346_203b_c075_abb4;
 
 /// 64-bit FNV-1a, implemented inline so the shape pins have no dependency.
 #[cfg(test)]

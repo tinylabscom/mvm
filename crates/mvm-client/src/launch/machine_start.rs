@@ -242,6 +242,7 @@ pub fn start_machine_spec(
         caller_commitment: spec.caller_commitment.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
+        gpu: spec.gpu,
     })?;
     Ok(MachineStart {
         resolved_digest: boot.digest,
@@ -370,6 +371,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            gpu: false,
         }
     }
 

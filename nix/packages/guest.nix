@@ -60,6 +60,20 @@ in
     inherit lib mvmSrc;
   };
 
+  # Guest GPU shims (libcuda.so.1 / libcudart.so / libnvidia-ml.so.1),
+  # one derivation per shim, in glibc and musl-static variants. mvm-images
+  # composes them into the runtime overlay; image composition is not owned
+  # here.
+  mvm-gpu-shims-glibc = import ./mvm-gpu-shims.nix {
+    inherit pkgs lib mvmSrc;
+    static = false;
+  };
+
+  mvm-gpu-shims-musl = import ./mvm-gpu-shims.nix {
+    inherit pkgs lib mvmSrc;
+    static = true;
+  };
+
   # A guest can only dlopen the variant matching its own libc.
   mvm-sdk-cdylib-glibc = sdkCdylib "glibc";
   mvm-sdk-cdylib-musl = sdkCdylib "musl";

@@ -406,6 +406,7 @@ fn main() -> anyhow::Result<()> {
                 trusted_builder_egress: cfg.trusted_builder_egress,
                 broker_socket: cfg.broker_socket.clone(),
                 display_socket: cfg.display_socket.clone(),
+                gpu_socket: cfg.gpu_socket.clone(),
                 console_data_sockets: cfg
                     .console_data_sockets
                     .iter()

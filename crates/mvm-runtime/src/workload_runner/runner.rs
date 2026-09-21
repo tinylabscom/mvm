@@ -343,6 +343,28 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         self.driver.vm_full_control(vm_name)
     }
 
+    /// Backend-shaped guest→host channel for the GPU endpoint. QEMU's
+    /// vhost-vsock lets the endpoint bind the real port directly; every other
+    /// tier proxies the guest dial to a per-VM UDS.
+    fn gpu_endpoint_transport(
+        kind: mvm_core::vm_backend::BackendKind,
+        state_dir: &std::path::Path,
+    ) -> mvm_vmm::host::network_endpoint_spawn::EndpointTransport {
+        use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
+        if kind == mvm_core::vm_backend::BackendKind::Qemu {
+            EndpointTransport::Vsock {
+                port: mvm_agentd::vsock::GPU_PORT,
+            }
+        } else {
+            EndpointTransport::Uds {
+                path: mvm_core::config::vm_vsock_port_socket_at(
+                    state_dir,
+                    mvm_agentd::vsock::GPU_PORT,
+                ),
+            }
+        }
+    }
+
     /// Spawn the optional gating endpoint, compose the spec, and boot. A
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
@@ -391,6 +413,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
         }
 
+        // A GPU launch gets its host endpoint before the spec is assembled:
+        // the channel the guest dials must already have a listener, and the
+        // socket path the endpoint bound is by construction the one
+        // `standing_sockets` resolves for the spec.
+        if inputs.config.gpu {
+            let gpu_transport = Self::gpu_endpoint_transport(self.driver.kind(), &state_dir);
+            mvm_vmm::host::gpu_endpoint_spawn::spawn_gpu_endpoint(
+                &inputs.config.name,
+                &state_dir,
+                gpu_transport,
+            )
+            .context("spawning the GPU endpoint")?;
+        }
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,

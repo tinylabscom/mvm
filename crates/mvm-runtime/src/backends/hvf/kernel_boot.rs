@@ -704,6 +704,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 trusted_builder_egress: channels.trusted_builder_egress,
                 broker_socket: channels.broker_socket,
                 display_socket: channels.display_socket,
+                gpu_socket: channels.gpu_socket,
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
@@ -767,6 +768,9 @@ struct RunInputs {
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
     display_socket: Option<PathBuf>,
+    /// Per-VM host GPU endpoint UDS. When set, `GPU_PORT` relays here — the
+    /// `mvm-gpu-endpoint` process the workload runner spawned for this VM.
+    gpu_socket: Option<PathBuf>,
     /// Additional host-dial listeners, including telemetry and console channels.
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
@@ -1425,6 +1429,7 @@ unsafe fn run(
         trusted_builder_egress,
         broker_socket,
         display_socket,
+        gpu_socket,
         console_data_sockets,
         builder_control_sockets,
         console_log,
@@ -1694,6 +1699,11 @@ unsafe fn run(
                 v.set_display_activity(egress_active.clone());
                 v.set_display_endpoint(display);
             }
+            // The GPU relay shares the activity counter so a guest blocked
+            // on a launch keeps the loop polling.
+            if let Some(gpu) = gpu_socket.as_ref() {
+                v.set_gpu_endpoint(gpu);
+            }
             // Bind the explicitly supplied telemetry, console and builder
             // listeners through the shared host-dial bridge. Telemetry does not
             // enable a console or grant network access. The activity counter
@@ -1814,6 +1824,7 @@ unsafe fn run(
                     network_endpoint: egress_relay.clone().or_else(|| substitution_socket.clone()),
                     broker_endpoint: broker_socket.clone(),
                     display_endpoint: display_socket.clone(),
+                    gpu_endpoint: gpu_socket.clone(),
                     console_sockets: console_data_sockets.clone(),
                 };
                 v.rebind_host_channels(&bindings, Arc::new(GicSpi))

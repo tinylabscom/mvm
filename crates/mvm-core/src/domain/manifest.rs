@@ -161,6 +161,10 @@ pub struct Manifest {
     /// narrows it further with explicit allow-hosts.
     #[serde(default)]
     pub net: bool,
+    /// GPU remoting plane: forward the guest's CUDA/NVML calls to a
+    /// host GPU endpoint over vsock.
+    #[serde(default)]
+    pub gpu: bool,
 
     /// Optional machine-oriented host allow-list. Empty means "no
     /// narrowing beyond `net`".
@@ -360,6 +364,7 @@ impl Manifest {
         Some(ManifestMachineWorkflow {
             image: self.image.clone()?,
             net: self.net,
+            gpu: self.gpu,
             allow_hosts: self.network.allow_hosts.clone(),
             ai: self.network.ai.clone(),
             init: self.dev.init.clone(),
@@ -588,6 +593,7 @@ impl ManifestDev {
 pub struct ManifestMachineWorkflow {
     pub image: String,
     pub net: bool,
+    pub gpu: bool,
     pub allow_hosts: Vec<String>,
     pub ai: Option<AiPolicy>,
     pub init: Vec<String>,

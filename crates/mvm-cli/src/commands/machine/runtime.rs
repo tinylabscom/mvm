@@ -212,7 +212,10 @@ pub(crate) fn banner_suppressed(args: &MachineRunArgs) -> bool {
 pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineStartArgs {
     MachineStartArgs {
         name: name.to_string(),
-        create_flags: MachineStartCreateFlags::default(),
+        create_flags: MachineStartCreateFlags {
+            gpu: args.run.gpu,
+            ..MachineStartCreateFlags::default()
+        },
         receipt: args.run.receipt.clone(),
         json: args.run.json,
         dry_run: false,

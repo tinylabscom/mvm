@@ -63,6 +63,9 @@ pub(in crate::commands) struct Args {
     /// Content-addressed asset binding. See `run --asset`.
     #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
     pub assets: Vec<String>,
+    /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
+    #[arg(long)]
+    pub gpu: bool,
     /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
     /// carried by `--launch-plan`.
     #[arg(short, long)]
@@ -301,6 +304,9 @@ pub(in crate::commands) struct RunArgs {
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
+    /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
+    #[arg(long)]
+    pub gpu: bool,
     /// Select a security profile.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
@@ -473,6 +479,7 @@ impl Default for RunArgs {
             flake_profile: None,
             deployment: None,
             warm_pool_size: 0,
+            gpu: false,
             pty: false,
             vm_name: None,
             runtime_pack: false,
@@ -572,6 +579,7 @@ impl RunArgs {
             healthcheck: self.healthcheck,
             hypervisor: self.hypervisor,
             host_service: self.host_service,
+            gpu: self.gpu,
         }
     }
 }
@@ -1281,6 +1289,7 @@ fn build_exec_request(
         stdin: args.stdin,
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,
+        gpu: args.gpu,
         sdk_host_services,
         declared_libc: args.detected_libc,
         assets: args

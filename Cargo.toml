@@ -15,6 +15,19 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # GPU compute by API remoting: the per-VM host endpoint that serves
+    # guest CUDA/NVML shim RPCs over vsock against the real driver or a
+    # deterministic stub. Host-only (std); the guest side of the wire is
+    # the mvm-gpu-*-shim cdylibs + mvm-contract::protocol::gpu.
+    "crates/mvm-gpu",
+    # Guest GPU shim libraries (drop-in libcuda/libcudart/libnvidia-ml
+    # replacements forwarding over vsock) and their shared client core.
+    # cdylibs linked into the guest runtime overlay; mvm-images composes
+    # them into the overlay image.
+    "crates/mvm-gpu-shim-core",
+    "crates/mvm-gpu-cuda-shim",
+    "crates/mvm-gpu-cudart-shim",
+    "crates/mvm-gpu-nvml-shim",
     # The in-guest host-services C ABI. Its own crate so the object compiled
     # into every guest carries no host-side toolchain: `mvm-sdk` holds the
     # decorator parser (tree-sitter) and the deploy record (blake3), both C,

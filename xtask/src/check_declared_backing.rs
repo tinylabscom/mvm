@@ -145,6 +145,7 @@ const PENDING: &[&str] = &[
     "specs/adrs/036-l3-tun-over-vsock.md",
     "specs/adrs/037-mvmd-only-production-launch.md",
     "specs/adrs/052-userspace-socket-datapath.md",
+    "specs/adrs/053-gpu-compute-over-vsock.md",
     "specs/adrs/038-ipv6-support.md",
     "specs/adrs/039-macos-network-helper.md",
     "specs/adrs/040-node-to-node-transport.md",
