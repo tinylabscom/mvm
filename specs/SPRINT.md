@@ -295,6 +295,16 @@
       refusals. Measured: 118 minutes to 92 and 106, all 313 scenarios passing;
       the 25-minute hypothesis is rejected as stated, and the source-matched SDK
       sidecar build is the cost that remains.
+      W2 (#3367) is complete: `tinylabscom/mvm-images` is public with PR-only
+      `main`, immutable image tags, a reviewed tag-only release environment,
+      read-only workflow defaults, CODEOWNERS, security and dependency policy,
+      and an immutable-action-pin gate. Its documented two-architecture image
+      contract covers roles, cadence, indefinite retention, incident response,
+      and the no-secrets/no-customer-data rule. The build workflow is the
+      no-publish dry run: it can upload CI artifacts but has no signing,
+      deployment, write-token, or OIDC capability, so incomplete or synthetic
+      inputs have no publication path. Live settings and validation are
+      recorded in `specs/sprint/delivery/3367-mvm-images-governance.md`.
       W3 (#3365) slice W3a: `mvm_core::image_set` defines the signed image-set
       manifest and lock with pure completeness, architecture, boot-protocol,
       capability, protocol-range, supersession and lock checks; the updater and
