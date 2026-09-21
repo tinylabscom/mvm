@@ -102,6 +102,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_hostname();
     ensure_runtime_dirs();
     provision_pty_devices();
+    provision_cgroup2();
     provision_workload_identity();
     mount_mediated_tools();
     provision_verb_grant();
@@ -143,6 +144,38 @@ fn provision_pty_devices() {
     }
     for failure in crate::guest_mount::link_dev_fd_family() {
         eprintln!("mvm-guest-init: /dev symlink not created: {failure}");
+    }
+}
+
+/// Mount the unified cgroup hierarchy and delegate a subtree to the workload.
+///
+/// Best-effort, deliberately: the sealed workload kernel compiles cgroups
+/// out, and a guest that never asked for cgroups must boot identically. An
+/// orchestrator guest (rootless Kubernetes) cannot function without the
+/// delegation, but the failure it would see is its own to report — refusing
+/// every other boot over a filesystem the workload may never read is the
+/// wrong default.
+fn provision_cgroup2() {
+    match crate::guest_mount::mount_and_delegate_cgroup2(
+        crate::guest_mount::WORKLOAD_UID,
+        crate::guest_mount::WORKLOAD_GID,
+    ) {
+        Ok(crate::guest_mount::Cgroup2Status::MountedAndDelegated) => {
+            eprintln!(
+                "mvm-guest-init: mounted cgroup2 at {}; delegated {} to uid {}",
+                crate::guest_mount::CGROUP2_MOUNT_POINT,
+                crate::guest_mount::CGROUP_DELEGATION_DIR,
+                crate::guest_mount::WORKLOAD_UID,
+            );
+        }
+        Ok(crate::guest_mount::Cgroup2Status::KernelLacksCgroups) => {
+            eprintln!(
+                "mvm-guest-init: kernel has no cgroup2; skipping cgroup mount                  (orchestrator guests need a cgroup-capable kernel)"
+            );
+        }
+        Err(error) => {
+            eprintln!("mvm-guest-init: cgroup2 provisioning failed (continuing): {error}");
+        }
     }
 }
 

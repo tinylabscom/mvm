@@ -36,7 +36,12 @@
       delegation, which nothing mounts today. W2's example + recipe is in
       `examples/kubernetes/`; the cgroup2 mount and W4 (builder-VM E2E, BDD,
       docs, parity-claim amendment) are not started. Template scaffold PR:
-      tinylabscom/mvm-templates#2.
+      tinylabscom/mvm-templates#2. The cgroup2 gap is now implemented,
+      best-effort and unconditional: `mvm-agentd` mounts cgroup2 during
+      provisioning and delegates `/sys/fs/cgroup/mvm-workload` to the
+      workload uid, and mkGuest's `/init` does the same on the template path
+      (delegating to the entrypoint uid) — on a kernel without cgroups the
+      mount skips quietly, so sealed guests boot identically.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.

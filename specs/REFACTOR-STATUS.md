@@ -16,9 +16,9 @@ Last updated: 2026-09-20
 - [ ] **Kubernetes in a single microVM** —
       `specs/plans/2026-09-20-kubernetes-in-microvm.md` (#3554; template
       tinylabscom/mvm-templates#1; kernel audit tinylabscom/mvm-images#9).
-      W1 device allow-list enabler implemented on
-      `feat/kubernetes-in-microvm`; example, template integration, E2E, and
-      docs pending.
+      W1 device allow-list enabler and W2 cgroup2 mount + workload-uid
+      delegation implemented on `feat/kubernetes-in-microvm`; template
+      integration, E2E, and docs pending.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds

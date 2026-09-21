@@ -520,6 +520,21 @@ let
     /bin/busybox mount -t sysfs    sysfs    /sys
     /bin/busybox mount -t devtmpfs devtmpfs /dev
 
+    # Stage 1b — unified cgroup hierarchy, best-effort. The sealed workload
+    # kernel compiles cgroups out (the mount fails ENODEV); an orchestrator
+    # guest (rootless Kubernetes) boots a cgroup-capable kernel instead and
+    # gets a delegated subtree owned by the entrypoint uid, which is the
+    # cgroup v2 delegation contract without a systemd to issue it.
+    /bin/busybox mkdir -p /sys/fs/cgroup 2>/dev/null || true
+    if /bin/busybox mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null; then
+      for mvm_ctrl in cpu memory pids cpuset io; do
+        /bin/busybox echo "+$mvm_ctrl" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+      done
+      /bin/busybox mkdir -p /sys/fs/cgroup/mvm-workload 2>/dev/null || true
+      /bin/busybox chown -R ${toString entrypointUid}:${toString entrypointUid} /sys/fs/cgroup/mvm-workload 2>/dev/null || true
+      echo "mvm-init: mounted cgroup2; delegated /sys/fs/cgroup/mvm-workload to uid ${toString entrypointUid}"
+    fi
+
     # devpts is required for openpty(3): the guest agent allocates a PTY per
     # interactive `dev` console session (mvm-agentd::console). devtmpfs gives
     # /dev/ptmx the node but not the /dev/pts slave fs, so without this

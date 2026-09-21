@@ -115,8 +115,12 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
 - [x] `examples/kubernetes/`: `mvm.toml` + README recipe — data disk at
       `/data`, `kubectl` via `mvmctl machine exec` (dev tier), sizing
       guidance (4 vCPU / 4 GiB starting point)
-- [ ] cgroup2 mount + workload-uid delegation in the guest boot path
-      (activation-time mount; opt-in for guests that declare it)
+- [x] cgroup2 mount + workload-uid delegation in the guest boot path —
+      best-effort and unconditional (the sealed workload kernel compiles
+      cgroups out; ENODEV skips quietly): `mvm-agentd` mounts cgroup2 during
+      `provision_guest_environment` and delegates
+      `/sys/fs/cgroup/mvm-workload` to the workload uid; mkGuest's `/init`
+      does the same for the template path (delegating to the entrypoint uid)
 
 ### W3 — guest template + kernel variant (not in this repo)
 
