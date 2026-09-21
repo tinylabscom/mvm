@@ -10,6 +10,29 @@
 
 ## In progress
 
+- [ ] **Kubernetes in a single microVM.**
+      `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
+      #3554, guest template in tinylabscom/mvm-templates#1, workload-kernel
+      audit in tinylabscom/mvm-images#9. Goal: one microVM boots a complete
+      single-node k3s cluster, so a whole cluster is a disposable, fork-able,
+      digest-pinned artifact. W1 is the mvm runtime enabler: `/dev/kmsg`
+      (char 1:11) — a hard kubelet requirement — is allow-listed in the OCI
+      device-node unpack list (`mvm-fs/src/oci/unpack/device_nodes.rs`),
+      materialized `0o644` so a world-writable kernel log cannot be used to
+      forge kernel log lines. `AllowedDeviceNode` now carries a per-node mode
+      consumed by `mknodat`. Classification and Linux-materialization tests
+      cover the accept, wrong-pair, wrong-type, and mode paths. The design
+      runs k3s `--rootless` under the uid-901 workload identity (no
+      relaxation of the no-root-workload gate) with cluster state on a `:rw`
+      disk volume at `/data` (`--data-dir=/data/k3s`), which the existing
+      mount-allow roots already admit. The guest has no NIC or TAP/TUN —
+      outbound cluster traffic (image pulls, pod egress) must ride the vsock
+      egress plane via the guest loopback proxy, and host ingress exists
+      only at pre-declared signed ports. W2 (example + recipe under
+      `examples/kubernetes/`), W3 (template-registry k3s guest + image-train
+      kernel audit), and W4 (builder-VM E2E, BDD, docs, parity-claim
+      amendment) are not started.
+
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.
       The first reviewable slice clears all five pairs from
