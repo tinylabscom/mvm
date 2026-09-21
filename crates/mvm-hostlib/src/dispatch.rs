@@ -24,13 +24,24 @@ pub const MACHINE_LOGS: &str = "machine.logs";
 /// Reports what the backend can do. Request: empty. Reply: a
 /// `BackendCapabilityReport`.
 pub const BACKEND_CAPABILITIES: &str = "backend.capabilities";
+/// Stops one machine. Request: `{"id"}`. Reply: `{}`. Idempotent.
+pub const MACHINE_STOP: &str = "machine.stop";
+/// Removes one machine, stopping it first when needed. Request: `{"id"}`.
+/// Reply: `{}`. Idempotent.
+pub const MACHINE_RM: &str = "machine.rm";
+/// Runs one non-interactive command in a machine. Request: `{"id",
+/// "command": [argv...]}`. Reply: an `ExecResult`.
+pub const MACHINE_EXEC: &str = "machine.exec";
 
 /// Every method this library answers.
-pub const METHODS: [&str; 4] = [
+pub const METHODS: [&str; 7] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
     BACKEND_CAPABILITIES,
+    MACHINE_STOP,
+    MACHINE_RM,
+    MACHINE_EXEC,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -60,9 +71,45 @@ pub(crate) struct LogsRequest {
 
 /// A request that carries nothing.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Empty {}
+
+/// A request naming one machine.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StopRequest {
+    id: String,
+}
+
+/// A request naming one machine for removal.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoveRequest {
+    id: String,
+}
+
+/// A `machine.exec` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecRequest {
+    id: String,
+    command: Vec<String>,
+}
+
+/// A `machine.exec` reply. Stream bytes cross as base64, because JSON
+/// strings are not byte strings — the same convention as `machine.logs`
+/// and every `guest.*` payload.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize)]
+pub(crate) struct ExecReply {
+    exit_code: i32,
+    stdout_b64: String,
+    stderr_b64: String,
+}
 
 /// Console bytes, which need not be UTF-8.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -102,6 +149,30 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
         BACKEND_CAPABILITIES => {
             let _: Empty = parse_or_default_empty(request)?;
             Outcome::ok(&client.backend_capabilities().await?)
+        }
+        MACHINE_STOP => {
+            let target: StopRequest = parse(request)?;
+            client.stop_machine(&MachineId(target.id)).await?;
+            Outcome::ok(&Empty {})
+        }
+        MACHINE_RM => {
+            let target: RemoveRequest = parse(request)?;
+            client.remove_machine(&MachineId(target.id)).await?;
+            Outcome::ok(&Empty {})
+        }
+        MACHINE_EXEC => {
+            let target: ExecRequest = parse(request)?;
+            if target.command.is_empty() {
+                return Err(Outcome::invalid_input("command must not be empty"));
+            }
+            let result = client
+                .exec_machine(&MachineId(target.id), target.command)
+                .await?;
+            Outcome::ok(&ExecReply {
+                exit_code: result.exit_code,
+                stdout_b64: B64.encode(result.stdout),
+                stderr_b64: B64.encode(result.stderr),
+            })
         }
         other => return Err(Outcome::invalid_input(&format!("unknown method `{other}`"))),
     })
@@ -244,6 +315,53 @@ mod tests {
         let client = MockBackend::default();
         assert!(!is_known("machine.shell"));
         let outcome = run(dispatch(&client, "machine.shell", b"{}"));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn machine_stop_stops_the_named_machine() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_STOP, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome), serde_json::json!({}));
+        let outcome = run(dispatch(&client, MACHINE_INSPECT, &request));
+        assert_eq!(body(&outcome)["status"], "stopped");
+        // An absent machine is the mock's `NotFound`; the real backend's
+        // contract is idempotent, and both reach the binding as a typed error.
+        let outcome = run(dispatch(&client, MACHINE_STOP, br#"{"id":"ghost"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    #[test]
+    fn machine_rm_removes_the_named_machine() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_RM, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let listed: Vec<MachineState> =
+            serde_json::from_slice(&run(dispatch(&client, MACHINE_LIST, b"")).body).unwrap();
+        assert!(listed.is_empty(), "{listed:?}");
+    }
+
+    #[test]
+    fn machine_exec_returns_the_command_result() {
+        let (client, state) = with_machine("alpha");
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "command": ["true"] }))
+                .unwrap();
+        let outcome = run(dispatch(&client, MACHINE_EXEC, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome)["exit_code"], 0);
+        assert_eq!(body(&outcome)["stdout_b64"], "");
+    }
+
+    #[test]
+    fn machine_exec_refuses_an_empty_command() {
+        let (client, state) = with_machine("alpha");
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "command": [] })).unwrap();
+        let outcome = run(dispatch(&client, MACHINE_EXEC, &request));
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
     }
 

@@ -6,6 +6,10 @@
 */
 
 /**
+ * Which way `guest.cp` moves the file.
+ */
+export type CopyDirection = ("host_to_guest" | "guest_to_host")
+/**
  * Type of a filesystem entry returned by `FsList` / `FsStat`.
  */
 export type FsEntryKind = ("file" | "dir" | "symlink" | "other")
@@ -78,6 +82,7 @@ export type MachineListReply = MachineState1[]
 
 export interface HostAbi {
 backend_capabilities: BackendCapabilities
+guest_cp: GuestCp
 guest_fs_list: GuestFsList
 guest_fs_mkdir: GuestFsMkdir
 guest_fs_read: GuestFsRead
@@ -91,9 +96,12 @@ guest_proc_signal: GuestProcSignal
 guest_proc_start: GuestProcStart
 guest_proc_stdin: GuestProcStdin
 guest_proc_wait: GuestProcWait
+machine_exec: MachineExec
 machine_inspect: MachineInspect
 machine_list: MachineList
 machine_logs: MachineLogs
+machine_rm: MachineRm
+machine_stop: MachineStop
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -110,6 +118,22 @@ export interface BackendCapabilitiesReply {
  */
 export interface Empty {
 
+}
+export interface GuestCp {
+reply: Empty1
+request: CopyRequest
+}
+export interface Empty1 {
+
+}
+/**
+ * A `guest.cp` request.
+ */
+export interface CopyRequest {
+direction: CopyDirection
+guest_path: string
+host_path: string
+id: string
 }
 export interface GuestFsList {
 reply: ListReply
@@ -141,10 +165,10 @@ id: string
 path: string
 }
 export interface GuestFsMkdir {
-reply: Empty1
+reply: Empty2
 request: MkdirRequest
 }
-export interface Empty1 {
+export interface Empty2 {
 
 }
 export interface MkdirRequest {
@@ -180,10 +204,10 @@ path: string
 recursive?: boolean
 }
 export interface GuestFsRename {
-reply: Empty2
+reply: Empty3
 request: RenameRequest
 }
-export interface Empty2 {
+export interface Empty3 {
 
 }
 export interface RenameRequest {
@@ -235,10 +259,10 @@ mode?: (number | null)
 path: string
 }
 export interface GuestProcKill {
-reply: Empty3
+reply: Empty4
 request: ProcessRequest
 }
-export interface Empty3 {
+export interface Empty4 {
 
 }
 export interface ProcessRequest {
@@ -268,10 +292,10 @@ export interface MachineRequest {
 id: string
 }
 export interface GuestProcSignal {
-reply: Empty4
+reply: Empty5
 request: SignalRequest
 }
-export interface Empty4 {
+export interface Empty5 {
 
 }
 export interface SignalRequest {
@@ -323,6 +347,25 @@ export interface WaitRequest {
 id: string
 timeout_secs?: (number | null)
 token: string
+}
+export interface MachineExec {
+reply: ExecReply
+request: ExecRequest
+}
+/**
+ * A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.
+ */
+export interface ExecReply {
+exit_code: number
+stderr_b64: string
+stdout_b64: string
+}
+/**
+ * A `machine.exec` request.
+ */
+export interface ExecRequest {
+command: string[]
+id: string
 }
 export interface MachineInspect {
 reply: MachineState
@@ -497,4 +540,30 @@ data_b64: string
 export interface LogsRequest {
 id: string
 tail_lines?: (number | null)
+}
+export interface MachineRm {
+reply: Empty6
+request: RemoveRequest1
+}
+export interface Empty6 {
+
+}
+/**
+ * A request naming one machine for removal.
+ */
+export interface RemoveRequest1 {
+id: string
+}
+export interface MachineStop {
+reply: Empty7
+request: StopRequest
+}
+export interface Empty7 {
+
+}
+/**
+ * A request naming one machine.
+ */
+export interface StopRequest {
+id: string
 }

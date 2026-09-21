@@ -64,7 +64,10 @@ use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_I
 pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// The ABI minor version. A minor bump only adds methods, so a binding built
 /// for an older minor keeps working.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 0;
+/// The ABI minor version. A minor bump only adds methods, so a binding built
+/// for an older minor keeps working. 1 added `machine.stop`, `machine.rm`,
+/// `machine.exec`, and `guest.cp`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 1;
 
 /// Set once a binding has confirmed it was built for this ABI.
 static NEGOTIATED: AtomicBool = AtomicBool::new(false);

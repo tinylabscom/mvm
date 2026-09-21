@@ -495,7 +495,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         allow_host: vec![],
         peer: Vec::new(),
         ai: None,
-        ports: vec![],
+        ports: request.ports.clone(),
         cpus: request.cpus,
         memory: format!("{}M", request.memory_mib),
         mem_initial: None,

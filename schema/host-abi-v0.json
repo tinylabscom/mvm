@@ -77,6 +77,25 @@
         }
       ]
     },
+    "CopyDirection": {
+      "description": "Which way `guest.cp` moves the file.",
+      "oneOf": [
+        {
+          "description": "Read the host file, write it into the guest.",
+          "enum": [
+            "host_to_guest"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read the guest file, write it to the host.",
+          "enum": [
+            "guest_to_host"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "FsEntry": {
       "additionalProperties": false,
       "description": "One entry in an `FsList` response.",
@@ -116,6 +135,36 @@
         "other"
       ],
       "type": "string"
+    },
+    "GuestCpReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestCpRequest": {
+      "additionalProperties": false,
+      "description": "A `guest.cp` request.",
+      "properties": {
+        "direction": {
+          "$ref": "#/definitions/CopyDirection"
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "host_path": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "direction",
+        "guest_path",
+        "host_path",
+        "id"
+      ],
+      "title": "CopyRequest",
+      "type": "object"
     },
     "GuestFsListReply": {
       "properties": {
@@ -743,6 +792,49 @@
         }
       ]
     },
+    "MachineExecReply": {
+      "description": "A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.",
+      "properties": {
+        "exit_code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "exit_code",
+        "stderr_b64",
+        "stdout_b64"
+      ],
+      "title": "ExecReply",
+      "type": "object"
+    },
+    "MachineExecRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.exec` request.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "id"
+      ],
+      "title": "ExecRequest",
+      "type": "object"
+    },
     "MachineId": {
       "type": "string"
     },
@@ -1082,6 +1174,24 @@
       "title": "LogsRequest",
       "type": "object"
     },
+    "MachineRmReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineRmRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine for removal.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RemoveRequest",
+      "type": "object"
+    },
     "MachineStatus": {
       "oneOf": [
         {
@@ -1101,6 +1211,24 @@
           "type": "string"
         }
       ]
+    },
+    "MachineStopReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineStopRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "StopRequest",
+      "type": "object"
     },
     "PortMapping": {
       "additionalProperties": false,
@@ -1242,6 +1370,23 @@
         "reply"
       ],
       "title": "BackendCapabilities",
+      "type": "object"
+    },
+    "guest_cp": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestCpReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestCpRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestCp",
       "type": "object"
     },
     "guest_fs_list": {
@@ -1465,6 +1610,23 @@
       "title": "GuestProcWait",
       "type": "object"
     },
+    "machine_exec": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineExecReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineExecRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineExec",
+      "type": "object"
+    },
     "machine_inspect": {
       "additionalProperties": false,
       "properties": {
@@ -1515,13 +1677,51 @@
       ],
       "title": "MachineLogs",
       "type": "object"
+    },
+    "machine_rm": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineRmReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineRmRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineRm",
+      "type": "object"
+    },
+    "machine_stop": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineStopReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineStopRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineStop",
+      "type": "object"
     }
   },
   "required": [
     "backend_capabilities",
+    "machine_exec",
     "machine_inspect",
     "machine_list",
     "machine_logs",
+    "machine_rm",
+    "machine_stop",
+    "guest_cp",
     "guest_fs_list",
     "guest_fs_mkdir",
     "guest_fs_read",

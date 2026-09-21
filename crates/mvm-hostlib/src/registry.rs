@@ -17,15 +17,16 @@ use mvm_core::client::dto::{MachineFilter, MachineState};
 use serde::Serialize;
 
 use crate::dispatch::{
-    BACKEND_CAPABILITIES, Empty as DispatchEmpty, LogsReply, LogsRequest, MACHINE_INSPECT,
-    MACHINE_LIST, MACHINE_LOGS, MachineRef,
+    BACKEND_CAPABILITIES, Empty as DispatchEmpty, ExecReply, ExecRequest, LogsReply, LogsRequest,
+    MACHINE_EXEC, MACHINE_INSPECT, MACHINE_LIST, MACHINE_LOGS, MACHINE_RM, MACHINE_STOP,
+    MachineRef, RemoveRequest as DispatchRemoveRequest, StopRequest,
 };
 use crate::guest::{
-    AcceptedReply, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME, FS_STAT, FS_WRITE,
-    ListReply, MachineRequest, MkdirRequest, PROC_KILL, PROC_LIST, PROC_SIGNAL, PROC_START,
-    PROC_STDIN, PROC_WAIT, PathRequest, ProcessRequest, ReadRequest, RemoveRequest, RemovedReply,
-    RenameRequest, SignalRequest, StartRequest, StartedReply, StatRequest, StdinRequest, WaitReply,
-    WaitRequest, WriteRequest, WrittenReply,
+    AcceptedReply, CP, CopyRequest, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME,
+    FS_STAT, FS_WRITE, ListReply, MachineRequest, MkdirRequest, PROC_KILL, PROC_LIST, PROC_SIGNAL,
+    PROC_START, PROC_STDIN, PROC_WAIT, PathRequest, ProcessRequest, ReadRequest, RemoveRequest,
+    RemovedReply, RenameRequest, SignalRequest, StartRequest, StartedReply, StatRequest,
+    StdinRequest, WaitReply, WaitRequest, WriteRequest, WrittenReply,
 };
 
 /// How a method is classified for admission policy. `DevOnly` methods are
@@ -128,6 +129,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: any_json,
     },
     MethodDef {
+        name: MACHINE_EXEC,
+        key: "machine_exec",
+        summary: "Runs one non-interactive command in a machine.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<ExecRequest>,
+        reply: schema_of::<ExecReply>,
+    },
+    MethodDef {
         name: MACHINE_INSPECT,
         key: "machine_inspect",
         summary: "Inspects one machine.",
@@ -150,6 +159,30 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<LogsRequest>,
         reply: schema_of::<LogsReply>,
+    },
+    MethodDef {
+        name: MACHINE_RM,
+        key: "machine_rm",
+        summary: "Removes a machine, stopping it first when needed.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<DispatchRemoveRequest>,
+        reply: schema_of::<crate::guest::Empty>,
+    },
+    MethodDef {
+        name: MACHINE_STOP,
+        key: "machine_stop",
+        summary: "Stops a machine. Idempotent.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<StopRequest>,
+        reply: schema_of::<crate::guest::Empty>,
+    },
+    MethodDef {
+        name: CP,
+        key: "guest_cp",
+        summary: "Copies a file between the host and the guest.",
+        classification: Classification::DevOnly,
+        request: schema_of::<CopyRequest>,
+        reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
         name: FS_LIST,

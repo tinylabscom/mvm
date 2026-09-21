@@ -1,12 +1,18 @@
 {
   "abi_major": 1,
-  "abi_minor": 0,
+  "abi_minor": 1,
   "methods": [
     {
       "classification": "prod_safe",
       "key": "backend_capabilities",
       "name": "backend.capabilities",
       "summary": "Reports what the backend can do."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_exec",
+      "name": "machine.exec",
+      "summary": "Runs one non-interactive command in a machine."
     },
     {
       "classification": "prod_safe",
@@ -25,6 +31,24 @@
       "key": "machine_logs",
       "name": "machine.logs",
       "summary": "Returns captured console output, base64-encoded."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_rm",
+      "name": "machine.rm",
+      "summary": "Removes a machine, stopping it first when needed."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_stop",
+      "name": "machine.stop",
+      "summary": "Stops a machine. Idempotent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_cp",
+      "name": "guest.cp",
+      "summary": "Copies a file between the host and the guest."
     },
     {
       "classification": "dev_only",

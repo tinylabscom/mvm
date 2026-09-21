@@ -58,11 +58,35 @@ BackpressureReason = Union[
 ]
 
 
+class CopyDirection1(Enum):
+    host_to_guest = 'host_to_guest'
+
+
+class CopyDirection2(Enum):
+    guest_to_host = 'guest_to_host'
+
+
+CopyDirection = Union[CopyDirection1, CopyDirection2]
+
+
 class FsEntryKind(Enum):
     file = 'file'
     dir = 'dir'
     symlink = 'symlink'
     other = 'other'
+
+
+@dataclass
+class GuestCpReply:
+    pass
+
+
+@dataclass
+class GuestCpRequest:
+    direction: CopyDirection
+    guest_path: str
+    host_path: str
+    id: str
 
 
 @dataclass
@@ -275,6 +299,19 @@ InstanceReadiness = Union[
 ]
 
 
+@dataclass
+class MachineExecReply:
+    exit_code: int
+    stderr_b64: str
+    stdout_b64: str
+
+
+@dataclass
+class MachineExecRequest:
+    command: List[str]
+    id: str
+
+
 MachineId = str
 
 
@@ -294,6 +331,16 @@ class MachineLogsRequest:
     tail_lines: Optional[int] = None
 
 
+@dataclass
+class MachineRmReply:
+    pass
+
+
+@dataclass
+class MachineRmRequest:
+    id: str
+
+
 class MachineStatus1(Enum):
     starting = 'starting'
     running = 'running'
@@ -306,6 +353,16 @@ class MachineStatus2(Enum):
 
 
 MachineStatus = Union[MachineStatus1, MachineStatus2]
+
+
+@dataclass
+class MachineStopReply:
+    pass
+
+
+@dataclass
+class MachineStopRequest:
+    id: str
 
 
 @dataclass
@@ -374,6 +431,12 @@ class BackendCapabilities:
 
 
 @dataclass
+class GuestCp:
+    reply: GuestCpReply
+    request: GuestCpRequest
+
+
+@dataclass
 class GuestFsMkdir:
     reply: GuestFsMkdirReply
     request: GuestFsMkdirRequest
@@ -434,9 +497,27 @@ class GuestProcStdin:
 
 
 @dataclass
+class MachineExec:
+    reply: MachineExecReply
+    request: MachineExecRequest
+
+
+@dataclass
 class MachineLogs:
     reply: MachineLogsReply
     request: MachineLogsRequest
+
+
+@dataclass
+class MachineRm:
+    reply: MachineRmReply
+    request: MachineRmRequest
+
+
+@dataclass
+class MachineStop:
+    reply: MachineStopReply
+    request: MachineStopRequest
 
 
 @dataclass
@@ -555,6 +636,7 @@ class MachineList:
 @dataclass
 class HostAbi:
     backend_capabilities: BackendCapabilities
+    guest_cp: GuestCp
     guest_fs_list: GuestFsList
     guest_fs_mkdir: GuestFsMkdir
     guest_fs_read: GuestFsRead
@@ -568,6 +650,9 @@ class HostAbi:
     guest_proc_start: GuestProcStart
     guest_proc_stdin: GuestProcStdin
     guest_proc_wait: GuestProcWait
+    machine_exec: MachineExec
     machine_inspect: MachineInspect
     machine_list: MachineList
     machine_logs: MachineLogs
+    machine_rm: MachineRm
+    machine_stop: MachineStop

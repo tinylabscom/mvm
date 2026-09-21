@@ -74,6 +74,9 @@ pub struct LaunchRequest {
     pub(crate) backend: Option<String>,
     pub(crate) profile: String,
     pub(crate) ttl_seconds: Option<u64>,
+    /// Opaque-TCP ingress as `host:guest` port specs, the written form the
+    /// persisted spec carries and the start path lowers to ingress mappings.
+    pub(crate) ports: Vec<String>,
     pub(crate) volumes: Vec<LaunchVolumeSpec>,
     pub(crate) secret_refs: Vec<MachineSecretRef>,
     pub(crate) force: bool,
@@ -118,6 +121,7 @@ impl LaunchRequest {
             backend: None,
             profile: "standard".to_string(),
             ttl_seconds: None,
+            ports: Vec::new(),
             network: LaunchNetworkPolicy::DenyAll,
             volumes: Vec::new(),
             secret_refs: Vec::new(),
@@ -153,6 +157,9 @@ pub struct LaunchRequestBuilder {
     backend: Option<String>,
     profile: String,
     ttl_seconds: Option<u64>,
+    /// Opaque-TCP ingress as `host:guest` port specs; see
+    /// [`LaunchRequest::ports`].
+    ports: Vec<String>,
     network: LaunchNetworkPolicy,
     volumes: Vec<LaunchVolumeSpec>,
     secret_refs: Vec<MachineSecretRef>,
@@ -225,6 +232,14 @@ impl LaunchRequestBuilder {
     #[must_use]
     pub fn ttl_seconds(mut self, ttl_seconds: u64) -> Self {
         self.ttl_seconds = Some(ttl_seconds);
+        self
+    }
+
+    /// Add one opaque-TCP ingress mapping, written `host:guest`. Refused at
+    /// `build` when the spec does not parse, so a malformed mapping fails
+    /// before anything is persisted or booted.
+    pub fn port(mut self, spec: impl Into<String>) -> Self {
+        self.ports.push(spec.into());
         self
     }
 
@@ -366,6 +381,11 @@ impl LaunchRequestBuilder {
         if self.ttl_seconds == Some(0) {
             return Err(invalid("ttl_seconds must be > 0 when set".into()));
         }
+        for port in &self.ports {
+            if let Err(reason) = crate::launch::persistent::parse_port_spec(port) {
+                return Err(invalid(format!("invalid port spec {port:?}: {reason}")));
+            }
+        }
         for volume in &self.volumes {
             if volume.volume.trim().is_empty() {
                 return Err(invalid("volume name must not be empty".into()));
@@ -427,6 +447,7 @@ impl LaunchRequestBuilder {
             backend: self.backend,
             profile: self.profile,
             ttl_seconds: self.ttl_seconds,
+            ports: self.ports,
             volumes: self.volumes,
             secret_refs: self.secret_refs,
             force: self.force,

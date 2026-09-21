@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 0;
+export const ABI_MINOR = 1;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -21,6 +21,9 @@ export interface HostAbiMethod {
 /** Reports what the backend can do. */
 export const BACKEND_CAPABILITIES = "backend.capabilities";
 
+/** Runs one non-interactive command in a machine. */
+export const MACHINE_EXEC = "machine.exec";
+
 /** Inspects one machine. */
 export const MACHINE_INSPECT = "machine.inspect";
 
@@ -29,6 +32,15 @@ export const MACHINE_LIST = "machine.list";
 
 /** Returns captured console output, base64-encoded. */
 export const MACHINE_LOGS = "machine.logs";
+
+/** Removes a machine, stopping it first when needed. */
+export const MACHINE_RM = "machine.rm";
+
+/** Stops a machine. Idempotent. */
+export const MACHINE_STOP = "machine.stop";
+
+/** Copies a file between the host and the guest. */
+export const GUEST_CP = "guest.cp";
 
 /** Lists a directory in the guest. */
 export const GUEST_FS_LIST = "guest.fs.list";
@@ -71,9 +83,13 @@ export const GUEST_PROC_WAIT = "guest.proc.wait";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
+  "machine.exec": { key: "machine_exec", classification: "prod_safe", summary: "Runs one non-interactive command in a machine." },
   "machine.inspect": { key: "machine_inspect", classification: "prod_safe", summary: "Inspects one machine." },
   "machine.list": { key: "machine_list", classification: "prod_safe", summary: "Lists machines, optionally filtered." },
   "machine.logs": { key: "machine_logs", classification: "prod_safe", summary: "Returns captured console output, base64-encoded." },
+  "machine.rm": { key: "machine_rm", classification: "prod_safe", summary: "Removes a machine, stopping it first when needed." },
+  "machine.stop": { key: "machine_stop", classification: "prod_safe", summary: "Stops a machine. Idempotent." },
+  "guest.cp": { key: "guest_cp", classification: "dev_only", summary: "Copies a file between the host and the guest." },
   "guest.fs.list": { key: "guest_fs_list", classification: "dev_only", summary: "Lists a directory in the guest." },
   "guest.fs.mkdir": { key: "guest_fs_mkdir", classification: "dev_only", summary: "Creates a directory in the guest." },
   "guest.fs.read": { key: "guest_fs_read", classification: "dev_only", summary: "Reads a file from the guest, base64-encoded." },

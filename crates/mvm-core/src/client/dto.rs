@@ -383,6 +383,7 @@ pub struct LogOpts {
 /// The result of a non-interactive `exec_machine`: the process's exit code and
 /// captured output. (Interactive shells are not a facade operation — they need
 /// a duplex PTY the request/response trait can't model, and stay a CLI concern.)
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecResult {

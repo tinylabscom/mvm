@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 0
+ABI_MINOR: Final = 1
 
 
 class Classification(str, Enum):
@@ -34,6 +34,10 @@ class Method:
 BACKEND_CAPABILITIES: Final = "backend.capabilities"
 
 
+#: Runs one non-interactive command in a machine.
+MACHINE_EXEC: Final = "machine.exec"
+
+
 #: Inspects one machine.
 MACHINE_INSPECT: Final = "machine.inspect"
 
@@ -44,6 +48,18 @@ MACHINE_LIST: Final = "machine.list"
 
 #: Returns captured console output, base64-encoded.
 MACHINE_LOGS: Final = "machine.logs"
+
+
+#: Removes a machine, stopping it first when needed.
+MACHINE_RM: Final = "machine.rm"
+
+
+#: Stops a machine. Idempotent.
+MACHINE_STOP: Final = "machine.stop"
+
+
+#: Copies a file between the host and the guest.
+GUEST_CP: Final = "guest.cp"
 
 
 #: Lists a directory in the guest.
@@ -100,9 +116,13 @@ GUEST_PROC_WAIT: Final = "guest.proc.wait"
 
 METHODS: dict[str, Method] = {
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
+    "machine.exec": Method(key="machine_exec", classification=Classification.PROD_SAFE, summary="Runs one non-interactive command in a machine."),
     "machine.inspect": Method(key="machine_inspect", classification=Classification.PROD_SAFE, summary="Inspects one machine."),
     "machine.list": Method(key="machine_list", classification=Classification.PROD_SAFE, summary="Lists machines, optionally filtered."),
     "machine.logs": Method(key="machine_logs", classification=Classification.PROD_SAFE, summary="Returns captured console output, base64-encoded."),
+    "machine.rm": Method(key="machine_rm", classification=Classification.PROD_SAFE, summary="Removes a machine, stopping it first when needed."),
+    "machine.stop": Method(key="machine_stop", classification=Classification.PROD_SAFE, summary="Stops a machine. Idempotent."),
+    "guest.cp": Method(key="guest_cp", classification=Classification.DEV_ONLY, summary="Copies a file between the host and the guest."),
     "guest.fs.list": Method(key="guest_fs_list", classification=Classification.DEV_ONLY, summary="Lists a directory in the guest."),
     "guest.fs.mkdir": Method(key="guest_fs_mkdir", classification=Classification.DEV_ONLY, summary="Creates a directory in the guest."),
     "guest.fs.read": Method(key="guest_fs_read", classification=Classification.DEV_ONLY, summary="Reads a file from the guest, base64-encoded."),
@@ -120,9 +140,13 @@ METHODS: dict[str, Method] = {
 
 __all__ = [
     "BACKEND_CAPABILITIES",
+    "MACHINE_EXEC",
     "MACHINE_INSPECT",
     "MACHINE_LIST",
     "MACHINE_LOGS",
+    "MACHINE_RM",
+    "MACHINE_STOP",
+    "GUEST_CP",
     "GUEST_FS_LIST",
     "GUEST_FS_MKDIR",
     "GUEST_FS_READ",
