@@ -829,7 +829,6 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
                 cpus_override: cpus,
                 memory_override: memory,
                 json,
-                bypass_experimental_guard: false,
                 // No CLI surface declares bindings yet, so a fork declares
                 // none — exactly the prior behaviour.
                 declared_secrets,

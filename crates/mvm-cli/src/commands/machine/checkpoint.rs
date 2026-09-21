@@ -133,9 +133,9 @@ pub(in crate::commands) struct ForkVmFullMachineInput {
 ///
 /// Validates the checkpoint, generates a fresh child identity, admits a new
 /// claim-8 plan, restores the saved machine state through the backend fork
-/// path, and delivers the post-restore generation token. The user-facing verb
-/// implicitly opts into the experimental Firecracker vm_full fork path, so
-/// the lower-level env-var guard is bypassed here.
+/// path, and delivers the post-restore generation token. The parent may be
+/// running: the Firecracker arm remaps the child's device paths into its own
+/// state dir and no guest NIC exists to collide with the parent.
 pub(in crate::commands) fn fork_vm_full_machine(input: ForkVmFullMachineInput) -> Result<()> {
     let checkpoint = crate::commands::vm::checkpoint::validated_checkpoint_id(&input.checkpoint_id)
         .with_context(|| format!("invalid checkpoint id {:?}", input.checkpoint_id))?;
@@ -170,7 +170,6 @@ pub(in crate::commands) fn fork_vm_full_machine(input: ForkVmFullMachineInput) -
             cpus_override: None,
             memory_override: None,
             json: input.json,
-            bypass_experimental_guard: true,
             declared_secrets: &input.declared_secrets,
             allow_secret_drop: input.allow_secret_drop,
         },

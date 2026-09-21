@@ -684,12 +684,25 @@ impl VmmDriver for FcDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        // The runner-backed, NIC-less profile.
-        // (which advertise a routable TAP). The converged Firecracker driver
-        // carries no guest NIC and routes egress solely over the vsock proxy,
-        // matching libkrun and hvf. Pause/resume and balloon stay true (both are
-        // wired through this driver's boot + running-VM handle); live-memory
-        // snapshots are dropped, since the runner path is cold-boot only.
+        // The runner-backed, NIC-less profile — unlike the retired raw
+        // Firecracker configuration, which advertised a routable TAP. The
+        // converged driver carries no guest NIC and routes egress solely over
+        // the vsock proxy, matching libkrun and hvf. Pause/resume and balloon
+        // stay true (both are wired through this driver's boot + running-VM
+        // handle).
+        //
+        // Live-memory snapshots are wired: `machine fork` of a running machine
+        // pauses the parent, captures the full memory + vmstate triple, and
+        // resumes it, and a forked child restores that state into a fresh VMM
+        // whose device paths were remapped into the child's own state dir. A
+        // guest has no NIC, so a forked child has no host network identity to
+        // collide with its parent — the vsock UDS the snapshot records is the
+        // per-child resource, remapped per child before its VMM starts. The
+        // no-NIC device-model guard still runs between a child's load and
+        // resume, so a NIC-carrying snapshot can never execute. The wired
+        // restore surface is the fork path (`vm checkpoint fork`, `machine
+        // fork`/`restore`); the trait-level `warm_start` seam stays on the
+        // trait default, same posture as the HVF runner's save-restore tier.
         //
         // `standby_pool` is the saved-state/preloaded-child path, not arbitrary
         // named-VM snapshot support. Refill captures a clean factory parent,
@@ -705,7 +718,7 @@ impl VmmDriver for FcDriver {
             max_vcpus: Some(MAX_VCPUS),
             pause_resume: true,
             snapshots: false,
-            snapshot_capability: SnapshotCapability::Unsupported,
+            snapshot_capability: SnapshotCapability::LiveMemory,
             standby_pool: true,
             vsock: true,
             // GPU remoting rides the multiplexed vsock device; the
@@ -1514,7 +1527,11 @@ mod tests {
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
         assert_eq!(caps.max_vcpus, Some(MAX_VCPUS));
-        assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
+        // The live-memory tier the fork path wires: `machine fork` of a
+        // running parent captures and resumes it, and a forked child restores
+        // into a fresh VMM with its device paths remapped into its own state
+        // dir. No guest NIC exists, so nothing collides with the parent.
+        assert_eq!(d.snapshot_capability(), SnapshotCapability::LiveMemory);
         // The driver reports the claim-bearing tier itself now, rather than
         // asking a legacy shell for it.
         assert_eq!(d.security_profile().tier, "Tier 1");

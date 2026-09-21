@@ -244,7 +244,9 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        assert_eq!(r.backends.get("firecracker"), Some(&"unsupported"));
+        // Firecracker forks a running parent at the live-memory tier; the
+        // vsock-only guest has no NIC to collide with its parent on.
+        assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"unsupported"));
         assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
         // HVF saves and reloads machine state; apple-container boots through
@@ -262,7 +264,7 @@ mod tests {
 
         let mut expected_backends = vec![
             ("apple-container".to_string(), "save-restore"),
-            ("firecracker".to_string(), "unsupported"),
+            ("firecracker".to_string(), "live-memory"),
             ("hvf".to_string(), "save-restore"),
             ("libkrun".to_string(), "unsupported"),
             ("qemu".to_string(), "unsupported"),
