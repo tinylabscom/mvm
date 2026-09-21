@@ -28,10 +28,15 @@
       mount-allow roots already admit. The guest has no NIC or TAP/TUN —
       outbound cluster traffic (image pulls, pod egress) must ride the vsock
       egress plane via the guest loopback proxy, and host ingress exists
-      only at pre-declared signed ports. W2 (example + recipe under
-      `examples/kubernetes/`), W3 (template-registry k3s guest + image-train
-      kernel audit), and W4 (builder-VM E2E, BDD, docs, parity-claim
-      amendment) are not started.
+      only at pre-declared signed ports. Kernel audit verdict: the sealed
+      workload kernel cannot run Kubernetes (`CGROUPS`, `NAMESPACES`,
+      `NETFILTER` are required-disables), so the image train adds a
+      `workload-k8s` variant rather than relaxing the sealed kernel; and the
+      guest boot path must grow a cgroup2 mount with workload-uid
+      delegation, which nothing mounts today. W2's example + recipe is in
+      `examples/kubernetes/`; the cgroup2 mount and W4 (builder-VM E2E, BDD,
+      docs, parity-claim amendment) are not started. Template scaffold PR:
+      tinylabscom/mvm-templates#2.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.

@@ -3,9 +3,9 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Tracking:** tinylabscom/mvm#3554 (runtime), tinylabscom/mvm-templates#1
-(guest template), tinylabscom/mvm-images#9 (workload-kernel audit). Branch:
-`feat/kubernetes-in-microvm`.
+**Tracking:** tinylabscom/mvm#3554 (runtime), tinylabscom/mvm-templates#2
+(guest template PR), tinylabscom/mvm-images#9 (workload-kernel variant).
+Branch: `feat/kubernetes-in-microvm`.
 
 **Status: W1 (mvm runtime enabler) IMPLEMENTED, awaiting review; W2-W4
 NOT STARTED.**
@@ -76,6 +76,24 @@ satisfies differently:
   proves infeasible inside the guest, that relaxation is a separate,
   security-reviewed change — not part of this plan.
 
+## Runtime gaps found during design
+
+Two gaps surfaced while designing against the real code, both now tracked:
+
+1. **No cgroup2 mount.** Nothing in the guest boot path mounts
+   `/sys/fs/cgroup` today (mkGuest's busybox `/init` and the guest agent's
+   mount set both omit it) — sealed OCI workloads never needed it. Rootless
+   k3s needs cgroup2 mounted, and delegation to the workload uid needs
+   subtree-ownership setup mvm does not do yet. mvm work item: mount cgroup2
+   during activation and delegate to the workload uid for guests that
+   declare it.
+2. **The sealed workload kernel cannot run Kubernetes.** `CGROUPS`,
+   `NAMESPACES`, and `NETFILTER` are required-disables in the workload
+   kernel, and `BRIDGE` is disabled in shared base — all deliberate cuts for
+   the sealed single-workload posture. The image train's audit recommends a
+   second `workload-k8s` kernel variant rather than relaxing the sealed
+   kernel; the template pins it via mkGuest's `kernel` argument.
+
 ## Workstreams
 
 ### W1 — mvm runtime enabler: /dev/kmsg in the OCI device allow-list
@@ -94,24 +112,30 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
 
 ### W2 — example + recipe
 
-- [ ] `examples/kubernetes/`: `mvm.toml` + README recipe — image reference
-      (published by the mvm-images workstream), data disk at `/data`,
-      `kubectl` via `mvmctl machine exec` (dev tier), sizing guidance
-      (4 vCPU / 4 GiB starting point)
+- [x] `examples/kubernetes/`: `mvm.toml` + README recipe — data disk at
+      `/data`, `kubectl` via `mvmctl machine exec` (dev tier), sizing
+      guidance (4 vCPU / 4 GiB starting point)
+- [ ] cgroup2 mount + workload-uid delegation in the guest boot path
+      (activation-time mount; opt-in for guests that declare it)
 
-### W3 — guest template + kernel audit (not in this repo)
+### W3 — guest template + kernel variant (not in this repo)
 
-The template registry owns `templates/kubernetes/`: a `mkGuest` flake with
-the k3s rootless entrypoint service and its health check
-(tinylabscom/mvm-templates#1). The image train owns the workload-kernel
-config audit (cgroup v2 delegation, netfilter/iptables, bridge/veth, user
-namespaces, `/dev/kmsg` reachability) — tinylabscom/mvm-images#9.
+- [x] Template registry `templates/kubernetes/`: a `mkGuest` flake with the
+      k3s rootless entrypoint service and its health check —
+      tinylabscom/mvm-templates#2 (experimental scaffold; bring-up validated
+      by W4)
+- [ ] `workload-k8s` kernel variant: `CGROUPS` + controllers, `NAMESPACES`
+      + per-ns symbols, `NETFILTER` + conntrack/iptables, `BRIDGE`/`VETH`/
+      `VXLAN` — tinylabscom/mvm-images#9. The sealed workload kernel's
+      required-disables are deliberate and stay; this is a second variant,
+      pinned by the template through mkGuest's `kernel` argument.
 
 ### W4 — E2E validation, BDD, docs
 
-- [ ] Builder-VM E2E: boot the image, wait for node Ready, pull an image
-      through the egress proxy, run a pod with admitted egress, exercise a
-      declared ingress port, teardown; BDD scenario under `features/suites/`
+- [ ] Builder-VM E2E: boot the image (on the `workload-k8s` kernel), wait
+      for node Ready, pull an image through the egress proxy, run a pod with
+      admitted egress, exercise a declared ingress port, teardown; BDD
+      scenario under `features/suites/`
 - [ ] Docs guide page (`public/src/content/docs/guides/`)
 - [ ] Amend the "Kubernetes compatibility" deliberately-not-claimed entry in
       `public/src/content/docs/security/sandbox-parity-status.md`: the claim
