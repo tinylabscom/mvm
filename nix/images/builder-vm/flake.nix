@@ -517,15 +517,6 @@
       mkWorkloadKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
         in (import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
-      # In-guest orchestrator variant (Kubernetes guests): the configfile
-      # target is what CI resolves to run the olddefconfig enable/disable
-      # guards over the delta; the full kernel builds where it is consumed.
-      mkWorkloadK8sKernel = system:
-        let pkgs = import nixpkgs { inherit system; };
-        in import (workspaceRoot + "/nix/images/kernel/workload-k8s.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
-      mkWorkloadK8sKernelConfigfile = system:
-        let pkgs = import nixpkgs { inherit system; };
-        in (import (workspaceRoot + "/nix/images/kernel/workload-k8s.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
       mkWorkloadKernelSizeoptConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
         in (import (workspaceRoot + "/nix/images/kernel/workload.nix") {
@@ -551,8 +542,6 @@
         builder-kernel = mkBuilderKernel system;
         workload-kernel = mkWorkloadKernel system;
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
-        workload-k8s-kernel = mkWorkloadK8sKernel system;
-        workload-k8s-kernel-configfile = mkWorkloadK8sKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
         # SDK sidecar images for Stage 0 builds. The builder VM needs the

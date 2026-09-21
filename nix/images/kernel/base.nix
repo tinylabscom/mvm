@@ -681,29 +681,7 @@ let
       extraEnables ? [ ],
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
-      # Symbols to re-enable that base.nix disables (audited cuts, and —
-      # deliberately — requiredDisables too). An exemption is how a second,
-      # non-sealed kernel posture keeps a subsystem the sealed workload
-      # posture cuts. The caller's own `requiredExtraDisables` stay hard —
-      # exemptions never weaken them.
-      #
-      # Every exemption MUST also appear in `extraEnables`: defconfig
-      # defaults are arch-dependent (arm64's multi-platform defconfig
-      # enables subsystems x86_64's leaves =m, which MODULES=n then drops),
-      # so an exemption without an explicit enable request silently rides
-      # on whatever the arch's defconfig happened to pick. Enforced at
-      # eval time below, before the olddefconfig enable guard re-checks it
-      # against the resolved config.
-      disableExemptions ? [ ],
     }:
-    let
-      # Exemptions that name no enable request would be arch-dependent
-      # no-ops (see above) — refuse them at eval time, naming the orphans.
-      orphans = pkgs.lib.subtractLists extraEnables disableExemptions;
-    in
-    if orphans != [ ] then
-      throw "mkKernel: disableExemptions without a matching extraEnables entry (defconfig defaults are arch-dependent, so an exemption alone cannot request a symbol): ${pkgs.lib.concatStringsSep " " orphans}"
-    else
     pkgs.buildPackages.runCommandCC "mvm-kernel-config"
       {
         nativeBuildInputs = with pkgs.buildPackages; [
@@ -716,16 +694,10 @@ let
           openssl
         ];
         enableList = pkgs.lib.concatStringsSep " " (baseEnables ++ extraEnables);
-        # Exemptions apply to base's audited cuts only; the caller's own
-        # required disables stay hard.
         disableList = pkgs.lib.concatStringsSep " " (
-          pkgs.lib.subtractLists disableExemptions (baseDisables ++ extraDisables)
-          ++ requiredExtraDisables
+          baseDisables ++ extraDisables ++ requiredExtraDisables
         );
-        requiredDisableList = pkgs.lib.concatStringsSep " " (
-          pkgs.lib.subtractLists disableExemptions requiredDisables
-          ++ requiredExtraDisables
-        );
+        requiredDisableList = pkgs.lib.concatStringsSep " " (requiredDisables ++ requiredExtraDisables);
       }
       ''
         set -euo pipefail
@@ -835,14 +807,13 @@ let
       extraEnables ? [ ],
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
-      disableExemptions ? [ ],
     }:
     (pkgs.linuxManualConfig {
       src = kernelSourceTree;
       version = kernelVersion;
       modDirVersion = kernelVersion;
       configfile = mkConfigfile {
-        inherit extraEnables extraDisables requiredExtraDisables disableExemptions;
+        inherit extraEnables extraDisables requiredExtraDisables;
       };
       allowImportFromDerivation = false;
     }).overrideAttrs

@@ -10,16 +10,6 @@
 
 ## In progress
 
-- [x] **Persistent machine environment refusal — issue #3470.**
-      `machine run --env` now fails before source resolution or builds whenever
-      a persistence trigger is present, instead of accepting environment that
-      `MachineSpec` cannot carry. Python and TypeScript live
-      `Sandbox.create(env=...)` fail before invoking the CLI and name image or
-      `Sandbox.commands.start` delivery; record mode continues to encode the
-      workload declaration. BDD, CLI unit/integration coverage, and both SDK
-      suites own the refusal. See
-      `specs/sprint/delivery/3470-persistent-environment-refusal.md`.
-
 - [x] **HVF vCPU accounting test no longer depends on Mach teardown timing — issues #3446 and #3452.**
       The macOS-only witness now asserts the production contract: a busy vCPU
       reads and publishes non-zero CPU time before its thread exits, and that

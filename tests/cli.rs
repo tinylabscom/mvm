@@ -1133,31 +1133,6 @@ fn machine_run_output_is_advertised_and_refused_before_boot() {
 }
 
 #[test]
-fn machine_run_refuses_persistent_environment_before_boot() {
-    let tmp = tempfile::tempdir().unwrap();
-    #[allow(deprecated)]
-    let out = Command::cargo_bin("mvmctl")
-        .unwrap()
-        .env("HOME", tmp.path())
-        .env("MVM_HOME", tmp.path().join("state"))
-        .env("MVM_NO_AUTO_DEV", "1")
-        .args(["machine", "run", "--image", "alpine", "-d", "--env", "K=V"])
-        .output()
-        .unwrap();
-
-    assert!(!out.status.success(), "persistent environment must not run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("`machine run --env` is supported only for transient runs"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("declare environment in the image or workload manifest"),
-        "stderr must name the supported delivery path: {stderr}"
-    );
-}
-
-#[test]
 fn image_boot_verify_help_lists_every_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["image", "boot", "verify", "--help"])

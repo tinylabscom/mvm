@@ -357,18 +357,6 @@ impl MachineRunArgs {
             || !self.port.is_empty()
     }
 
-    /// Refuse environment overrides that the persistent machine spec cannot
-    /// carry. This must run before source resolution or a build so the caller
-    /// never pays for work that cannot preserve the requested environment.
-    fn refuse_unsupported_persistent_env(&self) -> Result<()> {
-        if self.persistent() && !self.run.env.is_empty() {
-            bail!(
-                "`machine run --env` is supported only for transient runs; for a persistent machine, declare environment in the image or workload manifest"
-            );
-        }
-        Ok(())
-    }
-
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     /// `image_supplies_entrypoint` is the caller's answer to "does the thing

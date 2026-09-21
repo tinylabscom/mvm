@@ -134,7 +134,7 @@ Four things are committed to make this convenient:
 
 - **`scripts/dev-env.sh`** exports all three vars (resolved relative to the worktree root, so it works from any subdir). Source it once at the top of a shell: `source scripts/dev-env.sh`.
 - **`bin/dev`** is a wrapper that sources `scripts/dev-env.sh` and execs `cargo run --quiet -- "$@"`. Use it for any one-off `mvmctl` call: `bin/dev build`, `bin/dev exec ...`.
-- **`just dev-test` / `just dev-clippy` / `just dev-check`** invoke cargo with the env sourced.
+- Users can source `scripts/dev-env.sh` once at the top of a shell, then run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, etc.
 - **`.envrc.example`** sources `scripts/dev-env.sh` for direnv users (`cp .envrc.example .envrc && direnv allow`).
 
 One-time per clone: run `just install-hooks` from the main checkout to point `core.hooksPath` at `.githooks/`. The committed pre-commit hook (`.githooks/pre-commit`) is intentionally light — it formats Rust code and checks Nix formatting, nothing else — so it doesn't block worktree workflows. Heavy gates (workspace clippy, full tests, supply-chain checks) run in CI.
@@ -164,7 +164,7 @@ cp .envrc.example .envrc
 direnv allow
 ```
 
-This is a convenience for users who already have direnv installed; the `bin/dev` / `just dev-*` wrappers work without it.
+This is a convenience for users who already have direnv installed; the `bin/dev` / `MVM_HOME=...` pattern works without it.
 
 ### Cleaning up
 

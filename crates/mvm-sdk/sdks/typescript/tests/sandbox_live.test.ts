@@ -349,7 +349,7 @@ describe("Sandbox.create (live mode)", () => {
     expect(readFixtureLog()).toEqual([]);
   });
 
-  it("lowers an image, allowlist, and boot command", () => {
+  it("lowers an image, literal env, allowlist, and boot command", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
     });
@@ -358,6 +358,7 @@ describe("Sandbox.create (live mode)", () => {
     mvm.Sandbox.create(
       { image: mvm.OBSCURA_IMAGE },
       {
+        env: { MODE: "safe" },
         network: {
           mode: "none",
           egress: { allowlist: [{ host: "example.com", port: 443 }] },
@@ -367,11 +368,12 @@ describe("Sandbox.create (live mode)", () => {
     );
     const call = readFixtureLog()[0];
     expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
+    expect(call).toContain("--env MODE=safe");
     expect(call).toContain("--allow-host example.com:443");
     expect(call).toContain("-- /obscura serve");
   });
 
-  it("rejects env and unrepresentable options before boot", () => {
+  it("rejects secrets and unrepresentable options before boot", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
     });
@@ -379,9 +381,9 @@ describe("Sandbox.create (live mode)", () => {
     process.env.MVM_CLI_BIN = script;
     expect(() =>
       mvm.Sandbox.create("minimal", {
-        env: { MODE: "safe" },
+        env: { TOKEN: mvm.secret("token", { type: "bearer", hosts: ["example.com"] }) },
       }),
-    ).toThrow(/Sandbox\.commands\.start/);
+    ).toThrow(/only literal/);
     expect(readFixtureLog()).toEqual([]);
     expect(() =>
       mvm.Sandbox.create("minimal", {

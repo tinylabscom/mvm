@@ -1366,8 +1366,6 @@ jobs:
             staging/kernel-${{ matrix.arch }}.json
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
-            staging/workload-k8s-config-${{ matrix.arch }}
-            staging/kernel-k8s-metrics-${{ matrix.arch }}.json
 
   guest-image-boot:
     name: Guest image boots (tree-built)

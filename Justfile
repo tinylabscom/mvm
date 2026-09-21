@@ -41,8 +41,10 @@ toolchain-embed:
 # Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
 #
 # The native per-VM helpers are separate bin targets. The optional libkrun
-# integration has its own explicit recipe and is never part of `just build`.
-build: build-supervisors
+# integration has its own explicit recipe `build-libkrun-supervisor`.
+#
+# Build all crates (debug).
+build:
     ./scripts/cargo-fast.sh build --workspace
 
 # `--all-targets` is narrower than it sounds: it skips any target behind
@@ -109,36 +111,6 @@ check-embedded TARGET="riscv32imac-unknown-none-elf":
 run *ARGS:
     ./scripts/cargo-fast.sh run -- {{ ARGS }}
 
-# Run mvmctl with the dev env set (worktree-local MVM_HOME).
-dev *ARGS:
-    sh ./scripts/dev {{ ARGS }}
-
-# Run cargo with the dev env set (worktree-local MVM_HOME /
-
-# CARGO_TARGET_DIR / CARGO_HOME).
-dev-cargo *ARGS:
-    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-fast.sh {{ ARGS }}'
-
-# Run cargo test --workspace with the dev env.
-dev-test:
-    just dev-cargo test --workspace
-
-# Run clippy with the dev env.
-dev-clippy:
-    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-stable.sh clippy --workspace -- -D warnings'
-
-# Build the host-side eBPF object for vsock egress telemetry.
-
-# Requires nightly Rust and `cargo install bpf-linker`.
-build-ebpf:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd crates/mvm-hostd/ebpf
-    PATH="${HOME}/.cargo/bin:${PATH}" cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
-
-# Run cargo check with the dev env.
-dev-check:
-    just dev-cargo check --workspace
 
 # Verify that the nightly fast path stays pinned and does not leak into the
 
@@ -148,44 +120,38 @@ check-fast-cargo:
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
-
 # on the hot path. Pass through extra args like `--force` or `--source download`.
 runtime-overlay *ARGS:
     just dev build runtime-overlay build {{ ARGS }}
 
-# Prebuild or refresh the version-matched read-only runtime overlay once so
-# later required-overlay boots can reuse it without rebuilding guest binaries
-
-# on the hot path. Kept as a compatibility alias for `just runtime-overlay`.
-runtime-overlay-build *ARGS:
-    just runtime-overlay {{ ARGS }}
-
 # Build the publishable SDK artifacts without building the full Rust workspace.
-sdk-build: sdk-build-python sdk-build-typescript
+# Usage: just sdk-build [lang]
+#   lang: sdk name (python, typescript) or "all" (default)
+sdk-build LANG="all":
+    just sdk-build-{{ LANG }}
 
-# Build the Python SDK wheel + sdist into crates/mvm-sdk/sdks/python/dist/.
+# Build a single language SDK.
 sdk-build-python:
     uv build crates/mvm-sdk/sdks/python --out-dir crates/mvm-sdk/sdks/python/dist
 
-# Install TypeScript SDK dependencies locally. Run once after a fresh clone or
-
-# whenever package-lock.json changes.
-sdk-install-typescript:
-    npm --prefix crates/mvm-sdk/sdks/typescript ci
-
-# Build the TypeScript SDK into crates/mvm-sdk/sdks/typescript/dist/.
 sdk-build-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript run build
 
+
+# Install TypeScript SDK dependencies locally. Run once after a fresh clone or
+# whenever package-lock.json changes.
+sdk-install-typescript:
+    npm --prefix crates/mvm-sdk/sdks/typescript ci
 # Run the language SDKs' own unit suites. Neither is a cargo target, so
 # `cargo nextest run --workspace` does not touch them and a Rust-only gate
 # leaves the hand-written half of each SDK — the subprocess wrappers, the
-
 # argv builders, the refusal paths — unproven.
-sdk-test: sdk-test-python sdk-test-typescript
+# Usage: just sdk-test [lang]
+#   lang: sdk name (python, typescript) or "all" (default)
+sdk-test LANG="all":
+    just sdk-test-{{ LANG }}
 
 # `--extra schema` installs pydantic; without it the eight
-
 # `derive_schema` tests fail on an ImportError rather than being skipped.
 sdk-test-python:
     uv run --directory crates/mvm-sdk/sdks/python --group dev --extra schema pytest -q
@@ -206,81 +172,84 @@ sdk-test-typescript: sdk-install-typescript
 #
 # `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
 # a failing suite exits 0, which is the exact silent-green this whole change
-
+# ── Testing (nextest) ────────────────────────────────────────────────────
+# Run all tests, keeping the full output at target/nextest/last-run.log.
+# An intermittent failure in a suite this size is only diagnosable from the
+# panic and captured streams nextest prints beside it, and those survive
+# nowhere by default — a dev who hits one has terminal scrollback at best,
+# and anyone piping this through `grep` has already discarded the part that
+# mattered. `tee` costs nothing and leaves the evidence under target/, which
+# is gitignored and never uploaded, so this says nothing about the CI-artifact
+# question that .config/nextest.toml settles deliberately.
+# `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
+# a failing suite exits 0, which is the exact silent-green this whole change
 # is trying to remove.
-test:
+
+# Usage: just test [FILTER]
+#   FILTER: optional test filter expression (e.g., "my_test" or "test(my_*)")
+
+# Run all tests with nextest
+test FILTER="":
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/require-nextest.sh
     mkdir -p target/nextest
+    if [ -n "{{ FILTER }}" ]; then
+    ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
+    else
     ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
+    fi
 
-# Doctests. nextest does NOT run doctests, so `just test` skips them;
-
-# this is the companion that keeps doc-fence coverage gated.
-test-doc:
-    ./scripts/cargo-fast.sh test --workspace --doc
-
-# Run tests with sccache also caching the workspace crates.
-#
-# The wrapper itself is not what this recipe adds. `RUSTC_WRAPPER = "sccache"`
-# belongs in a contributor's own `~/.cargo/config.toml` (a fact about a host
-# that runs many worktrees, not about the project), and there it already caches
-# every third-party dependency, because cargo compiles dependencies
-# non-incrementally regardless of this setting.
-#
-# What `CARGO_INCREMENTAL=0` adds is the *workspace* crates, which are the ones
-# incremental compilation otherwise keeps out of the cache. That is a good
-# trade for a full-suite run — incremental buys nothing when everything is
-# being compiled anyway — and a bad one for the inner loop, which is why it is
-# scoped to this recipe instead of being set globally.
-#
-# A content cache, not a build lock, so parallel sessions don't serialize on it.
-# Needs `cargo install sccache`.
-#
-# Do not expect this to dedupe across worktrees. `basedirs` in the host config
-# is necessary for that but is NOT sufficient: sccache's key covers the
-# rustc command line, which carries the target directory's full path, and every
-# worktree has its own. Measured on this host with `basedirs` correctly set,
-# building one crate three ways:
-#
-#   cold, target dir A                       2 hits / 100 misses
-#   target dir A wiped and rebuilt          70 hits /  79 misses
-#   identical source, target dir B           0 hits / 152 misses
-#
-# So it pays for re-populating one checkout after `cargo clean`, and pays
-# nothing for the second checkout — which is why the machine-wide Rust hit rate
-# sits near 2.5% across ~35k compiles rather than the 84% a same-path
-# experiment suggests. Cargo already caches deps within a target dir, so the
-
-# remaining value here is narrow.
-test-cached:
+# Run tests with sccache caching the workspace crates.
+# Usage: just test-cached [FILTER]
+#   FILTER: optional test filter expression
+test-cached FILTER="":
+    #!/usr/bin/env bash
+    set -euo pipefail
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
-    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace
+    if [ -n "{{ FILTER }}" ]; then
+    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
+    else
+    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
+    fi
     @sccache --show-stats
 
-# Test a single crate
+# Run tests matching a filter expression (alias for test with filter)
+# Usage: just test-filter FILTER
+# Run a single crate's tests
+# Usage: just test-crate CRATE
+#   CRATE: crate name to test
 test-crate CRATE:
     ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
-# Run tests matching a filter expression
-test-filter FILTER:
-    ./scripts/require-nextest.sh
-    ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})'
-
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
-
 # only (no captured test output — see .config/nextest.toml).
-test-ci:
+# Usage: just test-ci [FILTER]
+#   FILTER: optional test filter expression
+test-ci FILTER="":
     ./scripts/require-nextest.sh
+    if [ -n "{{ FILTER }}" ]; then
+    ./scripts/cargo-fast.sh nextest run --workspace --profile ci -E 'test({{ FILTER }})'
+    else
     ./scripts/cargo-fast.sh nextest run --workspace --profile ci
+    fi
 
 # Run tests with cargo test (fallback if nextest not installed)
-test-cargo:
+# Usage: just test-cargo [FILTER]
+#   FILTER: optional test filter expression
+test-cargo FILTER="":
+    if [ -n "{{ FILTER }}" ]; then
+    ./scripts/cargo-fast.sh test --workspace -E 'test({{ FILTER }})'
+    else
     ./scripts/cargo-fast.sh test --workspace
+    fi
 
+# Doctests. nextest does NOT run doctests, so `just test` skips them;
+# this is the companion that keeps doc-fence coverage gated.
+test-doc:
+    ./scripts/cargo-fast.sh test --workspace --doc
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
 # features/suites/ against it. Scenarios tagged `@wip` describe
@@ -562,14 +531,14 @@ recall +TERMS:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -d .agent-memory/notes ]; then
-        echo "no .agent-memory/notes yet — notes are local and gitignored; \`just remember <slug>\` starts one"
-        exit 0
+    echo "no .agent-memory/notes yet — notes are local and gitignored; \`just remember <slug>\` starts one"
+    exit 0
     fi
     pattern=$(printf '%s' "{{ TERMS }}" | tr ' ' '|')
     rg -il --sort path -e "$pattern" .agent-memory/notes | while read -r path; do
-        printf '%s\n    %s\n' \
-            "$(basename "$path" .md)" \
-            "$(sed -n 's/^title: //p' "$path")"
+    printf '%s\n    %s\n' \
+    "$(basename "$path" .md)" \
+    "$(sed -n 's/^title: //p' "$path")"
     done
 
 # List every note, newest first.
@@ -579,14 +548,14 @@ notes:
     shopt -s nullglob
     set -- .agent-memory/notes/*.md
     if [ "$#" -eq 0 ]; then
-        echo "no .agent-memory/notes yet — notes are local and gitignored; \`just remember <slug>\` starts one"
-        exit 0
+    echo "no .agent-memory/notes yet — notes are local and gitignored; \`just remember <slug>\` starts one"
+    exit 0
     fi
     for path in "$@"; do
-        printf '%s  %s — %s\n' \
-            "$(sed -n 's/^date: //p' "$path")" \
-            "$(basename "$path" .md)" \
-            "$(sed -n 's/^title: //p' "$path")"
+    printf '%s  %s — %s\n' \
+    "$(sed -n 's/^date: //p' "$path")" \
+    "$(basename "$path" .md)" \
+    "$(sed -n 's/^title: //p' "$path")"
     done | sort -r
 
 # Scaffold a note. Fill in the body; it stays in your checkout, gitignored.
@@ -626,9 +595,28 @@ clippy:
 clippy-bdd:
     ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
-# Format check + clippy + model gates (workspace + the feature-gated BDD target)
-lint: fmt-check clippy clippy-bdd model check-fast-cargo
-
+# Lint all: fmt-check + clippy + clippy-bdd + model gates
+# Usage: just lint [subset]
+#   subset: subset of checks (fmt, clippy, clippy-bdd, model)
+lint SUBSET="all":
+    case "{{ SUBSET }}" in
+    fmt) just fmt-check ;;
+    clippy) just clippy ;;
+    clippy-bdd) just clippy-bdd ;;
+    model) just model ;;
+    all)
+    just fmt-check
+    just clippy
+    just clippy-bdd
+    just model
+    just check-fast-cargo
+    ;;
+    *)
+    echo "Unknown lint subset: {{ SUBSET }}" >&2
+    echo "Valid subsets: fmt, clippy, clippy-bdd, model, all" >&2
+    exit 1
+    ;;
+    esac
 # ── Claim mutation testing ───────────────────────────────────────────────
 # Verify the committed mutation surface still matches the claims ledger.
 
@@ -661,39 +649,36 @@ mutation-repin:
 # Full CI gate: lint + test + doctests + hermetic BDD + model gates.
 ci: lint test test-doc bdd
 
-# Alias for ci
-preflight: ci
-
 # ── Release ──────────────────────────────────────────────────────────────
 # Cut a release with automatic version bump (based on conventional commits)
+# Cut the next release (auto-detected version) via a PR. `main` is protected
+# (enforce_admins + merge queue), so the version bump lands through a PR — a
+# ── Release ──────────────────────────────────────────────────────────────
+# Cut a release with automatic or manual version bump (based on conventional commits).
 # Cut the next release (auto-detected version) via a PR. `main` is protected
 # (enforce_admins + merge queue), so the version bump lands through a PR — a
 # direct `git push` to main is rejected. After the PR merges, run
 
 # `just release-tag <version>` to publish.
-release-auto:
+# Usage: just release [VERSION]
+#   VERSION: version string (e.g., "0.17.0") or "auto" (default, auto-detected)
+
+release VERSION="auto":
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "==> Preparing automatic release (PR-based)"
-    # Quality gates — auto-fix fmt and clippy, then test.
     cargo fmt --all
     ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
     ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
+    if [ "{{ VERSION }}" = "auto" ]; then
+    echo "==> Preparing automatic release (PR-based)"
     NEXT_VERSION=$(git cliff --bumped-version | sed 's/^v//')
     echo "==> Auto-detected next version: $NEXT_VERSION"
     just _release-prep "$NEXT_VERSION"
-
-# Cut a specific version via a PR: just release 0.17.0
-release VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    else
     echo "==> Preparing release v{{ VERSION }}"
-    cargo fmt --all
-    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
-    cargo nextest run --workspace
     just _release-prep "{{ VERSION }}"
+    fi
 
 # Shared release prep: on a `release/v<version>` branch, bump every version pin,
 # prepend the changelog, commit, push, and open the release PR. Bumps the
@@ -702,75 +687,6 @@ release VERSION:
 
 # version-mismatched on `cargo update`.
 _release-prep VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    V="{{ VERSION }}"
-    BRANCH="release/v$V"
-    git switch -c "$BRANCH"
-    sed -i.bak -E \
-        -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
-        -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
-    rm Cargo.toml.bak
-    # Stable release PRs also advance the installer's checked-in default. A
-    # prerelease must remain opt-in, matching GitHub's releases/latest
-    # behavior and the installer's historical contract.
-    if [[ "$V" != *-* ]]; then
-        sed -i.bak -E "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"v$V\"/" install.sh
-        rm install.sh.bak
-        grep -qxF "DEFAULT_VERSION=\"v$V\"" install.sh
-        git add install.sh
-    fi
-    cargo update -w
-    # The runtime overlay, SDK sidecar and initramfs take their VERSION from
-    # one pin (check-runtime-overlay-version fails closed on a mismatch), so
-    # bump it alongside Cargo.toml. The mvmctl and SDK cdylib nix packages
-    # read their version from Cargo.toml and need no edit.
-    sed -i.bak -E "s/^\"[^\"]*\"$/\"$V\"/" nix/images/version.nix
-    rm nix/images/version.nix.bak
-    grep -qxF "\"$V\"" nix/images/version.nix
-    git add nix/images/version.nix
-    # The cargo-fuzz crates are separate workspaces with their own lockfiles,
-    # each pinning the internal `mvm-*` crates by version. A bump leaves every
-    # one of them naming the old version, and ci.yml's "cargo-fuzz crates still
-    # compile" step runs `cargo check --locked` per manifest — a lock that would
-    # have to change is the failure.
-    #
-    # Invisible on the PR: that step sits behind a change-detector and
-    # `check-all` cannot see detached lockfiles at all. v0.18.0-rc.1 was evicted
-    # from the merge queue three times before anyone looked at a merge-group log.
-    #
-    # `cargo metadata` re-resolves and rewrites each lock without compiling.
-    for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
-        [ -f "$manifest" ] || continue
-        cargo metadata --manifest-path "$manifest" --format-version 1 >/dev/null
-        git add "$(dirname "$manifest")/Cargo.lock"
-    done
-    git-cliff --tag "v$V" --unreleased --prepend CHANGELOG.md
-    # Fail closed if git-cliff did not add the new section (silently shipped
-    # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
-    if ! grep -qE "^## \[$V\]" CHANGELOG.md; then
-        echo "ERROR: git-cliff did not add a '## [$V]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
-        exit 1
-    fi
-    git add Cargo.toml Cargo.lock CHANGELOG.md
-    # Gate the commit on the bumped tree. `just release` runs the workspace
-    # suite before calling this recipe, which green-lights the tree as it was
-    # *before* the version changed — so the tree actually being pushed was never
-    # run. That is how a pre-release-unaware version parser reached CI on
-    # v0.18.0-rc.1: no published version had ever carried a `-rc.1` suffix, so
-    # the defect was unreachable until the bump, and the bump was never tested.
-    #
-    # A gate that runs before a mutation cannot witness the mutation.
-    echo "==> re-running the workspace suite against the bumped tree"
-    cargo nextest run --workspace
-    git commit -m "release: v$V"
-    git push -u origin "$BRANCH"
-    gh pr create --base main --head "$BRANCH" --title "release: v$V" \
-        --body "Version bump + git-cliff changelog for v$V. Merge via the queue, then \`just release-tag $V\`."
-    echo "==> Opened release PR for v$V. Merge it via the queue, then run: just release-tag $V"
-
-# After the release PR merges: tag the merged main commit and push the tag,
-
 # which triggers the build + publish pipeline. Tags are not branch-protected.
 release-tag VERSION:
     #!/usr/bin/env bash
@@ -779,8 +695,8 @@ release-tag VERSION:
     git fetch origin main
     # The bump commit must be on main (the release PR merged) before tagging.
     if ! git show "origin/main:Cargo.toml" | grep -qE "^version = \"$V\""; then
-        echo "ERROR: origin/main is not at version $V — merge the release PR first." >&2
-        exit 1
+    echo "ERROR: origin/main is not at version $V — merge the release PR first." >&2
+    exit 1
     fi
     git tag "v$V" origin/main
     git push origin "v$V"
@@ -810,11 +726,6 @@ deploy-guard:
 @version:
     echo {{ version }}
 
-# Create a git tag for the current workspace version
-tag:
-    git tag v{{ version }}
-    @echo "Tagged v{{ version }}"
-
 # Release the boot image train (`boot-image/v*`)
 # This creates and pushes a tag for the boot image release, which triggers
 # the release-boot-image.yml workflow to build and publish all microVM assets.
@@ -824,11 +735,9 @@ release-image VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     V="{{ VERSION }}"
-    TAG="boot-image/v$V"
-    git fetch origin main --tags
     if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-        echo "ERROR: tag $TAG already exists." >&2
-        exit 1
+    echo "ERROR: tag $TAG already exists." >&2
+    exit 1
     fi
     git tag "$TAG" origin/main
     git push origin "$TAG"
@@ -858,12 +767,6 @@ docs-publish:
     # dispatching from a branch would publish something nobody has merged.
     gh workflow run workers.yml --ref main
     @echo "Dispatched workers.yml on main. Watch it with: gh run watch \$(gh run list --workflow=workers.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-
-# Alias for `docs-publish` using the Cloudflare Workers deployment name.
-workers-deploy: docs-publish
-
-# Backward-compatible alias retained for operators with the old Pages command.
-pages-deploy: docs-publish
 
 # Check the live site sends the cross-origin isolation headers the demo needs
 docs-check-live-headers url="":
@@ -953,66 +856,66 @@ setup-libkrun:
     set -euo pipefail
     EXISTING=""
     for p in \
-        /opt/homebrew/lib/libkrun.dylib \
-        /usr/local/lib/libkrun.dylib \
-        /usr/lib/x86_64-linux-gnu/libkrun.so \
-        /usr/lib/aarch64-linux-gnu/libkrun.so \
-        /usr/lib64/libkrun.so \
-        /usr/local/lib/libkrun.so
+    /opt/homebrew/lib/libkrun.dylib \
+    /usr/local/lib/libkrun.dylib \
+    /usr/lib/x86_64-linux-gnu/libkrun.so \
+    /usr/lib/aarch64-linux-gnu/libkrun.so \
+    /usr/lib64/libkrun.so \
+    /usr/local/lib/libkrun.so
     do
-        if [ -f "$p" ]; then
-            EXISTING="$p"
-            break
-        fi
+    if [ -f "$p" ]; then
+    EXISTING="$p"
+    break
+    fi
     done
     if [ -n "$EXISTING" ]; then
-        echo "libkrun already installed at $EXISTING — skipping."
-        exit 0
+    echo "libkrun already installed at $EXISTING — skipping."
+    exit 0
     fi
     case "$(uname -s)" in
-        Darwin)
-            if ! command -v brew >/dev/null; then
-                echo "error: Homebrew not found. Install: https://brew.sh" >&2
-                exit 1
-            fi
-            echo "→ brew install slp/krun/libkrun"
-            brew install slp/krun/libkrun
-            ;;
-        Linux)
-            if command -v apt-get >/dev/null; then
-                echo "→ apt install libkrun-dev"
-                sudo apt-get update
-                sudo apt-get install -y libkrun-dev
-            elif command -v dnf >/dev/null; then
-                echo "→ dnf install libkrun-devel"
-                sudo dnf install -y libkrun-devel
-            elif command -v pacman >/dev/null; then
-                echo "→ pacman -S libkrun"
-                sudo pacman -S --needed libkrun
-            else
-                echo "error: no recognized package manager (apt / dnf / pacman)." >&2
-                echo "       Build from source: https://github.com/containers/libkrun" >&2
-                exit 1
-            fi
-            ;;
-        *)
-            echo "error: libkrun is not supported on $(uname -s)." >&2
-            exit 1
-            ;;
+    Darwin)
+    if ! command -v brew >/dev/null; then
+        echo "error: Homebrew not found. Install: https://brew.sh" >&2
+        exit 1
+    fi
+    echo "→ brew install slp/krun/libkrun"
+    brew install slp/krun/libkrun
+    ;;
+    Linux)
+    if command -v apt-get >/dev/null; then
+        echo "→ apt install libkrun-dev"
+        sudo apt-get update
+        sudo apt-get install -y libkrun-dev
+    elif command -v dnf >/dev/null; then
+        echo "→ dnf install libkrun-devel"
+        sudo dnf install -y libkrun-devel
+    elif command -v pacman >/dev/null; then
+        echo "→ pacman -S libkrun"
+        sudo pacman -S --needed libkrun
+    else
+        echo "error: no recognized package manager (apt / dnf / pacman)." >&2
+        echo "       Build from source: https://github.com/containers/libkrun" >&2
+        exit 1
+    fi
+    ;;
+    *)
+    echo "error: libkrun is not supported on $(uname -s)." >&2
+    exit 1
+    ;;
     esac
     echo "Verifying install…"
     for p in \
-        /opt/homebrew/lib/libkrun.dylib \
-        /usr/local/lib/libkrun.dylib \
-        /usr/lib/x86_64-linux-gnu/libkrun.so \
-        /usr/lib/aarch64-linux-gnu/libkrun.so \
-        /usr/lib64/libkrun.so \
-        /usr/local/lib/libkrun.so
+    /opt/homebrew/lib/libkrun.dylib \
+    /usr/local/lib/libkrun.dylib \
+    /usr/lib/x86_64-linux-gnu/libkrun.so \
+    /usr/lib/aarch64-linux-gnu/libkrun.so \
+    /usr/lib64/libkrun.so \
+    /usr/local/lib/libkrun.so
     do
-        if [ -f "$p" ]; then
-            echo "  ✓ $p"
-            exit 0
-        fi
+    if [ -f "$p" ]; then
+    echo "  ✓ $p"
+    exit 0
+    fi
     done
     echo "  ! libkrun shared library not found at the standard locations." >&2
     exit 1
@@ -1042,13 +945,13 @@ clean-dev-state:
     set -euo pipefail
     root="$(git rev-parse --show-toplevel)/.mvm-test"
     if [ ! -d "$root" ]; then
-        echo "clean-dev-state: nothing at $root"
-        exit 0
+    echo "clean-dev-state: nothing at $root"
+    exit 0
     fi
     size=$(du -sh "$root" 2>/dev/null | cut -f1)
     if [ -n "${DRY_RUN:-}" ]; then
-        echo "clean-dev-state: would remove $root ($size)"
-        exit 0
+    echo "clean-dev-state: would remove $root ($size)"
+    exit 0
     fi
     rm -rf "$root"
     echo "clean-dev-state: removed $root ($size)"
@@ -1076,8 +979,8 @@ worktrees-prune:
     set -euo pipefail
     paths=$(./scripts/worktree-status.sh --safe-only)
     if [ -z "$paths" ]; then
-        echo "worktrees-prune: nothing finished to remove"
-        exit 0
+    echo "worktrees-prune: nothing finished to remove"
+    exit 0
     fi
     # Snapshot the process list ONCE. Grepping ps per path inside the loop looks
     # equivalent and is not: the grep's own argv holds the path it searches for,
@@ -1085,32 +988,32 @@ worktrees-prune:
     ps_snapshot=$(ps -eo command 2>/dev/null || true)
     removed=0
     while IFS= read -r p; do
-        [ -d "$p" ] || continue
-        # Re-checked at the moment of action: the classification is seconds old,
-        # and a session may have started work in one since.
-        case "$ps_snapshot" in
-            *"$p"*) echo "  skip (in use)     $(basename "$p")"; continue ;;
-        esac
-        if [ -n "$(git -C "$p" status --porcelain 2>/dev/null)" ]; then
-            echo "  skip (now dirty)  $(basename "$p")"; continue
-        fi
-        size=$(du -sh "$p" 2>/dev/null | cut -f1 | tr -d ' ')
-        if [ -z "${APPLY:-}" ]; then
-            echo "  would remove      $(basename "$p")  (${size})"
-            continue
-        fi
-        if git worktree remove "$p" 2>/tmp/wtprune-err.$$; then
-            echo "  removed           $(basename "$p")  (${size})"
-            removed=$((removed + 1))
-        else
-            echo "  refused           $(basename "$p"): $(head -1 /tmp/wtprune-err.$$)"
-        fi
-        rm -f /tmp/wtprune-err.$$
+    [ -d "$p" ] || continue
+    # Re-checked at the moment of action: the classification is seconds old,
+    # and a session may have started work in one since.
+    case "$ps_snapshot" in
+    *"$p"*) echo "  skip (in use)     $(basename "$p")"; continue ;;
+    esac
+    if [ -n "$(git -C "$p" status --porcelain 2>/dev/null)" ]; then
+    echo "  skip (now dirty)  $(basename "$p")"; continue
+    fi
+    size=$(du -sh "$p" 2>/dev/null | cut -f1 | tr -d ' ')
+    if [ -z "${APPLY:-}" ]; then
+    echo "  would remove      $(basename "$p")  (${size})"
+    continue
+    fi
+    if git worktree remove "$p" 2>/tmp/wtprune-err.$$; then
+    echo "  removed           $(basename "$p")  (${size})"
+    removed=$((removed + 1))
+    else
+    echo "  refused           $(basename "$p"): $(head -1 /tmp/wtprune-err.$$)"
+    fi
+    rm -f /tmp/wtprune-err.$$
     done <<< "$paths"
     if [ -z "${APPLY:-}" ]; then
-        echo "worktrees-prune: preview only — re-run with APPLY=1 to remove"
+    echo "worktrees-prune: preview only — re-run with APPLY=1 to remove"
     else
-        echo "worktrees-prune: removed ${removed}; branches kept"
+    echo "worktrees-prune: removed ${removed}; branches kept"
     fi
 
 # Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)

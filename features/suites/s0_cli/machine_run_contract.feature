@@ -24,14 +24,6 @@ Feature: machine run request contract
     And the error output contains "--detach"
     And the error output contains "-it -- /bin/sh"
 
-  # Persistent machine state has no environment field. Refuse before source
-  # resolution rather than accepting a value that cannot reach the guest.
-  Scenario: machine run refuses environment on a persistent machine
-    When I run mvmctl with "machine run --image alpine -d --env K=V" and an isolated mvm home
-    Then the command exits with code 1
-    And the error output contains "machine run --env"
-    And the error output contains "declare environment in the image or workload manifest"
-
   # --entrypoint dispatches a baked /etc/mvm/entrypoint, which an OCI image does
   # not have; silently ignoring the flag would run something other than what was
   # asked for.
