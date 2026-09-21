@@ -35,7 +35,9 @@ use mvm_core::arch::GuestArch;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec, StandbyState, StartMode};
-use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
+use mvm_runtime::checkpoint::{
+    CaptureVmFullParams, CheckpointStore, capture_vm_full, materialize_chunked_blobs,
+};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{
     BlockDev, ChildForkRequest, ConsoleCapture, KernelImage, PreloadChildRequest,
@@ -260,9 +262,54 @@ fn copy_checkpoint_content(
     let content_dir = store.content_dir(checkpoint);
     for blob in &meta.content {
         let src = content_dir.join(&blob.name);
-        std::fs::copy(&src, child_dir.join(&blob.name))
-            .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
+        if src.is_file() {
+            std::fs::copy(&src, child_dir.join(&blob.name))
+                .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
+        }
     }
+    materialize_chunked_blobs(store, meta, child_dir)
+        .expect("materialize the captured parent's chunked blobs");
+}
+
+fn regular_file_bytes(root: &Path) -> u64 {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0u64;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.expect("read checkpoint storage entry");
+            let file_type = entry.file_type().expect("read checkpoint storage type");
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                total = total
+                    .checked_add(entry.metadata().expect("read stored file metadata").len())
+                    .expect("checkpoint storage byte count fits u64");
+            }
+        }
+    }
+    total
+}
+
+fn checkpoint_own_bytes(store: &CheckpointStore, checkpoint: &CheckpointId) -> u64 {
+    let content = store.content_dir(checkpoint);
+    let content_bytes: u64 = std::fs::read_dir(content)
+        .expect("read checkpoint content")
+        .map(|entry| entry.expect("read checkpoint content entry"))
+        .filter(|entry| {
+            entry
+                .file_type()
+                .expect("read content entry type")
+                .is_file()
+        })
+        .map(|entry| entry.metadata().expect("read content metadata").len())
+        .sum();
+    content_bytes
+        + std::fs::metadata(store.dir_for(checkpoint).join("meta.json"))
+            .expect("read checkpoint metadata size")
+            .len()
 }
 
 fn read_getrandom(vsock_path: &str) -> Vec<u8> {
@@ -553,7 +600,7 @@ fn fc_warm_pool_spawn_and_claim() {
         .expect("the FC driver supplies vm_full control");
     let store = CheckpointStore::open();
     let parent_checkpoint = CheckpointId::new(format!("standby-{parent_id}"));
-    let _meta = capture_vm_full(
+    let meta = capture_vm_full(
         &store,
         CaptureVmFullParams {
             id: parent_checkpoint.clone(),
@@ -570,6 +617,55 @@ fn fc_warm_pool_spawn_and_claim() {
         control.as_ref(),
     )
     .expect("capture the standby parent's full state");
+    let pool_after_first = regular_file_bytes(&store.root().join(".objects"));
+    let first_stored = pool_after_first + checkpoint_own_bytes(&store, &parent_checkpoint);
+
+    let second_checkpoint = CheckpointId::new(format!("standby-{parent_id}-second"));
+    let second_meta = capture_vm_full(
+        &store,
+        CaptureVmFullParams {
+            id: second_checkpoint.clone(),
+            vm_name: parent_id.clone(),
+            supervisor_config_digest: String::new(),
+            runtime_overlay_version: None,
+            supervisor_config_src: None,
+            tag: None,
+            created_unix: mvm_core::time::now_unix_secs(),
+            retain_paused: false,
+            grants: None,
+        },
+        control.as_ref(),
+    )
+    .expect("capture the idle standby parent a second time");
+    let pool_after_second = regular_file_bytes(&store.root().join(".objects"));
+    let second_growth = pool_after_second
+        .checked_sub(pool_after_first)
+        .expect("the object pool does not shrink during capture")
+        + checkpoint_own_bytes(&store, &second_checkpoint);
+    let growth_milli_percent = second_growth
+        .checked_mul(100_000)
+        .expect("checkpoint growth percentage fits u64")
+        .checked_div(first_stored)
+        .expect("the first checkpoint stores bytes");
+    let growth_percent_whole = growth_milli_percent / 1_000;
+    let growth_percent_fraction = growth_milli_percent % 1_000;
+    println!("FC_CHECKPOINT_FIRST_STORED_BYTES={first_stored}");
+    println!("FC_CHECKPOINT_SECOND_GROWTH_BYTES={second_growth}");
+    println!(
+        "FC_CHECKPOINT_SECOND_GROWTH_PERCENT={growth_percent_whole}.{growth_percent_fraction:03}"
+    );
+    assert!(
+        second_growth
+            .checked_mul(10)
+            .expect("checkpoint growth comparison fits u64")
+            < first_stored,
+        "an idle second FC checkpoint grew storage by \
+         {growth_percent_whole}.{growth_percent_fraction:03}%"
+    );
+    mvm_runtime::checkpoint::verify_content(&store, &meta)
+        .expect("the first captured checkpoint verifies");
+    mvm_runtime::checkpoint::verify_content(&store, &second_meta)
+        .expect("the second captured checkpoint verifies");
     let spawn_ms = t_spawn.elapsed().as_millis();
 
     // A captured parent costs disk, not a resident VM: release it before the

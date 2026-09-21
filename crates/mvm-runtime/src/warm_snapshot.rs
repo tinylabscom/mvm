@@ -19,7 +19,10 @@ use mvm_fs::clone::CloneStrategy;
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
-use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
+use crate::checkpoint::{
+    CheckpointChainAnchor, CheckpointStore, materialize_chunked_blobs, verify_content,
+    verify_lineage,
+};
 
 /// Trusted publications use a distinct ID namespace so claim can select the
 /// immutable backend without trusting a mutable sidecar or configuration flag.
@@ -59,9 +62,11 @@ pub fn materialize_child_from_parent(
         anyhow::anyhow!("checkpoint '{parent_id}' has no staged snapshot binding")
     })?;
 
-    snapshot_store
+    let strategy = snapshot_store
         .materialize(&SnapshotId::new(snapshot_id), dst)
-        .with_context(|| format!("materializing staged snapshot at {}", dst.display()))
+        .with_context(|| format!("materializing staged snapshot at {}", dst.display()))?;
+    materialize_chunked_blobs(checkpoint_store, &parent, dst)?;
+    Ok(strategy)
 }
 
 /// Materialize from a platform-backed immutable publication.
@@ -353,6 +358,39 @@ mod tests {
             std::fs::read(dst.join("rootfs.ext4")).unwrap(),
             b"warm-parent-rootfs-bytes",
             "materialized bytes must be the verified parent's content, never the staged evil blob"
+        );
+    }
+
+    #[test]
+    fn materialize_rebuilds_a_chunked_blob_instead_of_trusting_a_snapshot_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
+        let parent = stage_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            seed_parent(&checkpoint_store, tmp.path(), "warm-rebuild"),
+        );
+        let snapshot_id = parent.snapshot_id.as_deref().unwrap();
+        std::fs::write(
+            snapshot_store.root().join(snapshot_id).join("rootfs.ext4"),
+            b"unverified-redundant-copy",
+        )
+        .unwrap();
+
+        let dst = tmp.path().join("instance-dir");
+        materialize_child_from_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            &parent.id,
+            &MockAnchor::default().audited(&parent),
+            &dst,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(dst.join("rootfs.ext4")).unwrap(),
+            b"warm-parent-rootfs-bytes"
         );
     }
 

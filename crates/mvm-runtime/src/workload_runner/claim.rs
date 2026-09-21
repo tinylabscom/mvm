@@ -139,12 +139,19 @@ pub fn bind_plan_to_parent(
     meta: &CheckpointMeta,
 ) -> Result<(), ClaimRefusal> {
     let parent = parent_rootfs_digest(meta)?;
-    if parent == plan_image_sha256 {
+    bind_plan_to_parent_digest(plan_image_sha256, parent)
+}
+
+pub fn bind_plan_to_parent_digest(
+    plan_image_sha256: &str,
+    parent_image_sha256: &str,
+) -> Result<(), ClaimRefusal> {
+    if parent_image_sha256 == plan_image_sha256 {
         Ok(())
     } else {
         Err(ClaimRefusal::PlanParentMismatch {
             expected: plan_image_sha256.to_string(),
-            got: parent.to_string(),
+            got: parent_image_sha256.to_string(),
         })
     }
 }

@@ -9,8 +9,10 @@ measurements required before its checkbox may be ticked.
 Coordinates with #3382 (W5 of that plan, copy-on-write HVF restore), which
 changes how a restored memory image is consumed.
 
-**Status: C0 DONE; C1–C8 OPEN.** C0 made the existing whole-blob capture
-crash-safe and its verification parallel. Nothing here stores chunks yet.
+**Status: C0–C3 DONE; C4–C8 OPEN.** The capture path now stores the
+large blobs as chunks and materializes verified contiguous files for current
+restore consumers. Diff restore, garbage collection, audit-format cleanup,
+tenant-domain resolution and old-layout retirement remain separate work.
 
 ## Problem
 
@@ -163,44 +165,71 @@ it includes flushing whatever the kernel had not yet written back.
 
 ### C1 — Chunk index and object pool
 
-- [ ] C1.1 Define the index: blob length, chunk size, and one entry per chunk
+- [x] C1.1 Define the index: blob length, chunk size, and one entry per chunk
       (an object digest or the zero marker), with one canonical encoding whose
       SHA-256 is the blob's content address.
-- [ ] C1.2 Object pool per key domain with hard-linked membership, objects
+- [x] C1.2 Object pool per key domain with hard-linked membership, objects
       created `0400`, written through a synced temporary file and linked into
       the pool with a no-clobber link.
-- [ ] C1.3 Record the key domain in `CheckpointMeta`, covered by `meta_digest`.
-- [ ] C1.4 Tests: index encoding round trip and determinism; a zero chunk
+- [x] C1.3 Record the key domain in `CheckpointMeta`, covered by `meta_digest`.
+- [x] C1.4 Tests: index encoding round trip and determinism; a zero chunk
       stores nothing; two checkpoints in one domain share an object's inode;
       two domains never do.
 
 ### C2 — Chunked capture
 
-- [ ] C2.1 Split `memory.bin` and `rootfs.ext4` into chunks, hashing chunks in
+- [x] C2.1 Split `memory.bin` and `rootfs.ext4` into chunks, hashing chunks in
       parallel with `par_map`. Small blobs (sidecars, configs, the machine
       state) stay whole files.
-- [ ] C2.2 Link an existing object when the pool has it; otherwise write it.
+- [x] C2.2 Link an existing object when the pool has it; otherwise write it.
       Every object is synced before the index is written (extends C0's
       `commit_plan`).
-- [ ] C2.3 Acceptance: a second checkpoint of an idle machine adds under 10% of
+- [x] C2.3 Acceptance: a second checkpoint of an idle machine adds under 10% of
       the first one's stored bytes, measured as the growth of the object pool
       plus the second checkpoint's own files. Unit test on a synthetic image
       with 5% of chunks changed; live measurement on HVF and on Firecracker
       recorded here.
-- [ ] C2.4 Crash injection: a stop between the object writes and the index
+- [x] C2.4 Crash injection: a stop between the object writes and the index
       write, and at every other step, leaves no checkpoint that verifies
       wrongly — absent or refused, never silently wrong (C0.6's test, run
       against the chunked commit).
 
+**C2 measurements so far.** The synthetic 20-chunk test changes one chunk
+(5%) and proves that the new object plus the second index add under 10% of the
+first pool's bytes. On a live 512 MiB HVF guest with a representative
+multi-layer rootfs, the first checkpoint stored 237,862,839 bytes and the
+immediate idle recapture added 15,364,023 bytes (6.459%). A deliberately tiny
+rootfs measured 47,843,349 bytes then 11,765,781 bytes (24.592%): the same
+11 MiB of resumed-guest memory churn dominates that small stored baseline.
+On a live Linux/KVM Firecracker guest, the first checkpoint stored 452,050,904
+bytes and the immediate idle recapture added 24,231,903 bytes (5.360%). Two
+sibling restores from that checkpoint both completed the authenticated
+identity handshake and reported distinct reseeded randomness.
+
 ### C3 — Chunked verify and materialization
 
-- [ ] C3.1 Verify every chunk against its index entry in parallel. Refuse a
+- [x] C3.1 Verify every chunk against its index entry in parallel. Refuse a
       tampered chunk, a missing chunk and a tampered index, each with a test.
-- [ ] C3.2 Materialize a contiguous file from the index (for fork, restore and
+- [x] C3.2 Materialize a contiguous file from the index (for fork, restore and
       the warm claim), verifying each chunk as it is copied, so nothing reaches
       a VMM that was not verified. Zero chunks become holes.
-- [ ] C3.3 Measure serial against parallel verify for 1, 2 and 4 GiB memory
+- [x] C3.3 Measure serial against parallel verify for 1, 2 and 4 GiB memory
       images, and record the numbers in this plan and the PR.
+
+**C3 measurements.** `chunk_verify_timing` hashes a repeated non-zero 1 MiB
+object through an index of the stated logical size, avoiding a 7 GiB fixture
+while retaining the full hash workload. Best of three on a 16-core Apple
+Silicon host with load average 14–25:
+
+| Logical memory | Serial verify | Parallel verify | Speedup |
+| --- | --- | --- | --- |
+| 1 GiB | 2.865 s | 272 ms | 10.53x |
+| 2 GiB | 5.733 s | 527 ms | 10.88x |
+| 4 GiB | 5.091 s | 991 ms | 5.14x |
+
+The 4 GiB serial result is non-monotonic because the host was concurrently
+loaded and the repeated object was page-cache hot; the acceptance comparison
+is the same-size serial and parallel pair, not cross-row scaling.
 
 ### C4 — Diff restore
 
