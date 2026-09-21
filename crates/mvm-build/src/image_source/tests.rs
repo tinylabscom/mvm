@@ -64,6 +64,28 @@ fn open(path: &Path) -> Result<LocalImageCheckout, ImageSourceError> {
 }
 
 #[test]
+fn an_mvm_checkout_is_the_workspace_manifest_not_the_image_flakes() {
+    // The probe that keys automatic builds must not hinge on the in-tree
+    // image flakes: removing them (the end state of the extraction) must
+    // not turn a contributor build into an installed one.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("mvm");
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root.join("Cargo.toml"), "[workspace]\n");
+    assert_eq!(
+        mvm_source_checkout_at(&root).as_deref(),
+        Some(root.as_path())
+    );
+
+    let bare = tmp.path().join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert!(
+        mvm_source_checkout_at(&bare).is_none(),
+        "a directory with no workspace manifest is not an mvm checkout"
+    );
+}
+
+#[test]
 fn a_clean_checkout_records_its_canonical_root_commit_and_state() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");

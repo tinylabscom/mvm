@@ -371,6 +371,10 @@
       plan gains the one-base-image constraint: a single base Linux image
       per architecture boots on every Linux-direct backend, with host-side
       adaptation as translation, not separate products (mvm-images#8).
+      W5 (#3364) slice W5j: the libkrun supervisor auto-build keys on the mvm
+      checkout itself — the workspace manifest, release-channel aware — not
+      on the in-tree image flakes' presence, so deleting `nix/images` at W8
+      cannot turn a contributor build into an installed one.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

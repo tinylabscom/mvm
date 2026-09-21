@@ -281,8 +281,11 @@ Last updated: 2026-09-20
             kernel-pin and kernel-less-fallback paths answer the pair's
             `default-tenant` workload kernel. (The initramfs is an mvm-source
             cargo artifact, not an image product; it joins the set in W6.)
-      - [ ] W5i–W5m #3364: each remaining in-tree image consumer moved onto
-            the selector.
+      - [x] W5j #3364: the libkrun supervisor auto-build keys on the mvm
+            checkout, not the in-tree image flakes — deleting `nix/images`
+            no longer flips a contributor build to installed behavior.
+      - [ ] W5i, W5k–W5m #3364: each remaining in-tree image consumer
+            moved onto the selector.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

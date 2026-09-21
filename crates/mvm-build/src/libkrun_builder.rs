@@ -3168,15 +3168,23 @@ fn locate_supervisor_in_target_roots(target_roots: &[PathBuf]) -> Option<PathBuf
     candidates.pop().map(|(_, path)| path)
 }
 
+/// The mvm source checkout this binary was compiled from, when automatic
+/// builds are permitted. The supervisor auto-build keys on the checkout
+/// itself — not on the in-tree image flakes — so removing `nix/images` does
+/// not turn a contributor build into an installed one.
+fn supervisor_source_checkout_root() -> Option<PathBuf> {
+    crate::image_source::mvm_source_checkout(crate::artifact_acquisition::compiled_channel())
+}
+
 fn source_checkout_supervisor_build(on_path: Option<&Path>) -> Option<PathBuf> {
-    let workspace_root = builder_vm_source_checkout_root()?;
+    let workspace_root = supervisor_source_checkout_root()?;
     let target_roots = supervisor_target_roots(&workspace_root);
     locate_supervisor_in_target_roots(&target_roots)
         .filter(|candidate| supervisor_build_outranks_path(candidate, on_path))
 }
 
 fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, BuilderVmError> {
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
+    let Some(workspace_root) = supervisor_source_checkout_root() else {
         return Ok(None);
     };
     let target_roots = supervisor_target_roots(&workspace_root);
@@ -6029,6 +6037,20 @@ mod tests {
             }
             BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
+    }
+
+    #[test]
+    fn the_supervisor_auto_build_keys_on_the_checkout_not_the_image_flakes() {
+        let root = supervisor_source_checkout_root().expect("tests run from a source checkout");
+        assert!(
+            root.join("Cargo.toml").is_file(),
+            "the supervisor key is the workspace manifest"
+        );
+        assert_eq!(
+            root,
+            builder_vm_source_checkout_root().expect("the image flakes are still in-tree today"),
+            "both probes agree while the flakes exist; the supervisor probe must not depend on them"
+        );
     }
 
     #[test]

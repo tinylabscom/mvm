@@ -308,7 +308,16 @@ pub fn mvm_source_checkout(channel: DistributionChannel) -> Option<PathBuf> {
     if !channel.permits_automatic_builds() {
         return None;
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.parent()?.parent()?;
+    mvm_source_checkout_at(root)
+}
+
+/// Whether `root` is an mvm source checkout, independent of whether it still
+/// carries the in-tree image flakes: the probe is the workspace manifest, not
+/// `nix/images`. Removing the image flakes must not turn a contributor build
+/// into an installed one.
+pub(crate) fn mvm_source_checkout_at(root: &Path) -> Option<PathBuf> {
     root.join("Cargo.toml")
         .is_file()
         .then(|| root.to_path_buf())
