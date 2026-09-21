@@ -130,9 +130,11 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
       by W4)
 - [ ] `workload-k8s` kernel variant: `CGROUPS` + controllers, `NAMESPACES`
       + per-ns symbols, `NETFILTER` + conntrack/iptables, `BRIDGE`/`VETH`/
-      `VXLAN` — tinylabscom/mvm-images#9. The sealed workload kernel's
-      required-disables are deliberate and stay; this is a second variant,
-      pinned by the template through mkGuest's `kernel` argument.
+      `VXLAN` — mvm#3572 (lands in mvm's `nix/images/kernel/` first; the
+      mvm-images mirror follows at its next pin advance, mvm-images#9). The
+      sealed workload kernel's required-disables are deliberate and stay;
+      this is a second variant, pinned by the template through mkGuest's
+      `kernel` argument.
 
 ### W4 — E2E validation, BDD, docs
 
