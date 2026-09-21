@@ -1,6 +1,6 @@
 # Make `mvm-build` builder capabilities unconditional
 
-Backing: issue #3322
+Backing: shipped-source
 Validation: check-sprint-append
 
 **Status: IN PROGRESS**
