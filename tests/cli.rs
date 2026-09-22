@@ -806,8 +806,8 @@ fn run_prod_refuses_an_ad_hoc_command_before_pulling() {
         stderr.contains("refuses an ad-hoc command"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("image pull --prod"), "stderr: {stderr}");
-    assert!(stderr.contains("no way to run one yet"), "stderr: {stderr}");
+    assert!(stderr.contains("Omit the command"), "stderr: {stderr}");
+    assert!(stderr.contains("declared entrypoint"), "stderr: {stderr}");
 }
 
 /// `--prod --profile dev` is refused before any pull.

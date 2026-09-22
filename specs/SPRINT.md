@@ -304,7 +304,10 @@ docs commit went out as #3581). Under the
       declares, on both the in-process and the builder-VM writer. Its
       production-policy follow-up (issue #3480) refuses persistent and
       non-image `machine run --prod` paths before they can silently boot a
-      development image.
+      development image. Issue #3481 completes the usable production path: a
+      commandless digest-pinned OCI run dispatches the sealed image's declared
+      Entrypoint/Cmd with the ProdSafe `RunEntrypoint` verb under its signed
+      plan, while ad-hoc argv remains refused.
       W1b (issue #3431) hardens the reseed
       helper and makes a resume whose guest does not confirm a reseed a
       refusal rather than a warning; the post-merge follow-up runs the

@@ -72,11 +72,11 @@ being root-owned.
     unreadable one is widened only after `lstat` shows it is a regular file.
   - Files are streamed into the archive, never read into memory whole.
 - `mvmctl image pull --prod` verifies and seals an image, and the resolve
-  path of a `--prod` image run only ever selects a sealed image. There is
-  currently no way to run a `--prod` OCI image (issue #3481): with no
-  command `run` and `machine run` refuse ("needs a command"), and with one
-  `--prod` refuses (below). Before this change the cached rootfs path did
-  not record the variant, so an image's dev build and its sealed build
+  path of a `--prod` image run only ever selects a sealed image. The #3481
+  follow-up now runs a commandless sealed image through its declared
+  Entrypoint/Cmd and signed `RunEntrypoint` grant; caller-supplied commands
+  remain refused. Before this change the cached rootfs path did not record
+  the variant, so an image's dev build and its sealed build
   shared a file, and the first one written was kept. A `--prod` pull on a
   cold cache also materialized the dev variant, and a `--prod` run then
   booted it with the dev agent profile. Now:

@@ -40,6 +40,21 @@ Feature: machine run request contract
     Then the command exits with code 1
     And the error output contains "supported only for transient runs"
 
+  # A sealed OCI run cannot dispatch a caller-selected command because Exec is
+  # DevOnly. With no argv, the image's Entrypoint/Cmd is the command, and the
+  # production-safe RunEntrypoint verb carries it through the admitted path.
+  Scenario: machine run accepts a production OCI image's baked entrypoint
+    When I run mvmctl with "machine run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --dry-run" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+    And the output contains "profile: standard"
+
+  Scenario: run accepts a production OCI image's baked entrypoint
+    When I run mvmctl with "run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --dry-run" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+    And the output contains "profile: standard"
+
   # These sources do not build or select a sealed image. Refuse before looking
   # at the path or reaching the network so --prod can never become an ignored
   # spelling for a development boot.
