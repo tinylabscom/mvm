@@ -295,12 +295,16 @@ fn warn_registered_volumes_are_not_attached(name: Option<&str>) {
     if records.is_empty() {
         return;
     }
-    mvm_runtime::base::ui::warn(&format!(
+    mvm_runtime::base::ui::warn(&transient_volume_warning(name, records.len()));
+}
+
+pub(super) fn transient_volume_warning(name: &str, count: usize) -> String {
+    format!(
         "machine {name:?} has {n} registered volume mount(s) that a transient run does not \
          attach — those apply to `mvmctl machine start`. Use `--mount` to attach one here, or \
          `mvmctl machine volume ls {name}` to list them.",
-        n = records.len(),
-    ));
+        n = count,
+    )
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {

@@ -18,6 +18,10 @@ pub enum RuntimeOverlayAcquireMode {
 
 pub const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
 
+const COLD_SOURCE_RUNTIME_NOTICE: &str = "Preparing the MVM guest runtime from local sources (not the OCI base image): \
+     cold-building guest agent, network, sandbox, and egress helpers for this checkout; \
+     cached afterward. Run `mvmctl bootstrap` to prewarm; use -v for Cargo output…";
+
 pub fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
     mvm_build::image_source::in_tree_overlay_checkout_root()
 }
@@ -98,10 +102,7 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             {
                 return Ok(());
             }
-            mvm_runtime::ui::notice(
-                "Preparing guest runtime from local sources \
-                 (cold build for this checkout; cached afterward; use -v for Cargo output)…",
-            );
+            mvm_runtime::ui::notice(COLD_SOURCE_RUNTIME_NOTICE);
             let started = std::time::Instant::now();
             let spinner = mvm_runtime::ui::spinner("Compiling guest runtime from local sources…");
             let result = mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
@@ -187,5 +188,13 @@ mod acquisition_policy_tests {
             ),
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact
         );
+    }
+
+    #[test]
+    fn cold_source_runtime_notice_names_the_artifacts_and_prewarm_path() {
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("not the OCI base image"));
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("guest agent, network, sandbox, and egress"));
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("`mvmctl bootstrap`"));
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("cached afterward"));
     }
 }
