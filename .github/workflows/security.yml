@@ -919,10 +919,11 @@ jobs:
       # mvm-build (not standalone packages), built exactly as `crates/mvm-cli/
       # build.rs::run_cargo_zigbuild` does: `-p mvm-build --bin <name>`.
       - uses: ./.github/actions/install-zigbuild
+        id: install_zigbuild
       - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
         run: |
           set -euo pipefail
-          cargo zigbuild --release --locked --target x86_64-unknown-linux-musl \
+          RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl \
             -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
             --bin mvm-builderd
           # The flake reads `$MVM_HOST_BIN_DIR/<name>` (flat, by manifest name);
@@ -1053,6 +1054,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - uses: ./.github/actions/install-zigbuild
+        id: install_zigbuild
         if: env.TARGET_TAG != ''
 
       - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
@@ -1061,7 +1063,7 @@ jobs:
           MUSL_TARGET: ${{ matrix.musl_target }}
         run: |
           set -euo pipefail
-          cargo zigbuild --release --locked --target "$MUSL_TARGET" \
+          RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target "$MUSL_TARGET" \
             -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
             --bin mvm-builderd
           echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"

@@ -18,6 +18,10 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+const PINNED_RUST_ZIGBUILD: &str =
+    r#"RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild"#;
+const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
+
 pub fn run(workspace: &Path) -> Result<()> {
     let rust_entries = parse_rust_manifest(workspace)?;
     let nix_entries = parse_nix_attrset(workspace)?;
@@ -33,22 +37,25 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
 
-    let expected: Vec<&str> = rust_entries.keys().map(String::as_str).collect();
-    let mut missing = Vec::new();
-    for (file, step_args) in zigbuild_steps(workspace)? {
-        for name in &expected {
-            if !step_args.contains(&format!("--bin {name}")) {
-                missing.push(format!("{file}: cross-compile step omits --bin {name}"));
-            }
-        }
+    let steps = zigbuild_steps(workspace)?;
+    if steps.is_empty() {
+        bail!("no builder-VM host-binary cargo zigbuild steps found; the gate must fail closed");
     }
-    if !missing.is_empty() {
+
+    let expected: Vec<&str> = rust_entries.keys().map(String::as_str).collect();
+    let mut violations = workflow_step_violations(&steps, &expected);
+    let action_path = workspace.join(INSTALL_ACTION);
+    let action = std::fs::read_to_string(&action_path)
+        .with_context(|| format!("read {}", action_path.display()))?;
+    violations.extend(toolchain_action_violations(&action));
+    if !violations.is_empty() {
         bail!(
-            "manifest entries are not cross-compiled by every workflow that builds the builder-VM image:\n  {}\n\n\
-             Fix: add the missing `--bin <name>` to the `cargo zigbuild` step. \
-             The flake reads each manifest entry from $MVM_HOST_BIN_DIR and \
-             fails on a missing path.",
-            missing.join("\n  ")
+            "builder-VM host-binary workflow steps have drifted:\n  {}\n\n\
+             Fix: compile every manifest entry and select the Rust version exposed by \
+             .github/actions/install-zigbuild. The flake reads each manifest entry from \
+             $MVM_HOST_BIN_DIR, and the published image must use the same pinned compiler \
+             as mvmctl's embedded copies.",
+            violations.join("\n  ")
         );
     }
 
@@ -57,6 +64,48 @@ pub fn run(workspace: &Path) -> Result<()> {
         rust_entries.len()
     );
     Ok(())
+}
+
+fn toolchain_action_violations(source: &str) -> Vec<String> {
+    [
+        (
+            "value: ${{ steps.install_rust.outputs.rust_version }}",
+            "does not expose the metadata-derived Rust version as rust_version",
+        ),
+        (
+            "id: install_rust",
+            "does not identify the Rust installation step as install_rust",
+        ),
+        (
+            r#"echo "rust_version=${RUST_VERSION}" >> "$GITHUB_OUTPUT""#,
+            "does not publish the parsed Rust version through GITHUB_OUTPUT",
+        ),
+        (
+            r#"/^\[workspace\.metadata\.mvm\.toolchain\]/"#,
+            "does not read the Rust version from workspace.metadata.mvm.toolchain",
+        ),
+    ]
+    .into_iter()
+    .filter(|(required, _)| !source.contains(required))
+    .map(|(_, reason)| format!("{INSTALL_ACTION}: {reason}"))
+    .collect()
+}
+
+fn workflow_step_violations(steps: &[(String, String)], expected: &[&str]) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (file, step_args) in steps {
+        for name in expected {
+            if !step_args.contains(&format!("--bin {name}")) {
+                violations.push(format!("{file}: cross-compile step omits --bin {name}"));
+            }
+        }
+        if !step_args.contains(PINNED_RUST_ZIGBUILD) {
+            violations.push(format!(
+                "{file}: cross-compile step does not select the workspace-pinned Rust toolchain"
+            ));
+        }
+    }
+    violations
 }
 
 /// `(workflow file name, joined step text)` for every `cargo zigbuild`
@@ -253,5 +302,62 @@ mod tests {
     fn run_passes_on_current_workspace() {
         let root = workspace_root();
         run(&root).expect("manifests should agree");
+    }
+
+    #[test]
+    fn workflow_steps_require_the_pinned_rust_output() {
+        let expected = ["mvm-host-vm-init", "mvm-egress-proxy", "mvm-builderd"];
+        let unpinned = vec![(
+            "release.yml".to_string(),
+            "cargo zigbuild -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy --bin mvm-builderd"
+                .to_string(),
+        )];
+        assert_eq!(
+            workflow_step_violations(&unpinned, &expected),
+            ["release.yml: cross-compile step does not select the workspace-pinned Rust toolchain"]
+        );
+
+        let pinned = vec![(
+            "release.yml".to_string(),
+            format!(
+                "{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy --bin mvm-builderd"
+            ),
+        )];
+        assert!(workflow_step_violations(&pinned, &expected).is_empty());
+    }
+
+    #[test]
+    fn workflow_steps_still_require_every_manifest_binary() {
+        let steps = vec![(
+            "release.yml".to_string(),
+            format!("{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-builderd"),
+        )];
+        assert_eq!(
+            workflow_step_violations(&steps, &["mvm-builderd", "mvm-egress-proxy"]),
+            ["release.yml: cross-compile step omits --bin mvm-egress-proxy"]
+        );
+    }
+
+    #[test]
+    fn installer_must_export_the_metadata_derived_rust_version() {
+        let valid = r#"
+outputs:
+  rust_version:
+    value: ${{ steps.install_rust.outputs.rust_version }}
+steps:
+  - id: install_rust
+    run: |
+      RUST_VERSION=$(awk '/^\[workspace\.metadata\.mvm\.toolchain\]/ { t = 1; next }' Cargo.toml)
+      echo "rust_version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
+"#;
+        assert!(toolchain_action_violations(valid).is_empty());
+
+        let violations = toolchain_action_violations("outputs: {}");
+        assert_eq!(violations.len(), 4);
+        assert!(
+            violations
+                .iter()
+                .all(|violation| violation.starts_with(INSTALL_ACTION))
+        );
     }
 }

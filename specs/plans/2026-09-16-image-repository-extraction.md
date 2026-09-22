@@ -585,7 +585,10 @@ Delivery slices, one PR each:
       aarch64 builder build on physical Apple Silicon HVF remains open. Also
       found: #3500 (the Nix initramfs says `VERSION` `0.18.0`,
       which an rc CLI refuses) and #3502 (a Firecracker run rewrites the cached
-      dev rootfs).
+      dev rootfs). Issue #3491 is resolved: every direct published or
+      reproducibility builder-image host-binary build selects the Rust version
+      from `[workspace.metadata.mvm.toolchain]`, and the host-binary sync gate
+      rejects workflow or installer-output drift.
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 

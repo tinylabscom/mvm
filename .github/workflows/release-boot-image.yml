@@ -93,6 +93,7 @@ jobs:
         uses: sigstore/cosign-installer@v3
 
       - uses: ./.github/actions/install-zigbuild
+        id: install_zigbuild
 
       # The builder-vm rootfs embeds the cross-compiled, statically
       # musl-linked host-vm binaries, which the flake reads out of
@@ -108,7 +109,7 @@ jobs:
           MUSL_TARGET: ${{ matrix.musl_target }}
         run: |
           set -euo pipefail
-          cargo zigbuild --release --locked --target "$MUSL_TARGET" \
+          RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target "$MUSL_TARGET" \
             -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
             --bin mvm-builderd
           echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
