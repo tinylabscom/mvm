@@ -4561,3 +4561,15 @@ writes the plan:
       BDD validation matrix; record the delivery evidence.
 - [x] Pass protected head CI on PR #3550 and prepare the issue-closing change
       for protected merge-queue delivery.
+
+## 2026-09-22 builder host-binary toolchain parity
+
+- [x] Expose the workspace metadata Rust pin from the shared zigbuild installer
+      action.
+- [x] Make every direct published and reproducibility builder-image host-binary
+      build select that exact Rust toolchain.
+- [x] Extend `check-mvm-host-binaries-sync` to reject missing binaries,
+      unpinned workflow steps, and installer output-contract drift.
+- [x] Complete focused tests, actionlint, workspace check and serialized tests,
+      workspace doctests, zero-warning Clippy, and gated-target checks.
+- [x] Prepare the issue-closing change for protected merge-queue delivery.

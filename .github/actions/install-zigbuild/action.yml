@@ -2,10 +2,15 @@ name: Install zig + cargo-zigbuild
 description: |
   Plan 115 / ADR-065 — install the pinned cross-compile toolchain that
   mvm-cli's build.rs needs to embed the host-vm binaries
-  (mvm-host-vm-init, mvm-egress-proxy) for aarch64-unknown-linux-musl
+  (mvm-host-vm-init, mvm-egress-proxy, mvm-builderd) for Linux musl targets
   (static; the builder VM rootfs has no FHS dynamic loader).
   Versions are pinned in [workspace.metadata.mvm.toolchain] in the root
   Cargo.toml; keep this action in lockstep.
+
+outputs:
+  rust_version:
+    description: Rust version from workspace.metadata.mvm.toolchain
+    value: ${{ steps.install_rust.outputs.rust_version }}
 
 runs:
   using: composite
@@ -58,6 +63,7 @@ runs:
         done
 
     - name: Install embedded Rust toolchain and musl targets
+      id: install_rust
       shell: bash
       # Plan 164 — mvm-cli/build.rs picks the embed target by
       # CARGO_CFG_TARGET_ARCH. On an x86_64 runner it builds the bins
@@ -76,6 +82,7 @@ runs:
           echo "::error::no rust pin in [workspace.metadata.mvm.toolchain]" >&2
           exit 1
         fi
+        echo "rust_version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
         rustup toolchain install "${RUST_VERSION}" --profile minimal
         rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
           --toolchain "${RUST_VERSION}"
