@@ -50,8 +50,8 @@ export CARGO_TARGET_DIR="$PWD/.mvm-test/target"
 export CARGO_HOME="$PWD/.mvm-test/cargo"
 ```
 
-The repository's `scripts/dev-env.sh` and the `just dev` / `just dev-*` wrappers
-apply this pattern for worktree development.
+Source `scripts/dev-env.sh` before direct cargo commands, or use `bin/dev` for
+one-off `mvmctl` commands; both apply this pattern for worktree development.
 
 ## Secrets
 

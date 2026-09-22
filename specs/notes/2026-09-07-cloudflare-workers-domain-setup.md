@@ -16,8 +16,6 @@ wired up from the iwantmyname registrar.
 - A manual dispatch can be triggered from the repo with:
 
 ```bash
-just workers-deploy
-# or the generic alias
 just docs-publish
 ```
 
@@ -192,7 +190,7 @@ If you also need to send email:
 ## Triggering a deployment
 
 - Automatic: publish a GitHub Release or push a `v*` tag.
-- Manual: `just workers-deploy` from the repo root.
+- Manual: `just docs-publish` from the repo root.
 - Watch the run: `gh run watch $(gh run list --workflow=workers.yml --limit 1 --json databaseId --jq '.[0].databaseId')`
 
 ## Troubleshooting

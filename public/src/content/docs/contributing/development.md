@@ -89,7 +89,7 @@ just build
 
 # Prebuild the guest runtime overlay once so later required-overlay boots
 # can reuse the cached artifact instead of rebuilding guest binaries.
-just runtime-overlay-build
+just runtime-overlay
 
 # Run CLI
 just run -- --help
@@ -201,7 +201,7 @@ just test
 just test-crate mvm-core
 
 # Run tests matching a filter
-just test-filter "test_snapshot"
+just test "test_snapshot"
 
 # Full CI gate (lint + test)
 just ci
