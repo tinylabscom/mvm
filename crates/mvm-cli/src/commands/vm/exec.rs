@@ -628,7 +628,9 @@ pub(in crate::commands) fn run_transient(
     // with `machine run`, where `-d` boots with no command.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
-    if args.run.argv.is_empty() && args.run.launch_plan.is_none() {
+    let image_supplies_entrypoint =
+        args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
+    if args.run.argv.is_empty() && args.run.launch_plan.is_none() && !image_supplies_entrypoint {
         anyhow::bail!(
             "`mvmctl run` needs a command: `mvmctl run -- <cmd>`. Use `--launch-plan <path>` \
              for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
@@ -784,9 +786,13 @@ pub(in crate::commands) fn run_secure_with_source(
             services: admit_host_services.clone(),
             grants: admit_grants.clone(),
             backend_kind: Some(admit_backend_kind),
-            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                "an ad-hoc argv run replaces the image entrypoint",
-            ),
+            entrypoint: if admit_has_argv {
+                crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                    "an ad-hoc argv run replaces the image entrypoint",
+                )
+            } else {
+                crate::commands::vm::entrypoint_resolve::resolve_for_rootfs(rootfs)
+            },
             assets: assets.to_vec(),
         })?;
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -1189,11 +1195,12 @@ fn build_exec_request(
     } = selection;
     // Shapes where the thing being booted already carries a command, so an
     // empty argv is the image supplying one rather than the caller omitting it:
-    // the wasm backend runs the module itself, and a manifest slot names an
-    // image with a baked entrypoint — which is what a `--flake` run has become
-    // by the time it reaches here, the flake having been built into a slot.
-    let image_supplies_entrypoint =
-        args.hypervisor.as_deref() == Some("wasm") || args.manifest.is_some();
+    // the wasm backend runs the module itself, a manifest slot names an image
+    // with a baked entrypoint, and a production OCI image may run only the
+    // Entrypoint/Cmd sealed into the image (never a caller-supplied argv).
+    let image_supplies_entrypoint = args.hypervisor.as_deref() == Some("wasm")
+        || args.manifest.is_some()
+        || (prod && image_ref.is_some());
     let target = match (
         args.launch_plan.as_ref(),
         args.argv.is_empty(),
@@ -1958,6 +1965,38 @@ mod tests {
             argv: vec!["/bin/true".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_production_oci_image_without_argv_dispatches_its_baked_entrypoint() {
+        let mut run = run_args(RunProfile::Standard);
+        run.argv.clear();
+        run.prod = true;
+        run.image = Some(
+            "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_string(),
+        );
+        let selection = ImageSelection {
+            image_ref: run.image.clone(),
+            prod: true,
+            runtime_pack: false,
+        };
+        let provenance = OciProvenanceSink::default();
+
+        let request = build_exec_request(
+            run.into_exec_args(),
+            "test run",
+            selection,
+            mvm_core::network_policy::NetworkPolicy::deny_all(),
+            Some(crate::exec::ImageSource::Template("fixture".to_string())),
+            &provenance,
+        )
+        .expect("a production OCI image supplies its own entrypoint");
+
+        assert!(matches!(
+            request.target,
+            crate::exec::ExecTarget::Inline { ref argv } if argv.is_empty()
+        ));
     }
 
     #[test]

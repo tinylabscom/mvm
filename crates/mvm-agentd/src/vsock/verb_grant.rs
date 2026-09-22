@@ -638,6 +638,33 @@ mod tests {
     }
 
     #[test]
+    fn baked_entrypoint_is_refused_when_the_plan_grant_omits_it() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("readiness-status").unwrap()],
+            drive: None,
+            sig: vec![],
+        };
+        let request = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 1,
+            env: vec![],
+            stream_input: false,
+        };
+
+        match enforce_verb_grant(&request, Some(&grant)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => {
+                assert_eq!(verb, "run-entrypoint")
+            }
+            other => panic!("expected VerbNotAuthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn no_grant_is_class_gate_only() {
         let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
         assert!(

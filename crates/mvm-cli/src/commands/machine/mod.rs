@@ -422,9 +422,12 @@ impl MachineRunArgs {
                 //     mkGuest. `examples/exit_code` exists precisely to run its
                 //     own entrypoint and hand back that exit code, and the
                 //     README teaches `machine run --flake examples/<name>`
-                //     with nothing after it.
+                //     with nothing after it;
+                //   - a production OCI image seals its Entrypoint/Cmd into the
+                //     guest and refuses a caller-supplied argv.
                 let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
                     || self.run.flake.is_some()
+                    || (self.run.prod && (self.run.image.is_some() || self.run.runtime.is_some()))
                     || image_supplies_entrypoint;
                 if self.run.argv.is_empty() && !carries_own_entrypoint {
                     bail!(

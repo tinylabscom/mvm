@@ -528,6 +528,23 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn a_production_oci_image_without_argv_runs_its_baked_entrypoint() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "--prod",
+    ])
+    .expect("parse a digest-pinned production image run");
+
+    assert_eq!(
+        args.resolve_mode(false)
+            .expect("a production OCI image supplies its own entrypoint"),
+        MachineRunMode::Transient
+    );
+}
+
+#[test]
 fn a_flake_run_without_argv_is_accepted() {
     // A flake bakes `entrypoint.command` into the image via mkGuest, so an
     // empty argv is not a missing argument — it is the image supplying one.

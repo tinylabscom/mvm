@@ -4360,6 +4360,29 @@ fn run_transient_requires_argv() {
     );
 }
 
+#[test]
+fn direct_production_oci_run_accepts_the_baked_entrypoint() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--image",
+        "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "--prod",
+        "--dry-run",
+    ])
+    .expect("parse a digest-pinned production image run");
+    let Commands::Run(args) = cli.command else {
+        panic!("expected Commands::Run");
+    };
+
+    exec::run_transient(
+        &Cli::parse_from(["mvmctl", "doctor"]),
+        args,
+        &mvm_core::user_config::MvmConfig::default(),
+    )
+    .expect("the sealed image supplies its own entrypoint");
+}
+
 // --- Init CLI tests (pure project-scaffold; DIR is required) ---
 
 #[test]
