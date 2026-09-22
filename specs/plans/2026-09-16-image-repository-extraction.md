@@ -134,8 +134,8 @@ have separate owners and compatibility contracts.
   publication, which `kernel-build.yml` uploads to the CLI release today;
 - the QEMU/WebAssembly smoke pack: `nix/packages/qemu-wasm.nix`,
   `qemu-wasm-smoke-image.nix`, `qemu-wasm-smoke-pack.nix`,
-  `emscripten-cross.meson`, `scripts/build-qemu-wasm-smoke-pack.sh`, and the
-  `scripts/run-qemu-wasm-*.py` and `serve-qemu-wasm-smoke-pack.py` harnesses;
+  `emscripten-cross.meson`, the release-pack downloader, and the maintained
+  `run-qemu-wasm-smoke-chromium.py` / `serve-qemu-wasm-smoke-pack.py` harness;
 - `nix/packaging/release/assert-sidecar-coherent.sh`;
 - the image-only CI lanes: builder and pack reproducibility, verified-boot
   artifacts, cache warming, and the kernel CVE watch;
@@ -588,7 +588,10 @@ Delivery slices, one PR each:
       dev rootfs). Issue #3491 is resolved: every direct published or
       reproducibility builder-image host-binary build selects the Rust version
       from `[workspace.metadata.mvm.toolchain]`, and the host-binary sync gate
-      rejects workflow or installer-output drift.
+      rejects workflow or installer-output drift. Issue #3492 is resolved in
+      `mvm`: the retired Lima pack builder and duplicate missing-server browser
+      harness are removed; local setup downloads the checkout-pinned published
+      pack and the maintained smoke harness uses its checked-in server.
 
 ### W5 — Ship the sibling-checkout developer workflow (#3364)
 

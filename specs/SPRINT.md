@@ -4573,3 +4573,13 @@ writes the plan:
 - [x] Complete focused tests, actionlint, workspace check and serialized tests,
       workspace doctests, zero-warning Clippy, and gated-target checks.
 - [x] Prepare the issue-closing change for protected merge-queue delivery.
+
+## 2026-09-22 QEMU-WASM local tooling cleanup
+
+- [x] Remove the Lima-only local smoke-pack builder and its dead Just recipe.
+- [x] Remove the duplicate Chromium harness whose server was never checked in,
+      preserving the maintained smoke harness and checked-in COOP/COEP server.
+- [x] Make local setup point only at the image-lock-pinned published pack.
+- [x] Add a regression test that rejects the retired scripts, recipe, and stale
+      downloader guidance.
+- [x] Prepare the issue-closing change for protected merge-queue delivery.

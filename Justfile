@@ -893,14 +893,6 @@ demo-assets:
 qemu-wasm-pack-download *ARGS:
     ./scripts/download-qemu-wasm-smoke-pack.sh {{ ARGS }}
 
-# Build the qemu-wasm-smoke-pack in the Linux builder VM and copy it back.
-# This is an alternative to downloading from GitHub releases.
-# Usage: just qemu-wasm-pack [output-dir]
-
-# output-dir: Where to place the built pack (default: ./qemu-wasm-smoke-pack)
-qemu-wasm-pack *ARGS:
-    ./scripts/build-qemu-wasm-smoke-pack.sh {{ ARGS }}
-
 # Build all demo assets (wasm + weblinux); requires Linux for weblinux
 # Usage: just demo-build-all [qemu-wasm-pack-path]
 #   qemu-wasm-pack-path: Path to the built pack (default: ./qemu-wasm-smoke-pack)

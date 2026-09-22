@@ -6,10 +6,8 @@
 #   tag:        The boot-image tag to download from (default: the tag pinned by
 #               images.lock)
 #
-# NOTE: The qemu-wasm-smoke-pack is NOT currently published to GitHub releases.
-# This script exists as a template but you'll need to build the pack using
-# the just qemu-wasm-pack command which runs the build inside the Linux builder VM.
-# See scripts/build-qemu-wasm-smoke-pack.sh for details.
+# The boot-image release train builds and publishes this pack. By default this
+# downloads the exact release pinned by the checkout's image lock.
 
 set -euo pipefail
 

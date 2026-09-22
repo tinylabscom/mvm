@@ -1526,6 +1526,46 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
 }
 
 #[test]
+fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
+    let recipes = justfile();
+    let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
+        .expect("read QEMU-WASM pack downloader");
+    let harness = fs::read_to_string("scripts/run-qemu-wasm-smoke-chromium.py")
+        .expect("read maintained QEMU-WASM Chromium harness");
+
+    for retired in [
+        "scripts/build-qemu-wasm-smoke-pack.sh",
+        "scripts/run-qemu-wasm-demo-chromium.py",
+        "scripts/run-qemu-wasm-smoke-suite.py",
+    ] {
+        assert!(
+            !Path::new(retired).exists(),
+            "retired QEMU-WASM tool must stay deleted: {retired}"
+        );
+    }
+    assert!(
+        !recipes.contains("qemu-wasm-pack *ARGS:"),
+        "Justfile must not offer the retired Lima-backed build recipe"
+    );
+    assert!(
+        recipes.contains("qemu-wasm-pack-download *ARGS:")
+            && downloader.contains("locked-image-tag.sh")
+            && downloader.contains("qemu-wasm-smoke-pack.tar.gz"),
+        "local QEMU-WASM setup must use the tree-pinned published pack"
+    );
+    assert!(
+        !downloader.contains("NOT currently published")
+            && !downloader.contains("build-qemu-wasm-smoke-pack.sh"),
+        "the downloader must not direct users back to the retired build path"
+    );
+    assert!(
+        harness.contains("serve-qemu-wasm-smoke-pack.py")
+            && Path::new("scripts/serve-qemu-wasm-smoke-pack.py").is_file(),
+        "the maintained Chromium harness must use its checked-in server"
+    );
+}
+
+#[test]
 fn weblinux_qemu_module_is_staged_below_the_cloudflare_asset_file_limit() {
     let build =
         fs::read_to_string("web/weblinux-demo/build.sh").expect("read WebLinux build script");
