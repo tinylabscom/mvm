@@ -317,6 +317,9 @@ Last updated: 2026-09-22
             - [x] #3491: direct published and reproducibility builder-image
                   host-binary builds select the metadata-pinned Rust toolchain;
                   the sync gate rejects workflow and action-output drift.
+            - [x] #3492: the retired Lima pack builder and duplicate
+                  missing-server Chromium harness are gone; local setup uses
+                  the pinned published pack and the maintained smoke harness.
       - [x] W5a #3364: explicit `MVM_IMAGES_DIR` selector, `local-dev` /
             `verified-release` tiers, release-build and production refusals,
             `doctor` image-source line; W5b–W5m sliced in the plan.
