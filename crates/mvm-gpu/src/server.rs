@@ -169,9 +169,6 @@ where
 /// vsock path, which manages its own timeout via `poll`.
 fn listener_nonblocking_hint<L>(_listener: &L) {}
 
-#[allow(dead_code)]
-fn _assert_stop_is_static(_: &'static AtomicBool) {}
-
 #[cfg(target_os = "linux")]
 fn run_vsock(
     port: u32,

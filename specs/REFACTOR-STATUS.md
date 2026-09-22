@@ -144,11 +144,13 @@ Last updated: 2026-09-22
 
 - [ ] **`#[allow(dead_code)]` sweep.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A3.6 / D6, issue #3310.
-      58 of 61 attributes gone; dead paths deleted (an orphan 215-line HVF DAX
+      60 of the original 61 attributes gone; dead paths deleted (an orphan 215-line HVF DAX
       file and its trait, a signal-handler registry nothing ever populated,
       unused HVF FFI, placeholder variants and fields). Policy admission no
       longer constructs five unused controls or calls their bundle "live";
-      three attributes remain, blocked on #3484 or #3485.
+      `mvm-builderd` no longer compiles its host-side client and repair helpers,
+      so its two blanket module allowances are gone. A later GPU no-op
+      assertion allowance is gone too. One attribute remains, blocked on #3484.
 
 - [x] **Kept-alive entrypoint machines retain their requested names.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` T11, issue #3285.

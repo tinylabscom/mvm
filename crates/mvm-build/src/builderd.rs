@@ -4,8 +4,9 @@
 //! This module is the cross-platform, unit-testable heart of the
 //! daemon: it turns a decoded [`BuilderRequest`] into a
 //! [`BuilderResponse`] ([`dispatch`]) and runs the read-dispatch-write
-//! loop over a framed connection ([`serve_connection`]). The binary
-//! entrypoint and the Linux AF_VSOCK listener are deliberately *not*
+//! loop over a framed connection
+//! ([`serve_connection_with_executor`]). The binary entrypoint and the
+//! Linux AF_VSOCK listener are deliberately *not*
 //! here — they land with the builder-VM boot wiring. Keeping the core
 //! in the library lets it be driven from a `UnixStream` pair in tests
 //! without booting the builder VM.
@@ -23,8 +24,7 @@
 
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
 use crate::builderd_protocol::{
     BuilderRequest, BuilderResponse, FailureCategory, OperationId, PROTOCOL_VERSION,
@@ -135,6 +135,7 @@ fn serve_loop(
 /// operation executor): build/eval operations answer
 /// [`FailureCategory::Unsupported`]. Used where the daemon has no
 /// builder-side execution context (the skeleton path and tests).
+#[cfg(test)]
 pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
     serve_loop(stream, dispatch)
 }
@@ -510,37 +511,6 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
     let _ = tmp.close();
     Ok(())
 }
-
-#[cfg(any(target_os = "linux", test))]
-fn e2fsck_repair_exit_code_is_success(code: i32) -> bool {
-    matches!(code, 0..=2)
-}
-
-/// Repair a writable ext4 rootfs copy before it reaches a read-only guest.
-#[cfg(target_os = "linux")]
-pub fn repair_ext4_filesystem(path: &Path) -> Result<(), String> {
-    let status = std::process::Command::new("/sbin/e2fsck")
-        .args(["-f", "-y"])
-        .arg(path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("spawn e2fsck on {}: {e}", path.display()))?;
-    match status.code() {
-        Some(code) if e2fsck_repair_exit_code_is_success(code) => Ok(()),
-        Some(code) => Err(format!(
-            "e2fsck on {} exited with status {code}; the rootfs journal may still be dirty",
-            path.display()
-        )),
-        None => Err(format!(
-            "e2fsck on {} was terminated by a signal; the rootfs journal may still be dirty",
-            path.display()
-        )),
-    }
-}
-
-/// Run the builder-VM before_build hook runner on `rootfs_path`.
-///
 /// If the runner binary is not present (e.g., unit tests driving
 /// `export_image_artifacts` on a dev host), the hook is skipped. The
 /// binary is always baked into the builder VM rootfs in production.
@@ -716,174 +686,6 @@ pub fn dispatch_with_executor(
             dispatch_query_store_path(*op, store_path, executor)
         }
         other => dispatch(other),
-    }
-}
-
-// ============================================================================
-// Host-side client (readiness probe)
-// ============================================================================
-
-/// The **libkrun**-shape control socket for a builder VM rooted at
-/// `vm_state_dir`: normally `<vm_state_dir>/vsock-<port>.sock`. libkrun binds
-/// one socket per forwarded port directly in the resolved socket directory;
-/// deep state paths use the short namespace selected by
-/// `mvm_core::config::vm_socket_dir_at` (matching
-/// `persistent_builder::dispatch_socket_path`).
-///
-/// HVF nests its per-port sockets one level deeper, under a `vsock/`
-/// subdir — use [`builderd_hvf_control_socket_path`] there, or
-/// [`builderd_control_socket_candidates`] when the backend is unknown
-/// (e.g. scanning the builder-VM `vms/` root). Mixing the two shapes is
-/// the libkrun-vs-HVF socket-path bug class that has bitten the broker
-/// path before.
-pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {
-    mvm_core::config::vm_vsock_port_socket_at(
-        vm_state_dir,
-        mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT,
-    )
-}
-
-/// The **HVF**-shape control socket for a builder VM rooted at
-/// `vm_state_dir`: normally `<vm_state_dir>/vsock/vsock-<port>.sock`. The HVF
-/// supervisor nests per-port sockets under a `vsock/` subdir of the resolved
-/// socket directory (see `mvm_core::config::vm_hvf_vsock_dir_at`).
-pub fn builderd_hvf_control_socket_path(vm_state_dir: &Path) -> PathBuf {
-    mvm_core::config::vm_hvf_vsock_port_socket_at(
-        vm_state_dir,
-        mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT,
-    )
-}
-
-/// Both candidate control-socket paths (libkrun shape, then HVF shape)
-/// for a builder VM rooted at `vm_state_dir`. Use when the backend isn't
-/// known up front — e.g. `mvmctl doctor` scanning the builder-VM `vms/`
-/// root, where a dir may be a libkrun or an HVF builder VM. Probe whichever
-/// exists.
-pub fn builderd_control_socket_candidates(vm_state_dir: &Path) -> [PathBuf; 2] {
-    [
-        builderd_control_socket_path(vm_state_dir),
-        builderd_hvf_control_socket_path(vm_state_dir),
-    ]
-}
-
-/// Outcome of a host-side readiness probe against a builder daemon's
-/// control socket. Surfaced by `mvmctl doctor` and used by the host
-/// client to decide whether the daemon is usable before sending real
-/// operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BuilderdReadiness {
-    /// The daemon answered a handshake and agreed a protocol version.
-    Ready {
-        /// Protocol version the daemon speaks.
-        version: u32,
-    },
-    /// The daemon answered but refused our protocol version
-    /// (fail-closed). The daemon and host need a compatible build.
-    VersionMismatch {
-        /// The daemon's human-readable refusal detail.
-        detail: String,
-    },
-    /// No control socket exists — the daemon is not running (e.g. the
-    /// builder VM is down). The expected first-run state; non-blocking.
-    NotRunning,
-    /// A control socket exists but the daemon did not complete a clean
-    /// handshake (connect refused, timed out, or answered unexpectedly).
-    /// Usually a stale socket from a crashed daemon.
-    Unreachable {
-        /// Diagnostic detail for the operator.
-        detail: String,
-    },
-}
-
-/// Connect to a daemon control socket and arm both read and write
-/// timeouts. Shared by the readiness probe and the host client so the
-/// connect convention lives in one place.
-pub(crate) fn connect_with_timeout(
-    socket_path: &Path,
-    timeout: Duration,
-) -> std::io::Result<UnixStream> {
-    let stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    Ok(stream)
-}
-
-/// Classified outcome of the protocol handshake on a connected stream.
-/// Shared by the readiness probe and the host client so the handshake
-/// wire is interpreted in exactly one place.
-pub(crate) enum HandshakeOutcome {
-    /// Daemon agreed on this protocol version.
-    Agreed(u32),
-    /// Daemon refused our version fail-closed; detail is its message.
-    VersionRefused(String),
-    /// Connected, but the reply was not a handshake answer.
-    Unexpected(String),
-    /// Transport error writing or reading the handshake.
-    Transport(String),
-}
-
-/// Write our [`BuilderRequest::Handshake`] on an already-connected
-/// stream (timeouts pre-armed by the caller), read one reply, and
-/// classify it.
-pub(crate) fn perform_handshake(stream: &mut UnixStream) -> HandshakeOutcome {
-    let handshake = BuilderRequest::Handshake {
-        protocol_version: PROTOCOL_VERSION,
-    };
-    if let Err(e) = mvm_agentd::vsock::write_frame(stream, &handshake) {
-        return HandshakeOutcome::Transport(format!("handshake write failed: {e}"));
-    }
-    match mvm_agentd::vsock::read_frame::<BuilderResponse>(stream) {
-        Ok(BuilderResponse::Accepted {
-            protocol_version, ..
-        }) => HandshakeOutcome::Agreed(protocol_version),
-        Ok(BuilderResponse::Failed {
-            category: FailureCategory::Version,
-            message,
-            ..
-        }) => HandshakeOutcome::VersionRefused(message),
-        Ok(other) => {
-            HandshakeOutcome::Unexpected(format!("unexpected handshake response: {other:?}"))
-        }
-        Err(e) => HandshakeOutcome::Transport(format!("handshake read failed: {e}")),
-    }
-}
-
-/// Probe a builder daemon's readiness by connecting to `socket_path`
-/// and completing a [`BuilderRequest::Handshake`] within `timeout`.
-///
-/// Pure transport over the typed protocol — no side effects beyond the
-/// connection. A missing socket is [`BuilderdReadiness::NotRunning`]
-/// (the normal "builder VM down" case), so callers treat absence as
-/// informational, not a failure.
-pub fn probe_builderd_readiness(socket_path: &Path, timeout: Duration) -> BuilderdReadiness {
-    if !socket_path.exists() {
-        return BuilderdReadiness::NotRunning;
-    }
-    let mut stream = match connect_with_timeout(socket_path, timeout) {
-        Ok(s) => s,
-        Err(e) => {
-            return BuilderdReadiness::Unreachable {
-                detail: format!("connect failed: {e}"),
-            };
-        }
-    };
-    match perform_handshake(&mut stream) {
-        HandshakeOutcome::Agreed(version) => BuilderdReadiness::Ready { version },
-        HandshakeOutcome::VersionRefused(detail) => BuilderdReadiness::VersionMismatch { detail },
-        HandshakeOutcome::Unexpected(detail) | HandshakeOutcome::Transport(detail) => {
-            BuilderdReadiness::Unreachable { detail }
-        }
-    }
-}
-
-/// One-line human summary of a [`BuilderdReadiness`] for `mvmctl
-/// doctor`. Pure so the mapping is unit-testable without a socket.
-pub fn readiness_summary(readiness: &BuilderdReadiness) -> String {
-    match readiness {
-        BuilderdReadiness::Ready { version } => format!("ready (protocol v{version})"),
-        BuilderdReadiness::VersionMismatch { detail } => format!("version mismatch — {detail}"),
-        BuilderdReadiness::NotRunning => "not running".to_string(),
-        BuilderdReadiness::Unreachable { detail } => format!("unreachable — {detail}"),
     }
 }
 
@@ -1632,146 +1434,5 @@ mod tests {
         serve_connection_with_executor(&mut server, &exec).expect("serve");
         let resp = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
         assert!(matches!(resp, BuilderResponse::Completed { op: got } if got == op()));
-    }
-
-    // ---- host-side readiness probe ------------------------------------
-
-    #[test]
-    fn control_socket_path_uses_builderd_port() {
-        let port = mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT;
-        let dir = Path::new("/var/lib/mvm/vm-foo");
-        // libkrun: directly in the state dir.
-        assert_eq!(
-            builderd_control_socket_path(dir),
-            Path::new(&format!("/var/lib/mvm/vm-foo/vsock-{port}.sock"))
-        );
-        // HVF: one subdir deeper, under `vsock/` (the bug the live HVF boot
-        // surfaced — doctor/client must not assume the libkrun shape).
-        assert_eq!(
-            builderd_hvf_control_socket_path(dir),
-            Path::new(&format!("/var/lib/mvm/vm-foo/vsock/vsock-{port}.sock"))
-        );
-        // Candidates: libkrun first, then HVF.
-        assert_eq!(
-            builderd_control_socket_candidates(dir),
-            [
-                builderd_control_socket_path(dir),
-                builderd_hvf_control_socket_path(dir),
-            ]
-        );
-    }
-
-    #[test]
-    fn control_socket_path_shortens_deep_worktree_state_dirs() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("x".repeat(120));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let socket = builderd_control_socket_path(&dir);
-        assert_ne!(socket.parent(), Some(dir.as_path()));
-        assert!(socket.to_string_lossy().len() <= 103);
-    }
-
-    #[test]
-    fn probe_reports_not_running_when_socket_absent() {
-        let missing = std::path::Path::new("/nonexistent/mvm/builderd/vsock-21473.sock");
-        assert_eq!(
-            probe_builderd_readiness(missing, Duration::from_millis(100)),
-            BuilderdReadiness::NotRunning
-        );
-    }
-
-    #[test]
-    fn probe_reports_ready_against_a_live_daemon() {
-        use std::os::unix::net::UnixListener;
-        // Stand up the real serve loop behind a UnixListener and probe
-        // it end-to-end over the typed handshake.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("vsock-21473.sock");
-        let listener = match UnixListener::bind(&sock) {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "skipping test: sandbox denied binding Unix socket {}: {err}",
-                    sock.display()
-                );
-                return;
-            }
-            Err(err) => panic!("bind: {err}"),
-        };
-        let handle = std::thread::spawn(move || {
-            // Serve exactly one connection then return.
-            let (mut conn, _addr) = listener.accept().expect("accept");
-            serve_connection(&mut conn).expect("serve");
-        });
-
-        let readiness = probe_builderd_readiness(&sock, Duration::from_secs(2));
-        assert_eq!(
-            readiness,
-            BuilderdReadiness::Ready {
-                version: PROTOCOL_VERSION
-            }
-        );
-        handle.join().expect("server thread");
-    }
-
-    #[test]
-    fn probe_reports_unreachable_on_stale_socket() {
-        use std::os::unix::net::UnixListener;
-        // A bound socket whose owner never accepts/serves: connect
-        // succeeds (queued), but the handshake read times out. Models a
-        // crashed daemon that left its socket behind.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("vsock-21473.sock");
-        let _listener = match UnixListener::bind(&sock) {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "skipping test: sandbox denied binding Unix socket {}: {err}",
-                    sock.display()
-                );
-                return;
-            }
-            Err(err) => panic!("bind: {err}"),
-        };
-        let readiness = probe_builderd_readiness(&sock, Duration::from_millis(150));
-        assert!(
-            matches!(readiness, BuilderdReadiness::Unreachable { .. }),
-            "expected Unreachable, got {readiness:?}"
-        );
-    }
-
-    #[test]
-    fn readiness_summary_maps_every_variant() {
-        assert_eq!(
-            readiness_summary(&BuilderdReadiness::Ready { version: 1 }),
-            "ready (protocol v1)"
-        );
-        assert_eq!(
-            readiness_summary(&BuilderdReadiness::NotRunning),
-            "not running"
-        );
-        assert!(
-            readiness_summary(&BuilderdReadiness::VersionMismatch {
-                detail: "speaks 2".to_string()
-            })
-            .starts_with("version mismatch")
-        );
-        assert!(
-            readiness_summary(&BuilderdReadiness::Unreachable {
-                detail: "boom".to_string()
-            })
-            .starts_with("unreachable")
-        );
-    }
-
-    #[test]
-    fn ext4_repair_accepts_clean_and_corrected_e2fsck_exit_codes_only() {
-        for code in [0, 1, 2] {
-            assert!(e2fsck_repair_exit_code_is_success(code));
-        }
-        for code in [3, 4, 8, 16, 32, 128] {
-            assert!(!e2fsck_repair_exit_code_is_success(code));
-        }
     }
 }

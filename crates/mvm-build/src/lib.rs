@@ -38,6 +38,8 @@ pub mod builderd;
 /// handshake, run one typed operation per connection, stream
 /// progress/log events, and surface a typed terminal outcome.
 pub mod builderd_client;
+/// Host-only helpers used around the resident builder daemon.
+pub mod builderd_host;
 /// Typed allowlisted control-plane protocol for the resident
 /// `mvm-builderd` builder-VM service (the long-term replacement for the
 /// controlled-shell-job channel in `builder_protocol`).

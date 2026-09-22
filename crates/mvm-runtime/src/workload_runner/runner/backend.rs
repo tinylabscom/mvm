@@ -128,7 +128,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
         #[cfg(target_os = "linux")]
         if should_repair_rootfs_before_start(config)
-            && let Err(e) = mvm_build::builderd::repair_ext4_filesystem(std::path::Path::new(
+            && let Err(e) = mvm_build::builderd_host::repair_ext4_filesystem(std::path::Path::new(
                 &config.rootfs_path,
             ))
         {

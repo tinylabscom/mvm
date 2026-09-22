@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
+      The path-included daemon now compiles only its request execution core:
+      readiness, socket discovery, handshakes, and operation-id minting live in
+      `builderd_client`, while host ext4 repair lives in `builderd_host`.
+      Both blanket module allowances are gone, and the later GPU server
+      dead-assertion regression is deleted, leaving one repository-owned
+      `#[allow(dead_code)]` site (#3484). Focused daemon/client/doctor tests and
+      the Linux/feature-gated workspace compile pass.
+
 - [x] **Validate policy bundles without inventing live controls — issue #3483.**
       Admission no longer constructs and drops L4, L7, tool, keystore, and
       artifact supervisor controls. It validates the policy document, passes

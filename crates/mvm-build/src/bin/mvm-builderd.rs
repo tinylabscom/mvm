@@ -22,12 +22,10 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 #[path = "../builderd_protocol.rs"]
 mod builderd_protocol;
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 #[path = "../builderd.rs"]
 mod builderd;
 
