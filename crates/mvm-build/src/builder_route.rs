@@ -24,11 +24,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::builderd::{
-    BuilderdReadiness, builderd_control_socket_candidates, probe_builderd_readiness,
-};
 use crate::builderd_client::{
-    BuilderdClient, BuilderdClientError, OperationEvent, OperationOutcome,
+    BuilderdClient, BuilderdClientError, BuilderdReadiness, OperationEvent, OperationOutcome,
+    builderd_control_socket_candidates, probe_builderd_readiness,
 };
 use crate::builderd_protocol::{BuilderRequest, OperationId};
 
@@ -311,9 +309,8 @@ mod tests {
 #[cfg(test)]
 mod io_tests {
     use super::*;
-    use crate::builderd::{
-        OpExecResult, OpExecutor, builderd_control_socket_path, serve_connection_with_executor,
-    };
+    use crate::builderd::{OpExecResult, OpExecutor, serve_connection_with_executor};
+    use crate::builderd_client::builderd_control_socket_path;
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::thread;

@@ -2,7 +2,7 @@
 
 Issue #3310; `specs/plans/2026-09-15-the-big-cleanup.md` A3.6 / D6.
 
-58 of the 61 `#[allow(dead_code)]` attributes are gone (counted as attribute
+60 of the original 61 `#[allow(dead_code)]` attributes are gone (counted as attribute
 lines, excluding `third_party/` and the doc-example code that
 `mvm-conformance/build.rs` generates). Rather than judge each site by reading
 it, every attribute was removed and the compiler asked what was dead in each
@@ -40,6 +40,8 @@ macOS-only entitlement layouts in `tests/install_sh.rs`.
   `block_size` and `origin` (the latter recorded the snapshot's own id, not its
   origin's), `RemoteIndex::schema_version`, the unread `spec = "mvm/1"` tag in
   `model/*.toml`, and `Value::Bool`'s payload.
+- The GPU server's no-op `_assert_stop_is_static` helper, introduced after the
+  original sweep with its own allowance but never called.
 
 ## Made to mean something
 
@@ -58,6 +60,11 @@ Where a field existed to be checked, it is now checked instead of deleted:
   path never consumes. The validated bundle is loaded once for the live bridge,
   and `plan.policy_resolved` records `bundle-validated` rather than claiming
   those controls are `live`.
+- `mvm-builderd` path-includes only daemon request execution now. Host socket
+  discovery, readiness, handshake, and operation-id creation live in
+  `builderd_client`; host ext4 repair lives in `builderd_host`. The binary no
+  longer compiles those host-only paths or needs blanket allowances on either
+  path module.
 
 ## Left, each with an owner
 
@@ -65,8 +72,5 @@ Where a field existed to be checked, it is now checked instead of deleted:
   the vsock egress path the design calls production. #1613 swapped it for a
   child proxy that dials upstreams directly. Deleting it would delete the
   intended path.
-- `mvm-builderd`'s two `#[path]` modules: #3485. `builderd.rs` needs splitting
-  so the daemon stops compiling the host-side half.
-
 No security claim or ADR-001 witness changes. The deletions remove no
-production caller, and the three new checks pass on today's data.
+production caller, and the checks pass on today's data.

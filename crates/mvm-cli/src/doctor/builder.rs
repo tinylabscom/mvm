@@ -190,7 +190,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
         // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or HVF
         // (`<dir>/vsock/vsock-<port>.sock`); probe whichever socket the
         // backend actually created.
-        let Some(sock) = mvm_build::builderd::builderd_control_socket_candidates(&dir)
+        let Some(sock) = mvm_build::builderd_client::builderd_control_socket_candidates(&dir)
             .into_iter()
             .find(|p| p.exists())
         else {
@@ -198,10 +198,10 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         let readiness =
-            mvm_build::builderd::probe_builderd_readiness(&sock, BUILDERD_PROBE_TIMEOUT);
+            mvm_build::builderd_client::probe_builderd_readiness(&sock, BUILDERD_PROBE_TIMEOUT);
         lines.push(format!(
             "{name}: {}",
-            mvm_build::builderd::readiness_summary(&readiness)
+            mvm_build::builderd_client::readiness_summary(&readiness)
         ));
     }
     lines.sort();
@@ -742,7 +742,7 @@ mod tests {
             .unwrap();
         let vm_dir = root.path().join("bv");
         std::fs::create_dir_all(&vm_dir).unwrap();
-        let sock = mvm_build::builderd::builderd_control_socket_path(&vm_dir);
+        let sock = mvm_build::builderd_client::builderd_control_socket_path(&vm_dir);
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -753,7 +753,11 @@ mod tests {
         };
         let handle = std::thread::spawn(move || {
             let (mut conn, _addr) = listener.accept().expect("accept");
-            mvm_build::builderd::serve_connection(&mut conn).expect("serve");
+            mvm_build::builderd::serve_connection_with_executor(
+                &mut conn,
+                &mvm_build::builderd::CommandExecutor,
+            )
+            .expect("serve");
         });
 
         let s = builderd_daemon_summary(root.path());
@@ -772,7 +776,7 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
         let vm_dir = root.path().join("bhvf");
-        let sock = mvm_build::builderd::builderd_hvf_control_socket_path(&vm_dir);
+        let sock = mvm_build::builderd_client::builderd_hvf_control_socket_path(&vm_dir);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,
@@ -784,7 +788,11 @@ mod tests {
         };
         let handle = std::thread::spawn(move || {
             let (mut conn, _addr) = listener.accept().expect("accept");
-            mvm_build::builderd::serve_connection(&mut conn).expect("serve");
+            mvm_build::builderd::serve_connection_with_executor(
+                &mut conn,
+                &mvm_build::builderd::CommandExecutor,
+            )
+            .expect("serve");
         });
 
         let s = builderd_daemon_summary(root.path());
