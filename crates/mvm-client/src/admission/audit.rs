@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use crate::admission::policy_resolver::ResolveError;
+use crate::admission::policy_resolver::{PolicyResolutionKind, ResolveError};
 use mvm_hostd::audit::emitter::{AuditEmitter, default_audit_dir};
 
 pub fn build_default_audit_emitter(
@@ -49,9 +49,9 @@ pub fn build_policy_audit_emitter(
 pub fn emit_policy_resolved(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
-    slots_mode: &'static str,
+    resolution: PolicyResolutionKind,
 ) {
-    if let Err(e) = emitter.emit_policy_resolved(plan, slots_mode) {
+    if let Err(e) = emitter.emit_policy_resolved(plan, resolution.audit_label()) {
         tracing::warn!(error = %e, "audit emit_policy_resolved failed (non-fatal)");
     }
 }
@@ -111,7 +111,7 @@ mod policy_audit_admission_tests {
     }
 
     #[test]
-    fn admission_emits_policy_resolved_live_when_bundle_parses() {
+    fn admission_audits_a_validated_bundle_without_claiming_all_controls_are_live() {
         // Manually stage a bundle whose tenant matches the synthesized
         // plan's tenant. We can't trivially make the synthesizer emit
         // `<tenant>:<workload>` refs (synthesis hard-codes
@@ -213,22 +213,23 @@ chain_signing = true
         // ordering: the `[audit]` section affects the success-path
         // audit emitter.
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
-            .expect("live bundle must resolve");
+            .expect("bundle must validate");
         let signer = load_or_init_at(keys_dir.path()).expect("signer");
         let emitter = build_policy_audit_emitter(
             signer.signing,
             Some(audit_dir.path()),
-            resolved.audit.as_ref(),
+            resolved.bundle.as_ref().map(|bundle| &bundle.audit),
         )
         .unwrap();
-        emit_policy_resolved(&plan, &emitter, resolved.slots_mode);
+        emit_policy_resolved(&plan, &emitter, resolved.kind);
 
         let audit_path = audit_dir.path().join("acme.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
         assert!(
-            content.contains("\"slots_mode\":\"live\""),
-            "audit chain must record slots_mode=live for tenant-scoped refs: {content}"
+            content.contains("\"resolution\":\"bundle-validated\""),
+            "audit chain must record validated tenant policy resolution: {content}"
         );
+        assert!(!content.contains("slots_mode"), "{content}");
     }
 
     #[test]
@@ -331,11 +332,11 @@ stream_destinations = ["file://{}"]
         let emitter = build_policy_audit_emitter(
             signer.signing,
             Some(audit_dir.path()),
-            resolved.audit.as_ref(),
+            resolved.bundle.as_ref().map(|bundle| &bundle.audit),
         )
         .unwrap();
         emitter.emit_admitted(&plan, "host:test").unwrap();
-        emit_policy_resolved(&plan, &emitter, resolved.slots_mode);
+        emit_policy_resolved(&plan, &emitter, resolved.kind);
 
         let default_path = audit_dir.path().join("acme.jsonl");
         let default_content = std::fs::read_to_string(&default_path).unwrap();
@@ -445,7 +446,7 @@ chain_signing = false
         let err = match build_policy_audit_emitter(
             signer.signing.clone(),
             Some(audit_dir.path()),
-            resolved.audit.as_ref(),
+            resolved.bundle.as_ref().map(|bundle| &bundle.audit),
         ) {
             Ok(_) => panic!("chain_signing=false must reject admission audit construction"),
             Err(err) => err.context("opening audit chain emitter"),

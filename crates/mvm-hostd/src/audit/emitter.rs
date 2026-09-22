@@ -712,22 +712,20 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `plan.policy_resolved` — fires after the resolver
-    /// successfully constructs `ResolvedSlots` from the plan's policy
-    /// refs. `slots_mode` is `"noop"` when all four refs are
-    /// `"local-default"` (no bundle on disk) or `"live"` when a
-    /// `<tenant>:<workload>` bundle parsed cleanly.
+    /// Emit `plan.policy_resolved` after admission validates the plan's
+    /// policy refs. `resolution` describes what was validated without
+    /// claiming that every bundle section has a live runtime consumer.
     ///
     /// The audit entry is informational — the supervisor's hard
     /// admission decision is still `plan.admitted`. This event lets
     /// operators answer "did my bundle actually parse on the last
     /// boot, or did I fall back to local-default?" via
     /// `mvmctl audit tail --chain`.
-    pub fn emit_policy_resolved(&self, plan: &ExecutionPlan, slots_mode: &str) -> Result<()> {
+    pub fn emit_policy_resolved(&self, plan: &ExecutionPlan, resolution: &str) -> Result<()> {
         self.emit(
             plan,
             "plan.policy_resolved",
-            [("slots_mode".to_string(), slots_mode.to_string())],
+            [("resolution".to_string(), resolution.to_string())],
         )
     }
 

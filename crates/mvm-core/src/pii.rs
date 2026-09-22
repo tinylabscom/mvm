@@ -189,27 +189,31 @@ impl PiiRedactor {
         Self::new(DEFAULT_RULES, Mode::Detect).expect("DEFAULT_RULES must compile")
     }
 
-    /// Construct from a parsed `crate::policy::PiiPolicy`. Returns
-    /// `Ok(None)` when the policy explicitly disables PII scanning
-    /// (`mode = "disabled"`) — the caller skips inserting the
-    /// inspector into the chain rather than inserting a no-op that
-    /// always Allows.
-    ///
-    /// Mode mapping:
-    ///   - `None` / `Some("detect")` → [`Mode::Detect`] (default)
-    ///   - `Some("redact")` → [`Mode::Redact`]
-    ///   - `Some("refuse")` → [`Mode::Block`]
-    ///   - `Some("disabled")` → `Ok(None)` (skip the inspector)
-    ///   - anything else → [`PiiPolicyError::UnknownMode`]
-    ///
-    /// Category filter:
-    ///   - empty list → all [`DEFAULT_RULES`] (the implicit "scan
-    ///     everything" case)
-    ///   - non-empty list → only rules whose `name` appears in the
-    ///     list. Unknown names yield [`PiiPolicyError::UnknownCategory`]
-    ///     so a typo fails admission instead of silently scanning
-    ///     fewer categories than the operator intended.
+    /// Validate a parsed PII policy without constructing a redactor.
+    /// Admission uses this when it needs fail-loud syntax checking but
+    /// does not own the runtime inspector chain.
+    pub fn validate_policy(policy: &crate::policy::PiiPolicy) -> Result<(), PiiPolicyError> {
+        Self::policy_config(policy).map(|_| ())
+    }
+
+    /// Construct from a parsed policy. Returns `Ok(None)` for
+    /// `mode = "disabled"`; unknown modes or categories fail loudly.
     pub fn from_policy(policy: &crate::policy::PiiPolicy) -> Result<Option<Self>, PiiPolicyError> {
+        let Some((mode, rules)) = Self::policy_config(policy)? else {
+            return Ok(None);
+        };
+
+        // Pattern compilation cannot fail for DEFAULT_RULES (already
+        // proven at runtime by `with_default_rules`), but `new` is
+        // fallible in the general case. Surface as Internal in the
+        // unlikely event the runtime regex compiler hiccups.
+        let red = Self::new(&rules, mode).map_err(|e| PiiPolicyError::Internal(e.to_string()))?;
+        Ok(Some(red))
+    }
+
+    fn policy_config(
+        policy: &crate::policy::PiiPolicy,
+    ) -> Result<Option<(Mode, Vec<PiiRule>)>, PiiPolicyError> {
         let mode = match policy.mode.as_deref() {
             None | Some("detect") => Mode::Detect,
             Some("redact") => Mode::Redact,
@@ -243,13 +247,7 @@ impl PiiRedactor {
             }
             out
         };
-
-        // Pattern compilation cannot fail for DEFAULT_RULES (already
-        // proven at runtime by `with_default_rules`), but `new` is
-        // fallible in the general case. Surface as Internal in the
-        // unlikely event the runtime regex compiler hiccups.
-        let red = Self::new(&rules, mode).map_err(|e| PiiPolicyError::Internal(e.to_string()))?;
-        Ok(Some(red))
+        Ok(Some((mode, rules)))
     }
 
     pub fn mode(&self) -> Mode {
@@ -543,6 +541,36 @@ mod tests {
     #[test]
     fn iban_category_is_listed() {
         assert!(PII_CATEGORY_NAMES.contains(&"iban"));
+    }
+
+    #[test]
+    fn policy_validation_accepts_known_modes_and_categories_without_a_redactor() {
+        let policy = crate::policy::PiiPolicy {
+            mode: Some("redact".to_string()),
+            categories: vec!["email".to_string(), "iban".to_string()],
+        };
+        PiiRedactor::validate_policy(&policy).expect("known policy must validate");
+    }
+
+    #[test]
+    fn policy_validation_refuses_unknown_modes_and_categories() {
+        let bad_mode = crate::policy::PiiPolicy {
+            mode: Some("paranoid".to_string()),
+            categories: Vec::new(),
+        };
+        assert!(matches!(
+            PiiRedactor::validate_policy(&bad_mode),
+            Err(PiiPolicyError::UnknownMode { .. })
+        ));
+
+        let bad_category = crate::policy::PiiPolicy {
+            mode: Some("detect".to_string()),
+            categories: vec!["passport".to_string()],
+        };
+        assert!(matches!(
+            PiiRedactor::validate_policy(&bad_category),
+            Err(PiiPolicyError::UnknownCategory { .. })
+        ));
     }
 
     #[test]

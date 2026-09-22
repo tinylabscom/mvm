@@ -10,6 +10,13 @@
 
 ## In progress
 
+- [x] **Validate policy bundles without inventing live controls — issue #3483.**
+      Admission no longer constructs and drops L4, L7, tool, keystore, and
+      artifact supervisor controls. It validates the policy document, passes
+      that same parsed bundle to the live host bridge, removes the file-wide
+      dead-code allowance, and audits the truthful resolution source instead
+      of `slots_mode=live`.
+
 - [x] **Persistent machine environment refusal — issue #3470.**
       `machine run --env` now fails before source resolution or builds whenever
       a persistence trigger is present, instead of accepting environment that

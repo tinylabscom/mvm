@@ -21,8 +21,7 @@ use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_arti
 
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
 use crate::admission::policy_resolver::{
-    LOCAL_DEFAULT, resolve_policy_bundle, resolve_policy_bundle_with_dir,
-    resolve_supervisor_components, resolve_supervisor_components_with_dir,
+    PolicyResolutionKind, ValidatedPolicy, validate_policy_refs, validate_policy_refs_with_dir,
 };
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
@@ -632,7 +631,7 @@ pub fn admit_plan_for_boot_with_ingress(
     // fails, fall back to the default local chain for the failure
     // record so the rejection is still visible.
     let generated_bundle = generated_network_policy_bundle.map(|(_, bundle)| bundle);
-    let resolved = if let Some(bundle) = generated_bundle.as_ref() {
+    let resolved = if let Some(bundle) = generated_bundle {
         // The signed plan refs point at this generated in-memory bundle. Validate
         // the L4 rows before using its audit policy; the bundle is then threaded
         // to the bridge as `bundle_json`, so the signed plan path, not the bare
@@ -645,9 +644,9 @@ pub fn admit_plan_for_boot_with_ingress(
             emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
             return Err(err);
         }
-        PolicyAdmissionResolution {
-            slots_mode: "live",
-            audit: Some(bundle.audit.clone()),
+        ValidatedPolicy {
+            kind: PolicyResolutionKind::GeneratedBundleValidated,
+            bundle: Some(bundle),
         }
     } else {
         match resolve_policy_for_admission(admitted.plan(), p.policy_dir) {
@@ -664,7 +663,7 @@ pub fn admit_plan_for_boot_with_ingress(
     let emitter = match build_policy_audit_emitter(
         signer.signing.clone(),
         p.audit_dir,
-        resolved.audit.as_ref(),
+        resolved.bundle.as_ref().map(|bundle| &bundle.audit),
     ) {
         Ok(emitter) => emitter.with_receipts(),
         Err(err) => {
@@ -729,28 +728,12 @@ pub fn admit_plan_for_boot_with_ingress(
         "admit: record_admission (batched fsync)"
     );
 
-    // Resolve the plan's four policy refs into concrete supervisor
-    // component slots. Today the slots are constructed-and-dropped —
-    // no `Supervisor::launch` integration exists in mvmctl yet (that
-    // ships with the mvm-hostd lift). The call here is operator-
-    // facing: it validates the policy refs against the on-disk
-    // bundle so a missing file / typo / bad L4 CIDR fails the boot
-    // loudly *now* instead of silently passing through with Noops.
-    emit_policy_resolved(admitted.plan(), &emitter, resolved.slots_mode);
+    emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
 
-    // Slice 3 (b) — load the resolved tenant PolicyBundle (None for a
-    // local-default plan) so populate_audit_substrate can deliver it to the
-    // bridge for per-tenant L4 egress enforcement. resolve_policy_for_admission
-    // above already validated the refs, so a well-formed bundle won't surface a
-    // new error class here.
-    let policy_bundle = match generated_bundle {
-        Some(bundle) => Some(bundle),
-        None => match p.policy_dir {
-            Some(dir) => resolve_policy_bundle_with_dir(admitted.plan(), dir),
-            None => resolve_policy_bundle(admitted.plan()),
-        }
-        .context("loading the tenant policy bundle for the bridge")?,
-    };
+    // The validated tenant bundle is loaded once and delivered to the bridge
+    // for the live L4 enforcement path. Local-default plans retain the bridge's
+    // mandatory-deny posture by carrying no bundle.
+    let policy_bundle = resolved.bundle;
 
     // Record the admitted L7 egress boundary in the chain-signed log so a
     // receipt can name the destinations without re-resolving policy refs.
@@ -940,14 +923,8 @@ pub fn attach_host_signer_pubkey_config_for_plan(
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct PolicyAdmissionResolution {
-    pub slots_mode: &'static str,
-    pub audit: Option<mvm_core::policy::AuditPolicy>,
-}
-
 /// Run the policy resolver against the admitted plan and return the
-/// policy-derived audit configuration for emitter construction.
+/// validated bundle for audit configuration and bridge enforcement.
 ///
 /// `policy_dir` is the override for `~/.mvm/policies/`; production
 /// callers pass `None` and the resolver resolves it from `$HOME`.
@@ -956,31 +933,19 @@ pub struct PolicyAdmissionResolution {
 pub fn resolve_policy_for_admission(
     plan: &mvm_core::plan::ExecutionPlan,
     policy_dir: Option<&std::path::Path>,
-) -> Result<PolicyAdmissionResolution> {
+) -> Result<ValidatedPolicy> {
     let resolved = match policy_dir {
-        Some(dir) => resolve_supervisor_components_with_dir(plan, dir),
-        None => resolve_supervisor_components(plan),
+        Some(dir) => validate_policy_refs_with_dir(plan, dir),
+        None => validate_policy_refs(plan),
     };
     match resolved {
-        Ok(slots) => {
-            // Drop the slots — no live consumer in mvmctl today. The
-            // construction itself is the validation. Return the
-            // resolved-mode so the caller can audit it after the
-            // policy-derived emitter is constructed.
-            let mode = if plan.network_policy.0 == LOCAL_DEFAULT {
-                "noop"
-            } else {
-                "live"
-            };
+        Ok(validated) => {
             tracing::info!(
                 plan_id = %plan.plan_id.0,
-                slots_mode = mode,
+                policy_resolution = validated.kind.audit_label(),
                 "policy refs resolved",
             );
-            Ok(PolicyAdmissionResolution {
-                slots_mode: mode,
-                audit: slots.audit,
-            })
+            Ok(validated)
         }
         Err(rerr) => Err(anyhow::Error::new(rerr).context("resolving plan policy refs")),
     }
@@ -1871,7 +1836,7 @@ mod admit_plan_tests {
     //
     // The default synthesized plan ships `local-default` policy refs,
     // so the happy-path admission must succeed and emit
-    // `plan.policy_resolved` with `slots_mode="noop"`. Tests that
+    // `plan.policy_resolved` with `resolution="local-default"`. Tests that
     // need to exercise the resolver-failure path manually stage a
     // bogus bundle into a tempdir + drive admission with a plan
     // whose refs name that tenant. Tests use the existing
@@ -1882,8 +1847,8 @@ mod admit_plan_tests {
     #[test]
     fn admission_emits_policy_resolved_for_default_local_default_refs() {
         // The synthesized plan defaults to `local-default` on every
-        // ref; the resolver returns Noop slots. The hook must
-        // emit `plan.policy_resolved` with mode=noop.
+        // ref; validation succeeds without a bundle. The hook must
+        // record that resolution without implying a live control.
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -1933,9 +1898,10 @@ mod admit_plan_tests {
             "audit chain must include plan.policy_resolved: {content}"
         );
         assert!(
-            content.contains("\"slots_mode\":\"noop\""),
-            "audit chain must record slots_mode=noop for local-default refs: {content}"
+            content.contains("\"resolution\":\"local-default\""),
+            "audit chain must record local-default policy resolution: {content}"
         );
+        assert!(!content.contains("slots_mode"), "{content}");
         // Sanity: plan_id matches.
         assert!(content.contains(&ctx.admitted.plan_id().0));
     }
@@ -1984,7 +1950,10 @@ mod admit_plan_tests {
         })
         .expect("admission");
 
-        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(
+            ctx.admitted.plan().network_policy.0,
+            policy_resolver::LOCAL_DEFAULT
+        );
         assert_eq!(
             ctx.admitted.plan().network_policy.0,
             ctx.admitted.plan().egress_policy.0
@@ -2003,9 +1972,10 @@ mod admit_plan_tests {
         let content =
             std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("audit file");
         assert!(
-            content.contains("\"slots_mode\":\"live\""),
-            "generated bundle must audit as live policy resolution: {content}"
+            content.contains("\"resolution\":\"generated-bundle-validated\""),
+            "generated bundle must audit as validated policy resolution: {content}"
         );
+        assert!(!content.contains("slots_mode"), "{content}");
     }
 
     #[test]
@@ -2050,7 +2020,10 @@ mod admit_plan_tests {
         })
         .expect("admission");
 
-        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(
+            ctx.admitted.plan().network_policy.0,
+            policy_resolver::LOCAL_DEFAULT
+        );
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
         assert!(bundle.network.l4.is_empty());
