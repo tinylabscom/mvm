@@ -160,7 +160,7 @@ jobs:
           kernel_size="$(stat -c %s smoke/image-set/vmlinux)"
           cat > smoke/image-set.json <<JSON
           {
-            "schema_version": 1,
+            "schema_version": 2,
             "set_version": "${tag#v}",
             "issued_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "producer": {
@@ -177,7 +177,7 @@ jobs:
             },
             "revocation_channel": "https://example.test/revocations.json",
             "members": [{
-              "role": "workload_kernel",
+              "role": {"workload_kernel": "default_tenant"},
               "target": {"arch": "x86_64"},
               "boot_protocol": "linux_direct",
               "artifacts": [{

@@ -15,6 +15,7 @@ use mvm_build::image_source::{
     PairBuild, build_target_for_pair,
 };
 use mvm_core::arch::GuestArch;
+use mvm_core::image_set::WorkloadImageProfile;
 
 use super::shell_job::ShellJobBuilder;
 use super::{bootstrap, stage0_cache};
@@ -88,8 +89,8 @@ pub(crate) fn ensure_pair_built(
     .with_context(|| format!("building {target_label} from the local image checkout"))
 }
 
-/// Resolve the workload kernel from the pair's `default-tenant` set. The set
-/// carries the `workload_kernel` member, so an unchanged pair answers from
+/// Resolve the workload kernel from the pair's requested generic profile. The
+/// set carries that profile's `workload_kernel` member, so an unchanged pair answers from
 /// the local image cache and a changed pair builds once; the returned path
 /// is the file the set's manifest digests were verified over.
 ///
@@ -99,9 +100,10 @@ pub(crate) fn ensure_pair_built(
 /// is not a rejection here either.
 pub(crate) fn ensure_pair_workload_kernel(
     checkout: &LocalImageCheckout,
+    profile: WorkloadImageProfile,
 ) -> Result<std::path::PathBuf> {
     let target = ImageBuildTarget {
-        role: mvm_build::image_source::ImageBuildRole::DefaultTenant,
+        role: mvm_build::image_source::ImageBuildRole::for_workload_profile(profile),
         attr: mvm_build::image_source::FlakeAttr::new("default")
             .expect("default is a valid flake attribute"),
     };
@@ -111,8 +113,10 @@ pub(crate) fn ensure_pair_workload_kernel(
         .set
         .artifacts
         .iter()
-        .find(|artifact| artifact.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
-        .context("the pair's default-tenant set has no workload_kernel member")?;
+        .find(|artifact| {
+            artifact.role == mvm_core::image_set::ImageSetRole::WorkloadKernel(profile)
+        })
+        .with_context(|| format!("the pair's {profile} set has no workload kernel member"))?;
     Ok(artifact.path.clone())
 }
 
@@ -271,7 +275,7 @@ mod tests {
             &key.checkouts,
             key.arch,
             &[(
-                "builder_vm",
+                mvm_core::image_set::ImageSetRole::BuilderVm,
                 Some("linux_direct"),
                 builder_vm_files(),
                 &["virtio_vsock", "virtio_blk"],

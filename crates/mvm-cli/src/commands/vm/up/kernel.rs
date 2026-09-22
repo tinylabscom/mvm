@@ -2,6 +2,9 @@
 //! fallback to the cached builder-VM kernel, and the `--kernel-pin` /
 //! bundle-pin resolution paths against the mvm cache.
 
+#[cfg(test)]
+use mvm_core::image_set::WorkloadImageProfile;
+
 /// Kernel-less images (mkGuest ships no kernel) boot fine on libkrun,
 /// which materializes its own bundled kernel and ignores this path. The
 /// out-of-process backends (hvf and firecracker) need a real kernel file;
@@ -33,9 +36,12 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         return Ok(
-            crate::commands::env::builder_vm::ensure_pair_workload_kernel(&checkout)?
-                .display()
-                .to_string(),
+            crate::commands::env::builder_vm::ensure_pair_workload_kernel(
+                &checkout,
+                mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+            )?
+            .display()
+            .to_string(),
         );
     }
     let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -140,9 +146,12 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         return Ok(Some(
-            crate::commands::env::builder_vm::ensure_pair_workload_kernel(&checkout)?
-                .display()
-                .to_string(),
+            crate::commands::env::builder_vm::ensure_pair_workload_kernel(
+                &checkout,
+                mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+            )?
+            .display()
+            .to_string(),
         ));
     }
     let source_checkout =
@@ -356,7 +365,12 @@ mod resolve_pinned_kernel_tests {
             .set
             .artifacts
             .iter()
-            .find(|a| a.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
+            .find(|a| {
+                a.role
+                    == mvm_core::image_set::ImageSetRole::WorkloadKernel(
+                        WorkloadImageProfile::DefaultTenant,
+                    )
+            })
             .unwrap()
             .path
             .display()

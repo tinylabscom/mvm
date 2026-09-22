@@ -60,27 +60,51 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             ],
             vec![VirtioVsock, VirtioBlk],
         ),
-        ImageSetRole::WorkloadKernel => (
+        ImageSetRole::WorkloadKernel(profile) => (
             boot,
             vec![artifact(
-                &format!("default-microvm-vmlinux{suffix}"),
+                &format!(
+                    "{}-microvm-vmlinux{suffix}",
+                    match profile {
+                        WorkloadImageProfile::DefaultTenant => "default",
+                        WorkloadImageProfile::RootlessTenant => "rootless",
+                    }
+                ),
                 kernel,
             )],
             vec![VirtioVsock],
         ),
-        ImageSetRole::WorkloadRootfs => (
+        ImageSetRole::WorkloadRootfs(profile) => (
             None,
             vec![
                 artifact(
-                    &format!("default-microvm-rootfs{suffix}.ext4"),
+                    &format!(
+                        "{}-microvm-rootfs{suffix}.ext4",
+                        match profile {
+                            WorkloadImageProfile::DefaultTenant => "default",
+                            WorkloadImageProfile::RootlessTenant => "rootless",
+                        }
+                    ),
                     ArtifactFormat::Ext4,
                 ),
                 artifact(
-                    &format!("default-microvm-rootfs{suffix}.verity"),
+                    &format!(
+                        "{}-microvm-rootfs{suffix}.verity",
+                        match profile {
+                            WorkloadImageProfile::DefaultTenant => "default",
+                            WorkloadImageProfile::RootlessTenant => "rootless",
+                        }
+                    ),
                     ArtifactFormat::VerityHashTree,
                 ),
                 artifact(
-                    &format!("default-microvm-rootfs{suffix}.roothash"),
+                    &format!(
+                        "{}-microvm-rootfs{suffix}.roothash",
+                        match profile {
+                            WorkloadImageProfile::DefaultTenant => "default",
+                            WorkloadImageProfile::RootlessTenant => "rootless",
+                        }
+                    ),
                     ArtifactFormat::VerityRootHash,
                 ),
             ],
@@ -553,10 +577,38 @@ mod serde_shape {
 
     #[test]
     fn closed_enums_round_trip_with_stable_names() {
+        for profile in [
+            WorkloadImageProfile::DefaultTenant,
+            WorkloadImageProfile::RootlessTenant,
+        ] {
+            round_trip(&profile);
+        }
+        assert_eq!(
+            serde_json::to_string(&WorkloadImageProfile::DefaultTenant).unwrap(),
+            r#""default_tenant""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkloadImageProfile::RootlessTenant).unwrap(),
+            r#""rootless_tenant""#
+        );
         let roles = [
             (ImageSetRole::BuilderVm, r#""builder_vm""#),
-            (ImageSetRole::WorkloadKernel, r#""workload_kernel""#),
-            (ImageSetRole::WorkloadRootfs, r#""workload_rootfs""#),
+            (
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                r#"{"workload_kernel":"default_tenant"}"#,
+            ),
+            (
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+                r#"{"workload_rootfs":"default_tenant"}"#,
+            ),
+            (
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
+                r#"{"workload_kernel":"rootless_tenant"}"#,
+            ),
+            (
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
+                r#"{"workload_rootfs":"rootless_tenant"}"#,
+            ),
             (ImageSetRole::RuntimeOverlay, r#""runtime_overlay""#),
             (
                 ImageSetRole::SdkSidecar(GuestLibc::Musl),
@@ -730,12 +782,13 @@ mod structure {
     #[test]
     fn refuses_two_members_for_one_role_and_target() {
         let mut manifest = manifest();
-        manifest
-            .members
-            .push(member(ImageSetRole::WorkloadKernel, ARM));
+        manifest.members.push(member(
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            ARM,
+        ));
         assert!(matches!(
             refused(&manifest),
-            ImageSetError::DuplicateMember { role: ImageSetRole::WorkloadKernel, target } if target == ARM
+            ImageSetError::DuplicateMember { role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant), target } if target == ARM
         ));
     }
 
@@ -745,7 +798,9 @@ mod structure {
         let kernels = manifest
             .members
             .iter()
-            .filter(|member| member.role == ImageSetRole::WorkloadKernel)
+            .filter(|member| {
+                member.role == ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant)
+            })
             .count();
         assert_eq!(kernels, 2);
         validate_structure(&manifest).unwrap();
@@ -754,11 +809,15 @@ mod structure {
     #[test]
     fn refuses_a_repeated_artifact_name_within_a_member() {
         let mut manifest = manifest();
-        let rootfs = member_mut(&mut manifest, ImageSetRole::WorkloadRootfs, X86);
+        let rootfs = member_mut(
+            &mut manifest,
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            X86,
+        );
         rootfs.artifacts[1].name = rootfs.artifacts[0].name.clone();
         assert!(matches!(
             refused(&manifest),
-            ImageSetError::DuplicateArtifactName { role: ImageSetRole::WorkloadRootfs, name, .. }
+            ImageSetError::DuplicateArtifactName { role: ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant), name, .. }
                 if name.as_str() == "default-microvm-rootfs-x86_64.ext4"
         ));
     }
@@ -791,7 +850,7 @@ mod structure {
     fn refuses_a_bootable_role_without_a_boot_protocol() {
         for role in [
             ImageSetRole::BuilderVm,
-            ImageSetRole::WorkloadKernel,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
             ImageSetRole::Stage0BootstrapKernel,
         ] {
             let mut manifest = manifest();
@@ -809,12 +868,16 @@ mod structure {
     #[test]
     fn refuses_a_boot_protocol_on_a_non_bootable_role() {
         let mut manifest = manifest();
-        member_mut(&mut manifest, ImageSetRole::WorkloadRootfs, ARM).boot_protocol =
-            Some(BootProtocol::LinuxDirect);
+        member_mut(
+            &mut manifest,
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            ARM,
+        )
+        .boot_protocol = Some(BootProtocol::LinuxDirect);
         assert!(matches!(
             refused(&manifest),
             ImageSetError::UnexpectedBootProtocol {
-                role: ImageSetRole::WorkloadRootfs,
+                role: ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
                 ..
             }
         ));
@@ -823,12 +886,16 @@ mod structure {
     #[test]
     fn refuses_an_arch_bound_role_published_as_arch_independent() {
         let mut manifest = manifest();
-        member_mut(&mut manifest, ImageSetRole::WorkloadKernel, X86).target =
-            MemberTarget::ArchIndependent;
+        member_mut(
+            &mut manifest,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            X86,
+        )
+        .target = MemberTarget::ArchIndependent;
         assert!(matches!(
             refused(&manifest),
             ImageSetError::TargetNotAllowedForRole {
-                role: ImageSetRole::WorkloadKernel,
+                role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 target: MemberTarget::ArchIndependent
             }
         ));
@@ -916,12 +983,27 @@ mod completeness {
     fn current_train_requires_every_role_on_both_arches_plus_the_smoke_pack() {
         let requirement = ImageSetRequirement::current_train();
         let members = requirement.members();
-        assert_eq!(members.len(), 15);
+        assert_eq!(members.len(), 19);
+        for arch in [X86, ARM] {
+            for profile in [
+                WorkloadImageProfile::DefaultTenant,
+                WorkloadImageProfile::RootlessTenant,
+            ] {
+                assert!(members.contains(&RequiredMember {
+                    role: ImageSetRole::WorkloadKernel(profile),
+                    target: arch,
+                }));
+                assert!(members.contains(&RequiredMember {
+                    role: ImageSetRole::WorkloadRootfs(profile),
+                    target: arch,
+                }));
+            }
+        }
         for arch in [X86, ARM] {
             for role in [
                 ImageSetRole::BuilderVm,
-                ImageSetRole::WorkloadKernel,
-                ImageSetRole::WorkloadRootfs,
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
                 ImageSetRole::RuntimeOverlay,
                 ImageSetRole::SdkSidecar(GuestLibc::Glibc),
                 ImageSetRole::SdkSidecar(GuestLibc::Musl),
@@ -972,7 +1054,7 @@ mod completeness {
     fn a_custom_requirement_accepts_a_set_that_covers_it() {
         let manifest = manifest();
         let requirement = ImageSetRequirement::new(vec![RequiredMember {
-            role: ImageSetRole::WorkloadKernel,
+            role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
             target: X86,
         }]);
         require_complete(&manifest, &requirement).unwrap();
@@ -1037,10 +1119,58 @@ mod selection {
     fn selects_the_member_for_the_requested_arch() {
         let manifest = manifest();
         for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-            let selected =
-                select_member(&manifest, ImageSetRole::WorkloadKernel, arch, &backend()).unwrap();
+            let selected = select_member(
+                &manifest,
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                arch,
+                &backend(),
+            )
+            .unwrap();
             assert_eq!(selected.target, MemberTarget::Arch(arch));
         }
+    }
+
+    #[test]
+    fn selects_a_digest_pinned_kernel_and_rootfs_from_one_profile() {
+        let manifest = manifest();
+        for profile in [
+            WorkloadImageProfile::DefaultTenant,
+            WorkloadImageProfile::RootlessTenant,
+        ] {
+            let selected =
+                select_workload_image(&manifest, profile, GuestArch::Aarch64, &backend()).unwrap();
+            assert_eq!(selected.profile, profile);
+            assert_eq!(selected.kernel.role, ImageSetRole::WorkloadKernel(profile));
+            assert_eq!(selected.rootfs.role, ImageSetRole::WorkloadRootfs(profile));
+            assert_eq!(selected.kernel.target, ARM);
+            assert_eq!(selected.rootfs.target, ARM);
+            assert!(selected.kernel.pack_hash.is_some());
+            assert!(selected.rootfs.pack_hash.is_some());
+        }
+    }
+
+    #[test]
+    fn refuses_a_rootless_request_when_only_the_default_profile_is_present() {
+        let mut manifest = manifest();
+        manifest.members.retain(|member| {
+            !matches!(
+                member.role,
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant)
+                    | ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant)
+            )
+        });
+
+        assert!(matches!(
+            select_workload_image(
+                &manifest,
+                WorkloadImageProfile::RootlessTenant,
+                GuestArch::X86_64,
+                &backend(),
+            ),
+            Err(ImageSetError::MemberNotFound {
+                role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant)
+            })
+        ));
     }
 
     #[test]
@@ -1053,7 +1183,7 @@ mod selection {
         assert!(matches!(
             select_member(
                 &manifest,
-                ImageSetRole::WorkloadKernel,
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 GuestArch::X86_64,
                 &backend
             ),
@@ -1112,12 +1242,12 @@ mod selection {
         assert!(matches!(
             select_member(
                 &manifest,
-                ImageSetRole::WorkloadKernel,
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 GuestArch::Aarch64,
                 &backend
             ),
             Err(ImageSetError::UnsupportedBootProtocol {
-                role: ImageSetRole::WorkloadKernel,
+                role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 protocol: BootProtocol::LinuxDirect
             })
         ));
@@ -1144,16 +1274,16 @@ mod selection {
             ..backend()
         };
         assert!(matches!(
-            select_member(&manifest, ImageSetRole::WorkloadKernel, GuestArch::Aarch64, &backend),
+            select_member(&manifest, ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant), GuestArch::Aarch64, &backend),
             Err(ImageSetError::UnsupportedArtifactFormat {
-                role: ImageSetRole::WorkloadKernel,
+                role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 artifact,
                 format: ArtifactFormat::Kernel(KernelFormat::Image),
             }) if artifact.as_str() == "default-microvm-vmlinux-aarch64"
         ));
         select_member(
             &manifest,
-            ImageSetRole::WorkloadKernel,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
             GuestArch::X86_64,
             &backend,
         )
@@ -1173,12 +1303,12 @@ mod selection {
         assert!(matches!(
             select_member(
                 &manifest,
-                ImageSetRole::WorkloadRootfs,
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
                 GuestArch::X86_64,
                 &backend
             ),
             Err(ImageSetError::MissingDeviceCapability {
-                role: ImageSetRole::WorkloadRootfs,
+                role: ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
                 capability: GuestDeviceRequirement::DmVerity,
             })
         ));
@@ -1193,8 +1323,13 @@ mod lock {
         let manifest = manifest();
         let lock = lock_for(&manifest);
         let mut tampered = manifest.clone();
-        member_mut(&mut tampered, ImageSetRole::WorkloadKernel, X86).artifacts[0].sha256 =
-            sha("evil kernel");
+        member_mut(
+            &mut tampered,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            X86,
+        )
+        .artifacts[0]
+            .sha256 = sha("evil kernel");
         let actual = digest(&tampered);
         assert!(matches!(
             check_against_lock(&tampered, &actual, &lock),
@@ -1486,9 +1621,13 @@ mod verification {
     #[test]
     fn a_structurally_invalid_set_is_refused() {
         let mut manifest = manifest();
-        member_mut(&mut manifest, ImageSetRole::WorkloadRootfs, X86)
-            .artifacts
-            .clear();
+        member_mut(
+            &mut manifest,
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            X86,
+        )
+        .artifacts
+        .clear();
         let set = stage(manifest);
 
         let err = verify_checked(&set.request(), accept_signature)

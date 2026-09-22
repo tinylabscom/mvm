@@ -19,7 +19,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::LocalCheckouts;
+use mvm_core::image_set::{LocalCheckouts, WorkloadImageProfile};
 use mvm_core::packs::Sha256Hex;
 use serde::{Deserialize, Serialize};
 
@@ -42,15 +42,17 @@ const RUST_TOOLCHAIN_FILE: &str = "rust-toolchain.toml";
 pub enum ImageBuildRole {
     BuilderVm,
     DefaultTenant,
+    RootlessTenant,
     RuntimeOverlay,
     Initramfs,
     Kernel,
 }
 
 impl ImageBuildRole {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::BuilderVm,
         Self::DefaultTenant,
+        Self::RootlessTenant,
         Self::RuntimeOverlay,
         Self::Initramfs,
         Self::Kernel,
@@ -63,9 +65,19 @@ impl ImageBuildRole {
         match self {
             Self::BuilderVm => "builder-vm",
             Self::DefaultTenant => "default-tenant",
+            Self::RootlessTenant => "rootless-tenant",
             Self::RuntimeOverlay => "runtime-overlay",
             Self::Initramfs => "initramfs",
             Self::Kernel => "kernel",
+        }
+    }
+
+    /// The canonical image-checkout target carrying one workload profile.
+    #[must_use]
+    pub const fn for_workload_profile(profile: WorkloadImageProfile) -> Self {
+        match profile {
+            WorkloadImageProfile::DefaultTenant => Self::DefaultTenant,
+            WorkloadImageProfile::RootlessTenant => Self::RootlessTenant,
         }
     }
 

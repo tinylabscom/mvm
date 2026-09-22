@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::ImageSetRole;
+use mvm_core::image_set::{ImageSetRole, WorkloadImageProfile};
 use mvm_core::kernel_format::KernelFormat;
 use thiserror::Error;
 
@@ -162,18 +162,57 @@ const SDK_SIDECAR_MUSL: TargetContract = TargetContract {
 
 const DEFAULT_TENANT: TargetContract = TargetContract {
     files: &[
-        kernel("vmlinux", "workload_kernel"),
-        file("rootfs.ext4", "workload_rootfs", "ext4"),
-        file("rootfs.verity", "workload_rootfs", "verity_hash_tree"),
-        file("rootfs.roothash", "workload_rootfs", "verity_root_hash"),
-        file("mvm-meta.json", "workload_rootfs", "json"),
+        kernel("vmlinux", "default_tenant_workload_kernel"),
+        file("rootfs.ext4", "default_tenant_workload_rootfs", "ext4"),
+        file(
+            "rootfs.verity",
+            "default_tenant_workload_rootfs",
+            "verity_hash_tree",
+        ),
+        file(
+            "rootfs.roothash",
+            "default_tenant_workload_rootfs",
+            "verity_root_hash",
+        ),
+        file("mvm-meta.json", "default_tenant_workload_rootfs", "json"),
     ],
     capabilities: &[
-        ("workload_kernel", "virtio_vsock"),
-        ("workload_rootfs", "virtio_blk"),
-        ("workload_rootfs", "dm_verity"),
+        ("default_tenant_workload_kernel", "virtio_vsock"),
+        ("default_tenant_workload_rootfs", "virtio_blk"),
+        ("default_tenant_workload_rootfs", "dm_verity"),
     ],
-    set_roles: &[ImageSetRole::WorkloadKernel, ImageSetRole::WorkloadRootfs],
+    set_roles: &[
+        ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+        ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+    ],
+    needs_host_binaries: false,
+};
+
+const ROOTLESS_TENANT: TargetContract = TargetContract {
+    files: &[
+        kernel("vmlinux", "rootless_tenant_workload_kernel"),
+        file("rootfs.ext4", "rootless_tenant_workload_rootfs", "ext4"),
+        file(
+            "rootfs.verity",
+            "rootless_tenant_workload_rootfs",
+            "verity_hash_tree",
+        ),
+        file(
+            "rootfs.roothash",
+            "rootless_tenant_workload_rootfs",
+            "verity_root_hash",
+        ),
+        file("mvm-meta.json", "rootless_tenant_workload_rootfs", "json"),
+    ],
+    capabilities: &[
+        ("rootless_tenant_workload_kernel", "virtio_vsock"),
+        ("rootless_tenant_workload_rootfs", "virtio_blk"),
+        ("rootless_tenant_workload_rootfs", "dm_verity"),
+    ],
+    set_roles: &[
+        ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
+        ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
+    ],
     needs_host_binaries: false,
 };
 
@@ -192,6 +231,7 @@ pub fn contract_for(
         (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image") => Ok(&SDK_SIDECAR_GLIBC),
         (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image-musl") => Ok(&SDK_SIDECAR_MUSL),
         (ImageBuildRole::DefaultTenant, "default") => Ok(&DEFAULT_TENANT),
+        (ImageBuildRole::RootlessTenant, "default") => Ok(&ROOTLESS_TENANT),
         (ImageBuildRole::Initramfs, _) => Err(unsupported(
             "the image-set schema has no initramfs role, so a built initramfs has no manifest \
              to be published under",
@@ -203,7 +243,8 @@ pub fn contract_for(
         _ => Err(unsupported(
             "no output contract for this attribute; known: builder-vm.default, \
              runtime-overlay.default, runtime-overlay.sdk-sidecar-image, \
-             runtime-overlay.sdk-sidecar-image-musl, default-tenant.default",
+             runtime-overlay.sdk-sidecar-image-musl, default-tenant.default, \
+             rootless-tenant.default",
         )),
     }
 }
@@ -660,7 +701,19 @@ mod tests {
             (
                 ImageBuildRole::DefaultTenant,
                 "default",
-                &[ImageSetRole::WorkloadKernel, ImageSetRole::WorkloadRootfs][..],
+                &[
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                    ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+                ][..],
+                false,
+            ),
+            (
+                ImageBuildRole::RootlessTenant,
+                "default",
+                &[
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
+                    ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
+                ][..],
                 false,
             ),
         ] {
@@ -694,6 +747,16 @@ mod tests {
             let err = contract_for(&target(role, attr)).unwrap_err();
             assert!(err.to_string().contains(needle), "{role}.{attr}: {err}");
         }
+    }
+
+    #[test]
+    fn default_and_rootless_targets_have_distinct_cache_identities() {
+        let default = target(ImageBuildRole::DefaultTenant, "default");
+        let rootless = target(ImageBuildRole::RootlessTenant, "default");
+
+        assert_ne!(default, rootless);
+        assert_eq!(default.to_string(), "default-tenant.default");
+        assert_eq!(rootless.to_string(), "rootless-tenant.default");
     }
 
     #[test]
@@ -824,14 +887,14 @@ mod tests {
         assert!(joined.contains("--images-checkout /images --mvm-checkout /mvm"));
         assert!(joined.contains("--arch x86_64 --builder-cache-contract 4 --out /cache/staged"));
         assert!(joined.contains(&format!(
-            "--artifact workload_kernel kernel:elf {}",
+            "--artifact default_tenant_workload_kernel kernel:elf {}",
             built.join("vmlinux").display()
         )));
         assert!(joined.contains(&format!(
-            "--artifact workload_rootfs verity_root_hash {}",
+            "--artifact default_tenant_workload_rootfs verity_root_hash {}",
             built.join("rootfs.roothash").display()
         )));
-        assert!(joined.contains("--capability workload_rootfs dm_verity"));
+        assert!(joined.contains("--capability default_tenant_workload_rootfs dm_verity"));
         assert_eq!(
             argv.iter().filter(|a| *a == "--artifact").count(),
             contract.files.len()

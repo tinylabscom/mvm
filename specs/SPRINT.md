@@ -390,7 +390,7 @@ docs commit went out as #3581). Under the
 
 - [ ] **Extract the image release train into `mvm-images`.**
       `specs/plans/2026-09-16-image-repository-extraction.md`.
-      Issues #3362–#3369 and #3373.
+      Issues #3362–#3369, #3373, and #3589.
       Planned in eight incremental workstreams: remove cold source-image
       preparation from the release critical path; establish a separately
       governed image repository; define one signed image-set manifest and lock;
@@ -525,6 +525,13 @@ docs commit went out as #3581). Under the
       under a selector; both build verbs build the pair's targets; and the
       two private "in-tree overlay flake present?" probes collapse into one
       shared `image_source` helper.
+      W5 (#3589) slice W5n: image-set schema v2 qualifies workload kernel and
+      rootfs roles as `default_tenant` or `rootless_tenant`, requires both
+      profile pairs for both architectures in one atomic set, and exposes a
+      typed same-profile selector. Pair builds, cache identities and sibling
+      installs distinguish the profiles; image construction remains entirely
+      in `mvm-images`. Neither profile has a NIC or packet-network fallback;
+      external traffic remains FlowMux over vsock.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
