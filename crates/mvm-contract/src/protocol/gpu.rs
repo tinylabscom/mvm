@@ -26,6 +26,16 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+/// Where the guest's loader finds the shim libraries: the runtime overlay
+/// mounts at `/mvm/runtime`, and the overlay composition (the image train)
+/// stages the shims under `gpu/` there. Kept off the guest's default loader
+/// path on purpose — only a launch that carried the GPU plane exposes them
+/// (the guest activation prepends this directory to `LD_LIBRARY_PATH` when
+/// the boot's cmdline says `mvm.gpu=1`), so an ordinary guest whose
+/// workload opportunistically `dlopen("libcuda.so.1")` never picks the shim
+/// up and never dials a GPU endpoint that does not exist.
+pub const GPU_SHIM_GUEST_DIR: &str = "/mvm/runtime/gpu";
+
 /// The vsock port the guest's shim libraries dial to reach the host GPU
 /// endpoint.
 ///

@@ -221,6 +221,23 @@ impl WorkloadEnvironmentBuilder {
     pub fn build(mut self) -> WorkloadEnvironment {
         let home = crate::guest_mount::workload_home();
         self.set(OsString::from("HOME"), OsString::from(home));
+        if let Some(shim_dir) = boot_gpu_shim_dir() {
+            // The launch carried the GPU plane: expose the shim libraries
+            // to the workload's loader. Prepended so the remoting shim
+            // wins over anything an image shipped; the image's own entries
+            // are kept after it. Only `mvm.gpu=1` boots take this branch,
+            // so an ordinary workload's opportunistic dlopen("libcuda.so.1")
+            // never finds the shim and never dials a missing endpoint.
+            let existing = self
+                .vars
+                .iter()
+                .find(|(k, _)| k.as_os_str() == OsStr::new("LD_LIBRARY_PATH"))
+                .map(|(_, v)| v.clone());
+            self.set(
+                OsString::from("LD_LIBRARY_PATH"),
+                prepend_loader_dir(shim_dir, existing.as_deref()),
+            );
+        }
         if let Some(term) = self.term {
             self.set(OsString::from("TERM"), OsString::from(term));
         }
@@ -248,6 +265,46 @@ impl WorkloadEnvironmentBuilder {
     }
 }
 
+/// The GPU shim directory when this boot armed the GPU plane, `None`
+/// otherwise. Linux guests only: the token rides the kernel cmdline, which
+/// does not exist on the host builds of this crate, and they must keep the
+/// resolution they always had.
+#[cfg(target_os = "linux")]
+fn boot_gpu_shim_dir() -> Option<&'static str> {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
+    gpu_shim_dir_in_cmdline(&cmdline)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_gpu_shim_dir() -> Option<&'static str> {
+    None
+}
+
+/// Whether `cmdline` carries the GPU-plane token. The token must match as a
+/// whole word: `mvm.gpu=10` is a different parameter, and a substring match
+/// would arm the plane on a boot that did not ask for it.
+///
+/// Production use is Linux-only (the token rides the kernel cmdline); the
+/// `test` arm keeps the pure predicate compilable and checked on every host.
+#[cfg(any(target_os = "linux", test))]
+fn gpu_shim_dir_in_cmdline(cmdline: &str) -> Option<&'static str> {
+    cmdline
+        .split_whitespace()
+        .any(|token| token == "mvm.gpu=1")
+        .then_some(mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR)
+}
+
+/// `dir` first, then the existing loader path, colon-separated. An absent
+/// existing value yields the directory alone.
+fn prepend_loader_dir(dir: &str, existing: Option<&OsStr>) -> OsString {
+    let mut out = OsString::from(dir);
+    if let Some(existing) = existing.filter(|value| !value.is_empty()) {
+        out.push(":");
+        out.push(existing);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +313,47 @@ mod tests {
         env.vars()
             .map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into()))
             .collect()
+    }
+
+    #[test]
+    fn the_gpu_token_matches_as_a_whole_word_only() {
+        use mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR;
+        assert_eq!(
+            gpu_shim_dir_in_cmdline("console=ttyS0 mvm.gpu=1 mvm.hostname=w"),
+            Some(GPU_SHIM_GUEST_DIR)
+        );
+        assert_eq!(gpu_shim_dir_in_cmdline("console=ttyS0"), None);
+        // A prefix of a longer parameter is not the token.
+        assert_eq!(gpu_shim_dir_in_cmdline("mvm.gpu=10"), None);
+        assert_eq!(gpu_shim_dir_in_cmdline("x-mvm.gpu=1"), None);
+    }
+
+    #[test]
+    fn prepending_the_shim_dir_keeps_the_image_loader_path() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            prepend_loader_dir("/mvm/runtime/gpu", Some(OsStr::new("/usr/local/lib"))),
+            OsString::from("/mvm/runtime/gpu:/usr/local/lib")
+        );
+        assert_eq!(
+            prepend_loader_dir("/mvm/runtime/gpu", None),
+            OsString::from("/mvm/runtime/gpu")
+        );
+        assert_eq!(
+            prepend_loader_dir("/mvm/runtime/gpu", Some(OsStr::new(""))),
+            OsString::from("/mvm/runtime/gpu")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_boot_without_the_token_resolves_no_shim_dir() {
+        // The test host's own cmdline decides; the assertion is only that
+        // the function answers the token question without panicking, and
+        // that the pure predicate agrees with the /proc read.
+        let from_proc = boot_gpu_shim_dir();
+        let cmdline = std::fs::read_to_string("/proc/cmdline").expect("read cmdline");
+        assert_eq!(from_proc, gpu_shim_dir_in_cmdline(&cmdline));
     }
 
     fn value(env: &WorkloadEnvironment, key: &str) -> Option<String> {
