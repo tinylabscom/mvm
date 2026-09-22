@@ -320,13 +320,20 @@ pub fn admit_plan_for_boot_with_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
-    // A production boot runs only verified released images. The refusal keys
-    // on the variable being present rather than on whether it names a usable
-    // checkout, so a sealed run cannot be steered by a local path at all.
+    // A production boot runs only verified released images. The first
+    // refusal keys on the variable being present rather than on whether it
+    // names a usable checkout, so a sealed run cannot be steered by a local
+    // path at all; the second refuses what the boot actually resolved, so a
+    // locally built image already sitting in a managed cache is caught with
+    // the selector unset.
+    let variant = admission_variant(p.restrict_agent_verbs);
     mvm_build::image_source::refuse_in_production(
-        admission_variant(p.restrict_agent_verbs),
+        variant,
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
+    if let Some(tier) = mvm_build::image_source::recorded_tier_for(p.rootfs_path) {
+        mvm_build::image_source::refuse_tier_in_production(variant, tier)?;
+    }
     // Refuse before any hashing, bundle reads, or signing: a rejection here
     // must not have already spent the boot work it exists to avoid. Gated on
     // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
@@ -2507,6 +2514,99 @@ mod admit_plan_tests {
         .expect("dev-tier runs are out of the shell-entrypoint refusal's scope");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    /// Stage a default-image cache entry under a temporary MVM_HOME and point
+    /// the rootfs at it, exactly as a no-image boot resolves it. `source` is
+    /// the sidecar's recorded acquisition (what W5g stamps).
+    fn staged_default_image(
+        env: &mut mvm_core::util::test_env::TestEnv,
+        source: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let variant = home.path().join("cache/default-microvm/prod");
+        std::fs::create_dir_all(&variant).unwrap();
+        let rootfs = write_rootfs(&variant, b"staged default image");
+        std::fs::write(
+            variant.join("mvm-meta.json"),
+            format!(
+                "{{\"name\": \"mvm-default-microvm\", \"accessible\": false, \"sealed\": true, \"entrypointKind\": \"command\", \"initSystem\": \"busybox\", \"expectedBootMs\": 300, \"agentBinary\": \"real\", \"rootlessEntrypoint\": true, \"hypervisor\": \"libkrun\", \"protocolVersion\": 2, \"generatorRev\": \"abc\", \"source\": \"{source}\" }}"
+            ),
+        )
+        .unwrap();
+        (home, rootfs)
+    }
+
+    /// The tier gate W5k adds: a locally built image already sitting in the
+    /// managed cache is refused under production with the selector unset —
+    /// "however it was selected" is the point of reading the recorded tier.
+    #[test]
+    fn a_production_admission_refuses_a_locally_built_image_in_the_cache() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let (_home, rootfs) = staged_default_image(&mut env, "local-pair");
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            restrict_agent_verbs: true,
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect_err("a sealed boot must refuse a locally built cached image");
+
+        assert!(
+            err.to_string().contains("production admission"),
+            "unexpected refusal: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(keys_dir.path()).unwrap().count(),
+            0,
+            "the refusal must precede signing"
+        );
+    }
+
+    /// The same locally built image under a development profile is admitted:
+    /// the refusal is scoped to the production tier.
+    #[test]
+    fn a_development_admission_accepts_a_locally_built_image_in_the_cache() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let (_home, rootfs) = staged_default_image(&mut env, "local-pair");
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let ledger = InMemoryNonceLedger::new();
+
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            restrict_agent_verbs: false,
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("a development boot is not refused for a local-dev image");
+    }
+
+    /// A fetched (published) image recorded in the cache verifies as the
+    /// release tier and is admitted under production.
+    #[test]
+    fn a_production_admission_accepts_a_fetched_image_in_the_cache() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let (_home, rootfs) = staged_default_image(&mut env, "fetched");
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let ledger = InMemoryNonceLedger::new();
+
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            restrict_agent_verbs: true,
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("a sealed boot admits an image the cache records as fetched");
     }
 
     /// A sealed boot refuses while a local image checkout is configured, and

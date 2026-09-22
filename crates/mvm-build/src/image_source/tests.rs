@@ -4,6 +4,7 @@ use std::process::Command;
 use mvm_core::util::test_env::TestEnv;
 
 use super::*;
+use mvm_core::image_set::ImageTrustTier;
 
 /// Runs `git` in `dir` isolated from the developer's configuration and from
 /// any repository the test process itself runs inside.
@@ -61,6 +62,76 @@ fn images_checkout(dir: &Path) {
 
 fn open(path: &Path) -> Result<LocalImageCheckout, ImageSourceError> {
     LocalImageCheckout::open(path)
+}
+
+#[test]
+fn recorded_tier_reads_the_default_image_sidecar_and_fails_closed() {
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    let home = tempfile::tempdir().unwrap();
+    env.set("MVM_HOME", home.path());
+    let variant = home.path().join("cache/default-microvm/prod");
+    std::fs::create_dir_all(&variant).unwrap();
+    let rootfs = variant.join("rootfs.ext4");
+    write(&rootfs, "rootfs\n");
+
+    // Nothing cached yet: no sidecar records a tier.
+    assert_eq!(recorded_tier_for(&rootfs), None);
+
+    let sidecar = |source: &str| {
+        format!(
+            "{{\"name\": \"mvm-default-microvm\", \"accessible\": false, \"sealed\": true, \"entrypointKind\": \"command\", \"initSystem\": \"busybox\", \"expectedBootMs\": 300, \"agentBinary\": \"real\", \"rootlessEntrypoint\": true, \"hypervisor\": \"libkrun\", \"protocolVersion\": 2, \"generatorRev\": \"abc\", \"source\": \"{source}\" }}"
+        )
+    };
+    write(&variant.join("mvm-meta.json"), &sidecar("fetched"));
+    assert_eq!(
+        recorded_tier_for(&rootfs),
+        Some(ImageTrustTier::VerifiedRelease)
+    );
+    for local in ["built-local", "local-pair", "something-unrecognized"] {
+        write(&variant.join("mvm-meta.json"), &sidecar(local));
+        assert_eq!(
+            recorded_tier_for(&rootfs),
+            Some(ImageTrustTier::LocalDev),
+            "{local}"
+        );
+    }
+}
+
+#[test]
+fn recorded_tier_reads_the_builder_cache_provenance_and_scopes_to_the_caches() {
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    let home = tempfile::tempdir().unwrap();
+    env.set("MVM_HOME", home.path());
+    let arch_dir = home.path().join("cache/builder-vm/aarch64");
+    std::fs::create_dir_all(&arch_dir).unwrap();
+    let vmlinux = arch_dir.join("vmlinux");
+    write(&vmlinux, "kernel\n");
+
+    // No provenance yet: unrecognized as a managed entry.
+    assert_eq!(recorded_tier_for(&vmlinux), None);
+
+    let provenance = |kind: &str| format!("{{\"schema_version\": 1, \"source_kind\": \"{kind}\"}}");
+    write(
+        &arch_dir.join(".mvm-provenance.json"),
+        &provenance("fetched"),
+    );
+    assert_eq!(
+        recorded_tier_for(&vmlinux),
+        Some(ImageTrustTier::VerifiedRelease)
+    );
+    for local in ["local_pair", "source_checkout_stage0", "unrecognized"] {
+        write(&arch_dir.join(".mvm-provenance.json"), &provenance(local));
+        assert_eq!(
+            recorded_tier_for(&vmlinux),
+            Some(ImageTrustTier::LocalDev),
+            "{local}"
+        );
+    }
+
+    // Outside the managed caches there is no recorded tier.
+    let outside = home.path().join("elsewhere/rootfs.ext4");
+    write(&outside, "rootfs\n");
+    assert_eq!(recorded_tier_for(&outside), None);
 }
 
 #[test]

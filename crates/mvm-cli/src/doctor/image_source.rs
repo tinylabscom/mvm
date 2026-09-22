@@ -52,25 +52,47 @@ pub(super) fn image_source_check() -> Check {
 /// `<tier> — <source> — <identities>`, the same three-segment shape as the
 /// builder backend and boot image lines. A refused selection fails the check:
 /// the variable is set and the images it asks for cannot be used.
+/// The booted default image's content digest, when one is installed. Kept
+/// inside the identities segment — the line's three-segment shape is a
+/// tested contract — and absent rather than guessed when nothing is cached.
+fn default_image_digest_suffix() -> String {
+    let rootfs = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+        .join("default-microvm")
+        .join("prod")
+        .join("rootfs.ext4");
+    if !rootfs.is_file() {
+        return String::new();
+    }
+    match mvm_core::crypto::image_verify::sha256_file_cached(&rootfs) {
+        Ok(hex) => format!(
+            "; default image rootfs sha256 {}…",
+            &hex[..hex.len().min(16)]
+        ),
+        Err(_) => String::new(),
+    }
+}
+
 fn image_source_line(selected: &Result<ImageSource, ImageSourceError>, mvm: &MvmOrigin) -> Check {
+    let digests = default_image_digest_suffix();
+    let mvm_with_digests = format!("{}{digests}", mvm.describe());
     let (ok, info) = match selected {
         Ok(source @ ImageSource::Released) => (
             true,
             format!(
                 "{} — released image set pinned by the image lock — {}",
                 source.tier(),
-                mvm.describe()
+                mvm_with_digests,
             ),
         ),
         Ok(source @ ImageSource::LocalCheckout(checkout)) => (
             true,
             format!(
-                "{} — ${MVM_IMAGES_DIR_ENV}={} — mvm-images {}, {}; image builds do not \
-                 consume this selection yet and still use the in-tree nix/images",
+                "{} — ${MVM_IMAGES_DIR_ENV}={} — mvm-images {}, {}; image builds consume \
+                 this selection",
                 source.tier(),
                 checkout.root().display(),
                 checkout.identity(),
-                mvm.describe()
+                mvm_with_digests,
             ),
         ),
         Ok(source @ ImageSource::InTree { root }) => (
@@ -79,10 +101,10 @@ fn image_source_line(selected: &Result<ImageSource, ImageSourceError>, mvm: &Mvm
                 "{} — in-tree image flakes under {}/nix/images — {}",
                 source.tier(),
                 root.display(),
-                mvm.describe()
+                mvm_with_digests,
             ),
         ),
-        Err(error) => (false, format!("refused — {error} — {}", mvm.describe())),
+        Err(error) => (false, format!("refused — {error} — {mvm_with_digests}")),
     };
     Check {
         name: "image source",
@@ -159,6 +181,33 @@ mod tests {
 
         assert!(!c.ok, "{}", c.info);
         assert!(!c.info.contains("verified-release"), "{}", c.info);
+    }
+
+    #[test]
+    fn a_cached_default_image_adds_its_rootfs_digest_to_the_line() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let variant = home.path().join("cache/default-microvm/prod");
+        std::fs::create_dir_all(&variant).unwrap();
+        std::fs::write(variant.join("rootfs.ext4"), b"cached default image").unwrap();
+
+        let c = image_source_line(&Ok(ImageSource::Released), &mvm_checkout());
+        assert!(
+            c.info.contains("default image rootfs sha256 "),
+            "{}",
+            c.info
+        );
+        let expected =
+            mvm_core::crypto::image_verify::sha256_file(&variant.join("rootfs.ext4")).unwrap();
+        assert!(
+            c.info.contains(&expected[..16]),
+            "the line carries the digest prefix: {}",
+            c.info
+        );
+        // The three-segment shape is a tested contract; the digest rides
+        // inside the identities segment.
+        assert_eq!(c.info.matches(" — ").count(), 2, "{}", c.info);
     }
 
     #[test]

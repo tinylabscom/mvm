@@ -5,7 +5,7 @@ pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<(String, String)> {
     let base = mvm_core::config::default_microvm_cache_dir();
-    match mode {
+    let out = match mode {
         mvm_build::pipeline::BuildMode::Prod => ensure_default_microvm_prod_image(&format!(
             "{base}/{}",
             DefaultMicrovmVariant::Prod.cache_subdir()
@@ -14,7 +14,9 @@ pub(crate) fn ensure_default_microvm_image(
             "{base}/{}",
             DefaultMicrovmVariant::Dev.cache_subdir()
         )),
-    }
+    }?;
+    super::report_recorded_boot_tier("Default image", std::path::Path::new(&out.1));
+    Ok(out)
 }
 
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
