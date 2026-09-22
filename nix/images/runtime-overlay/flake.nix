@@ -205,7 +205,14 @@
       # Target overlay size: 16 MiB — a hard cap for the static-musl
       # runtime overlay. The SDK glibc closure lives in the separate
       # sidecar, so the production overlay no longer needs the old
-      # 32 MiB allocation.
+      # 32 MiB allocation. When the mediated ping binary joined the
+      # staged set the image briefly stopped fitting — the recovered
+      # space came from dropping the ext4 journal (a full 1 MiB at this
+      # image size), which a read-only dm-verity-sealed disk can never
+      # replay anyway. Growing the allocation instead would blow the
+      # `xtask perf footprint` guest-artifact budget: this file is
+      # preallocated, so every byte of slack here is counted against
+      # the 50 MB ceiling.
       overlaySizeBytes = 16 * 1024 * 1024;
 
       mkSdkSidecar =
@@ -373,8 +380,8 @@
             # Staging tree — the eventual filesystem root inside the
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
-            # /agent, /display-bridge, /seccomp-apply, /netinit, /runner,
-            # /egress-client, /addon-dns, /exit-report, /sdk-py/,
+            # /agent, /display-bridge, /seccomp-apply, /ping, /netinit,
+            # /runner, /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging"
@@ -382,6 +389,7 @@
             cp ${guest}/bin/mvm-guest-agent "$staging/agent"
             cp ${guest}/bin/mvm-display-bridge "$staging/display-bridge"
             cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
+            cp ${guest}/bin/mvm-ping "$staging/ping"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner "$staging/runner"
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
@@ -438,10 +446,18 @@
             # SOURCE_DATE_EPOCH conventions. Pre-allocate the
             # output file at the fixed budget (16 MiB) so the size
             # is also part of the deterministic shape.
+            #
+            # `-O ^has_journal,^orphan_file` mirrors the builder VM's
+            # `DISABLED_EXT4_FEATURES` (mvm_fs::oci_to_rootfs::ext4) and
+            # the pure-Rust writer, which never emits a journal. The
+            # overlay mounts read-only under dm-verity, so a journal is
+            # never replayed — it only burned 1 MiB of the fixed
+            # allocation and carried mkfs-version-dependent bytes.
             truncate -s ${toString overlaySizeBytes} $out/overlay.ext4
             SOURCE_DATE_EPOCH=0 \
               mkfs.ext4 -F \
                 -t ext4 \
+                -O ^has_journal,^orphan_file \
                 -L mvm-runtime-overlay \
                 -U ${overlayUuid} \
                 -E hash_seed=${overlayHashSeed},no_copy_xattrs \

@@ -143,7 +143,7 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "3";
+const LOCAL_BUILD_EPOCH: &str = "4";
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
 /// non-default cache root (e.g. a worktree-isolated `MVM_HOME`), seed
@@ -201,6 +201,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
         (&bins.netinit, root.join("netinit")),
         (&bins.ping, root.join("ping")),
         (&bins.seccomp_apply, root.join("seccomp-apply")),
+        (&bins.display_bridge, root.join("display-bridge")),
         (&bins.runner, root.join("runner")),
         (&bins.egress_client, root.join("egress-client")),
         (&bins.addon_dns, root.join("addon-dns")),
@@ -1216,6 +1217,7 @@ mod tests {
             "/netinit",
             "/ping",
             "/seccomp-apply",
+            "/display-bridge",
             "/runner",
             "/egress-client",
             "/addon-dns",
@@ -2155,6 +2157,7 @@ mod tests {
             netinit: make_bin("netinit"),
             ping: make_bin("ping"),
             seccomp_apply: make_bin("seccomp-apply"),
+            display_bridge: make_bin("display-bridge"),
             runner: make_bin("runner"),
             egress_client: make_bin("egress-client"),
             addon_dns: make_bin("addon-dns"),

@@ -66,6 +66,11 @@ pkgs.rustPlatform.buildRustPackage {
     "mvm-display-bridge"
     "--bin"
     "mvm-seccomp-apply"
+    # Host-mediated ICMP echo client, bind-mounted over /bin/ping by the
+    # agent's mediated-tools step. Staged on the runtime overlay; keep in
+    # lockstep with the Rust overlay builder (xtask check-guest-binary-lists).
+    "--bin"
+    "mvm-ping"
     # Guest-side network defense. Installs kernel blackhole routes
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
