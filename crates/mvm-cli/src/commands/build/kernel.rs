@@ -70,6 +70,10 @@ struct BuildArgs {
 enum Which {
     Builder,
     Workload,
+    /// In-guest-orchestrator variant (rootless Kubernetes guests):
+    /// cgroup/namespace/netfilter/bridge plumbing on top of the workload
+    /// kernel's verified-boot delta.
+    WorkloadK8s,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +122,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
         match args.which {
             Which::Builder => vec![(KernelVariant::Builder, "builder")],
             Which::Workload => vec![(KernelVariant::Workload, "workload")],
+            Which::WorkloadK8s => vec![(KernelVariant::WorkloadK8s, "workload-k8s")],
         }
     };
 

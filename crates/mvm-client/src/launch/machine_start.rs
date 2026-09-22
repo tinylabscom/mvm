@@ -278,15 +278,17 @@ impl StartHost for EmbedderStartHost {
     fn workload_kernel(&self) -> Result<String> {
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let arch = mvm_core::arch::GuestArch::host().to_string();
-        match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
+        let (resolution, label) =
+            mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
+        match resolution {
             mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
                 Ok(verified.path().display().to_string())
             }
             _ => bail!(
                 "starting a machine needs a verified workload kernel at {}, and this process \
                  does not build one — create it once with `mvmctl kernel build --which \
-                 workload`, then retry",
-                mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload").display()
+                 {label}`, then retry",
+                mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
             ),
         }
     }

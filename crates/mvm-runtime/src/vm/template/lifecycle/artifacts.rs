@@ -25,14 +25,16 @@ pub(super) fn slot_kernel_source(
         .join("builder-vm")
         .join(&arch_str)
         .join("vmlinux");
-    let verified_workload_kernel = || match mvm_build::kernel_fetch::resolve_kernel(
-        cache_root, &arch_str, "workload", false,
-    ) {
-        mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-            Some(verified.path().to_path_buf())
+    let verified_workload_kernel = || {
+        let (resolution, _label) =
+            mvm_build::kernel_fetch::resolve_kernel_for_workload(cache_root, &arch_str, false);
+        match resolution {
+            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                Some(verified.path().to_path_buf())
+            }
+            mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+            | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
         }
-        mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
-        | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
     };
 
     // A workload guest needs the workload kernel, on every arch.

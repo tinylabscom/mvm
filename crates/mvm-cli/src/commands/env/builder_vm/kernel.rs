@@ -11,6 +11,10 @@ pub(crate) enum KernelVariant {
     Builder,
     /// Workload-microVM kernel — the shared base alone (`workload-kernel`).
     Workload,
+    /// Workload-microVM kernel for in-guest orchestrators (rootless
+    /// Kubernetes guests): the base + dm-verity delta plus
+    /// cgroup/namespace/netfilter/bridge plumbing (`workload-k8s-kernel`).
+    WorkloadK8s,
 }
 
 #[cfg(feature = "builder-vm")]
@@ -20,6 +24,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "builder-kernel",
             Self::Workload => "workload-kernel",
+            Self::WorkloadK8s => "workload-k8s-kernel",
         }
     }
 
@@ -32,6 +37,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "kernel-configfile",
             Self::Workload => "workload-kernel-configfile",
+            Self::WorkloadK8s => "workload-k8s-kernel-configfile",
         }
     }
 
@@ -39,6 +45,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "builder",
             Self::Workload => "workload",
+            Self::WorkloadK8s => "workload-k8s",
         }
     }
 }
@@ -278,8 +285,10 @@ fn publish_kernel_artifacts(
             staged_config.display()
         );
     }
-    if variant == KernelVariant::Workload
-        && workload_config_carries_dm_verity(&config) != Some(true)
+    if matches!(
+        variant,
+        KernelVariant::Workload | KernelVariant::WorkloadK8s
+    ) && workload_config_carries_dm_verity(&config) != Some(true)
     {
         anyhow::bail!(
             "Stage 0 workload config must contain CONFIG_BLK_DEV_DM=y and CONFIG_DM_VERITY=y"
