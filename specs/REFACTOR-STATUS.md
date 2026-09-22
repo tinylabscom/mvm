@@ -186,7 +186,9 @@ Last updated: 2026-09-21
       immediate post-restore `getrandom(2)` divergence.
       W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
       the W3.6 live boot is still open. W3.7 done (#3430): files mvm injects
-      stay root-owned whatever a layer declares. W3.8 (builder-VM input
+      stay root-owned whatever a layer declares; its #3480 follow-up refuses
+      persistent and non-image `machine run --prod` paths before source
+      resolution. W3.8 (builder-VM input
       fidelity) is done except a macOS unpacker hard-link bug.
       W4 done except W4.5 as written (#3381): HVF returns freed guest memory
       by free page reporting, advertised as `free_page_reporting` rather than

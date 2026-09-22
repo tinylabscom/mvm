@@ -751,6 +751,98 @@ fn persistent_run_refuses_environment_that_its_spec_cannot_carry() {
 }
 
 #[test]
+fn persistent_run_refuses_prod_that_its_spec_cannot_preserve() {
+    for argv in [
+        &["run", "--image", "alpine", "--prod", "--detach"][..],
+        &["run", "--image", "alpine", "--prod", "--up-json"][..],
+        &["run", "--image", "alpine", "--prod", "--ttl", "30"][..],
+        &[
+            "run",
+            "--image",
+            "alpine",
+            "--prod",
+            "--healthcheck",
+            "true",
+        ][..],
+        &["run", "--image", "alpine", "--prod", "--port", "8080:80"][..],
+    ] {
+        let args = parse_run(argv).expect("persistent production run parses");
+        let err = args
+            .refuse_unsupported_prod()
+            .expect_err("persistent production run must be refused");
+        assert!(
+            err.to_string()
+                .contains("supported only for transient runs"),
+            "argv {argv:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn non_image_run_refuses_prod_before_source_work() {
+    for argv in [
+        &["run", "--runtime-pack", "--prod", "--", "/bin/true"][..],
+        &[
+            "run",
+            "--deployment",
+            "missing-deployment",
+            "--prod",
+            "--",
+            "/bin/true",
+        ][..],
+        &[
+            "run",
+            "--flake",
+            "missing-flake",
+            "--prod",
+            "--",
+            "/bin/true",
+        ][..],
+        &[
+            "run",
+            "--manifest",
+            "missing-manifest",
+            "--prod",
+            "--",
+            "/bin/true",
+        ][..],
+    ] {
+        let args = parse_run(argv).expect("non-image production run parses");
+        let err = args
+            .refuse_unsupported_prod()
+            .expect_err("non-image production run must be refused");
+        assert!(
+            err.to_string()
+                .contains("only with `--image` or `--runtime`"),
+            "argv {argv:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn transient_image_and_runtime_allow_prod_preflight() {
+    for argv in [
+        &[
+            "run",
+            "--image",
+            "alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "--prod",
+            "--",
+            "/bin/true",
+        ][..],
+        &["run", "--runtime", "python", "--prod", "--", "/bin/true"][..],
+    ] {
+        let args = parse_run(argv).expect("supported production run parses");
+        args.refuse_unsupported_prod()
+            .expect("transient image-backed production run remains supported");
+        assert!(
+            args.into_run_args().prod,
+            "argv {argv:?}: production policy must reach the admitted run"
+        );
+    }
+}
+
+#[test]
 fn name_is_identity_not_persistence() {
     let args =
         parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");
@@ -1325,7 +1417,7 @@ fn translation_is_an_image_backed_transient_run() {
     assert_eq!(run.image.as_deref(), Some("alpine"));
     assert!(run.manifest.is_none());
     assert!(run.launch_plan.is_none());
-    // OCI prod-pin stays off — `machine run` doesn't expose it.
+    // No production policy was requested, so it stays off.
     assert!(!run.prod);
     // User-facing flags flow through untouched.
     assert!(run.json);
