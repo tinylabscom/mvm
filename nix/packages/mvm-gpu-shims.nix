@@ -16,7 +16,12 @@
 }:
 
 let
-  toolchainPkgs = if static then pkgs.pkgsStatic else pkgs;
+  # The musl variant must NOT use pkgsStatic: that stdenv disables dynamic
+  # linking, and a shim is by definition a shared object — rustc refuses the
+  # cdylib crate type there. pkgsMusl keeps dynamic linking available while
+  # the +crt-static RUSTFLAGS below still link musl into the cdylib, so the
+  # result is self-contained and dlopen-able from a sealed-overlay musl guest.
+  toolchainPkgs = if static then pkgs.pkgsMusl else pkgs;
   variant = if static then "musl" else "glibc";
   crateFor =
     {
