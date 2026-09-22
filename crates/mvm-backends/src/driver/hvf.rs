@@ -444,6 +444,7 @@ impl VmmDriver for HvfDriver {
             // GPU remoting rides the same per-port vsock relay as every
             // other guest-dialed channel; the host endpoint binds the UDS.
             gpu: true,
+
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
             // Both are unconditional so the backend fails closed: a degraded host
@@ -1078,6 +1079,31 @@ impl RunningVm for HvfRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_pin_every_explicit_backend_capability() {
+        // Every field this expression names is a design assertion, not a
+        // default: deleting one changes what admission believes the backend
+        // contractually provides (vsock-only, fail-closed egress, GPU
+        // remoting over the per-port relay), so the whole set is pinned.
+        let capabilities = HvfDriver.capabilities();
+        assert!(capabilities.pause_resume);
+        assert_eq!(
+            capabilities.snapshot_capability,
+            mvm_core::vm_backend::SnapshotCapability::SaveRestore
+        );
+        assert!(capabilities.standby_pool);
+        assert!(capabilities.vsock);
+        assert!(capabilities.gpu);
+        assert!(capabilities.no_routable_guest_nic);
+        assert!(capabilities.host_vsock_proxy);
+        assert!(capabilities.free_page_reporting);
+        assert!(!capabilities.balloon);
+        assert_eq!(
+            capabilities.resource_controls,
+            ResourceControls::for_backend(BackendKind::Hvf)
+        );
+    }
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
 

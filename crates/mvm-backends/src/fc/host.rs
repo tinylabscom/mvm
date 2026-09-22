@@ -340,7 +340,18 @@ enum ProcessView {
 
 #[cfg(target_os = "linux")]
 fn observe_process(pid: u32) -> Result<ProcessView> {
-    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    observe_process_at(PathBuf::from(format!("/proc/{pid}")), || {
+        mvm_vmm::host::process_liveness::pid_is_alive(pid as i32)
+    })
+}
+
+/// Read one process view from `proc_dir` (a `/proc/<pid>` entry), consulting
+/// `is_alive` only when the entry itself cannot be read — an unreadable entry
+/// for a live process is `Hidden`, for a dead one `Gone`. Split out from
+/// [`observe_process`] so the classification is witnessable against a fixture
+/// directory instead of a live pid.
+#[cfg(any(target_os = "linux", test))]
+fn observe_process_at(proc_dir: PathBuf, is_alive: impl Fn() -> bool) -> Result<ProcessView> {
     match std::fs::read_to_string(proc_dir.join("comm")) {
         Ok(comm) if comm.trim() != "firecracker" => Ok(ProcessView::NotFirecracker),
         Ok(_) => Ok(ProcessView::Firecracker {
@@ -349,16 +360,14 @@ fn observe_process(pid: u32) -> Result<ProcessView> {
                 .map(|cmdline| split_cmdline(&cmdline)),
             cwd: std::fs::read_link(proc_dir.join("cwd")).ok(),
         }),
-        Err(_) if !mvm_vmm::host::process_liveness::pid_is_alive(pid as i32) => {
-            Ok(ProcessView::Gone)
-        }
+        Err(_) if !is_alive() => Ok(ProcessView::Gone),
         // The process exists but its entry is unreadable: `hidepid`, or a
         // permission this user lacks.
         Err(_) => Ok(ProcessView::Hidden),
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn split_cmdline(cmdline: &[u8]) -> Vec<String> {
     cmdline
         .split(|byte| *byte == 0)
@@ -762,6 +771,62 @@ impl FcForkRestorer {
 
 #[cfg(test)]
 mod tests {
+
+    fn proc_entry(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn observe_process_classifies_a_fixture_proc_entry() {
+        let firecracker = proc_entry(&[
+            ("comm", b"firecracker\n"),
+            ("cmdline", b"firecracker\0--api-sock\0/state/a.sock\0"),
+        ]);
+        let view = observe_process_at(firecracker.path().to_path_buf(), || true).unwrap();
+        match view {
+            ProcessView::Firecracker { args, cwd } => {
+                assert_eq!(
+                    args.unwrap(),
+                    vec!["firecracker", "--api-sock", "/state/a.sock"]
+                );
+                assert!(cwd.is_none(), "a fixture carries no cwd symlink");
+            }
+            other => panic!("expected Firecracker, got {other:?}"),
+        }
+
+        let systemd = proc_entry(&[("comm", b"systemd\n")]);
+        assert_eq!(
+            observe_process_at(systemd.path().to_path_buf(), || true).unwrap(),
+            ProcessView::NotFirecracker,
+            "a live non-Firecracker comm is positively not ours"
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            observe_process_at(empty.path().to_path_buf(), || false).unwrap(),
+            ProcessView::Gone,
+            "an unreadable entry for a dead pid is Gone"
+        );
+        assert_eq!(
+            observe_process_at(empty.path().to_path_buf(), || true).unwrap(),
+            ProcessView::Hidden,
+            "an unreadable entry for a live pid is Hidden, never silently Gone"
+        );
+    }
+
+    #[test]
+    fn split_cmdline_splits_on_nul_and_drops_empty_arguments() {
+        assert_eq!(
+            split_cmdline(b"firecracker\0--api-sock\0/state/a.sock\0"),
+            vec!["firecracker", "--api-sock", "/state/a.sock"]
+        );
+        assert!(split_cmdline(b"").is_empty());
+        assert_eq!(split_cmdline(b"only\0\0"), vec!["only"]);
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()

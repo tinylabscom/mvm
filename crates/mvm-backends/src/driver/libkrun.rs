@@ -307,6 +307,7 @@ impl VmmDriver for LibkrunDriver {
             // GPU remoting is a per-port vsock channel plus a host process;
             // libkrun terminates vsock exactly like the other VMM tiers.
             gpu: true,
+
             tap_networking: false,
             // Stronger than the field name asks for: the guest has no NIC at
             // all, not a NIC without a route. `VsockDirect` configures a
@@ -621,6 +622,35 @@ impl RunningVm for LibkrunRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_pin_the_runner_facing_contract_not_the_substrate() {
+        // The literal is only the substrate: the runner overwrites
+        // `snapshot_capability` and `standby_pool` before returning, and
+        // callers see the overwritten values. Pinning the final answer keeps
+        // a field delete or a stale overwrite from silently re-quoting the
+        // raw libkrun substrate to admission.
+        let capabilities = LibkrunDriver.capabilities();
+        assert_eq!(capabilities.max_vcpus, Some(MAX_VCPUS));
+        assert!(!capabilities.pause_resume);
+        assert!(!capabilities.snapshots);
+        assert_eq!(
+            capabilities.snapshot_capability,
+            SnapshotCapability::Unsupported
+        );
+        assert!(!capabilities.standby_pool);
+        assert!(capabilities.vsock);
+        assert!(capabilities.gpu);
+        assert!(!capabilities.tap_networking);
+        assert!(capabilities.no_routable_guest_nic);
+        assert!(capabilities.host_vsock_proxy);
+        assert!(!capabilities.balloon);
+        assert!(!capabilities.fs_quick_checkpoint);
+        assert_eq!(
+            capabilities.resource_controls,
+            ResourceControls::for_backend(BackendKind::Libkrun)
+        );
+    }
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{ConsoleCapture, VsockPort};

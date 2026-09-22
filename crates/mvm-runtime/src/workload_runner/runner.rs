@@ -303,6 +303,36 @@ pub struct StopTiming {
     pub driver_detail: Option<RunningVmStopTiming>,
 }
 
+/// Append one kernel-cmdline token, space-separated only when the cmdline is
+/// already non-empty: a token on an empty cmdline must not carry a leading
+/// space, which the guest's `/init` would read as an empty argument.
+fn append_cmdline_token(boot_cmdline: &mut String, token: &str) {
+    if !boot_cmdline.is_empty() {
+        boot_cmdline.push(' ');
+    }
+    boot_cmdline.push_str(token);
+}
+
+/// Backend-shaped guest→host channel for the GPU endpoint. QEMU's vhost-vsock
+/// lets the endpoint bind the real port directly; every other tier proxies the
+/// guest dial to a per-VM UDS. A free function so both `WorkloadRunner` and the
+/// unit tests name the same binding decision.
+fn gpu_endpoint_transport(
+    kind: mvm_core::vm_backend::BackendKind,
+    state_dir: &std::path::Path,
+) -> mvm_vmm::host::network_endpoint_spawn::EndpointTransport {
+    use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
+    if kind == mvm_core::vm_backend::BackendKind::Qemu {
+        EndpointTransport::Vsock {
+            port: mvm_agentd::vsock::GPU_PORT,
+        }
+    } else {
+        EndpointTransport::Uds {
+            path: mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT),
+        }
+    }
+}
+
 impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Build a runner over the process's registered console-streaming hook.
     ///
@@ -350,19 +380,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         kind: mvm_core::vm_backend::BackendKind,
         state_dir: &std::path::Path,
     ) -> mvm_vmm::host::network_endpoint_spawn::EndpointTransport {
-        use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
-        if kind == mvm_core::vm_backend::BackendKind::Qemu {
-            EndpointTransport::Vsock {
-                port: mvm_agentd::vsock::GPU_PORT,
-            }
-        } else {
-            EndpointTransport::Uds {
-                path: mvm_core::config::vm_vsock_port_socket_at(
-                    state_dir,
-                    mvm_agentd::vsock::GPU_PORT,
-                ),
-            }
-        }
+        gpu_endpoint_transport(kind, state_dir)
     }
 
     /// Spawn the optional gating endpoint, compose the spec, and boot. A
@@ -404,10 +422,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
 
         let mut boot_cmdline = inputs.cmdline.clone();
         if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
-            if !boot_cmdline.is_empty() {
-                boot_cmdline.push(' ');
-            }
-            boot_cmdline.push_str(&token);
+            append_cmdline_token(&mut boot_cmdline, &token);
         }
         if let Some(problem) = cmdline::cmdline_overflow(&boot_cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
@@ -1710,6 +1725,125 @@ mod tests {
             .find(|p| p.service.port() == EGRESS_PORT)
             .map(|p| p.host_uds.as_path())
             .expect("spec carries an EGRESS_PORT vsock channel")
+    }
+
+    #[test]
+    fn gpu_endpoint_transport_binds_vsock_only_for_qemu() {
+        use mvm_core::vm_backend::BackendKind;
+        use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
+
+        let state = tempfile::tempdir().unwrap();
+        assert_eq!(
+            gpu_endpoint_transport(BackendKind::Qemu, state.path()),
+            EndpointTransport::Vsock {
+                port: mvm_agentd::vsock::GPU_PORT,
+            },
+            "QEMU's vhost-vsock binds the GPU port directly"
+        );
+        for other in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+        ] {
+            assert_eq!(
+                gpu_endpoint_transport(other, state.path()),
+                EndpointTransport::Uds {
+                    path: mvm_core::config::vm_vsock_port_socket_at(
+                        state.path(),
+                        mvm_agentd::vsock::GPU_PORT,
+                    ),
+                },
+                "every non-QEMU tier proxies the guest GPU dial to a per-VM UDS"
+            );
+        }
+    }
+
+    #[test]
+    fn append_cmdline_token_separates_only_a_non_empty_cmdline() {
+        let mut empty = String::new();
+        append_cmdline_token(&mut empty, "mvm.secret_env=ab");
+        assert_eq!(
+            empty, "mvm.secret_env=ab",
+            "no leading space on an empty cmdline"
+        );
+
+        let mut non_empty = "root=/dev/vda".to_string();
+        append_cmdline_token(&mut non_empty, "mvm.secret_env=ab");
+        assert_eq!(
+            non_empty, "root=/dev/vda mvm.secret_env=ab",
+            "a non-empty cmdline gets exactly one space separator"
+        );
+    }
+
+    #[test]
+    fn a_secret_env_token_rides_the_boot_cmdline() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        let verity = rootfs_dir.path().join("rootfs.verity");
+        let initrd = rootfs_dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(
+            "runner-secret-env-cmdline-spacing",
+            false,
+            true,
+        )
+        .write_to_dir(rootfs_dir.path())
+        .unwrap();
+
+        let vm_name = "runner-secret-env-cmdline-spacing";
+        seed_grant_sidecar_and_key(vm_name);
+        // A substitution env with one secret-shaped pair: the
+        // `mvm.secret_env` token must reach the booted spec's cmdline.
+        // (The separator rule itself is witnessed directly on
+        // `append_cmdline_token` — the runner path always pre-seeds the
+        // hostepoch token, so the base cmdline is never empty here.)
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("substitution-env.json"),
+            br#"[["API_KEY","mvm-secret-test"]]"#,
+        )
+        .unwrap();
+
+        let cfg = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let driver = MockDriver::default();
+        let guest = spawn_activation_guest(driver.clone(), vm_name);
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.start(&cfg).expect("start succeeds");
+        guest.join().expect("guest thread");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+        assert!(
+            cmdline.contains("mvm.secret_env="),
+            "booted cmdline missing the secret-env token: {cmdline}"
+        );
     }
 
     #[test]
