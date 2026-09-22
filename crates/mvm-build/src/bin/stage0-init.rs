@@ -1131,7 +1131,7 @@ mod linux {
         // artifact that matters.
         if mode == "kernel"
             && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
-            && let Err(e) = emit_resolved_config(&nix, &arch, config_attr)
+            && let Err(e) = emit_resolved_config(&nix, &arch, config_attr, &flake_base)
         {
             eprintln!("stage0-init: skipping kernel-config emit: {e}");
         }
@@ -1140,12 +1140,20 @@ mod linux {
 
     /// Realise the resolved-`.config` flake attr and copy it to
     /// `/out/mvm-kernel.config`. Cheap — it's a cached dependency of the
-    /// kernel just built.
-    fn emit_resolved_config(nix: &Path, arch: &str, config_attr: &str) -> Result<(), String> {
-        // Same default as the image build; the conf is not threaded into this
-        // helper because both refs are built from the one staged tree.
-        let flake_base = "path:/work/nix/images/builder-vm#packages";
+    /// kernel just built. `flake_base` is the same conf-driven base the
+    /// kernel attr was built from: when the host stages a non-default flake
+    /// at `/work` (an mvm-images kernel checkout names its own attrs), the
+    /// config attr only resolves under that same base — hardcoding the
+    /// in-repo base here builds a config for the WRONG kernel and the host
+    /// publishes a sidecar that misdescribes the artifact.
+    fn emit_resolved_config(
+        nix: &Path,
+        arch: &str,
+        config_attr: &str,
+        flake_base: &str,
+    ) -> Result<(), String> {
         let flake_ref = format!("{flake_base}.{arch}-linux.{config_attr}");
+        eprintln!("stage0-init: emitting resolved config via {flake_ref}");
         let mut cmd = Command::new(nix);
         cmd.args([
             "build",
@@ -1162,18 +1170,39 @@ mod linux {
             "--impure",
             "--print-out-paths",
         ]);
-        let out = cmd.output().map_err(|e| format!("nix build config: {e}"))?;
-        if !out.status.success() {
+        // The guest has no direct network: every fetch rides the loopback
+        // egress proxy, exactly like the main build above. Without these the
+        // emit cannot substitute from cache.nixos.org and falls back to
+        // upstream mirrors the egress refuses.
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        if should_enable_vsock_egress(is_qemu(), &cmdline) {
+            apply_vsock_egress_proxy_env(&mut cmd);
+        }
+        // Stream stderr to the console like the main build: a config-only
+        // failure (e.g. a missing attr on a non-default flake base) is
+        // otherwise invisible — the host only sees a bare exit code and
+        // publishes a kernel with no config sidecar, misdescribed.
+        let (status, stderr_log, stdout) = run_streaming(cmd, &mut std::io::stderr().lock())
+            .map_err(|e| format!("nix build config: {e}"))?;
+        if !status.success() {
             return Err(format!(
-                "nix build config exit {}",
-                out.status.code().unwrap_or(-1)
+                "nix build config exit {}: {}",
+                status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&stderr_log)
             ));
         }
-        let store_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let store_path = stdout.trim().to_string();
         if store_path.is_empty() {
             return Err("config build emitted no /nix/store path".into());
         }
-        copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))
+        copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))?;
+        // Root the config output separately from the kernel: it is only a
+        // build-time input of the kernel derivation, so rooting the kernel
+        // does not keep it, and without a root the post-build collection
+        // deletes it — the next run's emit then rebuilds it from a cold
+        // store, which needs network fetches the egress may not admit.
+        crate::store_gc::collect::root_stage0_output(Path::new(&store_path), "kernel-config");
+        Ok(())
     }
 
     /// Spawn `cmd`, streaming its stderr line-by-line to `live` (flushed per

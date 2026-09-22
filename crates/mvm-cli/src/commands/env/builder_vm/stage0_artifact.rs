@@ -9,6 +9,11 @@ pub(super) struct Stage0ArtifactBuild<'a> {
     build_attr: &'a str,
     output_mode: &'a str,
     config_attr: Option<&'a str>,
+    /// Override for the in-guest flake ref base (`MVM_STAGE0_FLAKE`), without
+    /// the trailing `.<arch>-linux.<attr>` segment. `None` keeps the default
+    /// in-repo builder-vm flake. Set when the build resolves from an
+    /// mvm-images checkout whose kernel flake is staged at `/work`.
+    flake_base: Option<&'a str>,
     verbose: bool,
 }
 
@@ -20,6 +25,7 @@ pub(super) struct Stage0ArtifactBuildBuilder<'a> {
     build_attr: Option<&'a str>,
     output_mode: Option<&'a str>,
     config_attr: Option<&'a str>,
+    flake_base: Option<&'a str>,
     verbose: bool,
 }
 
@@ -35,6 +41,7 @@ impl<'a> Stage0ArtifactBuild<'a> {
             build_attr: None,
             output_mode: None,
             config_attr: None,
+            flake_base: None,
             verbose: false,
         }
     }
@@ -93,6 +100,9 @@ impl<'a> Stage0ArtifactBuild<'a> {
         if let Some(config_attr) = self.config_attr {
             conf.push_str(&format!("MVM_STAGE0_CONFIG_ATTR={config_attr}\n"));
         }
+        if let Some(flake_base) = self.flake_base {
+            conf.push_str(&format!("MVM_STAGE0_FLAKE={flake_base}\n"));
+        }
         conf
     }
 }
@@ -111,6 +121,11 @@ impl<'a> Stage0ArtifactBuildBuilder<'a> {
 
     pub(super) fn config_attr(mut self, config_attr: &'a str) -> Self {
         self.config_attr = Some(config_attr);
+        self
+    }
+
+    pub(super) fn flake_base(mut self, flake_base: &'a str) -> Self {
+        self.flake_base = Some(flake_base);
         self
     }
 
@@ -139,15 +154,34 @@ impl<'a> Stage0ArtifactBuildBuilder<'a> {
         {
             anyhow::bail!("Stage 0 config attribute contains invalid characters: {config_attr:?}");
         }
+        if let Some(flake_base) = self.flake_base
+            && !valid_flake_base(flake_base)
+        {
+            anyhow::bail!("Stage 0 flake base contains invalid characters: {flake_base:?}");
+        }
         Ok(Stage0ArtifactBuild {
             workspace_root: self.workspace_root,
             staging_dir: self.staging_dir,
             build_attr,
             output_mode,
             config_attr: self.config_attr,
+            flake_base: self.flake_base,
             verbose: self.verbose,
         })
     }
+}
+
+/// A flake base carries URL punctuation (`path:/work#packages`), so the
+/// attr-token alphabet does not fit. The conf is line-based on the guest;
+/// the only hard requirement is that the value stays one line with no
+/// control characters, and that it names a `#packages` fragment the guest
+/// appends `.<arch>-linux.<attr>` to.
+#[cfg(feature = "builder-vm")]
+fn valid_flake_base(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('\n')
+        && !value.contains('\r')
+        && value.chars().all(|c| !c.is_control())
 }
 
 #[cfg(feature = "builder-vm")]
@@ -161,6 +195,53 @@ fn valid_conf_token(value: &str) -> bool {
 #[cfg(all(test, feature = "builder-vm"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_carries_flake_base_into_conf() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let build = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("datapath-vmlinux")
+            .output_mode("kernel")
+            .config_attr("datapath-configfile")
+            .flake_base("path:/work#packages")
+            .build()
+            .expect("flake base builds");
+        let conf = build.render_conf();
+        assert!(
+            conf.contains("MVM_STAGE0_FLAKE=path:/work#packages\n"),
+            "{conf}"
+        );
+        assert!(
+            conf.contains("MVM_STAGE0_BUILD_ATTR=datapath-vmlinux\n"),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_flake_base_injection() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let error = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("datapath-vmlinux")
+            .output_mode("kernel")
+            .flake_base("path:/work#packages\nMVM_STAGE0_OUTPUT_MODE=image")
+            .build()
+            .expect_err("a newline must not enter stage0-build.conf");
+        assert!(error.to_string().contains("invalid characters"), "{error}");
+    }
+
+    #[test]
+    fn builder_omits_flake_base_by_default() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let build = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("workload-kernel")
+            .output_mode("kernel")
+            .build()
+            .expect("default build");
+        assert!(!build.render_conf().contains("MVM_STAGE0_FLAKE"));
+    }
 
     #[test]
     fn builder_rejects_config_injection() {
