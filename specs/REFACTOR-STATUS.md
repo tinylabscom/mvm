@@ -341,8 +341,11 @@ Last updated: 2026-09-21
             SDK sidecars, plus both build verbs) reads the selector through
             the pair, with the pair identity stamped beside each install;
             the duplicate checkout probes collapsed into one shared helper.
-      - [ ] W5k–W5m #3364: tier at admission, docs and paired CI, and the
-            acceptance witnesses.
+      - [x] W5k #3364: admission reads the tier recorded with the image it
+            boots — production refuses local-dev however the bytes were
+            selected, both cache kinds classified fail-closed.
+      - [ ] W5l–W5m #3364: contributor docs and paired CI, and the acceptance
+            witnesses.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
