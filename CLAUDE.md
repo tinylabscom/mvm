@@ -7,7 +7,7 @@ Validation: check-claim-catalog
 
 Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.
 
-Multi-tenant fleet orchestration (tenants, pools, instances, agents, coordinators) lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repository.
+Multi-tenant fleet orchestration (tenants, pools, instances, agents, coordinators) lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repository. Building, verification, signing, and publication of the system-image train (builder VM, workload kernel and rootfs, runtime overlay, SDK sidecars, Stage 0 seeds) live in the separate [mvm-images](https://github.com/tinylabscom/mvm-images) repository.
 
 ```
 macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
