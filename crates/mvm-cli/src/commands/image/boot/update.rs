@@ -55,6 +55,7 @@ pub(super) fn run(request: &UpdateRequest) -> Result<()> {
         target.display()
     );
     ui::success(&format!("Boot image updated to {tag}."));
+    crate::commands::env::builder_vm::report_recorded_boot_tier("Boot image", &target);
     Ok(())
 }
 

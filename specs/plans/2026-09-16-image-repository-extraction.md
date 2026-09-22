@@ -772,9 +772,15 @@ Delivery slices, one PR each:
       release-channel aware; `mvm_source_checkout_at(root)` makes the
       flake-free probe testable. `builder_vm_source_checkout_root` keeps its
       bootstrap-helper callers, which genuinely concern the in-tree flake.
-- [ ] W5k (`mvm`) — `image boot update`, `up` and admission read the tier
+- [x] W5k (`mvm`) — `image boot update`, `up` and admission read the tier
       recorded with the image they boot; production refuses `local-dev`; the
       `doctor` line adds artifact digests.
+      Landed as `image_source::recorded_tier_for`: the default image's
+      sidecar `source` and the builder cache's provenance `source_kind`
+      classify managed cache entries (fail closed), admission refuses a
+      local-dev answer under Prod before signing — however the bytes were
+      selected — boots report the recorded tier, and the doctor line adds
+      the installed default image's rootfs digest.
 - [ ] W5l — contributor documentation, the two-repository example change, and
       a paired-change CI job checking out both repositories at explicit SHAs.
 - [ ] W5m — the acceptance witnesses: cache reuse and single-sided

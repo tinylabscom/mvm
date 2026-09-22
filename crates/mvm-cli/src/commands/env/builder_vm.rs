@@ -81,6 +81,15 @@ pub(crate) fn with_pair_artifact_source<T>(
     f(None)
 }
 
+/// Report the tier recorded with a managed image cache entry, when `path`
+/// is inside one. Ordinary boots read what their image records, so a
+/// local-dev boot is visible in the log without running `doctor`.
+pub(crate) fn report_recorded_boot_tier(what: &str, path: &std::path::Path) {
+    if let Some(tier) = mvm_build::image_source::recorded_tier_for(path) {
+        crate::ui::info(&format!("{what}: {tier} (as recorded with the image)"));
+    }
+}
+
 /// Whether images are built from source here: the in-tree flakes, or a local
 /// image checkout the selector names. Either way the local build is
 /// authoritative. An invalid configured path is not an answer either way —

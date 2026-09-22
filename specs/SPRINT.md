@@ -464,6 +464,13 @@ docs commit went out as #3581). Under the
       plan gains the one-base-image constraint: a single base Linux image
       per architecture boots on every Linux-direct backend, with host-side
       adaptation as translation, not separate products (mvm-images#8).
+      W5 (#3364) slice W5k: admission reads the tier recorded with the image
+      it boots — a production admission refuses a local-dev answer however
+      the bytes were selected (a stale local install with the selector
+      unset is caught like a fresh pair build), both managed cache kinds are
+      classified from their recorded provenance fail-closed, ordinary boots
+      report the recorded tier, and the doctor image-source line adds the
+      installed default image's rootfs digest.
       W5 (#3364) slice W5j: the libkrun supervisor auto-build keys on the mvm
       checkout itself — the workspace manifest, release-channel aware — not
       on the in-tree image flakes' presence, so deleting `nix/images` at W8

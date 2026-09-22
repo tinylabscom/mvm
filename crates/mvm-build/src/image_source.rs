@@ -90,6 +90,12 @@ pub enum ImageSourceError {
         tier = ImageTrustTier::LocalDev
     )]
     RefusedInProduction,
+    #[error(
+        "a production admission boots only verified released image sets; the image this boot \
+         resolved records the {tier} tier. Boot an image fetched from a signed release, or run \
+         without the sealed-production profile"
+    )]
+    RefusedTierInProduction { tier: ImageTrustTier },
     #[error("${MVM_IMAGES_DIR_ENV}={}: cannot resolve the path: {source}", .path.display())]
     Unresolvable {
         path: PathBuf,
@@ -299,6 +305,79 @@ pub fn refuse_in_production(
         return Err(ImageSourceError::RefusedInProduction);
     }
     Ok(())
+}
+
+/// Refuse a locally built image under a production admission, however it was
+/// selected. W5a refuses while the selector is set; this refuses what the boot
+/// actually resolved, so a stale local install left in the cache with the
+/// selector unset is caught the same as a fresh pair build.
+pub fn refuse_tier_in_production(
+    variant: Variant,
+    tier: ImageTrustTier,
+) -> Result<(), ImageSourceError> {
+    if variant.is_prod() && tier == ImageTrustTier::LocalDev {
+        return Err(ImageSourceError::RefusedTierInProduction { tier });
+    }
+    Ok(())
+}
+
+/// The provenance file a builder-VM cache entry records; only the field the
+/// tier reader needs.
+const BUILDER_CACHE_PROVENANCE_FILE: &str = ".mvm-provenance.json";
+
+/// The tier recorded with a managed image cache entry holding `path`, when
+/// `path` is inside one. Managed entries record how they were produced — the
+/// default image's sidecar `source`, the builder cache's provenance
+/// `source_kind` — so admission can refuse a locally built answer under
+/// production however it was selected. Unmanaged paths (an operator-named
+/// `--image`) record nothing and return `None`: their admission stays the
+/// digest pin.
+pub fn recorded_tier_for(path: &Path) -> Option<ImageTrustTier> {
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let rel = {
+        let cache = cache.canonicalize().ok()?;
+        let path = path.canonicalize().ok()?;
+        path.strip_prefix(&cache).ok()?.to_path_buf()
+    };
+    let mut segments = rel.components();
+    let group = segments.next()?.as_os_str().to_str()?;
+    let entry = segments.next()?;
+    let entry_dir = cache.join(group).join(entry);
+    match group {
+        "default-microvm" => default_image_cache_tier(&entry_dir),
+        "builder-vm" => builder_vm_cache_tier(&entry_dir),
+        _ => None,
+    }
+}
+
+/// The default image's recorded tier: its sidecar `source` names how the
+/// bytes reached this host. Anything but an explicit `fetched` is local —
+/// built in-tree, installed from a pair — and unrecognized values fail
+/// closed to local.
+fn default_image_cache_tier(variant_dir: &Path) -> Option<ImageTrustTier> {
+    let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(variant_dir).ok()??;
+    Some(match sidecar.source.as_str() {
+        "fetched" => ImageTrustTier::VerifiedRelease,
+        _ => ImageTrustTier::LocalDev,
+    })
+}
+
+/// The builder cache's recorded tier: its provenance `source_kind` names the
+/// producer. Only an explicit `fetched` (a published download, which also
+/// records the release tag) is a verified release; every other kind — the
+/// Stage 0 source build, a pair install — is local, and unrecognized values
+/// fail closed to local.
+fn builder_vm_cache_tier(arch_dir: &Path) -> Option<ImageTrustTier> {
+    #[derive(serde::Deserialize)]
+    struct ProvenanceKind {
+        source_kind: String,
+    }
+    let text = std::fs::read_to_string(arch_dir.join(BUILDER_CACHE_PROVENANCE_FILE)).ok()?;
+    let provenance: ProvenanceKind = serde_json::from_str(&text).ok()?;
+    Some(match provenance.source_kind.as_str() {
+        "fetched" => ImageTrustTier::VerifiedRelease,
+        _ => ImageTrustTier::LocalDev,
+    })
 }
 
 /// The mvm checkout a contributor build was compiled from, when it is still
