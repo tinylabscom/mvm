@@ -231,6 +231,20 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
       for emit p50/p95/p99/max, allocations, memory, control/exit latency and flood
       fairness. Set regression budgets from repeated baseline runs before enabling
       the feature, recording the commands and variance.
+  - [x] W1d — Offline emit-path baselines: `cargo xtask telemetry-baseline`
+        measures record preparation and outbox admission (queued and shed)
+        p50/p95/p99/max, multi-producer flood fairness, and the deterministic
+        storage bound, with a host descriptor and schema version. Five release
+        runs on Apple M3 Max are committed with variance and ×1.5-derived
+        budgets in [the baselines doc](../telemetry/baselines.md); admission
+        sits at the timer floor, preparation dominates, and burst fairness is
+        recorded as effectively zero (first-scheduled producer monopolizes,
+        ~49% contended) — a documented deficiency, not a budget. Allocation
+        evidence stays with the existing native+Miri outbox regressions.
+  - [ ] W1e — Hardware-qualified control/exit latency: the live lanes
+        (`xtask perf boot` on Linux+KVM, the bench harness's interaction lane)
+        run per backend on qualified hardware; until those runs are recorded,
+        control/exit impact has a command, not a baseline.
 
 ### W2 — Typed records and authenticated telemetry service
 

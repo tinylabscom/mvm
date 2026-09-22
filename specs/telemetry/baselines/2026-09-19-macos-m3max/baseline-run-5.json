@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "host": {
+    "os": "macos",
+    "arch": "aarch64",
+    "cpu": "Apple M3 Max",
+    "logical_cores": 16
+  },
+  "samples": 100000,
+  "fairness_rounds": 50,
+  "timer_overhead_ns": {
+    "p50": 0.0,
+    "p95": 42.0,
+    "p99": 42.0,
+    "max": 42708.0,
+    "mean": 15.31072,
+    "std_dev": 136.50949722668153
+  },
+  "prepare_small_ns": {
+    "p50": 416.0,
+    "p95": 500.0,
+    "p99": 542.0,
+    "max": 44666.0,
+    "mean": 410.68016,
+    "std_dev": 228.0579304527102
+  },
+  "prepare_typical_ns": {
+    "p50": 958.0,
+    "p95": 1208.0,
+    "p99": 1292.0,
+    "max": 69958.0,
+    "mean": 974.76689,
+    "std_dev": 486.7269731889991
+  },
+  "offer_queued_small_ns": {
+    "p50": 41.0,
+    "p95": 42.0,
+    "p99": 42.0,
+    "max": 9834.0,
+    "mean": 26.00661365089514,
+    "std_dev": 59.85568345185741
+  },
+  "offer_queued_typical_ns": {
+    "p50": 41.0,
+    "p95": 42.0,
+    "p99": 42.0,
+    "max": 19666.0,
+    "mean": 29.486742726982097,
+    "std_dev": 75.36582989719034
+  },
+  "offer_shed_ns": {
+    "p50": 41.0,
+    "p95": 42.0,
+    "p99": 42.0,
+    "max": 208.0,
+    "mean": 21.52054028132992,
+    "std_dev": 21.260868142156202
+  },
+  "flood_fairness": {
+    "producers": 4,
+    "attempts_per_producer": 256,
+    "admitted_ratio": {
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max": 0.0,
+      "mean": 0.0,
+      "std_dev": 0.0
+    },
+    "total_queued": 12800,
+    "total_contended": 24854,
+    "total_shed": 13546
+  },
+  "memory": {
+    "slot_bytes": 32768,
+    "max_slots": 256,
+    "max_storage_bytes": 8388608
+  },
+  "allocation_witness": "zero allocations/frees on admission, loss read and close: mvm-core telemetry outbox allocation regressions, native and Miri"
+}
