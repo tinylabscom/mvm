@@ -7,9 +7,13 @@
 
 mod bounded;
 mod record;
+mod witness;
 
 pub use bounded::{BoundedList, Text};
 pub use record::{TelemetryRecord, TelemetryRecordBuilder};
+pub use witness::{
+    Activation, FindingKind, MAX_WITNESS_PRODUCERS, Observation, WitnessFinding, WitnessLedger,
+};
 
 use serde::{Deserialize, Serialize};
 

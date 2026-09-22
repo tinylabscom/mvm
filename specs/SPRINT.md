@@ -193,6 +193,16 @@ docs commit went out as #3581). Under the
       `just check-gated` pass. No runtime behavior changes; passing gap tests
       certify nothing. Evidence:
       `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
+      W1b source inventory beyond binaries is tested: subscriber-init sites with
+      a fail-closed install scan, wrapper/SDK script sources, launch edges with
+      activation policy covering every guest/builder runtime gap, per-backend
+      telemetry endpoint anchors, and the activation-aware `WitnessLedger`
+      model (no runtime constructor; collector integration is W4). Seventeen
+      new gate tests and seven ledger tests pass, plus fmt, workspace clippy,
+      14,436 workspace tests (zero failures, 27 skipped), doctests, all 72
+      repository gates and `just check-gated`. No startup witness is checked at
+      runtime and no capture is certified. Evidence:
+      `specs/sprint/delivery/3420-telemetry-source-inventory.md`.
       W3a preparatory runtime capture: bounded reader handoffs, owned completion
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:

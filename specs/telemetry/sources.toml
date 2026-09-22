@@ -1,0 +1,419 @@
+# Static source inventory beyond binary targets, not runtime coverage evidence.
+# See README.md for scope and section semantics. Anchors are navigation aids;
+# no entry certifies that a subscriber runs or that a record is delivered.
+version = 1
+
+# --- Rust subscriber / global diagnostic-state initialization sites ---------
+
+[[subscriber_init]]
+file = "crates/mvm-observability/src/logging.rs"
+anchor = "tracing_subscriber::registry()"
+scope = "global"
+role = "host"
+owner = "mvm-cli process startup"
+gap = "Global registry assembles fmt/span-timing/OTLP layers for the CLI process only; nothing routes them to VM-lifetime host collection, and a second in-process install panics."
+required_witness = "Host collector receives CLI-process diagnostics under its own producer identity without a second global-subscriber install."
+
+[[subscriber_init]]
+file = "crates/mvm-cli/src/commands/mod.rs"
+anchor = "fn configure_runtime_logging"
+scope = "global"
+role = "host"
+owner = "mvm-cli command dispatch"
+gap = "Library code installs the process-global subscriber and mutates RUST_LOG; an embedder linking mvm-cli gets both as side effects."
+required_witness = "Subscriber installation is an explicit, embedder-visible choice with a collector-backed capture path."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/panic_hook.rs"
+anchor = "pub fn install"
+scope = "global"
+role = "host"
+owner = "mvm-hostd role binaries"
+gap = "Redacted panic capture reaches stderr only; no durable host-side diagnostic record survives the process."
+required_witness = "Panic diagnostics reach host-local collection with the emitting role's identity."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-broker.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "mvm-hostd broker supervision"
+gap = "Per-binary stderr JSON subscriber without env filtering; no shared host collection or correlation."
+required_witness = "Host-local collection receives broker diagnostics with authoritative correlation labels."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-host-agent.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "mvm-hostd host-agent supervision"
+gap = "Per-binary stderr JSON subscriber without env filtering; no shared host collection or correlation."
+required_witness = "Host-local collection receives host-agent diagnostics with authoritative correlation labels."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-host-signer.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "mvm-hostd signer supervision"
+gap = "Per-binary stderr JSON subscriber without env filtering; no shared host collection or correlation."
+required_witness = "Host-local collection receives host-signer diagnostics with authoritative correlation labels."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-audit-signer.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "mvm-hostd signer supervision"
+gap = "Per-binary stderr JSON subscriber without env filtering; no shared host collection or correlation."
+required_witness = "Host-local collection receives audit-signer diagnostics with authoritative correlation labels."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-signer-helper.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "mvm-hostd signer supervision"
+gap = "Per-binary stderr JSON subscriber without env filtering; no shared host collection or correlation."
+required_witness = "Host-local collection receives signer-helper diagnostics with authoritative correlation labels."
+
+[[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "per-VM network endpoint supervision"
+gap = "Per-binary stderr JSON subscriber; endpoint diagnostics are not tied to the VM's collector identity."
+required_witness = "Host-local collection receives endpoint diagnostics correlated to the VM it serves."
+
+[[subscriber_init]]
+file = "crates/mvm-agentd/src/bin/mvm-addon-dns.rs"
+anchor = "tracing_subscriber::fmt::init"
+scope = "global"
+role = "workload-guest"
+owner = "guest init and service launcher"
+gap = "Local fmt subscriber writes to the guest console only; nothing reaches VM-lifetime host collection."
+required_witness = "Authenticated host collector receives producer startup and diagnostics across cold start, restore and exit."
+
+[[subscriber_init]]
+file = "crates/mvm-agentd/src/bin/mvm-addon-vsock-bridge.rs"
+anchor = "tracing_subscriber::fmt::init"
+scope = "global"
+role = "workload-guest"
+owner = "guest init and service launcher"
+gap = "Local fmt subscriber writes to the guest console only; nothing reaches VM-lifetime host collection."
+required_witness = "Authenticated host collector receives producer startup and diagnostics across cold start, restore and exit."
+
+[[subscriber_init]]
+file = "crates/mvm-agentd/src/bin/mvm-egress-client.rs"
+anchor = "with_env_filter"
+scope = "global"
+role = "workload-guest"
+owner = "guest init and service launcher"
+gap = "Local fmt subscriber is installed after the identity-provisioning early returns, which run with no subscriber at all."
+required_witness = "Authenticated host collector receives producer startup and diagnostics for every startup mode, including early returns."
+
+# --- SDK modules and dispatch/wrapper scripts --------------------------------
+
+[[script_source]]
+path = "nix/wrappers/python/oneshot.py"
+anchor = "ENVELOPE_MARKER"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "mvm-runner dispatch"
+gap = "Error envelope and user traceback go to the guest stderr pipe only; no structured host-side capture."
+required_witness = "Host collector receives dispatch diagnostics and error envelopes as sdk-source records."
+
+[[script_source]]
+path = "nix/wrappers/python/longrunning.py"
+anchor = "redirect_stdout"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "mvm-runner dispatch"
+gap = "Per-call stdout/stderr redirection is returned in call responses, not delivered to host collection."
+required_witness = "Host collector receives per-call output and worker diagnostics as sdk-source records."
+
+[[script_source]]
+path = "nix/wrappers/node/oneshot.mjs"
+anchor = "ENVELOPE_MARKER"
+language = "javascript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "mvm-runner dispatch"
+gap = "Error envelope and user output go to the guest stdio pipes only; no structured host-side capture."
+required_witness = "Host collector receives dispatch diagnostics and error envelopes as sdk-source records."
+
+[[script_source]]
+path = "nix/wrappers/node/longrunning.mjs"
+anchor = "process.stdout.write"
+language = "javascript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "mvm-runner dispatch"
+gap = "Per-call stream monkeypatching is returned in call responses, not delivered to host collection."
+required_witness = "Host collector receives per-call output and worker diagnostics as sdk-source records."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_hostsvc.py"
+anchor = "mvm_hsvc_call"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "language SDK in-guest transport"
+gap = "The shared broker-call chokepoint emits no diagnostics at all; transport failures are invisible."
+required_witness = "Host collector receives sdk-source diagnostics for broker-call failures without payload bytes."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/typescript/src/_hostsvc.ts"
+anchor = "mvm_hsvc_call"
+language = "typescript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "language SDK in-guest transport"
+gap = "The shared broker-call chokepoint emits no diagnostics at all; transport failures are invisible."
+required_witness = "Host collector receives sdk-source diagnostics for broker-call failures without payload bytes."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_sandbox.py"
+anchor = "sys.stderr"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "Driver diagnostics and forwarded workload output reach the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_session.py"
+anchor = "warnings.warn"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "Abandoned-session warnings surface only through the Python warnings machinery."
+required_witness = "Host-local collection receives session-lifecycle diagnostics."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_remote.py"
+anchor = "warnings.warn"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "Secret-in-argument warnings surface only through the Python warnings machinery."
+required_witness = "Host-local collection receives redaction-policy diagnostics without secret values."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/typescript/src/_sandbox.ts"
+anchor = "console.error"
+language = "typescript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "Driver diagnostics and forwarded workload output reach the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/__main__.py"
+anchor = "sys.stderr"
+language = "python"
+[script_source.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Build-time IR emitter run on the developer host during compile; not a VM runtime producer."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_helpers.py"
+anchor = "print(2 + 2)"
+language = "python"
+[script_source.capture]
+kind = "non-runtime"
+category = "developer-tool"
+reason = "Output pattern appears only inside a docstring example; the module itself emits nothing."
+
+# --- Launch edges: which launcher starts which guest/builder producer --------
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-guest-agent"
+launcher = "nix/images/initramfs/flake.nix"
+anchor = "mvm-guest-agent"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-guest-agent"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "MVM_AGENT_BIN"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-guest-netinit"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "NETINIT_OVERLAY"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-guest-netinit"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "mvm-guest-netinit"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-egress-client"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "start_vsock_egress"
+activation = "conditional"
+condition = "kernel cmdline mvm.vsock_egress=1"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-addon-dns"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "MVM_ADDON_DNS_BIN"
+activation = "conditional"
+condition = "addons opt-in resolves an addon-dns binary"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-addon-vsock-bridge"
+launcher = "crates/mvm-agentd/Cargo.toml"
+anchor = "mvm-addon-vsock-bridge"
+activation = "unwired"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-oci-entrypoint"
+launcher = "crates/mvm-build/src/oci_runtime_inject.rs"
+anchor = "oci-entrypoint"
+activation = "on-demand"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-runner"
+launcher = "nix/lib/factories/mkFunctionService.nix"
+anchor = "wrappers/runner"
+activation = "on-demand"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-exit-report"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "exit-report"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-seccomp-apply"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "seccomp-apply"
+activation = "on-demand"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-setpriv"
+launcher = "nix/lib/mk-guest.nix"
+anchor = "mvm-setpriv"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-display-bridge"
+launcher = "nix/images/runtime-overlay/flake.nix"
+anchor = "display-bridge"
+activation = "on-demand"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-ping"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "MEDIATED_TOOLS"
+activation = "mediated"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-builder-agent"
+launcher = "crates/mvm-build/src/pipeline/build.rs"
+anchor = "mvm-builder-agent.service"
+activation = "legacy"
+
+[[launch_edge]]
+producer = "mvm-build/mvm-host-vm-init"
+launcher = "nix/images/builder-vm/flake.nix"
+anchor = "chain_init"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-build/mvm-egress-proxy"
+launcher = "crates/mvm-build/src/bin/mvm-host-vm-init/proxy.rs"
+anchor = "mvm-egress-proxy"
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-build/mvm-builderd"
+launcher = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+anchor = "spawn_builderd"
+activation = "conditional"
+condition = "persistent builder dispatch loop"
+
+[[launch_edge]]
+producer = "mvm-build/stage0-init"
+launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
+anchor = "SEED_BINARIES"
+activation = "seed"
+
+[[launch_edge]]
+producer = "mvm-build/mvm-rootfs-patcher"
+launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
+anchor = "SEED_BINARIES"
+activation = "seed"
+
+# --- Backend telemetry endpoint provisioning anchors -------------------------
+
+[[backend_endpoint]]
+backend = "shared"
+file = "crates/mvm-vmm/src/host/spec_map.rs"
+anchor = "GuestService::Telemetry"
+note = "Every workload VM unconditionally carries a host-dials Telemetry vsock port beside its socket paths."
+
+[[backend_endpoint]]
+backend = "shared"
+file = "crates/mvm-backends/src/driver/mod.rs"
+anchor = "host_dialable_port"
+note = "The host-dial allow-list admits machine control, telemetry and the dev console range; nothing else."
+
+[[backend_endpoint]]
+backend = "firecracker"
+file = "crates/mvm-backends/src/driver/fc.rs"
+anchor = "host_dialable_port"
+note = "Host-dialed ports, telemetry included, ride the single vsock UDS CONNECT handshake."
+
+[[backend_endpoint]]
+backend = "libkrun"
+file = "crates/mvm-backends/src/driver/libkrun.rs"
+anchor = "vm_vsock_port_socket_at"
+note = "Per-port UDS under the VM state dir, gated by the shared host-dial allow-list."
+
+[[backend_endpoint]]
+backend = "hvf"
+file = "crates/mvm-backends/src/driver/hvf.rs"
+anchor = "HANDOFF_TELEMETRY"
+note = "Telemetry socket rides the shared host-dial bridge and survives supervisor handoff via its mask bit."
+
+[[backend_endpoint]]
+backend = "qemu"
+file = "crates/mvm-backends/src/driver/qemu.rs"
+anchor = "GuestService::Telemetry"
+note = "Real AF_VSOCK with a per-port UNIX socket bridge under the same allow-list."
+
+[[backend_endpoint]]
+backend = "apple-container"
+file = "crates/mvm-runtime/src/apple_container_backend.rs"
+anchor = "HvfRunner"
+note = "Holds an HvfRunner and substitutes only the kernel image, inheriting the hvf endpoint verbatim."
+
+[[backend_endpoint]]
+backend = "wasm"
+file = "crates/mvm-runtime/src/wasm_backend.rs"
+anchor = "no TAP/virtio/vsock"
+note = "No vsock and no microVM: an equivalent bounded host adapter is separate, honestly-distinct work."

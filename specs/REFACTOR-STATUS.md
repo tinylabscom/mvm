@@ -86,6 +86,12 @@ Last updated: 2026-09-22
       behavior, and `s34_telemetry_capture` holds the pending contracts as
       explicit `@wip` scenarios. Full battery passes; nothing is certified.
       Evidence: `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
+      W1b source inventory (subscriber-init scan, script sources, launch edges,
+      backend endpoint anchors) and the `WitnessLedger` model are tested: 17
+      new gate tests, 7 ledger tests, 14,436 workspace tests, doctests, all 72
+      repository gates and `just check-gated` pass. Startup witnesses are a
+      model only; nothing checks them at runtime and no capture is certified.
+      Evidence: `specs/sprint/delivery/3420-telemetry-source-inventory.md`.
       W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
       `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
       and limits. This does not enable the independent telemetry service.
