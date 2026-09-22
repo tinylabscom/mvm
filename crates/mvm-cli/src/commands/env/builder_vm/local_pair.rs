@@ -7,7 +7,7 @@
 //! The build that produces it runs inside the in-tree or published tool
 //! builder — never inside the image it is building, which would recurse.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mvm_build::image_source::{
@@ -116,6 +116,45 @@ pub(crate) fn ensure_pair_workload_kernel(
     Ok(artifact.path.clone())
 }
 
+/// Where one builder-VM cache artifact lives inside a pair-built local-set
+/// entry directory.
+///
+/// The cache layout uses plain names (`vmlinux`, `rootfs.ext4`, …), but a
+/// local-set entry names its member files by the manifest convention
+/// `<role>-<arch>-<artifact>` (e.g. `builder-vm-aarch64-vmlinux`). The two
+/// conventions only meet here, so resolve through the manifest — the
+/// builder-vm member's artifact whose format matches the cache artifact —
+/// rather than a third hardcoded naming scheme. When the manifest cannot
+/// say (an entry without a builder-vm member, or an unknown cache name),
+/// fall back to the plain name so the refusal below names the path an
+/// operator can inspect.
+fn builder_vm_artifact_source(entry: &CachedImageSet, cache_name: &str) -> PathBuf {
+    use mvm_core::image_set::{ArtifactFormat, ImageSetRole};
+    let format_matches = |format: &ArtifactFormat| match cache_name {
+        "vmlinux" => matches!(format, ArtifactFormat::Kernel(_)),
+        "rootfs.ext4" => *format == ArtifactFormat::Ext4,
+        "cmdline.txt" => *format == ArtifactFormat::Text,
+        "manifest.json" => *format == ArtifactFormat::Json,
+        _ => false,
+    };
+    entry
+        .set
+        .manifest
+        .members
+        .iter()
+        .find(|member| member.role == ImageSetRole::BuilderVm)
+        .and_then(|member| {
+            member
+                .artifacts
+                .iter()
+                .find(|artifact| format_matches(&artifact.format))
+        })
+        .map_or_else(
+            || entry.dir.join(cache_name),
+            |artifact| entry.dir.join(artifact.name.as_str()),
+        )
+}
+
 /// Install a pair-built `builder-vm` entry into the builder-VM cache that
 /// `up` and the build paths read, staging and promoting through the same
 /// sidecar-validated swap Stage 0 uses.
@@ -133,7 +172,14 @@ pub(crate) fn install_pair_builder_vm(
     let staging = stage0_cache::unique_builder_vm_stage0_staging_dir(out_dir_path)?;
     std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
     for name in mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
-        let from = entry.dir.join(name);
+        let from = builder_vm_artifact_source(entry, name);
+        if !from.is_file() {
+            anyhow::bail!(
+                "the pair-built builder-vm set at {} has no file for required cache                  artifact {name} (resolved {})",
+                entry.dir.display(),
+                from.display(),
+            );
+        }
         std::fs::copy(&from, staging.join(name))
             .with_context(|| format!("copying {} into {}", from.display(), staging.display()))?;
     }
@@ -154,6 +200,12 @@ mod tests {
 
     /// Builder-vm artifacts with the sizes and ext4 magic the Stage 0 cache
     /// validator requires.
+    /// Names a local-set entry the way the real producer names it —
+    /// `<role>-<arch>-<artifact>` — so the install test exercises the same
+    /// contract live pair builds produce. Plain-named synthetic entries
+    /// masked the mismatch that broke the real bootstrap (the install
+    /// copied `vmlinux` while the entry only carried
+    /// `builder-vm-aarch64-vmlinux`).
     fn builder_vm_files() -> Vec<TestArtifact> {
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
@@ -163,22 +215,22 @@ mod tests {
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
         vec![
             TestArtifact {
-                name: "vmlinux",
+                name: "builder-vm-aarch64-vmlinux",
                 bytes: vmlinux,
                 format: "kernel:image",
             },
             TestArtifact {
-                name: "rootfs.ext4",
+                name: "builder-vm-aarch64-rootfs.ext4",
                 bytes: rootfs,
                 format: "ext4",
             },
             TestArtifact {
-                name: "cmdline.txt",
+                name: "builder-vm-aarch64-cmdline.txt",
                 bytes: b"console=hvc0\n".to_vec(),
                 format: "text",
             },
             TestArtifact {
-                name: "manifest.json",
+                name: "builder-vm-aarch64-manifest.json",
                 bytes: b"{}\n".to_vec(),
                 format: "json",
             },
@@ -247,6 +299,57 @@ mod tests {
         assert_ne!(
             first, second,
             "an image edit must change the pair fingerprint"
+        );
+    }
+
+    /// Older and hand-built entries may carry the plain cache names
+    /// directly. The manifest-driven lookup must fall back to them rather
+    /// than refuse, so the fix does not break entries that already worked.
+    #[test]
+    fn installing_a_plain_named_entry_still_works() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        let target = Pair::target(ImageBuildRole::BuilderVm, "default");
+        let key = pair.key(ImageBuildRole::BuilderVm, "default");
+        let cache = mvm_build::image_source::LocalImageCache::at(
+            pair.mvm.parent().expect("tmp").join("cache"),
+        );
+        let contract = mvm_build::image_source::contract_for(&target).expect("builder-vm contract");
+        let ctx = mvm_build::image_source::EntryContext {
+            images: &pair.images,
+            mvm_checkout: &pair.mvm,
+            roles: contract.set_roles,
+        };
+        let staged = cache.stage(&key).expect("stage");
+        let mut plain = builder_vm_files();
+        for artifact in &mut plain {
+            artifact.name = artifact
+                .name
+                .strip_prefix("builder-vm-aarch64-")
+                .expect("prefixed test name");
+        }
+        Pair::emit_set(
+            staged.dir(),
+            &key.checkouts,
+            key.arch,
+            &[(
+                "builder_vm",
+                Some("linux_direct"),
+                plain,
+                &["virtio_vsock", "virtio_blk"],
+            )],
+        );
+        let published = cache.publish(staged, &ctx).expect("publish");
+        let home = pair.mvm.parent().expect("tmp").join("home-plain");
+        std::fs::create_dir_all(&home).expect("mkdir home");
+        env.set("MVM_HOME", &home);
+        let fingerprint = pair_fingerprint(&key);
+        install_pair_builder_vm(published.entry(), &key.arch.to_string(), &fingerprint)
+            .expect("install a plain-named entry");
+        let out_dir = home.join("cache/builder-vm").join(key.arch.to_string());
+        assert!(
+            super::stage0_cache::local_pair_cache_ready(&out_dir, &fingerprint),
+            "the plain-named entry must install into a ready cache"
         );
     }
 
