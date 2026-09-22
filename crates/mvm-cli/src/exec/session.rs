@@ -196,7 +196,14 @@ pub fn boot_session_vm(
         }
     }
 
-    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            backend.name(),
+            None,
+            pair,
+        )
+    })?;
     crate::commands::vm::up::attach_universal_initramfs_if_cached(
         &mut start_config,
         backend.name(),

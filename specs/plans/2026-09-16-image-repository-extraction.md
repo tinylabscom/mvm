@@ -751,9 +751,18 @@ Delivery slices, one PR each:
       gains the one-base-image design constraint (every Linux-direct
       backend boots the same set) tracked on the `mvm-images` side by
       tinylabscom/mvm-images#8.
-- [ ] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
+- [x] W5i (`mvm`) — the runtime overlay and both SDK sidecar build paths, with
       the duplicate checkout detection in `commands/runtime_overlay.rs` and
       `mvm-build/src/runtime_overlay.rs` collapsed into the selector.
+      Landed as pair routing for the launch-time overlay and sidecars
+      (installed under the version-matched caches with the pair cache-key
+      digest recorded beside the install; the pair arm resolves and returns
+      so the in-tree and download arms never run under a selector), the two
+      build verbs building the pair's `runtime-overlay` targets, and one
+      shared `image_source::in_tree_overlay_checkout_root()` replacing both
+      private checkout probes. The builder VM's own overlay
+      (`builder_runtime_overlay_or_bail`) is a separate consumer, noted in
+      the delivery note.
 - [x] W5j (`mvm`) — key the libkrun supervisor auto-build on
       `mvm_source_checkout` instead of `builder_vm_source_checkout_root`, so
       deleting `nix/images` does not turn a contributor build into an

@@ -605,30 +605,7 @@ fn validate_built_artifact(
 }
 
 fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
-    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
-        return None;
-    }
-    if let Ok(override_root) = std::env::var("MVM_RUNTIME_OVERLAY_SOURCE_ROOT") {
-        let path = PathBuf::from(override_root);
-        if path
-            .join("nix")
-            .join("images")
-            .join("runtime-overlay")
-            .join("flake.nix")
-            .is_file()
-        {
-            return Some(path);
-        }
-    }
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?.parent()?;
-    workspace_root
-        .join("nix")
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix")
-        .is_file()
-        .then(|| workspace_root.to_path_buf())
+    crate::image_source::in_tree_overlay_checkout_root()
 }
 
 fn build_runtime_overlay_from_source_checkout(

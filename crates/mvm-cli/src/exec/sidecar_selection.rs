@@ -40,7 +40,9 @@ pub(super) fn select_for_launch(
     }
     let recorded = mvm_build::guest_libc::recorded_image_libc(rootfs);
     refuse_declared_libc_disagreement(declared_libc, recorded)?;
-    crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(services, recorded)
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(services, recorded, pair)
+    })
 }
 
 /// Refuse a catalogued runtime whose declared libc is not what its image turned

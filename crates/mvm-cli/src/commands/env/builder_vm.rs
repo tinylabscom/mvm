@@ -46,6 +46,41 @@ pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
 pub(crate) use bootstrap::selected_local_checkout;
 
+/// Run `f` with the launch-time pair artifact source when a checkout is
+/// selected, or `None` when the selector is unset. The build closure runs
+/// `ensure_pair_built`, so a launch under a selected checkout builds the
+/// overlay or sidecar from the pair — never the in-tree arm, never a
+/// download. A binary without the `builder-vm` feature has no pair build to
+/// offer; the selector-unset behavior then applies.
+#[cfg(feature = "builder-vm")]
+pub(crate) fn with_pair_artifact_source<T>(
+    f: impl FnOnce(
+        Option<&mut mvm_client::launch::runtime_source::PairArtifactSource<'_>>,
+    ) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let Some(checkout) = selected_local_checkout()? else {
+        return f(None);
+    };
+    let mut build = |checkout: &mvm_build::image_source::LocalImageCheckout,
+                     target: mvm_build::image_source::ImageBuildTarget| {
+        Ok(local_pair::ensure_pair_built(checkout, target)?.entry)
+    };
+    let mut pair = mvm_client::launch::runtime_source::PairArtifactSource {
+        checkout: &checkout,
+        build: &mut build,
+    };
+    f(Some(&mut pair))
+}
+
+#[cfg(not(feature = "builder-vm"))]
+pub(crate) fn with_pair_artifact_source<T>(
+    f: impl FnOnce(
+        Option<&mut mvm_client::launch::runtime_source::PairArtifactSource<'_>>,
+    ) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    f(None)
+}
+
 /// Whether images are built from source here: the in-tree flakes, or a local
 /// image checkout the selector names. Either way the local build is
 /// authoritative. An invalid configured path is not an answer either way —
@@ -90,6 +125,8 @@ pub(crate) use kernel::resolve_kernel_source;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(all(test, feature = "builder-vm"))]
 use kernel::{format_compile_elapsed, format_compile_start};
+#[cfg(all(test, feature = "builder-vm"))]
+pub(crate) use local_pair::derive_pair_key;
 #[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::ensure_pair_built;
 #[cfg(feature = "builder-vm")]

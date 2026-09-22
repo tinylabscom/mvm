@@ -40,10 +40,52 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
+/// Build both libc variants from the pair's `runtime-overlay` sidecar targets
+/// and install them into the version-matched cache, stamped with the pair
+/// identity so launches under this pair trust them.
+#[cfg(feature = "builder-vm")]
+fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -> Result<()> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = GuestArch::host();
+    for (libc, attr) in [
+        (GuestLibc::Glibc, "sdk-sidecar-image"),
+        (GuestLibc::Musl, "sdk-sidecar-image-musl"),
+    ] {
+        let target = mvm_build::image_source::ImageBuildTarget {
+            role: mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+            attr: mvm_build::image_source::FlakeAttr::new(attr)
+                .expect("a literal attribute is valid"),
+        };
+        let build = crate::commands::env::builder_vm::ensure_pair_built(checkout, target)?;
+        let fingerprint = build.key.digest().as_str().to_string();
+        mvm_build::sdk_sidecar::install_source_built_sidecar(
+            &build.entry.dir,
+            &cache_root,
+            version,
+            arch,
+            libc,
+            &fingerprint,
+        )?;
+        ui::success(&format!(
+            "SDK sidecar ({libc}) built from the selected image checkout and cached."
+        ));
+    }
+    Ok(())
+}
+
 fn run_build(args: BuildArgs) -> Result<()> {
+    // A selected checkout is the sidecars' source: both libc variants build
+    // from the pair. `--force` is an in-tree concept; the pair answers from
+    // its content-addressed cache.
+    #[cfg(feature = "builder-vm")]
+    if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
+        return build_pair_sidecars(&checkout);
+    }
     let workspace_root = runtime_overlay_source_checkout_root().ok_or_else(|| {
         anyhow::anyhow!(
-            "SDK sidecar source build requires a source checkout with nix/images/runtime-overlay/flake.nix"
+            "SDK sidecar source build requires a source checkout with nix/images/runtime-overlay/flake.nix, or {} naming an mvm-images checkout",
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
         )
     })?;
 
