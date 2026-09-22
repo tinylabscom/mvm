@@ -143,10 +143,14 @@ docs commit went out as #3581). Under the
       remains the standard-default convenience. The third slice clears
       `mvm-vmm::vmm::run`: one `run` function accepts the existing `RunHooks`
       parameter object, whose pause callback and throttle predicate compose by
-      name. A repository gate ratchets the remaining count at 62 and forbids
-      regressions in all three cleared modules. Focused run-loop tests and the
-      gate tests pass; the remaining modules and the separate expect-message
-      and supervisor-timeout audits stay open.
+      name. The fourth slice clears `mvm-cli::commands::vm::console`: one
+      `console_interactive` function accepts builder-backed
+      `ConsoleSessionOptions`, while each caller keeps its existing exit-status
+      policy. A fresh pre-change scan found 61 pairs; the repository gate now
+      ratchets the post-change count at 59 and forbids regressions in all four
+      cleared modules. Focused option-composition and gate tests pass; the
+      remaining modules and the separate expect-message and supervisor-timeout
+      audits stay open.
 
 - [ ] **Agent sandbox drive plane.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`; epic #3275.

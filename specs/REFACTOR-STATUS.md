@@ -70,9 +70,12 @@ Last updated: 2026-09-22
       slice clears all five pairs from `network_policy.rs`; the second replaces
       observability's filter overload with a composable `ObservabilityConfig`;
       the third replaces both `mvm-vmm` run-loop overloads with one `run`
-      function taking composable `RunHooks`. The repository gate ratchets the
-      remaining count at 62 and prevents all three cleared modules from
-      regressing. The other modules plus D1/D2 remain open.
+      function taking composable `RunHooks`; the fourth replaces the three
+      console entry-point overloads with one `console_interactive` function and
+      builder-backed `ConsoleSessionOptions`. A fresh pre-change scan found 61
+      remaining pairs; the repository gate now ratchets the post-change count
+      at 59 and prevents all four cleared modules from regressing. The other
+      modules plus D1/D2 remain open.
 
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.

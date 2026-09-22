@@ -396,9 +396,15 @@ So the remaining work is not where the brief pointed.
       A third slice collapses `mvm-vmm`'s `run_with_pause_hook` and
       `run_with_hooks` wrappers into the existing `RunHooks` parameter object:
       `run` is now the one slice-backed entry point, with composable pause and
-      throttle hooks. `check-public-function-names` ratchets the remaining count
-      at 62 and prevents all three cleared modules from regressing. Continue
-      per-module rather than as one sweep. #3315.
+      throttle hooks. A fourth slice replaces the public-in-crate console
+      `console_interactive`, `console_interactive_with_env`, and
+      `console_interactive_with_env_and_argv` family with one
+      `console_interactive` entry point taking builder-backed
+      `ConsoleSessionOptions`; the session, command, and machine callers retain
+      their existing exit-status semantics explicitly. A fresh pre-change scan
+      found 61 pairs rather than the gate's allowed 62; the post-change gate is
+      ratcheted to 59 and prevents all four cleared modules from regressing.
+      Continue per-module rather than as one sweep. #3315.
 - [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
       builder methods exist only on the variant they apply to — an
       unrepresentable-illegal-states fix, not a panic-removal exercise.

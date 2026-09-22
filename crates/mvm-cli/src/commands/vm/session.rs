@@ -1202,8 +1202,12 @@ fn cmd_console(args: ConsoleArgs) -> Result<()> {
     // session-id correlation: the PTY events alone don't tell a
     // forensics consumer which `mvmctl session` invocation opened
     // them, but `vm_name` is shared so a join recovers the chain.
-    super::console::console_interactive(&record.vm_name)
-        .with_context(|| format!("opening console for session {id}"))
+    super::console::console_interactive(
+        &record.vm_name,
+        super::console::ConsoleSessionOptions::default(),
+    )
+    .map(|_| ())
+    .with_context(|| format!("opening console for session {id}"))
 }
 
 #[cfg(test)]

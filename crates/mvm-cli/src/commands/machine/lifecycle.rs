@@ -306,7 +306,14 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
         return match command {
             Some(cmd) => console::console_pty_command(&args.name, cmd, Vec::new()),
             None => {
-                console::console_interactive_with_env_and_argv(&args.name, Vec::new(), Vec::new())
+                let exit_code = console::console_interactive(
+                    &args.name,
+                    console::ConsoleSessionOptions::default(),
+                )?;
+                if exit_code != 0 {
+                    mvm_observability::exit(exit_code);
+                }
+                Ok(())
             }
         };
     }
