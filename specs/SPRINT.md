@@ -301,7 +301,10 @@ docs commit went out as #3581). Under the
       image-reference refusal, and every agent-facing failure carries a code.
       W3.7 (issue #3430) keeps every file mvm
       injects into a container-layer rootfs root-owned whatever a layer
-      declares, on both the in-process and the builder-VM writer.
+      declares, on both the in-process and the builder-VM writer. Its
+      production-policy follow-up (issue #3480) refuses persistent and
+      non-image `machine run --prod` paths before they can silently boot a
+      development image.
       W1b (issue #3431) hardens the reseed
       helper and makes a resume whose guest does not confirm a reseed a
       refusal rather than a warning; the post-merge follow-up runs the

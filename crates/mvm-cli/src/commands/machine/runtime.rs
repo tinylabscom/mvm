@@ -482,6 +482,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // flag that only exists on this verb (`--name`, `-d`/`--detach`, …) is
     // still caught when placed right after `--`.
     crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
+    args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer

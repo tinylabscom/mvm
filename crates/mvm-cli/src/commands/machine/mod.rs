@@ -312,10 +312,10 @@ impl Default for MachineRunArgs {
 }
 
 impl MachineRunArgs {
-    /// Translate into the canonical transient-run argument shape. The
-    /// launch-plan and OCI prod-pin surfaces are pinned off — they are not
-    /// part of the beginner contract (the SDK live/plan/record transport was
-    /// retired with the top-level `run` verb).
+    /// Translate into the canonical transient-run argument shape. The SDK
+    /// launch-plan surface is pinned off because it is not part of the
+    /// beginner contract; production policy is shared and validated before
+    /// this translation.
     /// Test-visible alias for [`Self::into_run_args`] so the flag-forwarding
     /// contract can be asserted from the transient-run module that consumes it.
     #[cfg(test)]
@@ -364,6 +364,26 @@ impl MachineRunArgs {
         if self.persistent() && !self.run.env.is_empty() {
             bail!(
                 "`machine run --env` is supported only for transient runs; for a persistent machine, declare environment in the image or workload manifest"
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse production requests on paths that cannot preserve their image
+    /// policy. This runs before source resolution or a build so an unsupported
+    /// request can never silently fall back to a development image.
+    fn refuse_unsupported_prod(&self) -> Result<()> {
+        if !self.run.prod {
+            return Ok(());
+        }
+        if self.persistent() {
+            bail!(
+                "`machine run --prod` is supported only for transient runs; persistent machine state cannot preserve the production image policy"
+            );
+        }
+        if self.run.image.is_none() && self.run.runtime.is_none() {
+            bail!(
+                "`machine run --prod` is supported only with `--image` or `--runtime`; other sources cannot select or build a sealed image"
             );
         }
         Ok(())

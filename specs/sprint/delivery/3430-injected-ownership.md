@@ -96,9 +96,10 @@ being root-owned.
     happen before anything is pulled.
   - An SDK run mode (`MVM_SDK_MODE`, `--dev`) refuses `--prod` rather than
     dropping it.
-  - Not covered yet: a persistent `mvmctl machine run --prod -d` and `--prod`
-    with `--runtime-pack`, `--deployment`, `--flake` or `--manifest` still do
-    not honour `--prod` (issue #3480).
+  - The production-policy follow-up refuses a persistent
+    `mvmctl machine run --prod -d` and `--prod` with `--runtime-pack`,
+    `--deployment`, `--flake`, or `--manifest` before source resolution, so
+    none can silently boot a development image (issue #3480).
 - A rebuilt rootfs is published, not written in place. Before this, a
   crashed rebuild left a partial `rootfs.ext4` beside the previous build's
   sidecars, and every later run reused it and failed at dm-verity. Now:

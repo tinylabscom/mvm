@@ -246,7 +246,8 @@ data directory ships owned by its own account boots with root-owned files.
         runs before anything is materialized or signed, and `--prod` refuses
         `--profile dev`, an ad-hoc command, a launch document and an SDK
         mode. There is no way to run a `--prod` OCI image yet (issue #3481);
-        persistent (`-d`) and non-image `--prod` runs are issue #3480;
+        persistent (`-d`) and non-image `--prod` runs now refuse before source
+        resolution instead of silently downgrading (issue #3480);
   - [x] a rebuilt rootfs is published whole (flushed, sidecar last), reused
         only when complete, and re-checked under the output lock so a
         complete set is never rebuilt; the output lock lives outside the

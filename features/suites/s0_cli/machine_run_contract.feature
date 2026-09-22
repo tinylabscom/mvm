@@ -32,6 +32,29 @@ Feature: machine run request contract
     And the error output contains "machine run --env"
     And the error output contains "declare environment in the image or workload manifest"
 
+  # Persistent machine state does not record the production image policy. A
+  # request must fail before resolution rather than booting a dev image and
+  # leaving later `machine start` calls permanently downgraded.
+  Scenario: machine run refuses production on a persistent machine
+    When I run mvmctl with "machine run --image alpine --prod --detach" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "supported only for transient runs"
+
+  # These sources do not build or select a sealed image. Refuse before looking
+  # at the path or reaching the network so --prod can never become an ignored
+  # spelling for a development boot.
+  Scenario Outline: machine run refuses production on a non-image source
+    When I run mvmctl with "machine run <source> --prod -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "only with `--image` or `--runtime`"
+
+    Examples:
+      | source                          |
+      | --runtime-pack                  |
+      | --deployment missing-deployment |
+      | --flake missing-flake           |
+      | --manifest missing-manifest     |
+
   # --entrypoint dispatches a baked /etc/mvm/entrypoint, which an OCI image does
   # not have; silently ignoring the flag would run something other than what was
   # asked for.
