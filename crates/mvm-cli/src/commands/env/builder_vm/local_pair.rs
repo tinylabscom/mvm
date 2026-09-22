@@ -100,6 +100,30 @@ pub(crate) fn ensure_pair_built(
 pub(crate) fn ensure_pair_workload_kernel(
     checkout: &LocalImageCheckout,
 ) -> Result<std::path::PathBuf> {
+    // The dev-tier kernel-label override applies to the pair path too: a
+    // paired machine otherwise always boots the pair set's workload kernel,
+    // which is how a guest that needs the in-guest-orchestrator kernel ends
+    // up on the sealed one (no cgroups, no namespaces — nothing in the guest
+    // can diagnose it). Same contract as the other resolve sites: unknown
+    // labels never get here, and a cache miss falls back to the pair set's
+    // kernel rather than refusing the boot.
+    let label = mvm_build::kernel_fetch::workload_kernel_label();
+    if label != "workload" {
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        if let mvm_build::kernel_fetch::KernelResolution::Cached(verified) =
+            mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, label, false)
+        {
+            crate::ui::info(&format!(
+                "kernel override: paired machine boots the {label} kernel at {}",
+                verified.path().display()
+            ));
+            return Ok(verified.path().to_path_buf());
+        }
+        crate::ui::warn(&format!(
+            "MVM_WORKLOAD_KERNEL_VARIANT={label} is set but the local kernel cache has no              verified entry; falling back to the pair set's workload kernel"
+        ));
+    }
     let target = ImageBuildTarget {
         role: mvm_build::image_source::ImageBuildRole::DefaultTenant,
         attr: mvm_build::image_source::FlakeAttr::new("default")
