@@ -262,7 +262,7 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         guest key to authoritative VM/boot/generation registration. Prove actual
         service routing and restore isolation before enabling collection.
         Boot-generation registration is now implemented and wired: every path
-        that establishes a guest observation identity (mint, endpoint spawn,
+        that sets up a guest observation identity (mint, endpoint spawn,
         inherit on claim/restore/standby) also writes a per-boot
         `telemetry-registration.json` binding the guest key to a fresh boot id
         and a per-state-dir generation. `resolve_expected_telemetry_peer` /
