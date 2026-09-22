@@ -235,7 +235,7 @@ impl WorkloadEnvironmentBuilder {
                 .map(|(_, v)| v.clone());
             self.set(
                 OsString::from("LD_LIBRARY_PATH"),
-                prepend_loader_dir(shim_dir, existing.as_deref()),
+                prepend_loader_dir(&shim_dir, existing.as_deref()),
             );
         }
         if let Some(term) = self.term {
@@ -269,29 +269,73 @@ impl WorkloadEnvironmentBuilder {
 /// otherwise. Linux guests only: the token rides the kernel cmdline, which
 /// does not exist on the host builds of this crate, and they must keep the
 /// resolution they always had.
+///
+/// The overlay stages one shim set per libc under the base directory the
+/// token names (`<base>/glibc`, `<base>/musl`); the guest selects by its
+/// own libc, the same question the host answers when it picks an SDK
+/// sidecar variant.
 #[cfg(target_os = "linux")]
-fn boot_gpu_shim_dir() -> Option<&'static str> {
+fn boot_gpu_shim_dir() -> Option<String> {
     let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
-    gpu_shim_dir_in_cmdline(&cmdline)
+    let base = gpu_shim_base_in_cmdline(&cmdline)?;
+    Some(format!("{base}/{}", shim_variant(guest_is_musl())))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn boot_gpu_shim_dir() -> Option<&'static str> {
+fn boot_gpu_shim_dir() -> Option<String> {
     None
 }
 
-/// Whether `cmdline` carries the GPU-plane token. The token must match as a
-/// whole word: `mvm.gpu=10` is a different parameter, and a substring match
-/// would arm the plane on a boot that did not ask for it.
-///
-/// Production use is Linux-only (the token rides the kernel cmdline); the
-/// `test` arm keeps the pure predicate compilable and checked on every host.
+/// Whether this guest runs musl: the musl loader lives at
+/// `/lib/ld-musl-<arch>.so.1`, which a glibc rootfs never carries. Falling
+/// back to false (glibc) on any read error matches the common guest and is
+/// safe either way — the wrong variant simply fails to load, and the
+/// workload's GPU calls refuse as they would with no shim at all.
+#[cfg(target_os = "linux")]
+fn guest_is_musl() -> bool {
+    std::fs::read_dir("/lib")
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("ld-musl-") && name.ends_with(".so.1"))
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(not(target_os = "linux"), test))]
+fn guest_is_musl() -> bool {
+    false
+}
+
+/// Linux production use; the `test` arm keeps the mapping checked on every
+/// host.
 #[cfg(any(target_os = "linux", test))]
-fn gpu_shim_dir_in_cmdline(cmdline: &str) -> Option<&'static str> {
-    cmdline
+fn shim_variant(is_musl: bool) -> &'static str {
+    if is_musl { "musl" } else { "glibc" }
+}
+
+/// The shim base directory when `cmdline` arms the GPU plane. The
+/// `mvm.gpu=1` token must match as a whole word (`mvm.gpu=10` is a
+/// different parameter); `mvm.gpu_shims=<dir>` names the base, defaulting
+/// to the shared contract constant when absent.
+#[cfg(any(target_os = "linux", test))]
+fn gpu_shim_base_in_cmdline(cmdline: &str) -> Option<String> {
+    let armed = cmdline.split_whitespace().any(|token| token == "mvm.gpu=1");
+    if !armed {
+        return None;
+    }
+    let named = cmdline
         .split_whitespace()
-        .any(|token| token == "mvm.gpu=1")
-        .then_some(mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR)
+        .find_map(|token| token.strip_prefix("mvm.gpu_shims="))
+        .filter(|base| !base.is_empty());
+    Some(
+        named
+            .unwrap_or(mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR)
+            .to_string(),
+    )
 }
 
 /// `dir` first, then the existing loader path, colon-separated. An absent
@@ -319,13 +363,25 @@ mod tests {
     fn the_gpu_token_matches_as_a_whole_word_only() {
         use mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR;
         assert_eq!(
-            gpu_shim_dir_in_cmdline("console=ttyS0 mvm.gpu=1 mvm.hostname=w"),
-            Some(GPU_SHIM_GUEST_DIR)
+            gpu_shim_base_in_cmdline("console=ttyS0 mvm.gpu=1 mvm.hostname=w"),
+            Some(GPU_SHIM_GUEST_DIR.to_string())
         );
-        assert_eq!(gpu_shim_dir_in_cmdline("console=ttyS0"), None);
+        // A shim dir on the token overrides the constant.
+        assert_eq!(
+            gpu_shim_base_in_cmdline("mvm.gpu=1 mvm.gpu_shims=/opt/gpu"),
+            Some("/opt/gpu".to_string())
+        );
+        assert_eq!(gpu_shim_base_in_cmdline("console=ttyS0"), None);
         // A prefix of a longer parameter is not the token.
-        assert_eq!(gpu_shim_dir_in_cmdline("mvm.gpu=10"), None);
-        assert_eq!(gpu_shim_dir_in_cmdline("x-mvm.gpu=1"), None);
+        assert_eq!(gpu_shim_base_in_cmdline("mvm.gpu=10"), None);
+        assert_eq!(gpu_shim_base_in_cmdline("x-mvm.gpu=1"), None);
+    }
+
+    #[test]
+    fn the_shim_variant_tracks_the_guest_libc() {
+        assert_eq!(shim_variant(false), "glibc");
+        assert_eq!(shim_variant(true), "musl");
+        assert!(!guest_is_musl(), "host builds answer glibc");
     }
 
     #[test]
@@ -347,13 +403,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_linux_boot_without_the_token_resolves_no_shim_dir() {
+    fn a_linux_boot_resolves_the_shim_dir_from_its_own_cmdline() {
         // The test host's own cmdline decides; the assertion is only that
-        // the function answers the token question without panicking, and
-        // that the pure predicate agrees with the /proc read.
+        // the /proc read and the pure predicate agree, and that a
+        // non-GPU cmdline resolves nothing.
         let from_proc = boot_gpu_shim_dir();
         let cmdline = std::fs::read_to_string("/proc/cmdline").expect("read cmdline");
-        assert_eq!(from_proc, gpu_shim_dir_in_cmdline(&cmdline));
+        match gpu_shim_base_in_cmdline(&cmdline) {
+            Some(base) => assert_eq!(
+                from_proc,
+                Some(format!("{base}/{}", shim_variant(guest_is_musl())))
+            ),
+            None => assert_eq!(from_proc, None),
+        }
     }
 
     fn value(env: &WorkloadEnvironment, key: &str) -> Option<String> {
