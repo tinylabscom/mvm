@@ -18,7 +18,7 @@ pub(crate) fn ensure_default_microvm_image(
 }
 
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
-    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel, workload_kernel_label};
 
     // A selected checkout is the kernel's source: the pair's
     // `default-tenant` set carries the workload kernel, built from the
@@ -43,7 +43,11 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = builder_vm_host_arch();
     let source_checkout = find_builder_vm_flake().is_ok();
-    let mut resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
+    // The dev-tier override selects the label for this resolve too: a
+    // machine run must boot the same kernel family the launch resolve
+    // sites pick, not always the sealed default.
+    let label = workload_kernel_label();
+    let mut resolved = resolve_kernel(&cache, arch, label, source_checkout);
 
     if let KernelResolution::Cached(verified) = &resolved {
         let cached = verified.path().display().to_string();
@@ -52,7 +56,7 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
                 "Cached workload kernel capability check failed ({error}); discarding it and preparing a correct kernel."
             ));
             evict_incompatible_workload_kernel(verified.path())?;
-            resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
+            resolved = resolve_kernel(&cache, arch, label, source_checkout);
         }
     }
 
@@ -71,7 +75,7 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     // or mismatched digest an acquisition failure instead of allowing the
     // caller to boot bytes merely because the destination path exists.
     let verified_path = if produced {
-        match resolve_kernel(&cache, arch, "workload", source_checkout) {
+        match resolve_kernel(&cache, arch, label, source_checkout) {
             KernelResolution::Cached(verified) => verified.path().display().to_string(),
             KernelResolution::NeedsBuild(dest) | KernelResolution::NeedsFetch(dest) => {
                 anyhow::bail!(
