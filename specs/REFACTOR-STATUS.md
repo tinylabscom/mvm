@@ -278,7 +278,7 @@ Last updated: 2026-09-22
 
 - [ ] **Image release-train repository extraction.**
       `specs/plans/2026-09-16-image-repository-extraction.md`.
-      Issues #3362–#3369 and #3373.
+      Issues #3362–#3369, #3373, and #3589.
       Move the builder VM, default boot image, runtime overlay, SDK sidecars,
       kernel/seed inputs, and their signed atomic manifest into one public
       `mvm-images` repository. The migration starts by taking cold source image
@@ -359,6 +359,11 @@ Last updated: 2026-09-22
       - [x] W5l #3364: the sibling-checkout developer guide with the worked
             two-repository example, and the image-pair workflow validating
             both repositories at explicit SHAs.
+      - [x] W5n #3589: image-set schema v2 carries complete, profile-qualified
+            default/rootless kernel-rootfs pairs; the typed selector, local
+            build targets, cache identities and sibling resolver keep each pair
+            atomic. Image construction stays in `mvm-images`; both profiles
+            are permanently NIC-less and use FlowMux over vsock.
       - [ ] W5m #3364: the acceptance witnesses.
 
 - [x] **Hermetic published-documentation link gate.**

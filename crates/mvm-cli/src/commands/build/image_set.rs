@@ -16,7 +16,7 @@ use super::Cli;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The image role to build: builder-vm, default-tenant or runtime-overlay.
+    /// The image role to build: builder-vm, default-tenant, rootless-tenant or runtime-overlay.
     #[arg(value_parser = parse_role)]
     role: ImageBuildRole,
 

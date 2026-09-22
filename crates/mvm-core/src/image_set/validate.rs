@@ -13,6 +13,7 @@ use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
     IMAGE_SET_SCHEMA_VERSION, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRole, LocalCheckouts, MemberTarget, ReleaseProducer,
+    WorkloadImageProfile,
 };
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
@@ -264,10 +265,12 @@ pub struct ImageSetRequirement {
 }
 
 /// Every role published once per guest architecture.
-const ARCH_BOUND_ROLES: [ImageSetRole; 7] = [
+const ARCH_BOUND_ROLES: [ImageSetRole; 9] = [
     ImageSetRole::BuilderVm,
-    ImageSetRole::WorkloadKernel,
-    ImageSetRole::WorkloadRootfs,
+    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+    ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+    ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
+    ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
     ImageSetRole::RuntimeOverlay,
     ImageSetRole::SdkSidecar(GuestLibc::Glibc),
     ImageSetRole::SdkSidecar(GuestLibc::Musl),
@@ -367,6 +370,45 @@ pub struct BackendImageSupport {
     pub boot_protocols: Vec<BootProtocol>,
     pub artifact_formats: Vec<ArtifactFormat>,
     pub device_capabilities: Vec<GuestDeviceRequirement>,
+}
+
+/// One verified workload kernel/rootfs pair selected from the same generic
+/// profile and architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadImageSelection<'a> {
+    pub profile: WorkloadImageProfile,
+    pub kernel: &'a ImageSetMember,
+    pub rootfs: &'a ImageSetMember,
+}
+
+/// Select a workload kernel and rootfs atomically from one profile.
+///
+/// Each member is independently held to the backend contract; constructing
+/// the pair here prevents a default kernel from ever being combined with a
+/// rootless rootfs (or the reverse) by a caller.
+pub fn select_workload_image<'a>(
+    manifest: &'a ImageSetManifest,
+    profile: WorkloadImageProfile,
+    arch: GuestArch,
+    backend: &BackendImageSupport,
+) -> Result<WorkloadImageSelection<'a>, ImageSetError> {
+    let kernel = select_member(
+        manifest,
+        ImageSetRole::WorkloadKernel(profile),
+        arch,
+        backend,
+    )?;
+    let rootfs = select_member(
+        manifest,
+        ImageSetRole::WorkloadRootfs(profile),
+        arch,
+        backend,
+    )?;
+    Ok(WorkloadImageSelection {
+        profile,
+        kernel,
+        rootfs,
+    })
 }
 
 /// Pick the member playing `role` for an `arch` guest, refusing it unless the

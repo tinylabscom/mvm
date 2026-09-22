@@ -12,7 +12,7 @@ use crate::packs::KeylessTrust;
 /// writes it: two members over a clean image checkout and a dirty mvm
 /// checkout. A drift between that emitter and this parser fails here.
 const EMITTED: &str = r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "set_version": "0.0.0-local",
   "issued_at": "2026-01-01T00:00:00Z",
   "producer": {
@@ -55,7 +55,7 @@ const EMITTED: &str = r#"{
   },
   "members": [
     {
-      "role": "workload_kernel",
+      "role": { "workload_kernel": "default_tenant" },
       "target": {
         "arch": "aarch64"
       },
@@ -504,7 +504,10 @@ mod local_path {
             .verify(
                 &current,
                 GuestArch::Aarch64,
-                &[ImageSetRole::WorkloadKernel, ImageSetRole::RuntimeOverlay],
+                &[
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                    ImageSetRole::RuntimeOverlay,
+                ],
             )
             .unwrap();
 
@@ -645,7 +648,10 @@ mod local_path {
             .verify(
                 &checkouts(),
                 GuestArch::Aarch64,
-                &[ImageSetRole::WorkloadKernel, musl],
+                &[
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                    musl,
+                ],
             )
             .unwrap_err();
         assert!(

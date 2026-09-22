@@ -4,7 +4,8 @@ description: Point mvmctl at a local mvm-images checkout to build and boot image
 ---
 
 mvm's own system images — the builder VM, the default workload image, the
-workload kernel, the guest runtime overlay, the SDK sidecars — are built
+rootless workload image, their profile-matched workload kernels, the guest
+runtime overlay, and the SDK sidecars — are built
 from the [mvm-images](https://github.com/tinylabscom/mvm-images)
 repository, not from the mvm checkout. Ordinarily a contributor build uses
 the image flakes still inside the mvm checkout, and release builds use
@@ -53,6 +54,7 @@ the builder VM (never host Nix) and publishes it to the local image cache:
 ```sh
 MVM_IMAGES_DIR=../mvm-images bin/dev build image-set builder-vm
 MVM_IMAGES_DIR=../mvm-images bin/dev build image-set default-tenant
+MVM_IMAGES_DIR=../mvm-images bin/dev build image-set rootless-tenant
 MVM_IMAGES_DIR=../mvm-images bin/dev build image-set runtime-overlay
 ```
 
@@ -74,10 +76,12 @@ release-check`), plus the gates a release runs.
 ## What consumes the selection
 
 With `MVM_IMAGES_DIR` set, every image consumer builds from the checkout it
-names: the builder VM a build runs in, the default workload image a bare
-`mvmctl run` boots, the workload kernel, the launch-time runtime overlay,
-and the SDK sidecars. With it unset, each keeps using the in-tree flakes or
-the published artifacts, unchanged.
+names: the builder VM a build runs in, the profile-selected workload image
+and its matching kernel, the launch-time runtime overlay, and the SDK
+sidecars. Default and rootless kernels/rootfses are separate members of one
+atomic schema-v2 image set; a consumer selects both from the same generic
+profile and architecture. With the selector unset, each consumer keeps using
+the in-tree flakes or published artifacts, unchanged.
 
 ## Trust tiers
 

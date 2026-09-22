@@ -257,7 +257,7 @@ mod pair_routing_tests {
             mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
             "default",
             &[(
-                "runtime_overlay",
+                mvm_core::image_set::ImageSetRole::RuntimeOverlay,
                 None,
                 vec![
                     TestArtifact {

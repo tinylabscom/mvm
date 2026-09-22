@@ -48,12 +48,12 @@ pub use train_lock::{
 pub use trust_tier::ImageTrustTier;
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
-    check_against_lock, check_protocol_compatibility, require_complete, select_member,
-    validate_structure,
+    WorkloadImageSelection, check_against_lock, check_protocol_compatibility, require_complete,
+    select_member, select_workload_image, validate_structure,
 };
 pub use verify::{ImageSetVerification, VerifiedArtifact, VerifiedImageSet, verify_image_set};
 
-pub const IMAGE_SET_SCHEMA_VERSION: u32 = 1;
+pub const IMAGE_SET_SCHEMA_VERSION: u32 = 2;
 
 /// The root object of one image set: a published release, or a set built
 /// locally from two checkouts. Both are read by the same parser and checked by
@@ -274,13 +274,36 @@ pub struct ImageSetMember {
     pub sbom: Option<SbomReference>,
 }
 
+/// Generic workload base-image posture selected by a workload capability
+/// declaration. Profiles name reusable security/capability floors, never a
+/// host backend or a product-specific workload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadImageProfile {
+    /// Smallest sealed workload base for one admitted workload.
+    #[default]
+    DefaultTenant,
+    /// Sealed base with the generic namespace, cgroup and filesystem floor
+    /// needed by an unprivileged in-guest container stack or supervisor.
+    RootlessTenant,
+}
+
+impl fmt::Display for WorkloadImageProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DefaultTenant => f.write_str("default_tenant"),
+            Self::RootlessTenant => f.write_str("rootless_tenant"),
+        }
+    }
+}
+
 /// The part a member plays in the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageSetRole {
     BuilderVm,
-    WorkloadKernel,
-    WorkloadRootfs,
+    WorkloadKernel(WorkloadImageProfile),
+    WorkloadRootfs(WorkloadImageProfile),
     RuntimeOverlay,
     /// One sidecar per C library, since a guest can only load the variant
     /// linked against the libc it carries.
@@ -295,7 +318,7 @@ impl ImageSetRole {
     pub fn is_bootable(self) -> bool {
         matches!(
             self,
-            Self::BuilderVm | Self::WorkloadKernel | Self::Stage0BootstrapKernel
+            Self::BuilderVm | Self::WorkloadKernel(_) | Self::Stage0BootstrapKernel
         )
     }
 
@@ -311,8 +334,8 @@ impl fmt::Display for ImageSetRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BuilderVm => f.write_str("builder_vm"),
-            Self::WorkloadKernel => f.write_str("workload_kernel"),
-            Self::WorkloadRootfs => f.write_str("workload_rootfs"),
+            Self::WorkloadKernel(profile) => write!(f, "{profile}_workload_kernel"),
+            Self::WorkloadRootfs(profile) => write!(f, "{profile}_workload_rootfs"),
             Self::RuntimeOverlay => f.write_str("runtime_overlay"),
             Self::SdkSidecar(libc) => write!(f, "sdk_sidecar_{libc}"),
             Self::Stage0BootstrapKernel => f.write_str("stage0_bootstrap_kernel"),

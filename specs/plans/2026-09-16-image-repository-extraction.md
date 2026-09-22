@@ -10,6 +10,7 @@ checkbox may be completed.
 [#3365](https://github.com/tinylabscom/mvm/issues/3365) (W3) ·
 [#3362](https://github.com/tinylabscom/mvm/issues/3362) (W4) ·
 [#3364](https://github.com/tinylabscom/mvm/issues/3364) (W5) ·
+[#3589](https://github.com/tinylabscom/mvm/issues/3589) (W5n) ·
 [#3369](https://github.com/tinylabscom/mvm/issues/3369) (W6) ·
 [#3368](https://github.com/tinylabscom/mvm/issues/3368) (W7) ·
 [#3366](https://github.com/tinylabscom/mvm/issues/3366) (W8) ·
@@ -21,7 +22,7 @@ Create one public `tinylabscom/mvm-images` repository that owns the build,
 verification, signing, publication, and lifecycle of MVM's system-image train:
 
 - builder VM kernel and rootfs;
-- default workload kernel and verity-sealed rootfs;
+- default and rootless workload kernels and verity-sealed rootfses;
 - universal runtime overlay;
 - SDK sidecars;
 - Stage 0 seed inputs; and
@@ -794,6 +795,16 @@ Delivery slices, one PR each:
       sidebar + cross-link) and the image-pair workflow (nightly and
       dispatch, both repositories at explicit SHAs, running the sibling's
       source-drift gate).
+- [x] W5n (#3589) — profile-qualified workload bases.
+      Image-set schema v2 carries separate `default_tenant` and
+      `rootless_tenant` kernel/rootfs roles for both architectures, requires
+      all four pairs in one atomic set, and selects a same-profile pair through
+      one typed resolver. Local build targets and cache keys distinguish the
+      profiles, the sibling resolver can install either pair, and contributor
+      documentation names both roles. The rootless base remains a generic
+      capability floor owned and built by `mvm-images`; `mvm` contains no
+      image recipe or rebuild fallback. Both profiles retain the permanent
+      no-NIC contract: external traffic is FlowMux over vsock only.
 - [ ] W5m — the acceptance witnesses: cache reuse and single-sided
       invalidation, two concurrent pairs, stale manifest, wrong architecture,
       a live boot from a sibling checkout, and the same pair-built base image

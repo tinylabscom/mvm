@@ -4,13 +4,17 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, ImageTrustTier, LOCAL_SET_MANIFEST_NAME, LocalCheckouts};
+use mvm_core::image_set::{
+    ImageSetRole, ImageTrustTier, LOCAL_SET_MANIFEST_NAME, LocalCheckouts, WorkloadImageProfile,
+};
 use mvm_core::packs::Sha256Hex;
 
 use super::*;
 
 const KERNEL: &[u8] = b"kernel bytes\n";
-const ROLES: &[ImageSetRole] = &[ImageSetRole::WorkloadKernel];
+const ROLES: &[ImageSetRole] = &[ImageSetRole::WorkloadKernel(
+    WorkloadImageProfile::DefaultTenant,
+)];
 
 const MVM_CARGO_TOML: &str = r#"[workspace]
 
@@ -153,7 +157,7 @@ fn manifest_json(
     kernel: &[u8],
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "set_version": "0.0.0-local",
         "issued_at": "2026-01-01T00:00:00Z",
         "producer": {"local_checkouts": checkouts},
@@ -170,7 +174,7 @@ fn manifest_json(
             "source_revisions": []
         },
         "members": [{
-            "role": "workload_kernel",
+            "role": {"workload_kernel": "default_tenant"},
             "target": {"arch": arch.to_string()},
             "boot_protocol": "linux_direct",
             "artifacts": [{

@@ -1,5 +1,6 @@
 use super::*;
 use mvm_build::boot_image_select::{self, BootImageAcquisition};
+use mvm_core::image_set::WorkloadImageProfile;
 
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
@@ -28,7 +29,10 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     // never a quiet fall-through to a download.
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
-        let path = super::local_pair::ensure_pair_workload_kernel(&checkout)?;
+        let path = super::local_pair::ensure_pair_workload_kernel(
+            &checkout,
+            WorkloadImageProfile::DefaultTenant,
+        )?;
         let path = path.display().to_string();
         assert_workload_kernel_supports_verity(&path)?;
         ui::info(&format!("Workload kernel: pair-built at {path}"));
@@ -274,7 +278,12 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
                 mvm_build::image_source::MVM_IMAGES_DIR_ENV,
             );
         }
-        return ensure_pair_default_image(&checkout, cache_dir, DefaultMicrovmVariant::Prod);
+        return ensure_pair_workload_image(
+            &checkout,
+            cache_dir,
+            DefaultMicrovmVariant::Prod,
+            WorkloadImageProfile::DefaultTenant,
+        );
     }
     #[cfg(not(feature = "builder-vm"))]
     if mvm_build::image_source::configured_images_dir().is_some() {
@@ -374,23 +383,24 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
     build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
 }
 
-/// Serve the default image from the pair's `default-tenant` target: install
-/// the verified set into the variant's cache, stamped with the pair identity,
-/// and answer an unchanged pair from the install without a cache lookup.
+/// Serve one profile-qualified workload image from the pair: install the
+/// verified set into the caller's profile-specific cache, stamp it with the
+/// pair identity, and answer an unchanged pair without a cache lookup.
 ///
 /// Only the prod variant has a pair contract: the sibling image repository
 /// publishes the `default` attribute, and the dev variant's writable image
 /// is an in-tree convenience with no counterpart there — it keeps building
 /// from the in-tree flake.
 #[cfg(feature = "builder-vm")]
-fn ensure_pair_default_image(
+fn ensure_pair_workload_image(
     checkout: &mvm_build::image_source::LocalImageCheckout,
     cache_dir: &str,
     variant: DefaultMicrovmVariant,
+    profile: WorkloadImageProfile,
 ) -> Result<(String, String)> {
     use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget};
     let target = ImageBuildTarget {
-        role: ImageBuildRole::DefaultTenant,
+        role: ImageBuildRole::for_workload_profile(profile),
         attr: FlakeAttr::new("default").expect("default is a valid flake attribute"),
     };
     let fingerprint = super::local_pair::pair_fingerprint(&super::local_pair::derive_pair_key(
@@ -707,10 +717,11 @@ mod pair_default_image_tests {
         let _entry = pair.publish_default_tenant();
         let cache_dir = pair.tmp.path().join("default-image");
 
-        let (kernel, rootfs) = ensure_pair_default_image(
+        let (kernel, rootfs) = ensure_pair_workload_image(
             &pair.images,
             &cache_dir.display().to_string(),
             DefaultMicrovmVariant::Prod,
+            WorkloadImageProfile::DefaultTenant,
         )
         .expect("install the pair default image");
         assert!(std::path::Path::new(&kernel).is_file());
@@ -738,14 +749,44 @@ mod pair_default_image_tests {
         // consults the install must still succeed.
         std::fs::remove_dir_all(mvm_build::image_source::LocalImageCache::open_default().root())
             .unwrap();
-        let (again_kernel, again_rootfs) = ensure_pair_default_image(
+        let (again_kernel, again_rootfs) = ensure_pair_workload_image(
             &pair.images,
             &cache_dir.display().to_string(),
             DefaultMicrovmVariant::Prod,
+            WorkloadImageProfile::DefaultTenant,
         )
         .expect("an unchanged pair answers from the install");
         assert_eq!(kernel, again_kernel);
         assert_eq!(rootfs, again_rootfs);
+    }
+
+    #[test]
+    fn a_pair_rootless_image_uses_the_rootless_target_and_cache_identity() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        let entry = pair.publish_workload_profile(WorkloadImageProfile::RootlessTenant);
+        let cache_dir = pair.tmp.path().join("rootless-image");
+
+        let (kernel, rootfs) = ensure_pair_workload_image(
+            &pair.images,
+            &cache_dir.display().to_string(),
+            DefaultMicrovmVariant::Prod,
+            WorkloadImageProfile::RootlessTenant,
+        )
+        .expect("install the pair rootless image");
+
+        assert!(std::path::Path::new(&kernel).is_file());
+        assert!(std::path::Path::new(&rootfs).is_file());
+        assert_eq!(entry.key.target.role, ImageBuildRole::RootlessTenant);
+        assert!(entry.set.manifest.members.iter().all(|member| matches!(
+            member.role,
+            mvm_core::image_set::ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant)
+                | mvm_core::image_set::ImageSetRole::WorkloadRootfs(
+                    WorkloadImageProfile::RootlessTenant
+                )
+        )));
     }
 
     #[test]
@@ -755,13 +796,21 @@ mod pair_default_image_tests {
         env.set("MVM_HOME", pair.tmp.path().join("home"));
         std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
         let entry = pair.publish_default_tenant();
-        let kernel = super::super::local_pair::ensure_pair_workload_kernel(&pair.images)
-            .expect("the pair resolves a workload kernel");
+        let kernel = super::super::local_pair::ensure_pair_workload_kernel(
+            &pair.images,
+            WorkloadImageProfile::DefaultTenant,
+        )
+        .expect("the pair resolves a workload kernel");
         let artifact = entry
             .set
             .artifacts
             .iter()
-            .find(|a| a.role == mvm_core::image_set::ImageSetRole::WorkloadKernel)
+            .find(|a| {
+                a.role
+                    == mvm_core::image_set::ImageSetRole::WorkloadKernel(
+                        WorkloadImageProfile::DefaultTenant,
+                    )
+            })
             .expect("the set carries a workload kernel");
         assert_eq!(
             kernel, artifact.path,

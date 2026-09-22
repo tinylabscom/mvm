@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget, LocalImageCacheKey};
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::LocalCheckouts;
+use mvm_core::image_set::{ImageSetRole, LocalCheckouts, WorkloadImageProfile};
 
 pub(crate) const MVM_CARGO_TOML: &str = r#"[workspace]
 
@@ -90,7 +90,7 @@ pub(crate) struct TestArtifact {
 /// for bootable roles, `None` otherwise), its artifacts and its required
 /// capabilities.
 pub(crate) type TestMember = (
-    &'static str,
+    ImageSetRole,
     Option<&'static str>,
     Vec<TestArtifact>,
     &'static [&'static str],
@@ -160,6 +160,15 @@ impl Pair {
     /// five artifacts are the default-tenant contract; the sidecar is a
     /// producer-shaped `mvm-meta.json`.
     pub(crate) fn publish_default_tenant(&self) -> mvm_build::image_source::CachedImageSet {
+        self.publish_workload_profile(WorkloadImageProfile::DefaultTenant)
+    }
+
+    /// Publish either generic workload profile with the same artifact layout
+    /// but distinct profile-qualified manifest roles and cache identity.
+    pub(crate) fn publish_workload_profile(
+        &self,
+        profile: WorkloadImageProfile,
+    ) -> mvm_build::image_source::CachedImageSet {
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
         vmlinux.extend_from_slice(b"\n");
@@ -172,11 +181,11 @@ impl Pair {
             format: "json",
         };
         self.publish(
-            mvm_build::image_source::ImageBuildRole::DefaultTenant,
+            mvm_build::image_source::ImageBuildRole::for_workload_profile(profile),
             "default",
             &[
                 (
-                    "workload_kernel",
+                    ImageSetRole::WorkloadKernel(profile),
                     Some("linux_direct"),
                     vec![TestArtifact {
                         name: "vmlinux",
@@ -186,7 +195,7 @@ impl Pair {
                     &["virtio_vsock"],
                 ),
                 (
-                    "workload_rootfs",
+                    ImageSetRole::WorkloadRootfs(profile),
                     None,
                     vec![
                         TestArtifact {
@@ -291,7 +300,7 @@ impl Pair {
             }));
         }
         let manifest = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "set_version": "0.0.0-local",
             "issued_at": "2026-01-01T00:00:00Z",
             "producer": {"local_checkouts": checkouts},

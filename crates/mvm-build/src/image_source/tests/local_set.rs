@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ImageSetError, ImageSetRole, ImageSetStage, ImageTrustTier, LOCAL_SET_MANIFEST_NAME,
-    LocalImageSet, RepoIdentity,
+    LocalImageSet, RepoIdentity, WorkloadImageProfile,
 };
 use mvm_core::packs::Sha256Hex;
 
@@ -50,7 +50,7 @@ impl Pair {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(KERNEL_NAME), KERNEL).unwrap();
         let manifest = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "set_version": "0.0.0-local",
             "issued_at": "2026-01-01T00:00:00Z",
             "producer": {"local_checkouts": {"images": images, "mvm": mvm}},
@@ -67,7 +67,7 @@ impl Pair {
                 "source_revisions": []
             },
             "members": [{
-                "role": "workload_kernel",
+                "role": {"workload_kernel": "default_tenant"},
                 "target": {"arch": "aarch64"},
                 "boot_protocol": "linux_direct",
                 "artifacts": [{
@@ -106,7 +106,12 @@ impl Pair {
     }
 
     fn read(&self) -> Result<LocalImageSet, LocalSetError> {
-        self.read_with(&self.mvm(), &[ImageSetRole::WorkloadKernel])
+        self.read_with(
+            &self.mvm(),
+            &[ImageSetRole::WorkloadKernel(
+                WorkloadImageProfile::DefaultTenant,
+            )],
+        )
     }
 }
 

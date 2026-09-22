@@ -170,7 +170,7 @@ mod tests {
     /// writes, so a drift between that workflow and the parser fails here
     /// rather than on a nightly run.
     const MANIFEST: &str = r#"{
-      "schema_version": 1,
+      "schema_version": 2,
       "set_version": "0.0.0-smoke",
       "issued_at": "2026-01-01T00:00:00Z",
       "producer": {
@@ -187,7 +187,7 @@ mod tests {
       },
       "revocation_channel": "https://example.test/revocations.json",
       "members": [{
-        "role": "workload_kernel",
+        "role": {"workload_kernel": "default_tenant"},
         "target": {"arch": "x86_64"},
         "boot_protocol": "linux_direct",
         "artifacts": [{
@@ -389,11 +389,14 @@ mod tests {
 
         assert_eq!(value["verified"], true);
         assert_eq!(value["set_version"], "0.0.0-smoke");
-        assert_eq!(value["artifacts"][0]["role"], "workload_kernel");
+        assert_eq!(
+            value["artifacts"][0]["role"],
+            "default_tenant_workload_kernel"
+        );
         assert_eq!(value["artifacts"][0]["target"], "x86_64");
         assert_eq!(value["artifacts"][0]["name"], "vmlinux");
         assert!(text.contains("Image set 0.0.0-smoke (v0.0.0-smoke) verified."));
-        assert!(text.contains("workload_kernel/x86_64 vmlinux"));
+        assert!(text.contains("default_tenant_workload_kernel/x86_64 vmlinux"));
     }
 
     /// The real release bundle `mvm-build` and `mvm-core` already verify: a
