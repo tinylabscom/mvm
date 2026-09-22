@@ -103,6 +103,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "From dev loop to attested image", slug: "guides/develop-to-attested" },
       { label: "From Workload IR to MicroVM Image", slug: "guides/ir-to-image" },
       { label: "Building MicroVM Images", slug: "guides/building-microvm-images" },
+      { label: "Developing Images with a Sibling Checkout", slug: "guides/image-sibling-checkout" },
       { label: "Building from Source", slug: "guides/building-from-source" },
       { label: "Builder VM", slug: "guides/builder-vm" },
       { label: "Custom kernels", slug: "guides/kernels" },
