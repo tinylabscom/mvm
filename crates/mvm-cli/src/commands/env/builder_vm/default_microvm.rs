@@ -1,5 +1,6 @@
 use super::*;
 use mvm_build::boot_image_select::{self, BootImageAcquisition};
+#[cfg(feature = "builder-vm")]
 use mvm_core::image_set::WorkloadImageProfile;
 
 pub(crate) fn ensure_default_microvm_image(
