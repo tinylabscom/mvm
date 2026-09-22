@@ -862,6 +862,11 @@
       "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
     },
     {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace observe_process -> Result<ProcessView> with Ok(Default::default())",
+      "reason": "valid only while ProcessView lacks a Default derive: with no Default, this mutant cannot compile against the Linux implementation, so the surviving form is the non-Linux probe stub (#[cfg(not(target_os = \"linux\"))], which shells out to the builder VM) — it is not compiled on the Linux mutation host, so no test there can distinguish it. The Linux implementation is `observe_process_at`, witnessed directly against fixture /proc directories; the shared function name means this single entry covers the stub without masking mutations of the Linux path."
+    },
+    {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "delete ! in extract_release_archive",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
