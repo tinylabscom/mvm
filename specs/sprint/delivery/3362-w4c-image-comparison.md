@@ -187,9 +187,29 @@ So the aarch64 Firecracker *boot* leg of W4c is witnessed on real
 hardware. The aarch64 builder *build* is witnessed on x86_64 Firecracker
 above; on this Pi it waits on #3578 (or a Landlock-capable kernel).
 
-## Not yet
+## HVF builder build on physical Apple Silicon (2026-09-21)
 
-W4c stays open until a build completes through the `mvm-images` builder on
-physical Apple Silicon HVF — unblocked by the #3522 fix landing, still to
-be re-run. #3499 decides whether the publication gate can compare digests,
-or has to compare file trees.
+The remaining leg ran after the #3522 egress fix landed. The same isolated
+`MVM_HOME` layout, the same `build.yml` aarch64 artifacts, and an `mvmctl`
+built from this branch's base with `just embed` (the embedded
+`mvm-host-vm-init` et al.), on macOS 26 under load:
+
+`MVM_BOOT_IMAGE=fetch mvmctl machine run --flake ./examples/exit_code`
+completed end to end: the `mvm-images` aarch64 builder VM booted under HVF,
+the in-guest Nix build of the fixture finished, the sealed workload it
+produced was admitted (`plan.admitted`, image `quiet-lynx-257b`, rootfs
+sha256 `85c6f04b…` in the audit chain under the isolated home), launched
+(`plan.launched`, 2026-09-22T02:24:57Z), and the host exited 7 — the code
+the fixture bakes. The built image persists under
+`images/sha256:ea828b09…` in the isolated home.
+
+Every leg W4c asked for is now witnessed: the comparison against
+`boot-image/v0.1.5` with every difference explained, same-commit
+equivalence on both architectures, x86_64 Firecracker boots and a build
+through the `mvm-images` builder, the aarch64 boot on real KVM hardware
+(rpi1, above), and the builder build on physical Apple Silicon HVF here.
+
+## Remaining
+
+#3499 decides whether the publication gate can compare digests, or has to
+compare file trees.
