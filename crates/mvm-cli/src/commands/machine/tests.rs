@@ -1,5 +1,7 @@
 use super::receipt::MachineStartInitPolicy;
-use super::runtime::{PostStart, post_start_action, resolve_persistent_spec};
+use super::runtime::{
+    PostStart, post_start_action, resolve_persistent_spec, transient_volume_warning,
+};
 use super::*;
 use crate::commands::{Cli, Commands};
 use clap::{CommandFactory, Parser};
@@ -54,6 +56,16 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
         MachineAction::Run(r) => r,
         other => panic!("expected run action, got {other:?}"),
     })
+}
+
+#[test]
+fn named_transient_with_registered_volume_explains_the_mount_is_not_attached() {
+    let warning = transient_volume_warning("dirvol-test", 1);
+
+    assert!(warning.contains("machine \"dirvol-test\" has 1 registered volume mount(s)"));
+    assert!(warning.contains("a transient run does not attach"));
+    assert!(warning.contains("mvmctl machine start"));
+    assert!(warning.contains("Use `--mount` to attach one here"));
 }
 
 fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {

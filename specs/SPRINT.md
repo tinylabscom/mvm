@@ -26,6 +26,15 @@
       dead-code allowance, and audits the truthful resolution source instead
       of `slots_mode=live`.
 
+- [x] **Transient runtime diagnostics.** `machine run --name` now has a
+      regression-tested explanation that registered volume attachments apply to
+      persistent `machine start`, and a cold contributor OCI launch now names
+      the MVM guest helpers it compiles rather than implying that it builds the
+      requested OCI base image. The notice supplies `mvmctl bootstrap` as the
+      prewarm command. Focused tests, formatting, workspace check, zero-warning
+      Clippy, and the host workspace test suite passed. See
+      `specs/plans/2026-09-21-transient-runtime-diagnostics.md`.
+
 - [x] **Persistent machine environment refusal — issue #3470.**
       `machine run --env` now fails before source resolution or builds whenever
       a persistence trigger is present, instead of accepting environment that

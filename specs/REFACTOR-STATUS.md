@@ -15,6 +15,14 @@ Last updated: 2026-09-22
       paths, and divergent post-restore identity. Ready for merge-queue
       delivery; the live witness runs manually on a KVM host.
 
+- [x] **Transient runtime diagnostics.**
+      `specs/plans/2026-09-21-transient-runtime-diagnostics.md`. Named
+      transient runs explicitly say that registered volumes do not attach, and
+      cold contributor OCI launches identify the local MVM guest-runtime build
+      and its `mvmctl bootstrap` prewarm path. Focused tests, formatting,
+      workspace check, zero-warning Clippy, and the host workspace test suite
+      passed.
+
 - [x] **Generic builder machinery — issue #3323.**
       `specs/plans/2026-09-21-generic-builder-machinery.md`. Generic builder
       image/cache, Stage 0 store, transport, overlay, egress, and shared
