@@ -162,7 +162,7 @@ fn build_pair_overlay(
         mvm_fs::overlay::read_overlay_artifact_from_dir(&build.entry.dir, &arch.to_string())?;
     if artifact.version != version {
         anyhow::bail!(
-            "the selected checkout's runtime overlay is version {}, but this mvmctl requires {version}",
+            "the selected checkout's runtime overlay is version {}, but version {version} is required",
             artifact.version,
         );
     }
