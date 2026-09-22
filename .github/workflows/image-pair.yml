@@ -1,0 +1,66 @@
+name: Image pair
+
+# Validates the mvm ↔ mvm-images pair with BOTH repositories at explicit
+# SHAs. The nightly run keeps the pair honest at both mains; the dispatch
+# inputs exist for the moment a change needs to be tested against a specific
+# companion commit before either side lands — check out both SHAs, run the
+# same drift gate the sibling's CI runs, and only then merge either half.
+#
+# The gate itself lives in mvm-images (scripts/check-source-drift.sh): it
+# knows which files it copied from mvm and the documented rewrites. This
+# workflow only supplies the two explicit checkouts.
+
+on:
+  schedule:
+    - cron: "53 6 * * *"
+  workflow_dispatch:
+    inputs:
+      mvm_sha:
+        description: "mvm commit SHA (or ref) to check against"
+        required: true
+        default: "main"
+      mvm_images_sha:
+        description: "mvm-images commit SHA (or ref) to check out"
+        required: true
+        default: "main"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  source-drift:
+    name: Both repositories at explicit SHAs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out mvm
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.mvm_sha || 'main' }}
+          path: mvm
+
+      - name: Check out mvm-images
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ inputs.mvm_images_sha || 'main' }}
+          path: mvm-images
+
+      - name: Resolve both SHAs
+        id: shas
+        run: |
+          set -euo pipefail
+          echo "mvm=$(git -C mvm rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "mvm_images=$(git -C mvm-images rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: The sibling's copies match mvm at the named commit
+        run: |
+          set -euo pipefail
+          cd mvm-images
+          scripts/check-source-drift.sh \
+            --against "${{ steps.shas.outputs.mvm }}" \
+            --mvm-git-dir "$(pwd)/../mvm/.git"

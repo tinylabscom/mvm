@@ -344,8 +344,10 @@ Last updated: 2026-09-21
       - [x] W5k #3364: admission reads the tier recorded with the image it
             boots — production refuses local-dev however the bytes were
             selected, both cache kinds classified fail-closed.
-      - [ ] W5l–W5m #3364: contributor docs and paired CI, and the acceptance
-            witnesses.
+      - [x] W5l #3364: the sibling-checkout developer guide with the worked
+            two-repository example, and the image-pair workflow validating
+            both repositories at explicit SHAs.
+      - [ ] W5m #3364: the acceptance witnesses.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

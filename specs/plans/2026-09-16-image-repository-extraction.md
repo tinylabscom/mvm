@@ -781,8 +781,13 @@ Delivery slices, one PR each:
       local-dev answer under Prod before signing — however the bytes were
       selected — boots report the recorded tier, and the doctor line adds
       the installed default image's rootfs digest.
-- [ ] W5l — contributor documentation, the two-repository example change, and
+- [x] W5l — contributor documentation, the two-repository example change, and
       a paired-change CI job checking out both repositories at explicit SHAs.
+      Landed as the image-sibling-checkout guide (selector rule, `bin/dev`,
+      `build image-set`, consumers, tiers, worked two-repository example;
+      sidebar + cross-link) and the image-pair workflow (nightly and
+      dispatch, both repositories at explicit SHAs, running the sibling's
+      source-drift gate).
 - [ ] W5m — the acceptance witnesses: cache reuse and single-sided
       invalidation, two concurrent pairs, stale manifest, wrong architecture,
       a live boot from a sibling checkout, and the same pair-built base image
