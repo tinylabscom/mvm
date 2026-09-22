@@ -80,6 +80,22 @@ pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> 
         .then(|| "mvm.vsock_egress=1".to_string())
 }
 
+/// Kernel cmdline token that arms the guest-side GPU shim activation.
+///
+/// The token itself only carries a boolean: the launch asked for the GPU
+/// plane, so the guest activation prepends the shim directory
+/// ([`mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR`]) to the workload's
+/// loader path. The host side of the plane (endpoint, vsock channel) is
+/// wired independently of this token, and an ordinary boot carries none.
+pub fn gpu_cmdline_token(config: &VmStartConfig) -> Option<String> {
+    config.gpu.then(|| {
+        format!(
+            "mvm.gpu=1 mvm.gpu_shims={}",
+            mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR
+        )
+    })
+}
+
 /// Kernel cmdline token that gives the guest the workload's machine name.
 ///
 /// The name crosses a whitespace-delimited boundary, so validate it again at
@@ -160,6 +176,7 @@ fn workload_cmdline_for_hostname(
     guest_hostname: Option<&str>,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
+    let gpu = gpu_cmdline_token(config);
     let hostname = guest_hostname.and_then(hostname_cmdline_token);
     let grants: Vec<String> = [
         verb_grant_cmdline_token(&config.name),
@@ -171,7 +188,12 @@ fn workload_cmdline_for_hostname(
     .collect();
     let has_disk = !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
-    if egress.is_none() && hostname.is_none() && grants.is_empty() && !verity_is_enabled {
+    if egress.is_none()
+        && gpu.is_none()
+        && hostname.is_none()
+        && grants.is_empty()
+        && !verity_is_enabled
+    {
         // Nothing mvm-specific to say and no initramfs boot: let the driver
         // fall back to its own default base cmdline. (This used to also require
         // a rootfs-only runtime-source policy; with the overlay as the single
@@ -200,7 +222,7 @@ fn workload_cmdline_for_hostname(
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
     }
-    for token in hostname.into_iter().chain(egress).chain(grants) {
+    for token in hostname.into_iter().chain(egress).chain(gpu).chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -301,6 +323,32 @@ pub fn seed_universal_initramfs(home: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::gpu_cmdline_token;
+    use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn the_gpu_token_only_rides_gpu_launches() {
+        let plain = VmStartConfig {
+            name: "w".into(),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..VmStartConfig::default()
+        };
+        assert_eq!(gpu_cmdline_token(&plain), None);
+
+        let gpu = VmStartConfig {
+            gpu: true,
+            ..plain.clone()
+        };
+        let token = gpu_cmdline_token(&gpu).expect("a GPU launch arms the token");
+        assert!(token.contains("mvm.gpu=1"), "{token}");
+        assert!(
+            token.contains(mvm_contract::protocol::gpu::GPU_SHIM_GUEST_DIR),
+            "the token names the shim directory: {token}"
+        );
+        // The whole token set must survive cmdline tokenization.
+        assert!(token.split_whitespace().all(|t| !t.contains(' ')));
+    }
+
     use super::*;
 
     /// HVF-like base bootargs for tests (pl011 UART console). Keeps the
