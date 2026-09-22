@@ -211,6 +211,14 @@ docs commit went out as #3581). Under the
       deficiency. Control/exit latency (W1e) stays command-only pending live
       hardware lanes; no VM was booted. Full battery passes. Evidence:
       `specs/sprint/delivery/3420-telemetry-baselines.md`.
+      W2b boot-generation registration is implemented and wired at the
+      identity seam: every boot writes a per-VM registration binding the
+      guest key to a fresh boot id and generation, with resolve/assert-current
+      as the dialer sequence and refusals by name. An integration witness
+      shows the session alone cannot distinguish boots sharing an inherited
+      key. Guest listener, host dialer and over-the-wire witnesses remain
+      open. Evidence:
+      `specs/sprint/delivery/3421-telemetry-generation-registration.md`.
       W3a preparatory runtime capture: bounded reader handoffs, owned completion
       tails, stage-specific losses and explicit unknown reader tails. Focused
       tests, BDD, clippy and Linux cross-check pass; evidence and delivery gates:
