@@ -202,13 +202,14 @@ rest being the secrets-substitution domain noun.
 - [ ] **A3.6** 63 `#[allow(dead_code)]` sites. Each is either a real unused path
       (delete it) or a cross-feature false positive (restructure the `cfg`).
       The project bans `#[allow]` on clippy lints; `dead_code` is rustc's, but
-      the same argument applies. **57 of 61 attributes removed** (#3310 sweep),
+      the same argument applies. **58 of 61 attributes removed** (#3310 sweep),
       each one either gated to the configuration that uses it, deleted, or
-      replaced by a check that actually reads the value. The four left are each
-      blocked on a separate decision: `mod proxy` in `mvm-host-vm-init` (#3484,
-      the vsock egress proxy that should be live is the unused one),
-      `policy_resolver` (#3483, controls built and never run), and
-      `mvm-builderd`'s two `#[path]` modules (#3485, split `builderd.rs`).
+      replaced by a check that actually reads the value. `policy_resolver`
+      (#3483) now validates once and hands the parsed bundle to the live bridge,
+      without constructing five unused controls or auditing them as `live`.
+      The three left are `mod proxy` in `mvm-host-vm-init` (#3484, the vsock
+      egress proxy that should be live is the unused one) and `mvm-builderd`'s
+      two `#[path]` modules (#3485, split `builderd.rs`).
 
 ### A4. Duplicate paths
 

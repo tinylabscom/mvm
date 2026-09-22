@@ -2,7 +2,7 @@
 
 Issue #3310; `specs/plans/2026-09-15-the-big-cleanup.md` A3.6 / D6.
 
-57 of the 61 `#[allow(dead_code)]` attributes are gone (counted as attribute
+58 of the 61 `#[allow(dead_code)]` attributes are gone (counted as attribute
 lines, excluding `third_party/` and the doc-example code that
 `mvm-conformance/build.rs` generates). Rather than judge each site by reading
 it, every attribute was removed and the compiler asked what was dead in each
@@ -53,6 +53,11 @@ Where a field existed to be checked, it is now checked instead of deleted:
 - The `.mvmev` vector sidecar's `negatives` list must match the four mutations
   `mvmev_archive_vectors.rs` exercises, so the cross-language contract and the
   Rust tests cannot drift apart.
+- Policy admission validates refs, L4 rows, inspector names, PII settings and
+  audit destinations without constructing five supervisor controls the launch
+  path never consumes. The validated bundle is loaded once for the live bridge,
+  and `plan.policy_resolved` records `bundle-validated` rather than claiming
+  those controls are `live`.
 
 ## Left, each with an owner
 
@@ -60,8 +65,6 @@ Where a field existed to be checked, it is now checked instead of deleted:
   the vsock egress path the design calls production. #1613 swapped it for a
   child proxy that dials upstreams directly. Deleting it would delete the
   intended path.
-- `policy_resolver`: #3483. It builds five supervisor controls that never run,
-  and the audit chain records them as `live`.
 - `mvm-builderd`'s two `#[path]` modules: #3485. `builderd.rs` needs splitting
   so the daemon stops compiling the host-side half.
 

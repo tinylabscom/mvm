@@ -71,10 +71,10 @@ optional `release_pin`, `post_run` lifecycle, the `valid_from`/
 
 Several `*Ref`-typed fields (`network_policy`, `fs_policy`,
 `egress_policy`, `tool_policy`) resolve at admission through
-`policy_resolver::resolve_supervisor_components`: a `"local-default"` ref
-resolves to fail-closed no-op components (deny by construction, not by
-omission); a `"<tenant>:<workload>"` ref loads
-`~/.mvm/policies/<tenant>/<workload>.toml`. The validity window is
+`policy_resolver::validate_policy_refs`: a `"local-default"` ref keeps the
+host bridge's mandatory-deny posture without constructing placeholder
+controls; a `"<tenant>:<workload>"` ref loads and validates
+`~/.mvm/policies/<tenant>/<workload>.toml` for the bridge. The validity window is
 deliberately short — long enough for boot plus verification, short enough
 that a captured plan cannot be replayed hours later — and is checked
 together with the nonce ledger so neither a stale-window replay nor a
