@@ -281,7 +281,12 @@ impl Pair {
                 // Name the file the way the image repository's manifest
                 // emitter does — <role-kebab>-<arch>-<contract-name> — so
                 // tests exercise the same layout a real build publishes.
-                let produced = format!("{}-{}-{}", role.replace('_', "-"), arch, artifact.name);
+                let produced = format!(
+                    "{}-{}-{}",
+                    role.to_string().replace('_', "-"),
+                    arch,
+                    artifact.name
+                );
                 write(&dir.join(&produced), &artifact.bytes);
                 let format = if let Some(kind) = artifact.format.strip_prefix("kernel:") {
                     serde_json::json!({"kernel": kind})

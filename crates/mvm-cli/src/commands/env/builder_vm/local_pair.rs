@@ -249,7 +249,7 @@ mod tests {
         std::fs::create_dir_all(&home_b).unwrap();
         let members = |checkout: &str| {
             vec![(
-                "builder_vm",
+                mvm_core::image_set::ImageSetRole::BuilderVm,
                 Some("linux_direct"),
                 {
                     let mut files = builder_vm_files();
