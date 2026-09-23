@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-22
+Last updated: 2026-09-23
 
 ## In progress
 
@@ -276,7 +276,19 @@ Last updated: 2026-09-22
           received distinct reseeded randomness.
     - [x] C3 — parallel chunk verify and contiguous verified materialization;
           5.14–10.88x over serial at 1–4 GiB logical size.
-    - [ ] C4 — diff restore from a cached materialization (with #3382).
+    - [x] C4 — diff restore keeps verified read-only materializations per
+          index/key-domain, clones the nearest cached index, rewrites only
+          changed chunks, and verifies the private result. A one-chunk change
+          in a 20 MiB fixture cut logical writes from 20 MiB to 1 MiB (95%);
+          mutating the cache after restore cannot change the restored file.
+          One per-domain/per-blob lock serializes verification, invalid-entry
+          replacement, and publish; event-backed race tests cover publishers
+          and readers crossing replacement. The exact single-threaded
+          workspace test run passed every unit and integration crate before a
+          transient `mvm-build` rustdoc `E0463` for the already-built
+          `mvm_sdk` artifact; the immediate isolated doctest rerun passed with
+          exit status zero. Workspace check, all-target clippy, formatting,
+          and all 74 `xtask check-all` policy gates pass.
     - [ ] C5 — `cache prune` reclaims unlinked objects and abandoned staging.
     - [ ] C6 — index digest as the audited content address.
     - [ ] C7 — dedup confined to one key domain.
