@@ -341,6 +341,14 @@ e2e-launch:
 # scenario names a capability this host lacks, and a green suite is not full
 # coverage while any of them are nonzero.
 #
+# Run the Firecracker live-parent fork witness (crates/mvm-runtime/tests/
+# fc_fork_live.rs, #[ignore]d: needs /dev/kvm) on a real Linux KVM host over
+# ssh. Idempotent — re-runs reuse the remote toolchain and image caches.
+# Extra args pass through as the boot-image tag, e.g.
+# `just live-fork-witness root@host boot-image/v0.1.5`.
+live-fork-witness TARGET *ARGS:
+    ./scripts/live-fork-witness-remote.sh {{ TARGET }} {{ ARGS }}
+
 # Every live end-to-end lane, back to back
 e2e:
     ./scripts/e2e-launch-modes.sh
