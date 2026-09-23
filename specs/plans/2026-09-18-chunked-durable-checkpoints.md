@@ -252,10 +252,10 @@ the next restore clones the nearest cached image and writes 1 MiB, a 95%
 reduction. The measurement counts bytes issued by the chunk writer, independent
 of whether the host filesystem implements the clone as APFS `clonefile`, Linux
 `FICLONE`, or the sparse-copy fallback. A second test restores from the exact
-cached index (zero rewritten chunks), mutates the cache afterward, and proves
-the private restored bytes do not change. A per-domain/per-blob file lock
+cached index (zero rewritten chunks), mutates the cache afterward, and checks
+that the private restored bytes do not change. A per-domain/per-blob file lock
 serializes candidate verification, cloning, invalid-entry replacement, and
-publish; deterministic contention tests prove concurrent publishers and a
+publish; deterministic contention tests check that concurrent publishers and a
 reader crossing replacement cannot observe partial cache state.
 
 **C4 validation.** The focused checkpoint namespace passes 108 tests with two
