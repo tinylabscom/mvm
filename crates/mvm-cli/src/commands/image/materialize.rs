@@ -284,9 +284,7 @@ pub(super) fn rematerialize_cached_image(
     }
     image.rootfs_path = Some(rootfs_path);
     image.runtime_tag = Some(runtime_tag.to_string());
-    let mut index = super::cache::load_index(cache_root)?;
-    super::cache::upsert_image(&mut index, image.clone());
-    super::cache::save_index(cache_root, &index)?;
+    super::cache::upsert_cached_image(cache_root, image.clone())?;
     Ok(Some(image))
 }
 
@@ -984,6 +982,8 @@ mod tests {
             call.rootfs_abs,
             format!("materialized:{}", call.image_label),
         )?;
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(call.image_label, call.sealed, true)
+            .write_to_dir(parent)?;
         Ok(())
     }
 

@@ -1,8 +1,18 @@
 # Refactor status
 
-Last updated: 2026-09-22
+Last updated: 2026-09-23
 
 ## In progress
+
+- [x] **OCI image publication and removal durability — issue #3538.**
+      The rootfs artifact-set rename now ends with a directory sync, OCI index
+      read-modify-write is serialized and durably replaced, and last-reference
+      removal reclaims the digest's unpacked tree and owner/deferred sidecars.
+      Tree and output locks precede the index lock; reload-and-revalidation plus
+      event-backed contention tests prevent a losing upsert from resurrecting
+      deleted paths and prove removal waits for live readers. Focused and full
+      workspace tests, zero-warning Clippy, gated-target compilation,
+      formatting, and all 74 repository gates pass.
 
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only

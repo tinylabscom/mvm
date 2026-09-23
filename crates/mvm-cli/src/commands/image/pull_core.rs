@@ -17,8 +17,8 @@ use mvm_fs::oci::{
     UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
 };
 
-use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file, save_index};
-use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present, upsert_image};
+use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file};
+use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present};
 use super::materialize::{
     RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
     inject_runtime_and_materialize, oci_entrypoint_from_cache_path, oci_runtime_tag,
@@ -470,7 +470,6 @@ fn pull_image_ref(
         },
     )?;
 
-    let mut index = load_index(cache_root)?;
     let cached = CachedOciImage {
         reference: image_ref.canonical(),
         registry: image_ref.registry.clone(),
@@ -485,8 +484,7 @@ fn pull_image_ref(
         claims_path: Some(claims_path),
         layers: cached_layers,
     };
-    upsert_image(&mut index, cached.clone());
-    save_index(cache_root, &index)?;
+    super::cache::upsert_cached_image(cache_root, cached.clone())?;
     Ok((cached, trust, registry_auth.source))
 }
 
@@ -964,7 +962,7 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         let mut index = load_index(&fixture.cache).unwrap();
         index.images[0].rootfs_path = Some(rel.clone());
         index.images[0].runtime_tag = Some(oci_runtime_tag(&fixture.cache));
-        save_index(&fixture.cache, &index).unwrap();
+        crate::commands::image::cache::save_index(&fixture.cache, &index).unwrap();
 
         let prod = resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
 
