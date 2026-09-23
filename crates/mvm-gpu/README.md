@@ -14,6 +14,10 @@ Opaque integer handles keep host pointers out of the guest protocol.
 `NativeCudaBackend` loads the host CUDA and NVML libraries dynamically.
 `StubBackend` provides deterministic behavior without GPU hardware.
 The stub keeps transport and lifecycle tests portable and repeatable.
+It tracks a submitted and completed sequence position for every stream.
+Events snapshot one position, remain not-ready until that position completes,
+and make stream/event waits deterministic. The legacy default stream remains
+synchronously complete.
 
 ## Transport
 

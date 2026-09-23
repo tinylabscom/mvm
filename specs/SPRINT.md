@@ -129,8 +129,12 @@ docs commit went out as #3581). Under the
       the `GuestService::Gpu` channel across all four VMM tiers, the
       runner-spawned per-VM endpoint with reap, and the Nix package
       recipes. Runtime-overlay composition of the shims is follow-up work
-      in the mvm-images repository. Named v2 follow-ups (CUDA graphs and
-      fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
+      in the mvm-images repository. Issue #3565 adds typed streams, events,
+      asynchronous copies and completion positions across the wire, native
+      backend and both CUDA shims. The stub models per-stream ordering and
+      event readiness deterministically, including default-stream compatibility
+      and fail-closed forged or stale handles. Named follow-ups (CUDA graphs
+      and fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
       plan and ADR.
 
 - [ ] **Public function naming cleanup — issue #3315.**

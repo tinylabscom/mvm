@@ -53,6 +53,14 @@ fn unit(response: GpuResponse) -> CudaError {
     }
 }
 
+fn queued(response: GpuResponse) -> CudaError {
+    match response {
+        GpuResponse::AsyncQueued { .. } => SUCCESS,
+        GpuResponse::Err(e) => e.code as CudaError,
+        _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    }
+}
+
 /// The context the endpoint has implicitly per device: created lazily on
 /// first use and reused for the process lifetime. Device 0 only in v1.
 fn ensure_context() -> Result<u64, CudaError> {
@@ -327,6 +335,98 @@ pub unsafe extern "C" fn cudaMemcpy(
 
 ///
 /// # Safety
+/// Pointer arguments must satisfy the CUDA Runtime API contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaMemcpyAsync(
+    dst: *mut c_void,
+    src: *const c_void,
+    count: usize,
+    kind: c_int,
+    stream: *mut c_void,
+) -> CudaError {
+    guard(
+        move || {
+            let result = (|| -> CudaError {
+                if (dst.is_null() || src.is_null()) && count > 0 {
+                    return wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError;
+                }
+                if kind == MEMCPY_HOST_TO_HOST {
+                    // SAFETY: the workload supplied both host regions.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.cast::<u8>(), dst.cast::<u8>(), count)
+                    };
+                    return SUCCESS;
+                }
+                let Ok(context) = ensure_context() else {
+                    return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+                };
+                let stream = stream as u64;
+                match kind {
+                    MEMCPY_HOST_TO_DEVICE => {
+                        // SAFETY: `src` is readable for `count` bytes.
+                        let data = unsafe { std::slice::from_raw_parts(src.cast::<u8>(), count) };
+                        queued(call(
+                            &mvm_contract::protocol::gpu::GpuRequest::MemcpyHtoDAsync {
+                                context,
+                                dst: dst as u64,
+                                data: data.to_vec(),
+                                stream,
+                            },
+                        ))
+                    }
+                    MEMCPY_DEVICE_TO_HOST => {
+                        match call(&mvm_contract::protocol::gpu::GpuRequest::MemcpyDtoHAsync {
+                            context,
+                            src: src as u64,
+                            len: count as u64,
+                            stream,
+                        }) {
+                            GpuResponse::DataQueued { bytes, .. } => {
+                                // SAFETY: the workload supplied the destination.
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        bytes.as_ptr(),
+                                        dst.cast::<u8>(),
+                                        bytes.len(),
+                                    )
+                                };
+                                SUCCESS
+                            }
+                            GpuResponse::Err(e) => e.code as CudaError,
+                            _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+                        }
+                    }
+                    MEMCPY_DEVICE_TO_DEVICE => {
+                        match call(&mvm_contract::protocol::gpu::GpuRequest::MemcpyDtoHAsync {
+                            context,
+                            src: src as u64,
+                            len: count as u64,
+                            stream,
+                        }) {
+                            GpuResponse::DataQueued { bytes, .. } => queued(call(
+                                &mvm_contract::protocol::gpu::GpuRequest::MemcpyHtoDAsync {
+                                    context,
+                                    dst: dst as u64,
+                                    data: bytes,
+                                    stream,
+                                },
+                            )),
+                            GpuResponse::Err(e) => e.code as CudaError,
+                            _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+                        }
+                    }
+                    _ => wire::CUDA_ERROR_RUNTIME_INVALID_MEMCPY_DIRECTION as CudaError,
+                }
+            })();
+            set_last_error(result);
+            result
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+///
+/// # Safety
 /// Pointer arguments must satisfy the API contract for this call — valid,
 /// correctly sized out-buffers — and are named by the workload itself,
 /// exactly as they would be against the real library.
@@ -376,6 +476,232 @@ pub unsafe extern "C" fn cudaDeviceSynchronize() -> CudaError {
     )
 }
 
+/// # Safety
+/// `stream` must name writable storage for one runtime stream handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaStreamCreate(stream: *mut *mut c_void) -> CudaError {
+    unsafe { cudaStreamCreateWithFlags(stream, 0) }
+}
+
+/// # Safety
+/// `stream` must name writable storage for one runtime stream handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaStreamCreateWithFlags(
+    stream: *mut *mut c_void,
+    flags: c_uint,
+) -> CudaError {
+    guard(
+        move || {
+            if stream.is_null() {
+                return wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError;
+            }
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            match call(&mvm_contract::protocol::gpu::GpuRequest::StreamCreate { context, flags }) {
+                GpuResponse::StreamCreated { stream: handle } => {
+                    // SAFETY: null-checked above.
+                    unsafe { *stream = handle as *mut c_void };
+                    SUCCESS
+                }
+                GpuResponse::Err(e) => e.code as CudaError,
+                _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+            }
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `stream` must be null or a handle returned by `cudaStreamCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaStreamDestroy(stream: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamDestroy {
+                    context,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `stream` must be null or a handle returned by `cudaStreamCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaStreamSynchronize(stream: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamSynchronize {
+                    context,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// Both handles must have been created by this runtime context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaStreamWaitEvent(
+    stream: *mut c_void,
+    event: *mut c_void,
+    flags: c_uint,
+) -> CudaError {
+    guard(
+        move || {
+            if flags != 0 {
+                return wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError;
+            }
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            queued(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamWaitEvent {
+                    context,
+                    stream: stream as u64,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `event` must name writable storage for one runtime event handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventCreate(event: *mut *mut c_void) -> CudaError {
+    unsafe { cudaEventCreateWithFlags(event, 0) }
+}
+
+/// # Safety
+/// `event` must name writable storage for one runtime event handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventCreateWithFlags(
+    event: *mut *mut c_void,
+    flags: c_uint,
+) -> CudaError {
+    guard(
+        move || {
+            if event.is_null() {
+                return wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError;
+            }
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            match call(&mvm_contract::protocol::gpu::GpuRequest::EventCreate { context, flags }) {
+                GpuResponse::EventCreated { event: handle } => {
+                    // SAFETY: null-checked above.
+                    unsafe { *event = handle as *mut c_void };
+                    SUCCESS
+                }
+                GpuResponse::Err(e) => e.code as CudaError,
+                _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+            }
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cudaEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventDestroy(event: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventDestroy {
+                    context,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// Both handles must belong to this runtime context; null stream is default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            queued(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventRecord {
+                    context,
+                    event: event as u64,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cudaEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventQuery(event: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            match call(&mvm_contract::protocol::gpu::GpuRequest::EventQuery {
+                context,
+                event: event as u64,
+            }) {
+                GpuResponse::EventStatus { complete: true } => SUCCESS,
+                GpuResponse::EventStatus { complete: false } => {
+                    wire::CUDA_ERROR_RUNTIME_NOT_READY as CudaError
+                }
+                GpuResponse::Err(e) => e.code as CudaError,
+                _ => wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+            }
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cudaEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cudaEventSynchronize(event: *mut c_void) -> CudaError {
+    guard(
+        move || {
+            let Ok(context) = ensure_context() else {
+                return wire::CUDA_ERROR_RUNTIME_INITIALIZATION as CudaError;
+            };
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventSynchronize {
+                    context,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
+    )
+}
+
 ///
 /// # Safety
 /// Pointer arguments must satisfy the API contract for this call — valid,
@@ -418,6 +744,7 @@ pub unsafe extern "C" fn cudaGetErrorString(error: CudaError) -> *const c_char {
                 e if e == wire::CUDA_ERROR_RUNTIME_NO_DEVICE => {
                     c"no CUDA-capable device is available"
                 }
+                e if e == wire::CUDA_ERROR_RUNTIME_NOT_READY => c"operation not ready",
                 e if e == wire::CUDA_ERROR_RUNTIME_NOT_SUPPORTED => c"operation not supported",
                 _ => c"unknown error",
             };

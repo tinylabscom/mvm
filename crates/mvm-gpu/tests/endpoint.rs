@@ -129,6 +129,69 @@ fn the_stub_endpoint_serves_the_full_device_memory_and_launch_flow() {
             bytes: vec![0x5a, 0x5a, 7, 6]
         }
     );
+    let GpuResponse::StreamCreated { stream } =
+        mvm_gpu_shim_core::call(&GpuRequest::StreamCreate { context, flags: 1 })
+    else {
+        panic!("stream create");
+    };
+    let GpuResponse::EventCreated { event } =
+        mvm_gpu_shim_core::call(&GpuRequest::EventCreate { context, flags: 2 })
+    else {
+        panic!("event create");
+    };
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::MemcpyHtoDAsync {
+            context,
+            dst: ptr,
+            data: vec![4, 3, 2, 1],
+            stream,
+        }),
+        GpuResponse::AsyncQueued { completion: 1 }
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::EventRecord {
+            context,
+            event,
+            stream,
+        }),
+        GpuResponse::AsyncQueued { completion: 2 }
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::EventQuery { context, event }),
+        GpuResponse::EventStatus { complete: false }
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::EventSynchronize { context, event }),
+        GpuResponse::Ok
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::EventQuery { context, event }),
+        GpuResponse::EventStatus { complete: true }
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::MemcpyDtoHAsync {
+            context,
+            src: ptr,
+            len: 4,
+            stream,
+        }),
+        GpuResponse::DataQueued {
+            bytes: vec![4, 3, 2, 1],
+            completion: 3,
+        }
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::StreamSynchronize { context, stream }),
+        GpuResponse::Ok
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::EventDestroy { context, event }),
+        GpuResponse::Ok
+    );
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::StreamDestroy { context, stream }),
+        GpuResponse::Ok
+    );
     assert_eq!(
         mvm_gpu_shim_core::call(&GpuRequest::MemFree { context, ptr }),
         GpuResponse::Ok
@@ -157,6 +220,7 @@ fn the_stub_endpoint_serves_the_full_device_memory_and_launch_flow() {
             grid: [1, 1, 1],
             block: [1, 1, 1],
             shared_mem_bytes: 0,
+            stream: None,
             params: vec![vec![0; 8]],
         }),
         GpuResponse::Ok
@@ -167,6 +231,7 @@ fn the_stub_endpoint_serves_the_full_device_memory_and_launch_flow() {
         grid: [1, 1, 1],
         block: [1, 1, 1],
         shared_mem_bytes: 0,
+        stream: None,
         params: vec![],
     }) else {
         panic!("a forged function handle must be refused");
@@ -201,6 +266,7 @@ fn over_cap_launch_is_refused_before_it_reaches_the_backend() {
         grid: [1, 1, 1],
         block: [1, 1, 1],
         shared_mem_bytes: 0,
+        stream: None,
         params,
     });
     let GpuResponse::Err(e) = response else {

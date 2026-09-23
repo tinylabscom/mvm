@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-22
+Last updated: 2026-09-23
 
 ## In progress
 
@@ -60,9 +60,11 @@ Last updated: 2026-09-22
       `GuestService::Gpu` channel across HVF (supervisor + relay + live
       handoff), libkrun, Firecracker and QEMU, the runner-spawned per-VM
       endpoint, and the shim package recipes (overlay composition is
-      mvm-images work). Open follow-ups named in the plan: CUDA-graph
-      fork-reconnect, `cuGetProcAddress`, cubin param metadata, overlay
-      image composition.
+      mvm-images work). W11 adds typed streams, events, asynchronous copies,
+      completion positions, deterministic stub ordering, native driver calls,
+      driver/runtime shim exports, and fail-closed opaque-handle validation.
+      Open follow-ups named in the plan: CUDA-graph fork-reconnect,
+      `cuGetProcAddress`, cubin param metadata, overlay image composition.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
