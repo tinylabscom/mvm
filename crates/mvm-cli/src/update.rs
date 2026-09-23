@@ -605,7 +605,11 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
 
     install_release_host_binaries(&extracted_dir, install_dir, needs_sudo)
         .context("Failed to update adjacent host helper binaries")?;
-    sign_installed_binaries().context("Failed to apply macOS VM entitlements")?;
+    sign_installed_binaries(cfg!(target_os = "macos"), || {
+        let targets = mvm_runtime::codesign::collect_sign_targets();
+        mvm_runtime::codesign::sign_targets(&targets)
+    })
+    .context("Failed to apply macOS VM entitlements")?;
 
     // --- Replace resources ---
     let new_resources = extracted_dir.join("resources");
@@ -639,9 +643,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
                         .expect("dest resources path must be valid UTF-8"),
                 ],
             )?;
-            if !output.status.success() {
-                ui::warn("Failed to update resources directory");
-            }
+            require_resource_copy_success(output.status.success())?;
         } else {
             if let Err(e) = std::fs::remove_dir_all(&dest_resources) {
                 tracing::warn!("failed to remove old resources: {e}");
@@ -651,6 +653,13 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         }
     }
 
+    Ok(())
+}
+
+fn require_resource_copy_success(success: bool) -> Result<()> {
+    if !success {
+        anyhow::bail!("sudo cp failed while updating resources directory");
+    }
     Ok(())
 }
 
@@ -690,14 +699,15 @@ fn install_release_host_binaries(
 /// Apply the macOS entitlements immediately after replacing a release binary
 /// and its adjacent supervisors. A successful update must not leave the next
 /// invocation dependent on a lazy first-boot repair.
-fn sign_installed_binaries() -> Result<()> {
-    if !cfg!(target_os = "macos") {
+fn sign_installed_binaries(
+    is_macos: bool,
+    signer: impl FnOnce() -> Vec<mvm_runtime::codesign::SignReport>,
+) -> Result<()> {
+    if !is_macos {
         return Ok(());
     }
 
-    let targets = mvm_runtime::codesign::collect_sign_targets();
-    let reports = mvm_runtime::codesign::sign_targets(&targets);
-    let failed: Vec<String> = reports
+    let failed: Vec<String> = signer()
         .iter()
         .filter(|report| !report.entitlements_present)
         .map(|report| report.path.display().to_string())
@@ -792,6 +802,13 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
     verify_archive_signature_at(&release_base, version, archive_name, archive_path)?;
     ui::success("Signature verified.");
     Ok(())
+}
+
+fn verify_signature_if_required(
+    skip_verify: bool,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if skip_verify { Ok(()) } else { verify() }
 }
 
 /// Verify `archive_name` against the bundle published under `release_base`,
@@ -1040,9 +1057,9 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
     let archive_path = tmp_dir.path().join(&archive_name);
     verify_checksum(&latest_tag, &archive_name, &archive_path)?;
-    if !skip_verify {
-        verify_signature(&latest_tag, &archive_name, &archive_path)?;
-    }
+    verify_signature_if_required(skip_verify, || {
+        verify_signature(&latest_tag, &archive_name, &archive_path)
+    })?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
     ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));
@@ -1268,6 +1285,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_failed_privileged_resource_copy_refuses_the_update() {
+        require_resource_copy_success(true).expect("a successful copy is accepted");
+        let error = require_resource_copy_success(false)
+            .expect_err("a failed resource copy must refuse the update")
+            .to_string();
+        assert!(error.contains("sudo cp failed"), "{error}");
+    }
+
+    #[test]
+    fn signing_is_skipped_off_macos_and_requires_every_entitlement_on_macos() {
+        sign_installed_binaries(false, || panic!("non-macOS must not invoke the signer"))
+            .expect("signing is a no-op off macOS");
+
+        let report = |path: &str, entitlements_present| mvm_runtime::codesign::SignReport {
+            path: path.into(),
+            applied: true,
+            entitlements_present,
+        };
+        sign_installed_binaries(true, || vec![report("mvmctl", true)])
+            .expect("a signed macOS install is accepted");
+
+        let error = sign_installed_binaries(true, || {
+            vec![report("mvmctl", true), report("mvm-hvf-supervisor", false)]
+        })
+        .expect_err("every macOS release binary must retain its entitlement")
+        .to_string();
+        assert!(error.contains("mvm-hvf-supervisor"), "{error}");
+        assert!(!error.contains("mvmctl"), "{error}");
+    }
+
     // --- signature verification ---
 
     /// Stage a release directory holding `archive` and, optionally, a bundle.
@@ -1316,6 +1364,22 @@ mod tests {
             &dir.path().join(SIGNED_ASSET),
         )
         .expect_err("a bundle that does not parse must not admit the archive");
+    }
+
+    #[test]
+    fn signature_verification_runs_unless_the_user_explicitly_skips_it() {
+        let mut called = false;
+        let error = verify_signature_if_required(false, || {
+            called = true;
+            anyhow::bail!("signature refused")
+        })
+        .expect_err("verification failures must refuse the update")
+        .to_string();
+        assert!(called);
+        assert!(error.contains("signature refused"), "{error}");
+
+        verify_signature_if_required(true, || panic!("skip verification must not verify"))
+            .expect("the explicit skip bypasses signature verification");
     }
 
     /// The tag carries a `v`; the identity template adds its own. A real
@@ -1766,7 +1830,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let archive = build_release_archive(tmp.path(), "unit-test", true, false);
+        let archive = build_release_archive(tmp.path(), "unit-test", true, true);
         std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
 
         let install_dir = tmp.path().join("install");
@@ -1784,6 +1848,7 @@ mod tests {
                 .unwrap()
                 .contains("9.9.9")
         );
+        assert!(install_dir.join("resources/config.toml").is_file());
     }
 
     #[test]
@@ -1809,6 +1874,11 @@ mod tests {
             install_announcement("nightly", "0.18.0"),
             NewVersion,
             "an unorderable current must not read as a downgrade either"
+        );
+        assert_eq!(
+            install_announcement("0.18.0+running", "0.18.0+published"),
+            NewVersion,
+            "semver-equivalent but textually distinct releases are not downgrades"
         );
     }
 }
