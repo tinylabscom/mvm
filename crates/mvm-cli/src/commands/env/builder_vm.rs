@@ -238,6 +238,7 @@ use mvm_build::cache_install::{
 /// built bootstrap helper, whose embed table is authoritative. An embedded
 /// binary can calculate the fingerprint directly and lets the low-level image
 /// loader reject stale local and shared cache entries before boot.
+#[cfg(feature = "builder-vm")]
 pub(in crate::commands) fn current_builder_vm_source_fingerprint(
     workspace_root: &std::path::Path,
 ) -> std::result::Result<Option<String>, String> {
