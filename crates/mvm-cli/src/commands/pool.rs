@@ -2098,6 +2098,7 @@ mod tests {
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
             gpu: false,
+            gpu_device: None,
         };
         let resolve = |name| {
             crate::exec::resolve_launch(
@@ -2451,6 +2452,7 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
         declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         hypervisor: None,
         gpu: false,
+        gpu_device: None,
     };
     crate::exec::resolve_launch(
         &shape,

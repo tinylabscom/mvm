@@ -14,6 +14,9 @@ Allocations return opaque endpoint handles presented as CUDA device pointers.
 Copies move bounded byte buffers through the protocol in the requested direction.
 Synchronization and memory operations retain CUDA-compatible result codes.
 Invalid pointers, devices, or copy kinds are rejected at the FFI boundary.
+The runtime exports stream and event lifecycle calls plus `cudaMemcpyAsync`;
+event queries distinguish ready from `cudaErrorNotReady`, and a null stream
+keeps synchronous default-stream behavior.
 
 ## Scope
 
