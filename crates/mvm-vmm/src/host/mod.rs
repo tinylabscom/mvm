@@ -31,5 +31,6 @@ pub mod runtime_meta;
 pub mod shell;
 pub mod snapshot_upper;
 pub mod spec_map;
+pub mod telemetry_registration;
 pub mod ui;
 pub mod workload_wait;

@@ -141,6 +141,15 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             }
         };
 
+        // Same seam for minted and inherited identities: the boot the endpoint
+        // authenticates is the boot the telemetry dialer must expect.
+        mvm_vmm::host::telemetry_registration::register_telemetry_boot(
+            req.state_dir,
+            req.vm_name,
+            &identity.guest_verifying_key_base64,
+        )
+        .context("registering this boot's telemetry identity")?;
+
         spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
@@ -208,6 +217,12 @@ fn prepare_observation_identity(
         }
     };
     identity.persist(req.state_dir)?;
+    mvm_vmm::host::telemetry_registration::register_telemetry_boot(
+        req.state_dir,
+        req.vm_name,
+        &identity.guest_verifying_key_base64,
+    )
+    .context("registering this boot's telemetry identity")?;
     Ok(drive)
 }
 
@@ -333,8 +348,12 @@ fn host_signer_key_base64() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use mvm_vmm::host::flowmux_identity::{
         IDENTITY_DRIVE_FILE, InheritableIdentity, PUBLIC_IDENTITY_FILE, load_inheritable_identity,
+    };
+    use mvm_vmm::host::telemetry_registration::{
+        TELEMETRY_REGISTRATION_FILE, resolve_expected_telemetry_peer,
     };
 
     fn prepare_test_identity(
@@ -387,8 +406,16 @@ mod tests {
             files,
             vec![
                 std::ffi::OsString::from(IDENTITY_DRIVE_FILE),
-                std::ffi::OsString::from(PUBLIC_IDENTITY_FILE)
+                std::ffi::OsString::from(PUBLIC_IDENTITY_FILE),
+                std::ffi::OsString::from(TELEMETRY_REGISTRATION_FILE),
             ]
+        );
+        let peer = resolve_expected_telemetry_peer(&state, "isolated-guest").unwrap();
+        assert_eq!(peer.generation, 1);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(peer.key.as_bytes()),
+            identity.guest_verifying_key_base64,
+            "the registered telemetry peer is this boot's minted guest key"
         );
         #[cfg(unix)]
         {
@@ -433,8 +460,19 @@ mod tests {
             .unwrap(),
             None
         );
-        assert_eq!(load_inheritable_identity(&child).unwrap(), Some(identity));
+        assert_eq!(
+            load_inheritable_identity(&child).unwrap(),
+            Some(identity.clone())
+        );
         assert!(!child.join(IDENTITY_DRIVE_FILE).exists());
+        // The child registers its own boot under the inherited key: same key,
+        // fresh boot binding, so the parent's boot cannot be confused for it.
+        let peer = resolve_expected_telemetry_peer(&child, "isolated-guest").unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(peer.key.as_bytes()),
+            identity.guest_verifying_key_base64
+        );
+        assert_eq!(peer.generation, 1);
     }
 
     #[test]

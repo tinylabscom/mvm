@@ -128,6 +128,10 @@ Last updated: 2026-09-23
       runs, variance, ×1.5 budgets; flood fairness recorded as effectively
       zero). W1e live control/exit baselines remain command-only. Evidence:
       `specs/sprint/delivery/3420-telemetry-baselines.md`.
+      W2b boot-generation registration landed at the identity seam with
+      stale-boot/wrong-VM refusals and a session-cannot-distinguish witness;
+      listener/dialer/wire witnesses remain open. Evidence:
+      `specs/sprint/delivery/3421-telemetry-generation-registration.md`.
       W3a bounded invocation capture passes focused tests, BDD and Linux cross-check;
       `specs/sprint/delivery/3422-bounded-capture-handoff.md` records its evidence
       and limits. This does not enable the independent telemetry service.

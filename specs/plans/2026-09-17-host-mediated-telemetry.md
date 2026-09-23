@@ -285,6 +285,17 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
   - [ ] W2b — Provision backend endpoints and bind each connection's expected
         guest key to authoritative VM/boot/generation registration. Prove actual
         service routing and restore isolation before enabling collection.
+        Boot-generation registration is now implemented and wired: every path
+        that sets up a guest observation identity (mint, endpoint spawn,
+        inherit on claim/restore/standby) also writes a per-boot
+        `telemetry-registration.json` binding the guest key to a fresh boot id
+        and a per-state-dir generation. `resolve_expected_telemetry_peer` /
+        `assert_peer_is_current` are the dialer's required sequence; wrong-VM,
+        missing, malformed-key and stale-boot expectations refuse by name, and
+        an integration witness shows the encrypted session alone cannot
+        distinguish two boots sharing an inherited key — the registration gate
+        is the discriminator. No guest listener, no host dialer and no
+        over-the-wire port-5254 witness yet; those remain open in this bullet.
         Local integration now adds the standing host-dial channel, backend
         connection routing, HVF supervisor binding, signed live-handoff bit and
         fresh child-local saved-restore endpoint. Affected-crate tests pass
