@@ -329,6 +329,14 @@ fn fork_restore_error(e: anyhow::Error) -> StandbyError {
     }
 }
 
+/// Preserve every context frame from a failed standby preload at the driver
+/// boundary. The pool command can only report the `StandbyError` string, so a
+/// display that stops at the outermost `anyhow` frame makes a live restore
+/// failure unactionable and hides Firecracker's API response or launch log.
+fn preload_spawn_error(action: &str, error: anyhow::Error) -> StandbyError {
+    StandbyError::SpawnFailed(format!("{action}: {error:#}"))
+}
+
 /// The host UDS Firecracker connects *out* to when the guest dials
 /// `CID_HOST:<port>`: the sibling `<runtime_dir>/v.sock_<port>` of the vsock mux
 /// socket. The host must own a listener there before the guest dials.
@@ -843,7 +851,7 @@ impl VmmDriver for FcDriver {
         }
         crate::fc::FcForkRestorer
             .restore_fork_paused(req.child_vm_name, req.child_dir)
-            .map_err(|e| StandbyError::SpawnFailed(format!("load paused child: {e}")))?;
+            .map_err(|error| preload_spawn_error("load paused child", error))?;
         let pid = read_firecracker_pid(&req.child_dir.to_string_lossy())
             .map_err(|e| StandbyError::SpawnFailed(format!("read paused child pid: {e}")))?;
         Ok(PreloadedChild {
@@ -2361,6 +2369,18 @@ mod tests {
             fork_restore_error(error),
             StandbyError::ClaimFailed(_)
         ));
+    }
+
+    #[test]
+    fn standby_preload_failure_keeps_the_complete_restore_chain() {
+        let error = anyhow!("HTTP 400: missing block device").context("PUT /snapshot/load");
+        match preload_spawn_error("load paused child", error) {
+            StandbyError::SpawnFailed(message) => assert_eq!(
+                message,
+                "load paused child: PUT /snapshot/load: HTTP 400: missing block device"
+            ),
+            other => panic!("expected SpawnFailed, got {other:?}"),
+        }
     }
 
     #[test]

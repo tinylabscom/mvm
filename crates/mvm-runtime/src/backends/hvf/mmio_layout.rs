@@ -9,24 +9,26 @@ pub(super) const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 pub(super) const VIRTIO_IRQ: u32 = 48;
 pub(super) const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 pub(super) const VSOCK_IRQ: u32 = 49;
-/// A **reserved hole** where the virtio-fs windows used to live, above the disk
-/// band (MAX_DISKS=6 → up to base+6*stride) and vsock.
+/// The first window where the deleted virtio-fs device used to live, above the
+/// original six-disk band and vsock.
 ///
-/// No device is placed here any more — the HVF virtio-fs device is deleted. The
-/// constants stay because `RNG_MMIO_BASE` and `RNG_IRQ` are computed *from*
-/// them: collapsing the hole would silently move the entropy device to a
-/// different address and SPI, which changes the device tree a guest boots
-/// against and the layout a saved snapshot was captured under. Reclaiming this
-/// range is a deliberate, separately-validated change, not a tidy-up.
+/// The HVF virtio-fs device is gone, so block devices may occupy this former
+/// root-plus-share band. The constants stay because `RNG_MMIO_BASE` and
+/// `RNG_IRQ` are computed *from* them: collapsing the band would silently move
+/// the entropy device to a different address and SPI, changing both the device
+/// tree a guest boots against and the layout a saved snapshot was captured
+/// under.
 pub(super) const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
 pub(super) const FS_IRQ: u32 = 55;
-/// Width of the reserved hole above, in MMIO slots and SPIs.
+/// Width of the former virtio-fs share band, retained to derive the stable
+/// address and SPI that follow it.
 pub(super) const MAX_VIRTIOFS_SHARES: usize = 8;
-/// The entropy device follows every optional disk/vsock/virtio-fs window, so its
-/// stable address cannot collide with a device combination selected at runtime.
-/// Derived from the reserved hole above rather than restated, so the fact that
-/// the entropy device sits *past* it is expressed once. Same address as before:
-/// `VIRTIO_MMIO_BASE + 7*stride` + `8*stride` + one slot = `base + 16*stride`.
+/// The entropy device keeps its address after the original
+/// disk/vsock/virtio-fs layout, so its stable window cannot collide with a
+/// device combination selected at runtime. Derived from the former band rather
+/// than restated, so the fact that the entropy device sits *past* it is
+/// expressed once. Same address as before: `VIRTIO_MMIO_BASE + 7*stride` +
+/// `8*stride` + one slot = `base + 16*stride`.
 pub(super) const RNG_MMIO_BASE: u64 = FS_MMIO_BASE + (MAX_VIRTIOFS_SHARES as u64 + 1) * MMIO_STRIDE;
 pub(super) const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// The free page reporting balloon takes the slot and SPI after the entropy
@@ -35,10 +37,11 @@ pub(super) const BALLOON_MMIO_BASE: u64 = RNG_MMIO_BASE + MMIO_STRIDE;
 pub(super) const BALLOON_IRQ: u32 = RNG_IRQ + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 pub(super) const MMIO_STRIDE: u64 = 0x200;
-/// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
-/// needs six: rootfs, nix-store, input, output, the read-only runtime overlay,
-/// and the per-boot FlowMux identity drive.
-pub(super) const MAX_DISKS: usize = 6;
+/// Max virtio-blk devices (`/dev/vda`..). Six slots preceded the former
+/// virtio-fs band; reclaiming its root slot plus eight share slots admits nine
+/// more without moving the entropy device or any later snapshot-visible
+/// address.
+pub(super) const MAX_DISKS: usize = 6 + MAX_VIRTIOFS_SHARES + 1;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
 /// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
@@ -77,17 +80,21 @@ mod tests {
     }
 
     #[test]
-    fn sixth_disk_slot_stays_below_virtiofs_window() {
+    fn disk_slots_reclaim_the_old_virtiofs_band_and_stop_before_entropy() {
         let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
         assert!(
-            last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
-            "sixth disk must fit below the virtiofs MMIO window"
+            last_mmio + MMIO_STRIDE <= RNG_MMIO_BASE,
+            "last disk must fit below the entropy device"
+        );
+        assert!(
+            last_mmio >= FS_MMIO_BASE,
+            "former virtio-fs slots are reused"
         );
 
         let (next_mmio, _) = disk_mmio(MAX_DISKS);
         assert_eq!(
-            next_mmio, FS_MMIO_BASE,
-            "a seventh disk would collide with the virtiofs root window"
+            next_mmio, RNG_MMIO_BASE,
+            "one more disk would collide with the entropy device"
         );
     }
 }

@@ -1,6 +1,6 @@
 {
-  "kernel_version": "6.12.110",
-  "kernel_hash": "sha256-jO4Z4YObtv9NUlTXYZM65qtnBJLV7QMOCagFODINXEw=",
+  "kernel_version": "6.12.111",
+  "kernel_hash": "sha256-nlncZ2JBiPoSpmAflZhJnNZmKpBmvlcrWfk149eEmBA=",
   "embedded_rust": {
     "version": "1.91.1",
     "aarch64_unknown_linux_musl_hash": "sha256-W95G9gKLSyz+ogTZiIt93mYDG3eKuEtoXrUjQ1kpt7U=",

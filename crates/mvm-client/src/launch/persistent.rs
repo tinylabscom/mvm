@@ -158,7 +158,12 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
     // Through the client boundary: mvm-client owns the host name-registry reach
     // (load → deregister-stale → register → save), so the CLI stays off the
     // runtime crate's registry internals.
-    crate::register_machine(&crate::MachineRegistration::minimal(vm_name, network_name));
+    crate::register_machine(&crate::MachineRegistration {
+        vm_dir: mvm_core::config::vm_state_dir(vm_name)
+            .to_string_lossy()
+            .into_owned(),
+        ..crate::MachineRegistration::minimal(vm_name, network_name)
+    });
 }
 
 /// Admit and start a persistent machine. Returns the admitted plan the
@@ -337,6 +342,29 @@ mod persistent_oci_boot_tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn persistent_registration_records_the_runtime_directory() {
+        use mvm_runtime::vm::reconcile::{FsRuntimeView, RuntimeView};
+
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let vm_name = "persistent-registration";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        super::register_vm_name(vm_name, "default");
+
+        let registry =
+            mvm_runtime::vm::name_registry::VmNameRegistry::load(&crate::name_registry_path())
+                .unwrap();
+        let registration = registry.vms.get(vm_name).expect("registered machine");
+        assert_eq!(registration.vm_dir, state_dir.to_string_lossy());
+        let view = FsRuntimeView::new(home.path().join("vms"));
+        assert!(view.state_present(registration));
+    }
 
     #[test]
     fn machine_ports_lower_to_admitted_flowmux_ingress() {

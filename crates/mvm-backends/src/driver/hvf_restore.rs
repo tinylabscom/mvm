@@ -606,6 +606,7 @@ mod tests {
             rootfs_verity: None,
             config: None,
             secrets: None,
+            identity: None,
             vsock: PathBuf::from("/parent/hvf-agent.sock"),
         }
     }

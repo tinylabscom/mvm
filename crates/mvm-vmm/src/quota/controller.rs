@@ -226,8 +226,8 @@ mod tests {
     use super::*;
     use crate::quota::clock::ScriptedClock;
     use std::collections::HashMap;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
+    use std::sync::{Condvar, Mutex};
 
     #[derive(Clone, Copy)]
     struct MockHandle(u64);
@@ -242,6 +242,45 @@ mod tests {
     static MOCK_STATE: std::sync::LazyLock<Mutex<HashMap<u64, MockState>>> =
         std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone)]
+    struct ObservedClock {
+        inner: ScriptedClock,
+        reads: Arc<(Mutex<usize>, Condvar)>,
+    }
+
+    impl ObservedClock {
+        fn new(readings: Vec<Duration>) -> Self {
+            Self {
+                inner: ScriptedClock::new(readings),
+                reads: Arc::new((Mutex::new(0), Condvar::new())),
+            }
+        }
+
+        fn read_count(&self) -> usize {
+            self.inner.read_count()
+        }
+
+        fn wait_for_reads(&self, minimum: usize, timeout: Duration) -> bool {
+            let (lock, ready) = &*self.reads;
+            let observed = lock.lock().expect("observed clock read count lock");
+            let (observed, _) = ready
+                .wait_timeout_while(observed, timeout, |count| *count < minimum)
+                .expect("observed clock read count wait");
+            *observed >= minimum
+        }
+    }
+
+    impl ThreadCpuClock for ObservedClock {
+        fn consumed(&self) -> Duration {
+            let value = self.inner.consumed();
+            let (lock, ready) = &*self.reads;
+            let mut observed = lock.lock().expect("observed clock read count lock");
+            *observed += 1;
+            ready.notify_all();
+            value
+        }
+    }
 
     impl MockHandle {
         fn new() -> Self {
@@ -312,14 +351,17 @@ mod tests {
     fn the_controller_reads_the_clock_once_per_period() {
         let period = Duration::from_millis(10);
         let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
-        let clock = ScriptedClock::new(vec![Duration::from_millis(1); 100]);
+        let clock = ObservedClock::new(vec![Duration::from_millis(1); 100]);
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
         let quota =
             VcpuQuota::start_with_flag(vec![handle], clock.clone(), policy, Arc::clone(&flag));
 
-        std::thread::sleep(Duration::from_millis(55));
+        assert!(
+            clock.wait_for_reads(4, Duration::from_secs(5)),
+            "controller should complete several periods before the deadline"
+        );
         let achievement = quota.stop();
 
         assert_eq!(

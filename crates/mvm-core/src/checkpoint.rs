@@ -271,6 +271,9 @@ pub struct DeviceAnchors {
     /// Secrets drive, if attached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<std::path::PathBuf>,
+    /// Guest transport identity drive, if attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<std::path::PathBuf>,
     /// vsock UDS path.
     pub vsock: std::path::PathBuf,
 }
@@ -720,6 +723,18 @@ mod tests {
             serde_json::to_string(&CheckpointClass::VmFull).unwrap(),
             "\"vm_full\""
         );
+    }
+
+    #[test]
+    fn device_anchors_keep_identity_backward_compatible_and_roundtrip_it() {
+        let legacy = r#"{"rootfs":"/vms/p/rootfs.ext4","vsock":"/vms/p/runtime/v.sock"}"#;
+        let mut anchors: DeviceAnchors = serde_json::from_str(legacy).unwrap();
+        assert_eq!(anchors.identity, None);
+
+        anchors.identity = Some("/vms/p/flowmux-identity.ext4".into());
+        let encoded = serde_json::to_string(&anchors).unwrap();
+        let decoded: DeviceAnchors = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, anchors);
     }
 
     #[test]

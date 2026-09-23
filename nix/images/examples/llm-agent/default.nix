@@ -52,11 +52,12 @@ in
     export DISABLE_ERROR_REPORTING=1
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
-    if [ "''${MVM_AGENT_SMOKE:-}" = "1" ]; then
+    input="$(${pkgs.coreutils}/bin/cat)"
+    if [ "$input" = "mvm-agent-smoke" ]; then
       echo "agent-workload smoke: placeholder-present"
       exec ${claudeCode}/bin/claude --version
     fi
 
-    exec ${claudeCode}/bin/claude --bare -p "$@"
+    printf '%s' "$input" | ${claudeCode}/bin/claude --bare -p "$@"
   '';
 }

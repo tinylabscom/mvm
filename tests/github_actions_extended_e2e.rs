@@ -49,7 +49,8 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
         "the live warm-claim process must have mount-namespace privilege, not only /dev/kvm access"
     );
     assert!(
-        job.contains("env \"PATH=$PATH\""),
+        job.contains("env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS")
+            && job.contains("\"PATH=$PATH\""),
         "the privileged recipe must restore the provisioned runner PATH for cargo and rustc"
     );
     assert!(

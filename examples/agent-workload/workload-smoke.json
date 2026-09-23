@@ -20,7 +20,6 @@
         "rootfs_size_mb": 4096
       },
       "env": {
-        "MVM_AGENT_SMOKE": { "kind": "literal", "value": "1" },
         "ANTHROPIC_API_KEY": {
           "kind": "secret_ref",
           "ref": {

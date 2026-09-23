@@ -59,6 +59,7 @@ use std::path::Path;
 /// ARCH_HAS_PTDUMP and adds MHP_DEFAULT_ONLINE_TYPE_OFFLINE, the explicit
 /// default for the already-enabled memory-hotplug family. The replacement is
 /// count-neutral and the new default raises aarch64 to 960; x86_64 remains 917.
+/// Linux 6.12.111 leaves the resolved aarch64 count unchanged at 960.
 const BUDGET_AARCH64: usize = 960;
 const BUDGET_X86_64: usize = 917;
 

@@ -153,6 +153,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
         rootfs_verity: None,
         config: None,
         secrets: None,
+        identity: None,
         vsock: PathBuf::from("/parent/state/hvf-agent.sock"),
     };
     let child = hvf_child_restore_config(

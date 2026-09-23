@@ -607,6 +607,23 @@ mod tests {
     }
 
     #[test]
+    fn elevated_warm_claim_does_not_inherit_another_users_session_bus() {
+        let workflow = ci_full_workflow();
+        let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
+        let sudo = warm_claim
+            .find("sudo --preserve-env=")
+            .expect("warm claim must cross the privilege boundary");
+        let recipe = warm_claim
+            .find("bdd-live-warm-claim")
+            .expect("warm claim recipe must run");
+        let invocation = &warm_claim[sudo..recipe];
+        assert!(
+            invocation.contains("env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS"),
+            "root must not inherit the runner user's systemd/DBus session"
+        );
+    }
+
+    #[test]
     fn working_directories_are_unquoted() {
         let src = "    working-directory: crates/mvm-agentd\n  working-directory: \"crates/x\"\n";
         assert_eq!(

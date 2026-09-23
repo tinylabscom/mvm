@@ -84,7 +84,7 @@ fn store_agent_workload_smoke_secret(_world: &mut CliWorld) {
 fn run_agent_workload_example(world: &mut CliWorld, args: String) {
     world.last_run = Some(run_agent_command(
         mvm_conformance::doc_examples::tokenize(&args),
-        Some(b""),
+        Some(b"mvm-agent-smoke"),
     ));
 }
 
