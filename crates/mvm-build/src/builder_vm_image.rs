@@ -3,6 +3,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -11,6 +12,27 @@ use crate::builder_vm::{
     BUILDER_VM_CACHE_CONTRACT_VERSION, BuilderVmError, BuilderVmImage, builder_vm_cache_dir,
     host_arch_tag, stage0_store_image_name_for,
 };
+
+type SourceFingerprintResolver = fn(&Path) -> Result<Option<String>, String>;
+
+static SOURCE_FINGERPRINT_RESOLVER: OnceLock<SourceFingerprintResolver> = OnceLock::new();
+
+/// Register the CLI-owned resolver for the source fingerprint embedded into
+/// the builder image.
+///
+/// `mvm-build` owns cache loading but cannot see `mvmctl`'s embedded host
+/// binary table. The CLI owns that table and the Stage 0 fingerprint function,
+/// so it supplies the exact same answer here rather than letting the loader
+/// grow a second, drifting fingerprint implementation.
+pub fn register_source_fingerprint_resolver(resolver: SourceFingerprintResolver) {
+    let _ = SOURCE_FINGERPRINT_RESOLVER.set(resolver);
+}
+
+enum SourceCheckoutFreshness {
+    NotApplicable,
+    Fingerprint(String),
+    BootstrapPreflight,
+}
 
 #[derive(Debug, Deserialize)]
 struct BuilderVmCacheManifest {
@@ -108,6 +130,38 @@ fn load_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
     ))
 }
 
+fn validate_source_fingerprint(
+    arch_dir: &Path,
+    expected_fingerprint: Option<&str>,
+) -> Result<(), BuilderVmError> {
+    let Some(expected) = expected_fingerprint else {
+        return Ok(());
+    };
+    let path = arch_dir.join(crate::cache_install::BUILDER_VM_SOURCE_FINGERPRINT_FILE);
+    let actual = std::fs::read_to_string(&path).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "builder VM cache at {} is stale: source fingerprint {} is missing or unreadable ({error})",
+            arch_dir.display(),
+            path.display(),
+        ))
+    })?;
+    if actual.trim() != expected {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "builder VM cache at {} is stale: source fingerprint does not match this source checkout and its embedded host binaries",
+            arch_dir.display(),
+        )));
+    }
+    Ok(())
+}
+
+fn load_from_cache_for_source(
+    arch_dir: &Path,
+    expected_fingerprint: Option<&str>,
+) -> Result<BuilderVmImage, BuilderVmError> {
+    validate_source_fingerprint(arch_dir, expected_fingerprint)?;
+    load_from_cache(arch_dir)
+}
+
 fn default_cache_dir() -> PathBuf {
     crate::cache_install::default_cache_root().join("builder-vm")
 }
@@ -126,6 +180,12 @@ fn shared_cache_is_trustworthy(source: &Path) -> bool {
             false
         }
     }
+}
+
+fn shared_cache_source(source: &Path, expected_fingerprint: Option<&str>) -> Option<PathBuf> {
+    validate_cache(source).ok()?;
+    validate_source_fingerprint(source, expected_fingerprint).ok()?;
+    shared_cache_is_trustworthy(source).then(|| source.to_path_buf())
 }
 
 fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
@@ -152,33 +212,86 @@ fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
     Ok(())
 }
 
-fn seed_from_default_cache(target: &Path) -> Result<bool, BuilderVmError> {
+fn seed_from_default_cache(
+    target: &Path,
+    expected_fingerprint: Option<&str>,
+) -> Result<bool, BuilderVmError> {
     crate::cache_install::seed_on_miss(
         &builder_vm_cache_dir().join(host_arch_tag()),
         &default_cache_dir().join(host_arch_tag()),
-        |source| {
-            validate_cache(source).ok()?;
-            shared_cache_is_trustworthy(source).then(|| source.to_path_buf())
-        },
+        |source| shared_cache_source(source, expected_fingerprint),
         |source| copy_cache(&source, target),
     )
+}
+
+fn source_checkout_freshness() -> Result<SourceCheckoutFreshness, BuilderVmError> {
+    let Some(workspace_root) = builder_vm_source_checkout_root() else {
+        return Ok(SourceCheckoutFreshness::NotApplicable);
+    };
+    let Some(resolver) = SOURCE_FINGERPRINT_RESOLVER.get() else {
+        // Library embedders do not own mvmctl's embedded host-binary table and
+        // keep the pre-existing cache contract. The CLI always registers.
+        return Ok(SourceCheckoutFreshness::NotApplicable);
+    };
+    resolver(&workspace_root)
+        .map(|fingerprint| match fingerprint {
+            Some(fingerprint) => SourceCheckoutFreshness::Fingerprint(fingerprint),
+            // An ordinary contributor binary has no embedded payload from
+            // which to derive the authoritative identity. Its bootstrap helper
+            // does, so let that helper run the canonical readiness decision.
+            None => SourceCheckoutFreshness::BootstrapPreflight,
+        })
+        .map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!(
+                "compute current builder VM source fingerprint: {error}"
+            ))
+        })
+}
+
+fn ensure_builder_vm_image_for_source(
+    expected_fingerprint: Option<&str>,
+) -> Result<BuilderVmImage, BuilderVmError> {
+    let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
+    match load_from_cache_for_source(&arch_dir, expected_fingerprint) {
+        Ok(image) => Ok(image),
+        Err(initial_error) => {
+            if seed_from_default_cache(&arch_dir, expected_fingerprint)? {
+                return load_from_cache_for_source(&arch_dir, expected_fingerprint);
+            }
+            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
+                return Err(initial_error);
+            }
+            load_from_cache_for_source(&arch_dir, expected_fingerprint)
+        }
+    }
+}
+
+fn load_after_source_preflight(
+    arch_dir: &Path,
+    bootstrap: impl FnOnce(&Path) -> Result<bool, BuilderVmError>,
+) -> Result<BuilderVmImage, BuilderVmError> {
+    if !bootstrap(arch_dir)? {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "builder VM source-checkout freshness preflight was declined for {}; refusing to load a cache whose source and embedded host-binary identity was not verified",
+            arch_dir.display(),
+        )));
+    }
+    load_from_cache(arch_dir)
 }
 
 /// Find the current builder image in the configured cache, seeding or
 /// bootstrapping it on a cache miss.
 pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
     let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
-    match load_from_cache(&arch_dir) {
-        Ok(image) => Ok(image),
-        Err(initial_error) => {
-            if seed_from_default_cache(&arch_dir)? {
-                return load_from_cache(&arch_dir);
-            }
-            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
-                return Err(initial_error);
-            }
-            load_from_cache(&arch_dir)
+    match source_checkout_freshness()? {
+        SourceCheckoutFreshness::NotApplicable => ensure_builder_vm_image_for_source(None),
+        SourceCheckoutFreshness::Fingerprint(fingerprint) => {
+            ensure_builder_vm_image_for_source(Some(&fingerprint))
         }
+        SourceCheckoutFreshness::BootstrapPreflight => load_after_source_preflight(
+            &arch_dir,
+            crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image,
+        ),
     }
 }
 
@@ -383,6 +496,90 @@ pub fn unique_job_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_test_cache(dir: &Path, source_fingerprint: Option<&str>) {
+        std::fs::create_dir_all(dir).expect("create cache");
+        std::fs::write(dir.join("vmlinux"), b"kernel").expect("write kernel");
+        std::fs::write(dir.join("rootfs.ext4"), b"rootfs").expect("write rootfs");
+        std::fs::write(
+            dir.join("cmdline.txt"),
+            b"console=hvc0 init=/sbin/mvm-host-vm-init\n",
+        )
+        .expect("write cmdline");
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(
+                "{{\"cache_contract_version\":{BUILDER_VM_CACHE_CONTRACT_VERSION},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}"
+            ),
+        )
+        .expect("write manifest");
+        if let Some(fingerprint) = source_fingerprint {
+            std::fs::write(
+                dir.join(crate::cache_install::BUILDER_VM_SOURCE_FINGERPRINT_FILE),
+                format!("{fingerprint}\n"),
+            )
+            .expect("write source fingerprint");
+        }
+    }
+
+    #[test]
+    fn source_checkout_cache_requires_its_current_fingerprint() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path(), Some("old-source-and-host-binaries"));
+
+        let error =
+            load_from_cache_for_source(cache.path(), Some("current-source-and-host-binaries"))
+                .expect_err("a source checkout must not boot an old builder image");
+
+        assert!(format!("{error}").contains("source fingerprint"), "{error}");
+    }
+
+    #[test]
+    fn source_checkout_cache_requires_a_fingerprint_marker() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path(), None);
+
+        let error =
+            load_from_cache_for_source(cache.path(), Some("current-source-and-host-binaries"))
+                .expect_err("a source checkout must not boot an unversioned builder image");
+
+        assert!(
+            format!("{error}").contains("missing or unreadable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn shared_cache_seed_requires_the_current_source_fingerprint() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path(), Some("old-source-and-host-binaries"));
+
+        assert!(
+            shared_cache_source(cache.path(), Some("current-source-and-host-binaries")).is_none(),
+            "an isolated source checkout must not seed an old shared image"
+        );
+    }
+
+    #[test]
+    fn release_cache_does_not_require_a_source_fingerprint() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path(), None);
+
+        load_from_cache_for_source(cache.path(), None)
+            .expect("a release binary has no source checkout to compare");
+        assert!(shared_cache_source(cache.path(), None).is_some());
+    }
+
+    #[test]
+    fn declined_source_checkout_preflight_cannot_load_an_unverified_cache() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path(), Some("old-source-and-host-binaries"));
+
+        let error = load_after_source_preflight(cache.path(), |_| Ok(false))
+            .expect_err("a declined helper preflight must fail closed");
+
+        assert!(format!("{error}").contains("preflight"), "{error}");
+    }
 
     #[test]
     fn job_id_uses_one_shared_timestamp_pid_shape() {

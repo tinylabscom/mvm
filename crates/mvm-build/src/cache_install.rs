@@ -64,6 +64,10 @@ pub(crate) fn seed_on_miss<S, E>(
 
 /// The `sha256sum`-format sidecar covering [`BUILDER_VM_CACHE_ARTIFACTS`].
 pub const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
+/// Source-checkout fingerprint recorded beside a locally built builder image.
+pub const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
+/// Provenance record describing how a builder image entered the cache.
+pub const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 
 /// The artifacts a builder-VM cache directory must carry, and which the digest
 /// sidecar commits to.
@@ -81,8 +85,8 @@ pub const BUILDER_VM_CACHE_ARTIFACTS: &[&str] =
 /// readiness check recognises the seeded copy instead of rebuilding over it.
 pub const BUILDER_VM_CACHE_SIDECARS: &[&str] = &[
     BUILDER_VM_ARTIFACT_DIGEST_FILE,
-    ".mvm-provenance.json",
-    ".mvm-source.sha256",
+    BUILDER_VM_PROVENANCE_FILE,
+    BUILDER_VM_SOURCE_FINGERPRINT_FILE,
 ];
 
 /// Recompute the `sha256sum`-format manifest covering `names` in `dir`.
