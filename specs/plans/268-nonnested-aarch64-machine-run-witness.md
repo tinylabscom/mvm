@@ -137,9 +137,10 @@ hardware.
 
 - [ ] Confirm `uname -m` is `aarch64` and `/dev/kvm` is openable read-write
       (join group `kvm`, or `chmod 666 /dev/kvm` on a throwaway box).
-- [ ] Install **Firecracker v1.14.1** — mvmctl's `FC_VERSION_DEFAULT`. Older
-      builds reject the `--enable-pci` argument mvmctl passes and exit 153
-      before the kernel loads.
+- [ ] Install **Firecracker v1.17.0** — mvmctl's `FC_VERSION_DEFAULT`. The
+      launch path leaves virtio devices on Firecracker's portable MMIO
+      transport instead of forcing PCI, so both GICv2 and GICv3 hosts can boot
+      the same device model.
 - [ ] Confirm no Rust and no Nix are needed: binaries and the bundle are copied in.
 
 ### 3. Carry the artifacts over

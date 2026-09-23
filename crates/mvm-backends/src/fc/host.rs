@@ -852,7 +852,8 @@ mod tests {
             "firecracker",
             "--api-sock",
             "/state/vms/vm-a/fc.socket",
-            "--enable-pci",
+            "--level",
+            "Debug",
         ]);
         assert!(identity_from(spawned, mine).unwrap());
         let equals = firecracker(&["firecracker", "--api-sock=/state/vms/vm-a/fc.socket"]);

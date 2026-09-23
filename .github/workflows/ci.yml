@@ -1123,10 +1123,8 @@ jobs:
       # like a latency regression when it is not. And the boot image train, not
       # the CLI train — `v0.18.0` was a workspace version bump, never a cut
       # release, so this lane once 404'd on an asset nobody had published.
-      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
-      # launch path passes `--enable-pci`, which older Firecracker rejects
-      # outright: it exits before creating its API socket, and the only symptom
-      # is a socket-wait timeout that says nothing about the cause.
+      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT` so this
+      # merge-queue witness exercises the same VMM release as product boots.
       FC_VERSION: v1.17.0
     steps:
       - uses: actions/checkout@v6
