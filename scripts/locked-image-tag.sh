@@ -1,7 +1,7 @@
 #!/bin/sh
 # Print a release tag pinned by `crates/mvm-core/images.lock`.
 #
-# Usage: scripts/locked-image-tag.sh [boot_image|stage0_kernel]
+# Usage: scripts/locked-image-tag.sh [image_set|boot_image|stage0_kernel] [field]
 #
 # The Rust side reads the same file through
 # `mvm_core::image_set::image_train_lock()`, and `xtask release-boot-image tag`
@@ -14,7 +14,8 @@
 
 set -eu
 
-section="${1:-boot_image}"
+section="${1:-image_set}"
+field="${2:-release_tag}"
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 lock="$root/crates/mvm-core/images.lock"
 
@@ -23,11 +24,25 @@ if [ ! -f "$lock" ]; then
   exit 1
 fi
 
-tag=$(sed -n "/^\\[$section\\]/,/^\\[/ s/^release_tag[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+case "$field" in
+  repository)
+    value=$(sed -n 's/^repository[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$lock" | head -n 1)
+    ;;
+  workflow|tag_ref)
+    value=$(sed -n "/^\\[$section.signing_identity\\]/,/^\\[/ s/^$field[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+    ;;
+  release_tag|manifest_asset|manifest_sha256)
+    value=$(sed -n "/^\\[$section\\]/,/^\\[/ s/^$field[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+    ;;
+  *)
+    echo "locked-image-tag: unsupported field $field" >&2
+    exit 1
+    ;;
+esac
 
-if [ -z "$tag" ]; then
-  echo "locked-image-tag: images.lock pins no release_tag under [$section]" >&2
+if [ -z "$value" ]; then
+  echo "locked-image-tag: images.lock pins no $field under [$section]" >&2
   exit 1
 fi
 
-printf '%s\n' "$tag"
+printf '%s\n' "$value"

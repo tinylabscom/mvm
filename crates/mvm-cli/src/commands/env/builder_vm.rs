@@ -33,11 +33,10 @@ mod vm_helpers;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
+#[cfg(test)]
 use super::artifact_verify::bump_verify_outcome;
-use super::artifact_verify::{
-    ChecksumManifest, download_file, fetch_expected_hashes, verify_artifact_hash,
-};
+#[cfg(test)]
+use super::artifact_verify::{ChecksumManifest, verify_artifact_hash};
 use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
@@ -45,6 +44,10 @@ pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 #[cfg(feature = "builder-vm")]
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
 pub(crate) use bootstrap::selected_local_checkout;
+
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+pub(super) const SYNTHESIZED_BUILDER_VM_CMDLINE: &str = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 \
+     loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n";
 
 /// Run `f` with the launch-time pair artifact source when a checkout is
 /// selected, or `None` when the selector is unset. The build closure runs
@@ -118,9 +121,7 @@ pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
 };
 #[cfg(test)]
-use default_microvm::{
-    default_microvm_assets, evict_incompatible_workload_kernel, missing_workload_kernel_message,
-};
+use default_microvm::{evict_incompatible_workload_kernel, missing_workload_kernel_message};
 use image_ops::validate_dev_image_artifacts;
 #[cfg(feature = "builder-vm")]
 use image_ops::verify_stage0_rootfs_has_init;

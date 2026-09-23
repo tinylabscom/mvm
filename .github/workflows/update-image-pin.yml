@@ -1,0 +1,155 @@
+name: Propose image-set pin update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Verify newest complete image set
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_REPOSITORY: tinylabscom/mvm-images
+        run: |
+          set -euo pipefail
+          tag="$(gh api "/repos/${IMAGE_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[].tag_name | select(test("^image-set/v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first')"
+          test -n "$tag"
+          mkdir candidate
+          gh release download "$tag" --repo "$IMAGE_REPOSITORY" \
+            --pattern 'image-set.json*' --dir candidate
+          cosign verify-blob \
+            --bundle candidate/image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPOSITORY}/.github/workflows/release.yml@refs/tags/${tag}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            candidate/image-set.json
+          jq -e '
+            .schema_version == 2 and
+            .producer.repository == "tinylabscom/mvm-images" and
+            .producer.workflow == ".github/workflows/release.yml" and
+            .producer.release_tag == $tag and
+            .compatibility.guest_agent_protocol.min <= 2 and
+            .compatibility.guest_agent_protocol.max >= 2 and
+            .compatibility.builder_cache_contract == 4
+          ' --arg tag "$tag" candidate/image-set.json >/dev/null
+          digest="$(sha256sum candidate/image-set.json | cut -d' ' -f1)"
+          {
+            echo "tag=$tag"
+            echo "digest=$digest"
+            echo "source_commit=$(jq -r .mvm_source_commit candidate/image-set.json)"
+            echo "protocol=$(jq -c .compatibility candidate/image-set.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update the single image lock
+        env:
+          NEW_TAG: ${{ steps.image.outputs.tag }}
+          NEW_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+
+          path = pathlib.Path("crates/mvm-core/images.lock")
+          text = path.read_text()
+          manifest = json.loads(pathlib.Path("candidate/image-set.json").read_text())
+          tag = os.environ["NEW_TAG"]
+          digest = os.environ["NEW_DIGEST"]
+
+          def section(name, body):
+              global text
+              pattern = rf"(?ms)(^\[{re.escape(name)}\]\n)(.*?)(?=^\[|\Z)"
+              match = re.search(pattern, text)
+              if not match:
+                  raise SystemExit(f"missing [{name}] in images.lock")
+              updated = body(match.group(2))
+              text = text[:match.start(2)] + updated + text[match.end(2):]
+
+          def set_value(body, key, value):
+              return re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', f'{key} = {value}', body)
+
+          def image_set(body):
+              body = set_value(body, "release_tag", json.dumps(tag))
+              return set_value(body, "manifest_sha256", json.dumps(digest))
+          section("image_set", image_set)
+          section("image_set.signing_identity", lambda body: set_value(body, "tag_ref", json.dumps(f"refs/tags/{tag}")))
+          section("boot_image", lambda body: set_value(body, "release_tag", json.dumps(tag)))
+
+          compatibility = manifest["compatibility"]
+          def compat(body):
+              body = set_value(body, "guest_agent_protocol", "{ min = %d, max = %d }" % (
+                  compatibility["guest_agent_protocol"]["min"],
+                  compatibility["guest_agent_protocol"]["max"],
+              ))
+              return set_value(body, "builder_cache_contract", str(compatibility["builder_cache_contract"]))
+          section("compatibility", compat)
+
+          stage0 = {}
+          for member in manifest["members"]:
+              if member["role"] == "stage0_bootstrap_kernel":
+                  artifact = member["artifacts"][0]
+                  stage0[member["target"]["arch"]] = artifact
+          def kernel(arch):
+              def update(body):
+                  artifact = stage0[arch]
+                  body = set_value(body, "release_tag", json.dumps(tag))
+                  body = set_value(body, "asset", json.dumps(artifact["name"]))
+                  return set_value(body, "sha256", json.dumps(artifact["sha256"]))
+              return update
+          section("stage0_kernel.aarch64", kernel("aarch64"))
+          section("stage0_kernel.x86_64", kernel("x86_64"))
+          path.write_text(text)
+          PY
+
+      - name: Open an evidence-bearing pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.image.outputs.tag }}
+          NEW_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_COMMIT: ${{ steps.image.outputs.source_commit }}
+          PROTOCOL: ${{ steps.image.outputs.protocol }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/mvm-core/images.lock; then
+            echo "images.lock already pins ${NEW_TAG} (${NEW_DIGEST})"
+            exit 0
+          fi
+          safe_tag="${NEW_TAG//\//-}"
+          branch="chore/image-pin-${safe_tag}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add crates/mvm-core/images.lock
+          git commit -m "chore: propose ${NEW_TAG} image set"
+          git push --force-with-lease origin "$branch"
+          body="$(cat <<EOF
+          Updates the single consumer lock to the newest publisher release.
+
+          Verification evidence:
+          - release: \`${NEW_TAG}\`
+          - root manifest SHA-256: \`${NEW_DIGEST}\`
+          - producer source commit: \`${SOURCE_COMMIT}\`
+          - compatibility: \`${PROTOCOL}\`
+          - keyless signature: verified against the exact mvm-images release workflow and tag identity
+          - merge policy: this workflow only opens or updates a PR; repository review and merge-queue checks remain mandatory
+          EOF
+          )"
+          existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$body"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "chore: propose ${NEW_TAG} image set" --body "$body"
+          fi

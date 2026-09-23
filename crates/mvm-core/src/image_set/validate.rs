@@ -343,7 +343,18 @@ pub fn check_protocol_compatibility(
     manifest: &ImageSetManifest,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    let declared = &manifest.compatibility;
+    check_declared_protocol_compatibility(&manifest.compatibility, host)
+}
+
+/// Refuse a compatibility declaration the host cannot speak.
+///
+/// The checked-in lock copies this declaration from its signed manifest so a
+/// bootstrap-only consumer can run the same check before it has downloaded
+/// even the root manifest.
+pub fn check_declared_protocol_compatibility(
+    declared: &super::ImageSetCompatibility,
+    host: &HostProtocolSupport,
+) -> Result<(), ImageSetError> {
     if !declared
         .guest_agent_protocol
         .overlaps(host.guest_agent_protocol)

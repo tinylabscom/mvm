@@ -833,16 +833,27 @@ Delivery slices, one PR each:
 
 ### W6 — Publish from `mvm-images` and migrate consumer trust (#3369)
 
-- [ ] Publish a complete candidate image set from the protected image workflow.
-- [ ] Update verifier identities and revocation URLs through an explicit
+- [x] Publish a complete candidate image set from the protected image workflow.
+- [x] Update verifier identities and revocation URLs through an explicit
       old-plus-new trust window.
-- [ ] Refuse an image set whose protocol range does not overlap the host's
+- [x] Refuse an image set whose protocol range does not overlap the host's
       before acquisition, on every path that consumes one (carried from W3).
-- [ ] Update Stage 0 kernel acquisition, default-image resolution, image update
+- [x] Update Stage 0 kernel acquisition, default-image resolution, image update
       commands, CI downloads, and WebLinux consumers to the lock file.
 - [ ] Boot every pack through its intended backend before advancing the pin.
-- [ ] Add a bot or workflow that opens, but never auto-merges, an `mvm` pin
+- [x] Add a bot or workflow that opens, but never auto-merges, an `mvm` pin
       update with manifest/compatibility evidence.
+
+Published pin: `tinylabscom/mvm-images` `image-set/v0.1.0`, root digest
+`9bb4f0bf01895b9ebda51f6f574cfa2902ae79e1bb4404c4665942aa4ecbf2ff`,
+signed by the exact `mvm-images/.github/workflows/release.yml` tag identity.
+The previous `mvm` boot-image publisher remains explicit in the lock; removal
+belongs to W7/W8. Local verification covers identity/digest refusals,
+compatibility-before-download, the single-lock routes, and the no-auto-merge
+workflow invariant. The producer manifest declares the HTTPS revocation
+channel, but the producer still needs to publish that channel's first document.
+Physical Apple Silicon HVF and Linux KVM/Firecracker boot evidence remains the
+unchecked live-boot item below.
 
 Acceptance: a clean machine installs `mvm`, downloads only from `mvm-images`,
 verifies the new identity and digest, and boots on Linux/Firecracker and

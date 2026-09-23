@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use super::cache;
-use crate::update::{BootImageVersion, fetch_latest_boot_image_tag};
+use crate::update::BootImageVersion;
 
 /// Every answer the comparison can give, including the two that are neither
 /// "behind" nor "current". Collapsing either of those into one of the other
@@ -54,17 +54,17 @@ impl CheckVerdict {
                 crate::update::BOOT_IMAGE_TAG_PREFIX
             ),
             CheckVerdict::NoCachedTag { latest } => format!(
-                "Latest published boot image is {latest}; the cache records no image tag, \
+                "This build locks image set {latest}; the cache records no image tag, \
                  so there is nothing to compare. A locally built image records none."
             ),
             CheckVerdict::UpToDate { cached } => {
-                format!("Cached boot image {cached} is the latest published.")
+                format!("Cached boot image {cached} matches this build's lock.")
             }
             CheckVerdict::Behind { cached, latest } => {
-                format!("Cached boot image {cached} is behind {latest}.")
+                format!("Cached boot image {cached} is behind locked image set {latest}.")
             }
             CheckVerdict::Ahead { cached, latest } => {
-                format!("Cached boot image {cached} is newer than the latest published {latest}.")
+                format!("Cached boot image {cached} is newer than this build's lock {latest}.")
             }
         }
     }
@@ -112,7 +112,13 @@ pub(super) fn cached_tag() -> Option<String> {
 }
 
 pub(super) fn run(json_output: bool) -> Result<()> {
-    let latest = fetch_latest_boot_image_tag()?;
+    let latest = Some(
+        mvm_core::image_set::image_train_lock()
+            .image_set
+            .release_tag
+            .as_str()
+            .to_string(),
+    );
     let cached = cached_tag();
     let verdict = verdict(cached.as_deref(), latest.as_deref());
 
@@ -122,7 +128,7 @@ pub(super) fn run(json_output: bool) -> Result<()> {
             serde_json::to_string_pretty(&json!({
                 "status": verdict.label(),
                 "cached_tag": cached,
-                "latest_tag": latest,
+                "locked_tag": latest,
                 "message": verdict.message(),
             }))?
         );
@@ -136,7 +142,9 @@ pub(super) fn run(json_output: bool) -> Result<()> {
     // a script. Every other arm — including no published line at all — exits
     // clean so a fresh install does not fail a pipeline.
     if let CheckVerdict::Behind { cached, latest } = &verdict {
-        bail!("boot image {cached} is behind {latest}; run `mvmctl image boot update`");
+        bail!(
+            "boot image {cached} is behind locked image set {latest}; run `mvmctl image boot update`"
+        );
     }
     Ok(())
 }

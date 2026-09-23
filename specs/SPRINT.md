@@ -588,6 +588,15 @@ docs commit went out as #3581). Under the
       installs distinguish the profiles; image construction remains entirely
       in `mvm-images`. Neither profile has a NIC or packet-network fallback;
       external traffic remains FlowMux over vsock.
+      W6 (#3369) local migration: `image-set/v0.1.0` from
+      `tinylabscom/mvm-images` is pinned by its signed-root digest and exact
+      release-workflow identity. Stage 0, builder/default image acquisition,
+      workload kernels, image update/check, CI and WebLinux all resolve the
+      one lock and refuse incompatible protocols before member downloads. The
+      legacy `mvm` identity remains explicit for the compatibility window. A
+      scheduled/manual workflow verifies a candidate and opens an
+      evidence-bearing PR without auto-merge. Producer revocation publication
+      and physical HVF/KVM live boots remain external acceptance work.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

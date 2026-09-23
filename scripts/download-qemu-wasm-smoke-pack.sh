@@ -17,9 +17,18 @@ OUTPUT_DIR="${1:-$ROOT_DIR/qemu-wasm-smoke-pack}"
 # Default to the locked pin rather than the newest published release: which
 # bytes this pack is built from must be a property of the tree, not of whoever
 # cut an image most recently.
-TAG="${2:-$("$SCRIPT_DIR/locked-image-tag.sh")}"
+LOCKED_TAG="$("$SCRIPT_DIR/locked-image-tag.sh")"
+TAG="${2:-$LOCKED_TAG}"
+if [ "$TAG" != "$LOCKED_TAG" ]; then
+  echo "ERROR: requested image set '$TAG' is not the lock's '$LOCKED_TAG'" >&2
+  exit 1
+fi
 
-REPO="${GITHUB_REPOSITORY:-tinylabscom/mvm}"
+REPO="$("$SCRIPT_DIR/locked-image-tag.sh" image_set repository)"
+MANIFEST="$("$SCRIPT_DIR/locked-image-tag.sh" image_set manifest_asset)"
+MANIFEST_SHA256="$("$SCRIPT_DIR/locked-image-tag.sh" image_set manifest_sha256)"
+WORKFLOW="$("$SCRIPT_DIR/locked-image-tag.sh" image_set workflow)"
+TAG_REF="$("$SCRIPT_DIR/locked-image-tag.sh" image_set tag_ref)"
 
 echo "=== Downloading qemu-wasm-smoke-pack ==="
 echo "Output directory: $OUTPUT_DIR"
@@ -53,22 +62,33 @@ if ! printf '%s\n' "$ASSETS" | grep -qxF 'qemu-wasm-smoke-pack.tar.gz'; then
   exit 1
 fi
 
-# Download the pack
 DOWNLOAD_DIR=$(mktemp -d)
 trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
 
-echo "Downloading qemu-wasm-smoke-pack from $TAG..."
-gh release download "$TAG" --repo "$REPO" --pattern 'qemu-wasm-smoke-pack.tar.gz*' --dir "$DOWNLOAD_DIR"
+gh release download "$TAG" --repo "$REPO" --pattern "$MANIFEST*" --dir "$DOWNLOAD_DIR"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$DOWNLOAD_DIR/$MANIFEST" | sha256sum -c -
+cosign verify-blob \
+  --bundle "$DOWNLOAD_DIR/$MANIFEST.bundle" \
+  --certificate-identity "https://github.com/$REPO/$WORKFLOW@$TAG_REF" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$DOWNLOAD_DIR/$MANIFEST"
 
-# Verify checksum
-if [ -f "$DOWNLOAD_DIR/qemu-wasm-smoke-pack.tar.gz.sha256" ]; then
-  echo "Verifying checksum..."
-  cd "$DOWNLOAD_DIR"
-  sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256
-  cd "$ROOT_DIR"
-else
-  echo "WARNING: No checksum file found, skipping verification"
-fi
+# Compatibility is established before the member is requested.
+jq -e '
+  .compatibility.guest_agent_protocol.min <= 2 and
+  .compatibility.guest_agent_protocol.max >= 2 and
+  .compatibility.builder_cache_contract == 4
+' "$DOWNLOAD_DIR/$MANIFEST" >/dev/null
+
+echo "Downloading qemu-wasm-smoke-pack from $TAG..."
+gh release download "$TAG" --repo "$REPO" --pattern 'qemu-wasm-smoke-pack.tar.gz' --dir "$DOWNLOAD_DIR"
+jq -r '
+  .members[] | select(.role == "qemu_wasm_smoke_pack") | .artifacts[] |
+  select(.name == "qemu-wasm-smoke-pack.tar.gz") |
+  "\(.sha256)  qemu-wasm-smoke-pack.tar.gz"
+' "$DOWNLOAD_DIR/$MANIFEST" > "$DOWNLOAD_DIR/expected.txt"
+test -s "$DOWNLOAD_DIR/expected.txt"
+(cd "$DOWNLOAD_DIR" && sha256sum -c expected.txt)
 
 # Extract to output directory
 echo "Extracting to $OUTPUT_DIR..."

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -135,10 +135,11 @@ fn download_release_asset(url: &str, dest: &Path) -> Result<()> {
 ///
 /// The bare semver is what `release_trust`'s boot image identity template
 /// interpolates, so it is derived here rather than re-split at each call site.
+#[cfg(test)]
 pub(crate) fn boot_image_release() -> Result<(String, String)> {
     let tag = mvm_core::config::default_boot_image_tag();
     let version = tag.rsplit_once("/v").map(|(_, v)| v).with_context(|| {
-        format!("boot image tag {tag:?} is not of the form `boot-image/v<semver>`")
+        format!("image set tag {tag:?} is not of the form `image-set/v<semver>`")
     })?;
     Ok((tag.to_string(), version.to_string()))
 }
@@ -165,29 +166,6 @@ fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String
         format!("{image}-vmlinux-{arch}"),
         format!("{image}-{arch}-checksums-sha256.txt"),
     ))
-}
-
-fn fetch_signed_checksum_manifest(
-    base_url: &str,
-    asset: &str,
-    version: &str,
-    train: mvm_build::release_signature::ReleaseTrain,
-) -> Result<String> {
-    let staged = tempfile::NamedTempFile::new()
-        .with_context(|| format!("creating staging file for {asset}"))?;
-    download_release_asset(&format!("{base_url}/{asset}"), staged.path())
-        .with_context(|| format!("downloading {asset} — cannot verify integrity"))?;
-    mvm_build::release_signature::verify_release_archive_signature(
-        &mvm_build::release_signature::ReleaseSignatureRequest {
-            base_url,
-            asset,
-            archive_path: staged.path(),
-            version,
-            train,
-        },
-    )
-    .with_context(|| format!("refusing to parse an unauthenticated checksum manifest ({asset})"))?;
-    std::fs::read_to_string(staged.path()).with_context(|| format!("reading {asset}"))
 }
 
 /// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
@@ -294,26 +272,6 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// Whether a release with this tag exists at all.
 ///
 /// Only ever called on the error path, so the extra request costs nothing in
-/// the success case. An unreachable or rate-limited API answers `true`: the
-/// point of the probe is to *sharpen* a message, and guessing "no release"
-/// from a failed lookup would state something false with more confidence than
-/// the vaguer wording it replaced.
-fn release_exists(tag: &str) -> bool {
-    let url = format!(
-        "{}/repos/{}/releases/tags/{}",
-        github_api_base(),
-        GITHUB_REPO,
-        tag
-    );
-    match http::fetch_json(&url) {
-        Ok(v) => v.get("tag_name").is_some(),
-        // Distinguishing "404, no such release" from "the network is down"
-        // would need a status code this helper does not get. Both land here,
-        // and both are better served by the asset-missing wording.
-        Err(_) => true,
-    }
-}
-
 /// The advice to print when a kernel download 404s.
 ///
 /// A missing asset and a missing release are the same HTTP status and
@@ -321,6 +279,7 @@ fn release_exists(tag: &str) -> bool {
 /// crate version runs ahead of the last tag, by construction — and telling
 /// that user to "cut a release that publishes kernels" points them at
 /// something that is not broken, when what they want is to compile.
+#[cfg(test)]
 fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
     if release_exists {
         format!(
@@ -336,37 +295,29 @@ fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
     }
 }
 
-/// Download a published kernel (`vmlinux-<arch>-<variant>`) from the
-/// release matching this mvmctl's version, SHA-256-verify it against the
-/// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
-/// `dest`. The `--source download` arm of `mvmctl kernel build`.
-///
-/// That manifest is itself signature-verified against the release identity
-/// before it is read, so the digest the kernel is held to comes from the
-/// publisher rather than from whoever answered the request.
-///
-/// Keyed by the mvmctl release tag: a given mvmctl can only ever fetch
-/// the kernel that shipped with it — never a substitute for an in-tree
-/// config edit (a source checkout compiles instead).
-/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape for the digest
-/// comparison — never set it in CI. It does not waive the manifest signature;
-/// `MVM_SKIP_COSIGN_VERIFY` is that separate, larger concession.
+/// Download a workload or builder kernel from the signed image set pinned by
+/// this build. The root digest, exact publisher identity, compatibility and
+/// member digest are all established before the staged file is published.
 ///
 /// Available without `builder-vm`: lean clients cannot compile kernels
 /// locally, so downloading the release-matched kernel is their supported
 /// acquisition path.
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
-    let (tag, image_version) = boot_image_release()?;
-    let (asset, checksums) = boot_image_kernel_assets(arch, variant)?;
-    let base = github_download_base();
+    let (asset, _) = boot_image_kernel_assets(arch, variant)?;
+    let arch = arch.parse::<mvm_core::arch::GuestArch>()?;
+    let role = match variant {
+        "workload" => mvm_core::image_set::ImageSetRole::WorkloadKernel(
+            mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+        ),
+        "builder" => mvm_core::image_set::ImageSetRole::BuilderVm,
+        other => bail!("unknown kernel variant {other:?}"),
+    };
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating kernel cache dir {}", parent.display()))?;
     }
 
-    let release_base = format!("{base}/{GITHUB_REPO}/releases/download/{tag}");
-    let asset_url = format!("{release_base}/{asset}");
     let parent = dest
         .parent()
         .with_context(|| format!("kernel destination has no parent: {}", dest.display()))?;
@@ -378,45 +329,17 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
             )
         })?
         .into_temp_path();
+    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let artifact =
+        image_set.artifact(role, mvm_core::image_set::MemberTarget::Arch(arch), &asset)?;
+    let tag = mvm_core::image_set::image_train_lock()
+        .image_set
+        .release_tag
+        .as_str();
     let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
-    let dl = download_release_asset(&asset_url, &download);
+    let dl = image_set.fetch_artifact(artifact, &download);
     sp.finish_and_clear();
-    dl.with_context(|| kernel_fetch_hint(&tag, &asset, release_exists(&tag)))?;
-
-    // The signature rung runs even under MVM_SKIP_HASH_VERIFY: that hatch
-    // waives comparing the digest, not the question of who published the
-    // manifest the digest comes from. Waiving the publisher takes the separate
-    // MVM_SKIP_COSIGN_VERIFY.
-    let manifest = fetch_signed_checksum_manifest(
-        &release_base,
-        &checksums,
-        &image_version,
-        mvm_build::release_signature::ReleaseTrain::BootImage,
-    )?;
-
-    if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
-        ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
-        publish_downloaded_kernel(download, dest)?;
-        return Ok(());
-    }
-
-    let expected = manifest
-        .lines()
-        .find(|l| l.contains(&asset))
-        .with_context(|| format!("{asset} not found in {checksums}"))
-        .and_then(parse_checksum_line)?;
-
-    let bytes = std::fs::read(&download)
-        .with_context(|| format!("reading {} for checksum", download.display()))?;
-    let actual: [u8; 32] = Sha256::digest(&bytes).into();
-    if actual != expected {
-        anyhow::bail!(
-            "Kernel checksum mismatch for {asset}!\n  expected: {}\n  actual:   {}\n\
-             Staged download rejected; any existing cached kernel was preserved.",
-            hex_encode(&expected),
-            hex_encode(&actual),
-        );
-    }
+    dl.with_context(|| format!("download {asset} from the locked image set"))?;
     ui::success(&format!("Verified {asset}."));
     publish_downloaded_kernel(download, dest)?;
     Ok(())
@@ -857,7 +780,7 @@ pub(crate) fn decide_update(latest: &str, current: &str, force: bool) -> UpdateA
 /// Tag prefix for the boot-image release line. Images version on their own
 /// counter, so `v0.18.0` (binaries) and `boot-image/v0.1.0` (images) name
 /// different things and neither ordering means anything to the other.
-pub(crate) const BOOT_IMAGE_TAG_PREFIX: &str = "boot-image/v";
+pub(crate) const BOOT_IMAGE_TAG_PREFIX: &str = "image-set/v";
 
 /// A `major.minor.patch` triple, parsed so two tags can be ordered.
 ///
@@ -903,27 +826,7 @@ impl BootImageVersion {
     }
 }
 
-/// The highest published `boot-image/v*` tag, or `None` when the line has
-/// published nothing yet.
-///
-/// `/releases/latest` is the wrong endpoint here: it answers with the newest
-/// release across *every* tag namespace, which for a repo whose binaries
-/// release far more often is almost never a boot image. The full listing is
-/// filtered instead, and an empty result is a clean answer — "no published
-/// image line" is a real state, not a failure and not "behind".
-pub(crate) fn fetch_latest_boot_image_tag() -> Result<Option<String>> {
-    let url = format!("{}/repos/{}/releases", github_api_base(), GITHUB_REPO);
-    let json = http::fetch_json(&url)
-        .context("Failed to list GitHub releases. Check your network connection.")?;
-    let releases = json
-        .as_array()
-        .context("GitHub releases listing was not a JSON array")?;
-    Ok(highest_boot_image_tag(
-        releases.iter().filter_map(|r| r["tag_name"].as_str()),
-    ))
-}
-
-/// Pick the highest `boot-image/v*` tag from a set of tag names.
+/// Pick the highest `image-set/v*` tag from a set of tag names.
 ///
 /// Split from the fetch so the ordering can be tested without a server.
 pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
@@ -932,15 +835,13 @@ pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) ->
         .map(|(_, tag)| tag.to_string())
 }
 
-/// Release-asset base URL for one boot-image tag.
-///
-/// Shares `MVM_UPDATE_DOWNLOAD_URL` with the binary updater so the network leg
-/// is redirectable in a test without a second override to remember.
-pub(crate) fn boot_image_asset_base_url(tag: &str) -> String {
+/// Release-asset base URL for the canonical image-set producer.
+pub(crate) fn image_set_asset_base_url(tag: &str) -> String {
+    let repository = mvm_core::image_set::image_train_lock().repository.as_str();
     format!(
         "{}/{}/releases/download/{}",
         github_download_base(),
-        GITHUB_REPO,
+        repository,
         tag
     )
 }
@@ -1117,10 +1018,10 @@ mod tests {
     fn the_boot_image_release_is_not_the_cli_version() {
         let (tag, version) = boot_image_release().expect("a well-formed pinned tag");
         assert!(
-            tag.starts_with("boot-image/v"),
+            tag.starts_with("image-set/v"),
             "images ship on their own counter: {tag}"
         );
-        assert_eq!(tag, format!("boot-image/v{version}"));
+        assert_eq!(tag, format!("image-set/v{version}"));
         assert_ne!(
             tag,
             format!("v{}", current_version()),
@@ -1133,11 +1034,11 @@ mod tests {
     #[test]
     fn the_image_version_matches_the_signing_identity_template() {
         let (_tag, version) = boot_image_release().expect("tag");
-        let identities = mvm_core::release_trust::accepted_boot_image_identities(&version);
+        let identities = mvm_core::release_trust::accepted_image_set_identities(&version);
         assert!(
             identities
                 .iter()
-                .any(|i| i.ends_with(&format!("refs/tags/boot-image/v{version}"))),
+                .any(|i| i.ends_with(&format!("refs/tags/image-set/v{version}"))),
             "identity must bind the published tag: {identities:?}"
         );
     }
@@ -1593,35 +1494,23 @@ mod tests {
 
     #[test]
     fn download_kernel_refuses_a_manifest_digest_that_does_not_match() {
-        let kernel = b"kernel bytes for the unit test";
-        // Deliberately not the digest of `kernel`.
-        let wrong_digest = "ab".repeat(32);
-        let (asset, checksums) =
-            boot_image_kernel_assets("aarch64", "workload").expect("known assets");
-        let closure_asset = asset.clone();
-        let server = loopback_release_server(2, move |line| {
-            if line.contains(&checksums) {
-                format!("{wrong_digest}  {closure_asset}\n").into_bytes()
-            } else {
-                assert!(
-                    line.contains(&closure_asset),
-                    "the asset download must name the asset: {line}"
-                );
-                kernel.to_vec()
-            }
+        let (asset, _) = boot_image_kernel_assets("aarch64", "workload").expect("known assets");
+        let server = loopback_release_server(1, move |line| {
+            assert!(
+                line.contains("/image-set.json"),
+                "the first and only request must be the signed root: {line}"
+            );
+            b"not the locked image-set root".to_vec()
         });
         let mut env = TestEnv::new();
         env.set("MVM_UPDATE_DOWNLOAD_URL", &server);
-        // The manifest signature is a separate rung with its own tests; this
-        // test pins the digest comparison below it.
-        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("out").join(&asset);
         let error = download_kernel("aarch64", "workload", &dest)
             .expect_err("a mismatched manifest digest must refuse the kernel")
             .to_string();
-        assert!(error.contains("checksum mismatch"), "{error}");
+        assert!(error.contains("manifest digest mismatch"), "{error}");
         assert!(
             !dest.exists(),
             "a rejected download must never be published into the cache"

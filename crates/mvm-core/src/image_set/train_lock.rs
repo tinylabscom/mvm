@@ -1,14 +1,11 @@
-//! The checked-in lock over the image pins that exist today.
+//! The checked-in lock over the published image set and compatibility window.
 //!
-//! [`ImageLock`](super::ImageLock) is the destination: it pins one published
-//! image set by the SHA-256 of its manifest, which is what lets a host accept
-//! exactly one set and refuse every other. No image set has been published
-//! yet, so that digest does not exist, and a lock file carrying an invented one
-//! would be a placeholder dressed as a pin. This type is therefore not a
-//! smaller `ImageLock` and not a stage on the way to one — it locks the release
-//! *trains* mvm fetches from today (the boot image, and the Stage 0 bootstrap
-//! kernel with its per-arch digests), and gains nothing when the first set is
-//! published. `ImageLock` arrives then, as its own section of the same file.
+//! [`ImageLock`](super::ImageLock) pins the signed root manifest. The small
+//! train-shaped fields remain because Stage 0 needs a compile-time seed digest
+//! before it can build anything, while the legacy entry deliberately preserves
+//! the previous producer through the compatibility window. New consumers use
+//! `image_set`; the legacy entry is evidence of accepted historical trust, not
+//! a fallback that may be selected implicitly.
 //!
 //! The pins are read from `mvm-core`'s own `images.lock`, parsed once, and
 //! shared. `include_str!` rather than a build script: the file is checked in, a
@@ -22,12 +19,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::identity::{ArtifactName, ReleaseTag, RepositorySlug};
+use super::{ImageLock, ImageSetCompatibility, SigningIdentity};
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
 
 /// The schema this build understands. Bumped when the file's shape changes in
 /// a way an older reader would misread rather than refuse.
-pub const IMAGE_TRAIN_LOCK_SCHEMA_VERSION: u32 = 1;
+pub const IMAGE_TRAIN_LOCK_SCHEMA_VERSION: u32 = 2;
 
 /// `mvm-core`'s `images.lock`, compiled in so a binary carries its pins
 /// wherever it runs.
@@ -42,6 +40,8 @@ pub enum ImageTrainLockError {
     UnsupportedSchemaVersion { found: u32, supported: u32 },
     #[error("the image lock pins no Stage 0 bootstrap kernel for {arch}")]
     NoStage0Kernel { arch: GuestArch },
+    #[error("the image lock is internally inconsistent: {detail}")]
+    Inconsistent { detail: String },
 }
 
 /// Every published pin mvm fetches, keyed by what it is rather than by who
@@ -50,10 +50,26 @@ pub enum ImageTrainLockError {
 #[serde(deny_unknown_fields)]
 pub struct ImageTrainLock {
     pub schema_version: u32,
-    /// Where every pinned artifact is published.
+    /// Where the current signed image-set artifacts are published.
     pub repository: RepositorySlug,
+    /// The signed root manifest all current consumers are bound to.
+    pub image_set: ImageLock,
+    /// Compatibility copied from the verified root so every path can refuse
+    /// before it starts an artifact download.
+    pub compatibility: ImageSetCompatibility,
     pub boot_image: BootImagePin,
     pub stage0_kernel: Stage0KernelPin,
+    /// The previous producer retained only for the declared support window.
+    pub legacy: LegacyImageTrain,
+}
+
+/// Previous image producer accepted during the old-plus-new trust window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyImageTrain {
+    pub repository: RepositorySlug,
+    pub release_tag: ReleaseTag,
+    pub signing_identity: SigningIdentity,
 }
 
 /// The boot image release the CLI expects.
@@ -101,6 +117,33 @@ impl ImageTrainLock {
                 supported: IMAGE_TRAIN_LOCK_SCHEMA_VERSION,
             });
         }
+        if lock.repository != lock.image_set.repository {
+            return Err(ImageTrainLockError::Inconsistent {
+                detail: "the train repository and image_set repository differ".to_string(),
+            });
+        }
+        for (consumer, tag) in [
+            ("boot_image", &lock.boot_image.release_tag),
+            ("stage0_kernel", &lock.stage0_kernel.release_tag),
+        ] {
+            if tag != &lock.image_set.release_tag {
+                return Err(ImageTrainLockError::Inconsistent {
+                    detail: format!(
+                        "{consumer} pins {tag}, not the root {}",
+                        lock.image_set.release_tag
+                    ),
+                });
+            }
+        }
+        let expected_ref = format!("refs/tags/{}", lock.image_set.release_tag);
+        if lock.image_set.signing_identity.tag_ref.as_str() != expected_ref {
+            return Err(ImageTrainLockError::Inconsistent {
+                detail: format!(
+                    "the signing tag ref {} does not bind {}",
+                    lock.image_set.signing_identity.tag_ref, lock.image_set.release_tag
+                ),
+            });
+        }
         Ok(lock)
     }
 
@@ -113,6 +156,16 @@ impl ImageTrainLock {
             "https://github.com/{}/releases/download/{release_tag}/{asset}",
             self.repository
         )
+    }
+
+    /// URL of the locked root manifest.
+    pub fn manifest_url(&self) -> String {
+        self.asset_url(&self.image_set.release_tag, &self.image_set.manifest_asset)
+    }
+
+    /// URL of the detached Sigstore bundle over the locked root manifest.
+    pub fn manifest_bundle_url(&self) -> String {
+        format!("{}.bundle", self.manifest_url())
     }
 
     /// The URL of the Stage 0 bootstrap kernel for `arch`.
@@ -141,30 +194,54 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = r#"
+schema_version = 2
+repository = "tinylabscom/mvm-images"
+
+[image_set]
 schema_version = 1
-repository = "tinylabscom/mvm"
+repository = "tinylabscom/mvm-images"
+release_tag = "image-set/v1.2.3"
+manifest_asset = "image-set.json"
+manifest_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[image_set.signing_identity]
+workflow = ".github/workflows/release.yml"
+tag_ref = "refs/tags/image-set/v1.2.3"
+
+[compatibility]
+guest_agent_protocol = { min = 2, max = 2 }
+builder_cache_contract = 4
 
 [boot_image]
-release_tag = "boot-image/v1.2.3"
+release_tag = "image-set/v1.2.3"
 
 [stage0_kernel]
-release_tag = "boot-image/v1.2.0"
+release_tag = "image-set/v1.2.3"
 
 [stage0_kernel.artifact.aarch64]
-name = "builder-vm-vmlinux-aarch64"
+name = "stage0-vmlinux-aarch64"
 sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
+
+[legacy]
+repository = "tinylabscom/mvm"
+release_tag = "boot-image/v1.2.0"
+
+[legacy.signing_identity]
+workflow = ".github/workflows/release-boot-image.yml"
+tag_ref = "refs/tags/boot-image/v1.2.0"
 "#;
 
     #[test]
     fn the_shipped_lock_parses() {
         let lock = image_train_lock();
         assert_eq!(lock.schema_version, IMAGE_TRAIN_LOCK_SCHEMA_VERSION);
-        assert_eq!(lock.repository.as_str(), "tinylabscom/mvm");
+        assert_eq!(lock.repository.as_str(), "tinylabscom/mvm-images");
+        assert_eq!(lock.image_set.repository, lock.repository);
         assert!(
             lock.boot_image
                 .release_tag
                 .as_str()
-                .starts_with("boot-image/v")
+                .starts_with("image-set/v")
         );
     }
 
@@ -190,27 +267,53 @@ sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
         assert_eq!(
             lock.stage0_kernel_url(GuestArch::X86_64).unwrap(),
             format!(
-                "https://github.com/tinylabscom/mvm/releases/download/{}/builder-vm-vmlinux-x86_64",
+                "https://github.com/tinylabscom/mvm-images/releases/download/{}/stage0-vmlinux-x86_64",
                 lock.stage0_kernel.release_tag
             )
         );
     }
 
     #[test]
-    fn the_two_trains_are_pinned_separately() {
+    fn the_current_and_legacy_trains_are_pinned_separately() {
         let lock = ImageTrainLock::parse(MINIMAL).expect("the fixture parses");
-        assert_eq!(lock.boot_image.release_tag.as_str(), "boot-image/v1.2.3");
-        assert_eq!(lock.stage0_kernel.release_tag.as_str(), "boot-image/v1.2.0");
+        assert_eq!(lock.boot_image.release_tag.as_str(), "image-set/v1.2.3");
+        assert_eq!(lock.stage0_kernel.release_tag.as_str(), "image-set/v1.2.3");
+        assert_eq!(lock.legacy.repository.as_str(), "tinylabscom/mvm");
+        assert_eq!(lock.legacy.release_tag.as_str(), "boot-image/v1.2.0");
+    }
+
+    #[test]
+    fn every_current_consumer_must_route_to_the_same_release() {
+        for text in [
+            MINIMAL.replacen(
+                "repository = \"tinylabscom/mvm-images\"",
+                "repository = \"tinylabscom/not-images\"",
+                1,
+            ),
+            MINIMAL.replace(
+                "[boot_image]\nrelease_tag = \"image-set/v1.2.3\"",
+                "[boot_image]\nrelease_tag = \"image-set/v1.2.4\"",
+            ),
+            MINIMAL.replace(
+                "[stage0_kernel]\nrelease_tag = \"image-set/v1.2.3\"",
+                "[stage0_kernel]\nrelease_tag = \"image-set/v1.2.4\"",
+            ),
+        ] {
+            assert!(matches!(
+                ImageTrainLock::parse(&text),
+                Err(ImageTrainLockError::Inconsistent { .. })
+            ));
+        }
     }
 
     #[test]
     fn a_future_schema_version_is_refused_by_number() {
-        let text = MINIMAL.replace("schema_version = 1", "schema_version = 2");
+        let text = MINIMAL.replacen("schema_version = 2", "schema_version = 3", 1);
         assert_eq!(
             ImageTrainLock::parse(&text),
             Err(ImageTrainLockError::UnsupportedSchemaVersion {
-                found: 2,
-                supported: 1,
+                found: 3,
+                supported: 2,
             })
         );
     }
@@ -226,7 +329,7 @@ sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
 
     #[test]
     fn a_mutable_reference_is_not_a_release_tag() {
-        let text = MINIMAL.replace("\"boot-image/v1.2.3\"", "\"boot-image/latest\"");
+        let text = MINIMAL.replace("\"image-set/v1.2.3\"", "\"image-set/latest\"");
         assert!(matches!(
             ImageTrainLock::parse(&text),
             Err(ImageTrainLockError::Malformed(_))
@@ -249,10 +352,7 @@ sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
     /// release it is downloaded into.
     #[test]
     fn an_artifact_name_with_a_path_separator_is_refused() {
-        let text = MINIMAL.replace(
-            "builder-vm-vmlinux-aarch64",
-            "../builder-vm-vmlinux-aarch64",
-        );
+        let text = MINIMAL.replace("stage0-vmlinux-aarch64", "../stage0-vmlinux-aarch64");
         assert!(matches!(
             ImageTrainLock::parse(&text),
             Err(ImageTrainLockError::Malformed(_))

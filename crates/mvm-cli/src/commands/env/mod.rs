@@ -12,6 +12,7 @@ pub(super) mod completions;
 pub(super) mod doctor;
 pub(super) mod group;
 pub(super) mod init;
+pub(crate) mod published_image_set;
 pub(super) mod setup;
 pub(super) mod shell_completion;
 pub(super) mod shell_init;

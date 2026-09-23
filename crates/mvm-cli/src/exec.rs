@@ -1620,6 +1620,11 @@ mod tests {
 
     #[test]
     fn resolve_launch_wasm_module_skips_kernel_initrd_and_verity() {
+        // `resolve_launch` consults the process-wide image-source selector even
+        // though wasm needs no image artifacts. Hold the shared environment
+        // guard so a parallel selector test cannot make this launch inspect
+        // its temporary checkout.
+        let _env = TestEnv::new();
         let module_path = "/tmp/dummy.wasm";
         let image = ImageSource::WasmModule {
             module_path: module_path.to_string(),

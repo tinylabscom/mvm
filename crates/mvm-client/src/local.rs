@@ -2470,13 +2470,7 @@ mod tests {
         let id = MachineId("vm-warm".into());
 
         let missing = be
-            .resume_machine(
-                &id,
-                ResumeOpts {
-                    warm: true,
-                    ..Default::default()
-                },
-            )
+            .resume_machine(&id, ResumeOpts { warm: true })
             .await
             .expect_err("no record")
             .to_string();
@@ -2490,13 +2484,7 @@ mod tests {
         registry.save(&registry_path).expect("save registry");
 
         let running = be
-            .resume_machine(
-                &id,
-                ResumeOpts {
-                    warm: true,
-                    ..Default::default()
-                },
-            )
+            .resume_machine(&id, ResumeOpts { warm: true })
             .await
             .expect_err("running")
             .to_string();

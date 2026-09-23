@@ -131,43 +131,9 @@ jobs:
       - name: Download verified WebLinux runtime pack
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release-boot-image.yml@refs/tags/boot-image/v.*$"
-          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
           set -euo pipefail
-          # The locked pin, not the newest published release. Scanning the
-          # release list and taking the highest version made what this site
-          # deploys a property of whoever published last, which is exactly the
-          # selection images.lock exists to remove.
-          BOOT_TAG="$(./scripts/locked-image-tag.sh)"
-
-          # A boot-image release cut before the pack job existed carries every
-          # other asset and none of these. `gh release download` reports that as
-          # `no assets match the file pattern`, which reads like a typo in the
-          # pattern rather than a release that needs re-cutting.
-          #
-          # No `-r` on `gh --jq`: it already prints a string result raw, and gh
-          # has no such flag. Passing one consumes `--jq`'s value, demoting the
-          # real expression to a positional argument, and gh rejects the whole
-          # invocation with `unknown command "<the entire jq program>"`.
-          ASSETS="$(gh release view "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" \
-            --json assets --jq '.assets[].name')"
-          if ! printf '%s\n' "${ASSETS}" | grep -qxF 'qemu-wasm-smoke-pack.tar.gz'; then
-            echo "::error::${BOOT_TAG} is the tag pinned by images.lock and carries no qemu-wasm-smoke-pack.tar.gz, so the WebLinux demo cannot be staged. Cut a new image tag from a commit whose release-boot-image.yml builds the pack, advance crates/mvm-core/images.lock to it, then re-run this deploy." >&2
-            exit 1
-          fi
-
-          gh release download "${BOOT_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern 'qemu-wasm-smoke-pack.tar.gz*'
-          cosign verify-blob \
-            --bundle qemu-wasm-smoke-pack.tar.gz.sha256.bundle \
-            --certificate-identity-regexp "${COSIGN_IDENTITY_REGEXP}" \
-            --certificate-oidc-issuer "${COSIGN_OIDC_ISSUER}" \
-            qemu-wasm-smoke-pack.tar.gz.sha256
-          sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256
-          mkdir qemu-wasm-smoke-pack
-          tar -xzf qemu-wasm-smoke-pack.tar.gz -C qemu-wasm-smoke-pack
+          ./scripts/download-qemu-wasm-smoke-pack.sh qemu-wasm-smoke-pack
           ./web/weblinux-demo/build.sh qemu-wasm-smoke-pack
 
       - name: Build wasm demo
