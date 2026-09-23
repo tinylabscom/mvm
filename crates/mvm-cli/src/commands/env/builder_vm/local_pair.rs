@@ -158,6 +158,39 @@ pub(crate) fn staged_contract_files(
     Ok(tmp)
 }
 
+/// Under a selected checkout, put the pair's workload kernel where the
+/// template path's kernel fallback reads it. The template source prefers a
+/// built vmlinux, then the verified workload-kernel cache, and only then the
+/// builder kernel — which is built without device-mapper on purpose and dies
+/// at dm-verity activation, so every sealed workload needs the middle rung
+/// to answer. The pair's kernel is that answer; without this seed a
+/// kernel-less mkGuest image (the common shape) falls through to the builder
+/// kernel the moment a checkout is selected.
+#[cfg(feature = "builder-vm")]
+pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
+    let Some(checkout) = super::bootstrap::selected_local_checkout()? else {
+        return Ok(());
+    };
+    let kernel = ensure_pair_workload_kernel(
+        &checkout,
+        mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+    )?;
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let dest = mvm_build::kernel_fetch::cached_kernel_path(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        &arch,
+        "workload",
+    );
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    copy_contract_file(&kernel, &dest)?;
+    mvm_build::kernel_fetch::record_kernel_digest(&dest)
+        .with_context(|| format!("recording the digest of {}", dest.display()))?;
+    Ok(())
+}
+
 /// Install a pair-built `builder-vm` entry into the builder-VM cache that
 /// `up` and the build paths read, staging and promoting through the same
 /// sidecar-validated swap Stage 0 uses.
@@ -314,6 +347,50 @@ mod tests {
                 mvm_build::image_source::CacheLookup::Hit(_)
             ),
             "pair B's home resolves pair B's entry"
+        );
+    }
+
+    /// A kernel-less mkGuest image (the common flake shape) boots through
+    /// the template kernel fallback, whose middle rung is the verified
+    /// workload kernel. Under a selected checkout that rung
+    /// must carry the pair's kernel — otherwise the fallback lands on the
+    /// builder kernel, which has no device-mapper and dies at dm-verity
+    /// activation.
+    #[test]
+    fn the_pair_kernel_seeds_the_template_fallback_cache() {
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
+        env.set(
+            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            pair.images.root(),
+        );
+        let entry = pair.publish_default_tenant();
+        let kernel_artifact = entry
+            .set
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.role.to_string().contains("kernel"))
+            .expect("the fixture set carries the workload kernel");
+
+        super::seed_pair_workload_kernel_cache().expect("the seed installs the pair kernel");
+
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let (resolution, _label) =
+            mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
+        let verified = match resolution {
+            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => verified,
+            other => panic!("the template fallback must find the pair kernel, got {other:?}"),
+        };
+        // The seed copies: the cache path differs from the entry path, so
+        // compare the verified bytes.
+        let cached = std::fs::read(verified.path()).unwrap();
+        let from_pair = std::fs::read(&kernel_artifact.path).unwrap();
+        assert_eq!(
+            cached, from_pair,
+            "the cached kernel is the pair's verified artifact"
         );
     }
 
