@@ -1484,6 +1484,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_socket_readiness_observes_a_socket_bound_after_the_first_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("hvf-agent.sock");
+        let mut listener = None;
+
+        wait_for_agent_socket(&socket, std::time::Duration::from_secs(1), || {
+            listener = Some(
+                std::os::unix::net::UnixListener::bind(&socket)
+                    .context("bind agent socket after the initial readiness probe")?,
+            );
+            Ok(true)
+        })
+        .expect("the readiness loop must observe a socket bound before its deadline");
+
+        assert!(
+            listener.is_some(),
+            "the liveness probe must bind the socket"
+        );
+    }
+
+    #[test]
     fn relay_config_wires_the_broker_relay_when_the_spec_carries_broker_port() {
         // An admitted workload's spec carries a BROKER_PORT channel; the
         // supervisor config must relay it so admitted host services

@@ -28,8 +28,9 @@
       freshness, and the Linux 6.12.111 synchronized pin are repaired. Focused
       mutation and identity-anchor tests, serial workspace, workspace doctest,
       check, Clippy, gated-target, builder-VM kernel, formatting, and all 74
-      repository-policy gates pass. Fresh scheduled-workflow evidence remains
-      before merge. See
+      repository-policy gates pass. The fresh Extended CI, standard PR CI, and
+      kernel freshness runs are green; the long-running Security mutation
+      matrix remains before merge. See
       `specs/sprint/delivery/3428-3495-3598-3601-scheduled-ci-repair.md`.
 
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**

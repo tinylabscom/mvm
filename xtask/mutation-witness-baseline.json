@@ -365,43 +365,13 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete ! in HvfVmFullControl::ensure_every_disk_is_restorable",
-      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "delete field balloon from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
       "reason": "provably equivalent: `balloon: false` sits next to `..Default::default()` in the same expression, and `VmCapabilities` derives `Default` with `bool::default() == false`, so the field-delete mutant is bit-identical to the original — no test, integration or otherwise, can distinguish them."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field host_vsock_proxy from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field no_routable_guest_nic from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field pause_resume from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field standby_pool from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace != with == in <impl VmmDriver for HvfDriver>::fork_standby_child",
       "reason": "HVF standby child fork identity-bitmask comparison; the correct bitmask is asserted by live HVF warm-claim tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace != with == in relay_supervisor_config_with_handoff",
-      "reason": "HVF supervisor config relay inequality check; the end-to-end config shape is validated by live HVF runs."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -427,11 +397,6 @@
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace + with - in boot_with_handoff",
       "reason": "HVF boot deadline arithmetic; mutating the operator changes timeout timing, not a security decision, and is covered by the overall timeout semantics exercised in live HVF runs."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace + with - in read_handoff_response",
-      "reason": "HVF boot/handoff deadline arithmetic is a timeout check; mutating the operator or comparison changes when the timeout fires, not a security decision, and is covered by live HVF tests."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -505,26 +470,6 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::supervisor_config_path -> Result<Option<PathBuf>> with Ok(None)",
-      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::supervisor_config_path -> Result<Option<PathBuf>> with Ok(Some(Default::default()))",
-      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmmDriver for HvfDriver>::is_available -> Result<bool> with Ok(false)",
-      "reason": "is_available probes the host environment for HVF support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmmDriver for HvfDriver>::is_available -> Result<bool> with Ok(true)",
-      "reason": "is_available probes the host environment for HVF support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace <impl VmmDriver for HvfDriver>::supports_resident_handoff -> bool with false",
       "reason": "HVF capability constant; the resident-handoff path is exercised by live HVF warm-claim tests and BDD scenarios."
     },
@@ -540,28 +485,8 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace == with != in read_handoff_response",
-      "reason": "HVF handoff response length check; the response framing is validated by live HVF warm-claim tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace == with != in relay_supervisor_config_with_handoff",
-      "reason": "HVF supervisor config relay equality check; the end-to-end config shape is validated by live HVF runs."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace >= with < in boot_with_handoff",
       "reason": "HVF boot deadline comparison; mutating the comparison changes when the timeout fires, not a security decision, and is covered by live HVF runs."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace >= with < in read_handoff_response",
-      "reason": "HVF boot/handoff deadline arithmetic is a timeout check; mutating the operator or comparison changes when the timeout fires, not a security decision, and is covered by live HVF tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace HvfVmFullControl::ensure_every_disk_is_restorable -> Result<()> with Ok(())",
-      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -607,16 +532,6 @@
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace || with && in <impl VmFullControl for HvfVmFullControl>::save_memory",
       "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
-      "mutant": "replace + with - in restore_hvf_vm",
-      "reason": "The deadline calculation in the HVF restore wait loop is a straightforward timeout. Mutating the arithmetic to subtract the timeout makes the deadline immediate and would cause spurious timeouts in production; it is not a security-relevant branch and is covered by the loop's overall timeout semantics rather than a unit test."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
-      "mutant": "replace >= with < in restore_hvf_vm",
-      "reason": "The deadline comparison in the HVF restore wait loop is a straightforward timeout. Mutating the comparison changes when the timeout fires but does not alter the security posture; it is covered by the loop's overall timeout semantics rather than a unit test."
     },
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
@@ -670,16 +585,6 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace * with +",
-      "reason": "libkrun driver logic is validated by backend-specific integration tests and live BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace * with /",
-      "reason": "libkrun driver logic is validated by backend-specific integration tests and live BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
       "mutant": "replace + with - in <impl RunningVm for LibkrunRunningVm>::kill",
       "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
     },
@@ -707,11 +612,6 @@
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
       "mutant": "replace <impl VmmDriver for LibkrunDriver>::is_available -> Result<bool> with Ok(true)",
       "reason": "is_available probes the host environment for libkrun support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace == with != in <impl RunningVm for LibkrunRunningVm>::vsock_connect",
-      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
     },
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",

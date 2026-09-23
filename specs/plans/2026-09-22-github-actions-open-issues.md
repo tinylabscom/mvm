@@ -29,6 +29,12 @@ claim-bearing evidence, and move both kernel consumers to the latest Linux
       child materialization.
 - [x] Keep the sealed agent-workload example on its baked per-call input path
       and persist the runtime state directory in named-machine registration.
+- [x] Make the agent-workload smoke script consume its input with an explicit
+      store path and replace the quota timing witness with event-driven
+      coordination.
+- [x] Wait for the native HVF agent socket before declaring boot complete and
+      reclaim the retired virtio-fs MMIO slots for the documented seven-disk
+      service-plane workload without moving snapshot-visible devices.
 - [x] Verify and synchronize the Linux 6.12.111 source pin for the Nix kernels
       and libkrun firmware.
 - [x] Pass focused mutation, workspace, gated-target, Linux Clippy, Nix kernel,

@@ -19,10 +19,13 @@ Last updated: 2026-09-23
       Security and Extended CI defects are repaired, claim evidence can become
       fresh once Security is green, and both kernel consumers pin verified
       Linux 6.12.111. Firecracker warm restore now retains its complete error
-      chain and materializes the standby parent's FlowMux identity drive. Local
-      mutation, identity-anchor, workspace, doctest, Clippy, gated-target,
-      builder-VM kernel, formatting, and all 74 policy gates pass; fresh
-      scheduled-workflow evidence remains open.
+      chain and materializes the standby parent's FlowMux identity drive. The
+      example smoke reader is store-pinned, quota timing is event-driven, and
+      native HVF waits for its agent socket while admitting the documented
+      seven-disk service plane. Local mutation, identity-anchor, workspace,
+      doctest, Clippy, gated-target, builder-VM kernel, formatting, and all 74
+      policy gates pass. Extended CI, standard PR CI, and kernel freshness are
+      green; the Security mutation matrix remains open.
 
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only

@@ -9,7 +9,9 @@ and one downstream freshness symptom:
 - Extended CI inherited a non-root session bus across `sudo`, omitted the
   standby parent's FlowMux identity drive from the checkpoint restored into a
   child, documented an interactive stdin grant that sealed workloads refuse,
-  and registered a persistent VM without its runtime directory;
+  used a PATH-dependent smoke input reader, registered a persistent VM without
+  its runtime directory, relied on quota-period wall-clock timing, and started
+  the documented seven-disk HVF service plane with a six-disk device ceiling;
 - both kernel consumers still pinned Linux 6.12.110 after 6.12.111 shipped;
 - claim-bearing freshness correctly went stale because Security was red.
 
@@ -23,8 +25,14 @@ Firecracker restore diagnostics. `DeviceAnchors` now records the optional
 `flowmux-identity.ext4` device and capture includes it in the checkpoint, so a
 materialized child can reopen every PCI block backing file encoded in the
 snapshot. The agent workload uses its baked per-call entrypoint without
-requesting streaming stdin, and persistent registration now records the
-canonical VM state directory.
+requesting streaming stdin, its smoke script invokes the store-pinned
+`coreutils` input reader, and persistent registration now records the canonical
+VM state directory. The quota witness coordinates period completion with a
+condition variable instead of guessing at scheduler timing. Native HVF boot now
+waits for the agent socket and reports supervisor diagnostics on failure; the
+retired virtio-fs MMIO band supplies nine additional disk slots, allowing the
+documented seven-disk service plane without moving the RNG, balloon, or any
+other snapshot-visible address.
 
 Linux 6.12.111 is synchronized across the Nix kernel and libkrun firmware
 consumers. The downloaded archive matched kernel.org's published SHA-256 and
@@ -42,5 +50,11 @@ passed parent boot and failed at the actual snapshot boundary with Firecracker
 HTTP 400: the restored PCI block device still named the parent's missing
 `flowmux-identity.ext4`. Focused serialization, Firecracker anchor-discovery,
 and checkpoint-materialization tests cover the repair, and the shared-type
-gated-target check passes. Fresh Security and Extended CI runs are the
-remaining remote evidence before merge.
+gated-target check passes. Full focused validation also passes for `mvm-vmm`
+(767 tests), `mvm-backends` (258 tests), and `mvm-runtime` (1,044 passed, 8
+ignored), including 20 repeated direct runs of the quota witness and all 43
+focused HVF tests. The focused agent-socket mutation batch caught 13 of 16
+variants with one unviable and only two pre-existing accepted capability
+constants; the baseline dropped 20 exemptions that the repaired witnesses now
+catch. Fresh Security remains the final remote evidence before merge; Extended
+CI, standard PR CI, and kernel freshness are green.
