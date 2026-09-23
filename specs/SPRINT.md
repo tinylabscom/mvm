@@ -144,7 +144,11 @@ docs commit went out as #3581). Under the
       asynchronous copies and completion positions across the wire, native
       backend and both CUDA shims. The stub models per-stream ordering and
       event readiness deterministically, including default-stream compatibility
-      and fail-closed forged or stale handles. Named follow-ups (CUDA graphs
+      and fail-closed forged or stale handles. Issue #3566 passes the backend's
+      real device count and ordinals through, gives the deterministic endpoint
+      two distinct devices, and adds `--gpu-device N` / `gpu_device = N`
+      pinning. A pinned VM sees guest ordinal zero mapped to host ordinal `N`;
+      unavailable host ordinals and hidden guest ordinals fail closed. Named follow-ups (CUDA graphs
       and fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
       plan and ADR.
 

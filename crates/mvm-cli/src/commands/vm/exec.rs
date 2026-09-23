@@ -66,6 +66,9 @@ pub(in crate::commands) struct Args {
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
+    /// Pin to a host GPU ordinal (guest device zero).
+    #[arg(long, value_name = "ORDINAL")]
+    pub gpu_device: Option<u32>,
     /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
     /// carried by `--launch-plan`.
     #[arg(short, long)]
@@ -307,6 +310,9 @@ pub(in crate::commands) struct RunArgs {
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
+    /// Pin to a host GPU ordinal (guest device zero).
+    #[arg(long, value_name = "ORDINAL")]
+    pub gpu_device: Option<u32>,
     /// Select a security profile.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
@@ -480,6 +486,7 @@ impl Default for RunArgs {
             deployment: None,
             warm_pool_size: 0,
             gpu: false,
+            gpu_device: None,
             pty: false,
             vm_name: None,
             runtime_pack: false,
@@ -580,6 +587,7 @@ impl RunArgs {
             hypervisor: self.hypervisor,
             host_service: self.host_service,
             gpu: self.gpu,
+            gpu_device: self.gpu_device,
         }
     }
 }
@@ -1297,6 +1305,7 @@ fn build_exec_request(
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,
         gpu: args.gpu,
+        gpu_device: args.gpu_device,
         sdk_host_services,
         declared_libc: args.detected_libc,
         assets: args

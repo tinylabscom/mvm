@@ -438,6 +438,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 &inputs.config.name,
                 &state_dir,
                 gpu_transport,
+                inputs.config.gpu_device,
             )
             .context("spawning the GPU endpoint")?;
         }

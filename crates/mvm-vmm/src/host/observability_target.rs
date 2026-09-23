@@ -238,6 +238,7 @@ mod tests {
             network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             dev_console: false,
             gpu: false,
+            gpu_device: None,
         }
     }
 

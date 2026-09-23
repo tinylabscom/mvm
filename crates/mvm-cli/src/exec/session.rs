@@ -265,6 +265,7 @@ pub fn dispatch_in_session(
         timeout_secs,
         pty: false,
         gpu: false,
+        gpu_device: None,
         // Wrapper-string construction only — the session VM is already
         // running, so this never reaches a backend boot.
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),

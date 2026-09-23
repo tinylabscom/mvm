@@ -74,6 +74,7 @@ pub struct LaunchRecord {
 /// framework-detection probe reads here must be stable across runs and
 /// machines, or "deterministic test backend" is a lie.
 pub const STUB_DEVICE_NAME: &str = "mvm deterministic GPU stub";
+pub const STUB_DEVICE_COUNT: u32 = 2;
 pub const STUB_DRIVER_VERSION: i32 = 12_040;
 pub const STUB_DRIVER_VERSION_STRING: &str = "555.0.0-mvm-stub";
 pub const STUB_TOTAL_MEM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -97,6 +98,7 @@ pub struct StubBackend {
     contexts: HashMap<u64, Context>,
     next_ctx: u64,
     current: Option<u64>,
+    device_ordinal: Option<u32>,
 }
 
 impl StubBackend {
@@ -104,6 +106,14 @@ impl StubBackend {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Restrict this backend to one host ordinal, exposed to the guest as
+    /// ordinal zero.
+    #[must_use]
+    pub fn with_device_ordinal(mut self, ordinal: u32) -> Self {
+        self.device_ordinal = Some(ordinal);
+        self
     }
 
     /// All launches recorded so far, across contexts — the test surface for
@@ -135,12 +145,14 @@ impl StubBackend {
     }
 
     fn require_ordinal(ordinal: u32) -> Result<(), GpuError> {
-        if ordinal == 0 {
+        if ordinal < STUB_DEVICE_COUNT {
             Ok(())
         } else {
             Err(GpuError::new(
                 wire::CUDA_ERROR_INVALID_DEVICE,
-                format!("the stub exposes exactly one device, ordinal 0, not {ordinal}"),
+                format!(
+                    "the stub exposes {STUB_DEVICE_COUNT} devices; ordinal {ordinal} is out of range"
+                ),
             ))
         }
     }
@@ -180,17 +192,25 @@ impl StubBackend {
 }
 
 impl GpuBackend for StubBackend {
+    fn device_ordinal(&self) -> Option<u32> {
+        self.device_ordinal
+    }
+
     fn driver_version(&mut self) -> Result<i32, GpuError> {
         Ok(STUB_DRIVER_VERSION)
     }
 
     fn device_count(&mut self) -> Result<u32, GpuError> {
-        Ok(1)
+        Ok(STUB_DEVICE_COUNT)
     }
 
     fn device_name(&mut self, ordinal: u32) -> Result<String, GpuError> {
         Self::require_ordinal(ordinal)?;
-        Ok(STUB_DEVICE_NAME.to_string())
+        Ok(if ordinal == 0 {
+            STUB_DEVICE_NAME.to_string()
+        } else {
+            format!("{STUB_DEVICE_NAME} {ordinal}")
+        })
     }
 
     fn device_total_mem(&mut self, ordinal: u32) -> Result<u64, GpuError> {
@@ -618,7 +638,7 @@ impl GpuBackend for StubBackend {
     }
 
     fn nvml_device_count(&mut self) -> Result<u32, GpuError> {
-        Ok(1)
+        Ok(STUB_DEVICE_COUNT)
     }
 
     fn nvml_driver_version(&mut self) -> Result<String, GpuError> {
@@ -627,7 +647,7 @@ impl GpuBackend for StubBackend {
 
     fn nvml_device_name(&mut self, ordinal: u32) -> Result<String, GpuError> {
         Self::require_ordinal(ordinal)?;
-        Ok(format!("{STUB_DEVICE_NAME} (NVML)"))
+        Ok(format!("{STUB_DEVICE_NAME} {ordinal} (NVML)"))
     }
 
     fn nvml_memory_info(&mut self, ordinal: u32) -> Result<(u64, u64, u64), GpuError> {
@@ -657,13 +677,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_stub_reports_one_fixed_device() {
+    fn the_stub_reports_distinct_deterministic_devices() {
         let mut gpu = StubBackend::new();
-        assert_eq!(gpu.device_count(), Ok(1));
+        assert_eq!(gpu.device_count(), Ok(2));
         assert_eq!(gpu.device_name(0), Ok(STUB_DEVICE_NAME.to_string()));
+        assert_eq!(gpu.device_name(1), Ok(format!("{STUB_DEVICE_NAME} 1")));
         assert_eq!(gpu.device_total_mem(0), Ok(STUB_TOTAL_MEM_BYTES));
-        let err = gpu.device_name(1).expect_err("only ordinal 0 exists");
+        let first = gpu.context_create(0).expect("device zero context");
+        let second = gpu.context_create(1).expect("device one context");
+        assert_eq!(gpu.contexts[&first]._ordinal, 0);
+        assert_eq!(gpu.contexts[&second]._ordinal, 1);
+        let err = gpu.device_name(2).expect_err("only ordinals 0 and 1 exist");
         assert_eq!(err.code, wire::CUDA_ERROR_INVALID_DEVICE);
+    }
+
+    #[test]
+    fn a_device_pin_exposes_one_guest_ordinal_mapped_to_the_host_selection() {
+        let mut gpu = StubBackend::new().with_device_ordinal(1);
+        assert_eq!(
+            crate::handle_request(&mut gpu, &crate::GpuRequest::DeviceGetCount),
+            crate::GpuResponse::DeviceCount { count: 1 }
+        );
+        assert_eq!(
+            crate::handle_request(&mut gpu, &crate::GpuRequest::DeviceGetName { ordinal: 0 }),
+            crate::GpuResponse::DeviceName {
+                name: format!("{STUB_DEVICE_NAME} 1")
+            }
+        );
+        let crate::GpuResponse::ContextCreated { context } =
+            crate::handle_request(&mut gpu, &crate::GpuRequest::ContextCreate { ordinal: 0 })
+        else {
+            panic!("guest ordinal zero must create a context on the selected host device");
+        };
+        assert_eq!(gpu.contexts[&context]._ordinal, 1);
+        let crate::GpuResponse::Err(error) =
+            crate::handle_request(&mut gpu, &crate::GpuRequest::DeviceGetName { ordinal: 1 })
+        else {
+            panic!("guest ordinal 1 must be hidden by the pin");
+        };
+        assert_eq!(error.code, wire::CUDA_ERROR_INVALID_DEVICE);
     }
 
     #[test]
@@ -839,7 +891,7 @@ mod tests {
     #[test]
     fn nvml_reports_memory_used_by_live_allocations() {
         let mut gpu = StubBackend::new();
-        assert_eq!(gpu.nvml_device_count(), Ok(1));
+        assert_eq!(gpu.nvml_device_count(), Ok(2));
         let (total, free, used) = gpu.nvml_memory_info(0).expect("memory info");
         assert_eq!(total, STUB_TOTAL_MEM_BYTES);
         assert_eq!(used, 0);
