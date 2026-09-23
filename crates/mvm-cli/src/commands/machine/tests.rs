@@ -1045,6 +1045,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     }
 }
 
@@ -1086,6 +1087,24 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         spec.caller_commitment.as_ref().map(ToString::to_string),
         Some("ab".repeat(32))
     );
+}
+
+#[test]
+fn run_gpu_device_pin_enables_gpu_and_persists_the_ordinal() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:3.20",
+        "--name",
+        "gpu-worker",
+        "--gpu-device",
+        "1",
+    ])
+    .expect("parse GPU ordinal");
+
+    let spec = machine_run_spec(&args, "gpu-worker".to_string(), None).expect("spec");
+    assert!(spec.gpu);
+    assert_eq!(spec.gpu_device, Some(1));
 }
 
 #[test]
@@ -2030,6 +2049,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
     mark_machine_started(&mut spec, "sha256:abc".to_string());
     assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
@@ -2047,6 +2067,7 @@ fn create_persists_machine_spec_under_data_dir() {
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: Some(4),
         cpu_limit: None,
         timeout: None,
@@ -2080,6 +2101,7 @@ fn create_auto_generates_a_name_when_omitted() {
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2108,6 +2130,7 @@ fn create_sources_machine_defaults_from_manifest() {
         r#"
 image = "python:3.12-alpine"
 net = true
+gpu_device = 1
 cpus = 4
 mem = "2G"
 mem_initial = "512M"
@@ -2130,6 +2153,7 @@ volumes = ["./src:/work:rw"]
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2145,6 +2169,8 @@ volumes = ["./src:/work:rw"]
 
     assert_eq!(spec.image.as_deref(), Some("python:3.12-alpine"));
     assert!(spec.net);
+    assert!(spec.gpu);
+    assert_eq!(spec.gpu_device, Some(1));
     assert_eq!(spec.allow_host, vec!["api.example.com"]);
     assert_eq!(spec.cpus, 4);
     assert_eq!(spec.memory, "2G");
@@ -2169,6 +2195,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2203,6 +2230,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2225,6 +2253,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -2271,6 +2300,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
 
     let summary = machine_start_preflight_summary(
@@ -2365,6 +2395,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
 
     let summary = machine_start_preflight_summary(&spec, Some("libkrun"), None)
@@ -2389,6 +2420,7 @@ fn create_rejects_unsafe_machine_name() {
         allow_host: Vec::new(),
         peer: Vec::new(),
         gpu: false,
+        gpu_device: None,
         cpus: Some(2),
         cpu_limit: None,
         timeout: None,
@@ -2432,6 +2464,7 @@ fn create_refuses_overwrite_without_force() {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
     save_machine_spec(&spec, false).expect("first save");
     let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -2468,6 +2501,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
     save_machine_spec(&spec, false).expect("save");
     let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -2506,6 +2540,7 @@ fn seed_machine_spec(name: &str) {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     };
     save_machine_spec(&spec, false).expect("save");
 }
@@ -3062,6 +3097,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         health_check: None,
         grants: None,
         gpu: false,
+        gpu_device: None,
     }
 }
 
@@ -3701,6 +3737,7 @@ fn start_resolver_creates_missing_machine_when_source_given() {
         "web",
         MachineStartCreateFlags {
             gpu: false,
+            gpu_device: None,
             image: Some("nginx".to_string()),
             cpus: Some(2),
             memory: Some("512M".to_string()),
@@ -3745,6 +3782,7 @@ fn start_resolver_errors_on_changed_config_without_force() {
         "web",
         MachineStartCreateFlags {
             gpu: false,
+            gpu_device: None,
             image: Some("ubuntu:24.04".to_string()),
             ..MachineStartCreateFlags::default()
         },
@@ -3763,6 +3801,7 @@ fn start_resolver_recreates_with_force() {
         "web",
         MachineStartCreateFlags {
             gpu: false,
+            gpu_device: None,
             image: Some("ubuntu:24.04".to_string()),
             force: true,
             ..MachineStartCreateFlags::default()

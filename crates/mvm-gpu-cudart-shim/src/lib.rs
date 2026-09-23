@@ -7,7 +7,8 @@
 //!
 //! v1 coverage is documented in `specs/plans/2026-09-20-gpu-over-vsock.md`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use mvm_contract::protocol::gpu::GpuResponse;
 use mvm_gpu_shim_core::{call, guard, wire};
@@ -27,8 +28,10 @@ const SUCCESS: CudaError = wire::SUCCESS;
 thread_local! {
     /// This thread's last sticky runtime error.
     static LAST_ERROR: Cell<CudaError> = const { Cell::new(SUCCESS) };
-    /// The device this thread has selected; v1 supports device 0 only.
+    /// The device this thread has selected.
     static CURRENT_DEVICE: Cell<c_int> = const { Cell::new(0) };
+    /// One lazily-created runtime context per selected device on this thread.
+    static CONTEXTS: RefCell<HashMap<c_int, u64>> = RefCell::new(HashMap::new());
 }
 
 fn set_last_error(code: CudaError) {
@@ -43,6 +46,15 @@ fn last_error() -> CudaError {
 
 fn current_device() -> c_int {
     CURRENT_DEVICE.with(Cell::get)
+}
+
+fn validate_device_selection(device: c_int, count: u32) -> Result<c_int, CudaError> {
+    let ordinal =
+        u32::try_from(device).map_err(|_| wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError)?;
+    if ordinal >= count {
+        return Err(wire::CUDA_ERROR_RUNTIME_INVALID_DEVICE as CudaError);
+    }
+    Ok(device)
 }
 
 fn unit(response: GpuResponse) -> CudaError {
@@ -62,18 +74,19 @@ fn queued(response: GpuResponse) -> CudaError {
 }
 
 /// The context the endpoint has implicitly per device: created lazily on
-/// first use and reused for the process lifetime. Device 0 only in v1.
+/// first use and reused for the thread lifetime.
 fn ensure_context() -> Result<u64, CudaError> {
-    thread_local! {
-        static CTX: Cell<u64> = const { Cell::new(0) };
-    }
-    let existing = CTX.with(Cell::get);
-    if existing != 0 {
+    let device = current_device();
+    if let Some(existing) = CONTEXTS.with(|contexts| contexts.borrow().get(&device).copied()) {
         return Ok(existing);
     }
-    match call(&mvm_contract::protocol::gpu::GpuRequest::ContextCreate { ordinal: 0 }) {
+    let ordinal =
+        u32::try_from(device).map_err(|_| wire::CUDA_ERROR_RUNTIME_INVALID_DEVICE as CudaError)?;
+    match call(&mvm_contract::protocol::gpu::GpuRequest::ContextCreate { ordinal }) {
         GpuResponse::ContextCreated { context } => {
-            CTX.with(|c| c.set(context));
+            CONTEXTS.with(|contexts| {
+                contexts.borrow_mut().insert(device, context);
+            });
             Ok(context)
         }
         GpuResponse::Err(e) => Err(e.code as CudaError),
@@ -116,12 +129,21 @@ pub unsafe extern "C" fn cudaGetDeviceCount(count: *mut c_int) -> CudaError {
 pub unsafe extern "C" fn cudaSetDevice(device: c_int) -> CudaError {
     guard(
         move || {
-            if device != 0 {
-                set_last_error(wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError);
-                return wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError;
+            let selected = match call(&mvm_contract::protocol::gpu::GpuRequest::DeviceGetCount) {
+                GpuResponse::DeviceCount { count } => validate_device_selection(device, count),
+                GpuResponse::Err(error) => Err(error.code as CudaError),
+                _ => Err(wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError),
+            };
+            match selected {
+                Ok(device) => {
+                    CURRENT_DEVICE.with(|current| current.set(device));
+                    SUCCESS
+                }
+                Err(error) => {
+                    set_last_error(error);
+                    error
+                }
             }
-            CURRENT_DEVICE.with(|d| d.set(device));
-            SUCCESS
         },
         wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
     )
@@ -741,6 +763,7 @@ pub unsafe extern "C" fn cudaGetErrorString(error: CudaError) -> *const c_char {
                 e if e == wire::CUDA_ERROR_RUNTIME_INVALID_VALUE => c"invalid argument",
                 e if e == wire::CUDA_ERROR_RUNTIME_MEMORY_ALLOCATION => c"out of memory",
                 e if e == wire::CUDA_ERROR_RUNTIME_INITIALIZATION => c"initialization error",
+                e if e == wire::CUDA_ERROR_RUNTIME_INVALID_DEVICE => c"invalid device ordinal",
                 e if e == wire::CUDA_ERROR_RUNTIME_NO_DEVICE => {
                     c"no CUDA-capable device is available"
                 }
@@ -800,4 +823,23 @@ pub unsafe extern "C" fn cudaDriverGetVersion(version: *mut c_int) -> CudaError 
         },
         wire::CUDA_ERROR_RUNTIME_UNKNOWN as CudaError,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_selection_accepts_each_reported_ordinal_and_refuses_the_rest() {
+        assert_eq!(validate_device_selection(0, 2), Ok(0));
+        assert_eq!(validate_device_selection(1, 2), Ok(1));
+        assert_eq!(
+            validate_device_selection(-1, 2),
+            Err(wire::CUDA_ERROR_RUNTIME_INVALID_VALUE as CudaError)
+        );
+        assert_eq!(
+            validate_device_selection(2, 2),
+            Err(wire::CUDA_ERROR_RUNTIME_INVALID_DEVICE as CudaError)
+        );
+    }
 }

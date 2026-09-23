@@ -21,7 +21,9 @@ three drop-in shim libraries — `libcuda.so.1`, `libcudart.so`,
 `libnvidia-ml.so.1` — that implement the CUDA C ABI by forwarding every
 call over the guest's existing vsock egress channel to a host-side
 endpoint that owns the real GPU. One flag — `mvmctl machine run --gpu` /
-`gpu = true` in the machine spec — turns the whole plane on.
+`gpu = true` in the machine spec — turns the whole plane on. The optional
+`--gpu-device N` / `gpu_device = N` selector pins a VM to host ordinal `N`
+and presents that device as guest ordinal zero.
 
 The approach is **API remoting**, in the lineage of rCUDA and the recent
 "GPU over vsock" work by an adjacent sandbox project: the GPU and its
@@ -104,7 +106,7 @@ that allocate, copy, load a module, and launch kernels:
 
 Out of v1 (named follow-ups, not silent gaps): `cuGetProcAddress`-based
 resolution (CUDA 12 cudart's full symbol path), CUDA graphs and
-contexted fork-reconnect (warm device memory handoff), peer/multi-GPU,
+contexted fork-reconnect (warm device memory handoff), peer-device access,
 the MLX backend for Apple Silicon hosts (second
 backend family behind the same endpoint and transport), and the
 paravirtual-display question (ADR-029's option A) which this plan does
@@ -152,6 +154,10 @@ not touch.
       operations; endpoint completion positions; deterministic stub ordering;
       native CUDA bindings; driver/runtime shim exports; compatibility,
       refusal, ordering, endpoint and workspace validation.
+- [x] W12 — Multi-GPU ordinals (#3566): real backend enumeration; distinct
+      ordinal-to-host-device mapping; runtime per-device contexts; optional
+      manifest/CLI pinning that exposes only guest ordinal zero; invalid host
+      and guest ordinal refusal; deterministic two-device endpoint coverage.
 
 ## Test plan
 

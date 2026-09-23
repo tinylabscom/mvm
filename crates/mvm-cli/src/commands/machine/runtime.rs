@@ -214,6 +214,7 @@ pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineSt
         name: name.to_string(),
         create_flags: MachineStartCreateFlags {
             gpu: args.run.gpu,
+            gpu_device: args.run.gpu_device,
             ..MachineStartCreateFlags::default()
         },
         receipt: args.run.receipt.clone(),

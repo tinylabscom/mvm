@@ -93,6 +93,18 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine restore <checkpoint> --branch <slug>`                                                                   | Auto-name the child `<checkpoint>-<slug>-<timestamp>` instead of using `--as`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl machine warm-restore <checkpoint> [--name <name>]`                                                              | Low-level synonym for restoring a `vm_full` checkpoint into a fresh child VM. Prefer `machine restore` for new scripts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
+### GPU device selection
+
+`mvmctl run`, `mvmctl machine run`, `mvmctl machine create`, and the
+auto-create forms of `machine start` accept `--gpu` to enable CUDA/NVML API
+remoting. Use `--gpu-device ORDINAL` to pin the VM to one host device;
+the selector implies `--gpu`. Persisted machines retain the selection, and an
+image-backed manifest can express the same choice as `gpu_device = ORDINAL`.
+Without a selector, the endpoint exposes the backend's available ordinals.
+With a selector, the guest sees one device at ordinal `0`, mapped to the
+selected host ordinal. Invalid host ordinals fail closed during endpoint
+startup.
+
 ## Environment Management
 
 | Command                                           | Description                                                                                                                                                                                                                                                   |

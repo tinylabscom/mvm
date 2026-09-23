@@ -80,6 +80,10 @@ Last updated: 2026-09-23
       mvm-images work). W11 adds typed streams, events, asynchronous copies,
       completion positions, deterministic stub ordering, native driver calls,
       driver/runtime shim exports, and fail-closed opaque-handle validation.
+      W12 passes real device counts and ordinals through, adds deterministic
+      two-device coverage and runtime per-device contexts, and carries an
+      optional fail-closed host ordinal pin through CLI/manifest, persisted
+      machine specs, launch config, and the per-VM endpoint.
       Open follow-ups named in the plan: CUDA-graph fork-reconnect,
       `cuGetProcAddress`, cubin param metadata, overlay image composition.
 

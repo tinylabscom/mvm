@@ -13,7 +13,7 @@ use std::sync::Arc;
 fn usage() -> ! {
     eprintln!(
         "usage: mvm-gpu-endpoint --listen unix:/path|tcp:HOST:PORT|vsock:PORT \\
-          --backend auto|native|stub [--vm NAME]"
+          --backend auto|native|stub [--device ORDINAL] [--vm NAME]"
     );
     exit(2);
 }
@@ -21,12 +21,25 @@ fn usage() -> ! {
 fn main() {
     let mut listen: Option<String> = None;
     let mut backend_mode = "auto".to_string();
+    let mut device_ordinal: Option<u32> = None;
     let mut vm_name: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--listen" => listen = args.next(),
             "--backend" => backend_mode = args.next().unwrap_or_else(|| usage()),
+            "--device" => {
+                let Some(raw) = args.next() else {
+                    usage();
+                };
+                device_ordinal = match raw.parse() {
+                    Ok(ordinal) => Some(ordinal),
+                    Err(error) => {
+                        eprintln!("mvm-gpu-endpoint: invalid device ordinal {raw:?}: {error}");
+                        exit(2);
+                    }
+                };
+            }
             "--vm" => vm_name = args.next(),
             "--help" | "-h" => usage(),
             other => {
@@ -48,7 +61,7 @@ fn main() {
 
     let make_backend: Arc<dyn Fn() -> Box<dyn GpuBackend> + Send + Sync> =
         match backend_mode.as_str() {
-            "stub" => Arc::new(|| Box::new(stub::StubBackend::new())),
+            "stub" => Arc::new(move || Box::new(stub_backend(device_ordinal))),
             "native" => {
                 if native::probe().is_none() {
                     eprintln!("mvm-gpu-endpoint: --backend native but no usable driver library");
@@ -57,25 +70,45 @@ fn main() {
                 // Each connection rebuilds from the loaded driver rather than
                 // sharing one backend: a shared backend would let two guests
                 // share handle tables. cuInit is documented idempotent.
-                Arc::new(|| match native::probe() {
+                Arc::new(move || match native_backend(device_ordinal) {
                     Some(backend) => Box::new(backend),
-                    None => Box::new(stub::StubBackend::new()),
+                    None => Box::new(stub_backend(device_ordinal)),
                 })
             }
             "auto" => match native::probe() {
-                Some(_) => Arc::new(|| match native::probe() {
+                Some(_) => Arc::new(move || match native_backend(device_ordinal) {
                     Some(backend) => Box::new(backend),
                     // A driver that vanished between probe and serve answers
                     // as the stub rather than refusing the guest outright.
-                    None => Box::new(stub::StubBackend::new()),
+                    None => Box::new(stub_backend(device_ordinal)),
                 }),
-                None => Arc::new(|| Box::new(stub::StubBackend::new())),
+                None => Arc::new(move || Box::new(stub_backend(device_ordinal))),
             },
             other => {
                 eprintln!("mvm-gpu-endpoint: unknown --backend {other:?}");
                 exit(2);
             }
         };
+
+    if let Some(ordinal) = device_ordinal {
+        let mut backend = make_backend();
+        match mvm_gpu::handle_request(&mut *backend, &mvm_gpu::GpuRequest::DeviceGetCount) {
+            mvm_gpu::GpuResponse::DeviceCount { count: 1 } => {}
+            mvm_gpu::GpuResponse::Err(error) => {
+                eprintln!(
+                    "mvm-gpu-endpoint: refusing host GPU ordinal {ordinal}: {}",
+                    error.message
+                );
+                exit(1);
+            }
+            response => {
+                eprintln!(
+                    "mvm-gpu-endpoint: refusing host GPU ordinal {ordinal}: unexpected validation response {response:?}"
+                );
+                exit(1);
+            }
+        }
+    }
 
     let vm = vm_name.as_deref().unwrap_or("<unnamed>");
     eprintln!("mvm-gpu-endpoint: vm={vm} backend={backend_mode} listening on {addr}");
@@ -88,6 +121,20 @@ fn main() {
         eprintln!("mvm-gpu-endpoint: serve {addr}: {e}");
         exit(1);
     }
+}
+
+fn stub_backend(device_ordinal: Option<u32>) -> stub::StubBackend {
+    match device_ordinal {
+        Some(ordinal) => stub::StubBackend::new().with_device_ordinal(ordinal),
+        None => stub::StubBackend::new(),
+    }
+}
+
+fn native_backend(device_ordinal: Option<u32>) -> Option<native::NativeCudaBackend> {
+    native::probe().map(|backend| match device_ordinal {
+        Some(ordinal) => backend.with_device_ordinal(ordinal),
+        None => backend,
+    })
 }
 
 /// One static stop flag + a libc signal arm. Self-contained on purpose:

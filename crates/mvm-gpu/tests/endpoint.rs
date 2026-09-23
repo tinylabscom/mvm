@@ -30,13 +30,20 @@ struct EndpointProcess {
 
 impl EndpointProcess {
     fn start(socket: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mvm-gpu-endpoint"))
+        Self::start_with_device(socket, None)
+    }
+
+    fn start_with_device(socket: &std::path::Path, device_ordinal: Option<u32>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvm-gpu-endpoint"));
+        command
             .arg("--listen")
             .arg(format!("unix:{}", socket.display()))
             .arg("--backend")
-            .arg("stub")
-            .spawn()
-            .expect("spawn mvm-gpu-endpoint");
+            .arg("stub");
+        if let Some(ordinal) = device_ordinal {
+            command.arg("--device").arg(ordinal.to_string());
+        }
+        let mut child = command.spawn().expect("spawn mvm-gpu-endpoint");
         // Wait until the socket actually accepts a connection: the file
         // appearing proves bind() ran, not that listen() has, and a dial in
         // that window is ECONNREFUSED.
@@ -74,7 +81,7 @@ fn the_stub_endpoint_serves_the_full_device_memory_and_launch_flow() {
 
     // Device enumeration answers the NVML-style detection path.
     let response = mvm_gpu_shim_core::call(&GpuRequest::NvmlDeviceGetCount);
-    assert_eq!(response, GpuResponse::NvmlDeviceCount { count: 1 });
+    assert_eq!(response, GpuResponse::NvmlDeviceCount { count: 2 });
     let response = mvm_gpu_shim_core::call(&GpuRequest::NvmlDeviceGetName { ordinal: 0 });
     let GpuResponse::DeviceName { name } = response else {
         panic!("device name: {response:?}");
@@ -243,8 +250,53 @@ fn the_stub_endpoint_serves_the_full_device_memory_and_launch_flow() {
     // endpoint.
     assert_eq!(
         mvm_gpu_shim_core::call(&GpuRequest::DeviceGetCount),
+        GpuResponse::DeviceCount { count: 2 }
+    );
+}
+
+fn a_pinned_endpoint_exposes_only_the_selected_host_device_as_guest_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("gpu-pinned.sock");
+    let _endpoint = EndpointProcess::start_with_device(&socket, Some(1));
+    set_transport(&socket);
+
+    assert_eq!(
+        mvm_gpu_shim_core::call(&GpuRequest::DeviceGetCount),
         GpuResponse::DeviceCount { count: 1 }
     );
+    let response = mvm_gpu_shim_core::call(&GpuRequest::DeviceGetName { ordinal: 0 });
+    let GpuResponse::DeviceName { name } = response else {
+        panic!("selected device name: {response:?}");
+    };
+    assert!(
+        name.ends_with("stub 1"),
+        "guest zero must map to host one: {name}"
+    );
+    let GpuResponse::Err(error) =
+        mvm_gpu_shim_core::call(&GpuRequest::DeviceGetName { ordinal: 1 })
+    else {
+        panic!("the pin must hide every guest ordinal except zero");
+    };
+    assert_eq!(
+        error.code,
+        mvm_gpu_shim_core::wire::CUDA_ERROR_INVALID_DEVICE
+    );
+}
+
+fn an_out_of_range_pin_is_refused_before_the_endpoint_listens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("gpu-invalid-pin.sock");
+    let status = Command::new(env!("CARGO_BIN_EXE_mvm-gpu-endpoint"))
+        .arg("--listen")
+        .arg(format!("unix:{}", socket.display()))
+        .arg("--backend")
+        .arg("stub")
+        .arg("--device")
+        .arg("2")
+        .status()
+        .expect("run endpoint with invalid pin");
+    assert!(!status.success());
+    assert!(!socket.exists(), "invalid pin must fail before bind");
 }
 
 /// Runs inside the full-flow test: the transport is process-global, so the
@@ -280,5 +332,7 @@ fn the_cap_refusal_runs_after_the_full_flow() {
     // Sequenced, not parallel: `MVM_GPU_RPC` and the cached transport are
     // process-global, and each of these tests needs a different endpoint.
     the_stub_endpoint_serves_the_full_device_memory_and_launch_flow();
+    a_pinned_endpoint_exposes_only_the_selected_host_device_as_guest_zero();
+    an_out_of_range_pin_is_refused_before_the_endpoint_listens();
     over_cap_launch_is_refused_before_it_reaches_the_backend();
 }

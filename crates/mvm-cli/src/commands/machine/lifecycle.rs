@@ -97,6 +97,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         allow_host: &args.create_flags.allow_host,
         peer: &args.create_flags.peer,
         gpu: args.create_flags.gpu,
+        gpu_device: args.create_flags.gpu_device,
         ai: None,
         cpus: args.create_flags.cpus,
         cpu_limit: args.create_flags.cpu_limit,

@@ -349,6 +349,7 @@ pub struct NativeCudaBackend {
     next_stream: u64,
     events: HashMap<u64, (u64, EventPtr)>,
     next_event: u64,
+    device_ordinal: Option<u32>,
 }
 
 // The backend holds raw CUDA context/stream/event/module/function pointers minted by
@@ -382,10 +383,19 @@ pub fn probe() -> Option<NativeCudaBackend> {
         next_stream: 0,
         events: HashMap::new(),
         next_event: 0,
+        device_ordinal: None,
     })
 }
 
 impl NativeCudaBackend {
+    /// Restrict this endpoint to one host device, exposed as guest ordinal
+    /// zero. Dispatch validates the selection against CUDA and NVML counts.
+    #[must_use]
+    pub fn with_device_ordinal(mut self, ordinal: u32) -> Self {
+        self.device_ordinal = Some(ordinal);
+        self
+    }
+
     fn mint_handle(base: u64, next: &mut u64, kind: &str) -> Result<u64, GpuError> {
         let offset = next.checked_mul(0x1000).ok_or_else(|| {
             GpuError::new(
@@ -512,6 +522,10 @@ impl NativeCudaBackend {
 }
 
 impl GpuBackend for NativeCudaBackend {
+    fn device_ordinal(&self) -> Option<u32> {
+        self.device_ordinal
+    }
+
     fn driver_version(&mut self) -> Result<i32, GpuError> {
         let mut version: c_int = 0;
         // SAFETY: `version` is a valid out-pointer.

@@ -78,20 +78,19 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
             .driver_version()
             .map(|version| GpuResponse::DriverVersion { version })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceGetCount => backend
-            .device_count()
+        GpuRequest::DeviceGetCount => visible_device_count(backend, false)
             .map(|count| GpuResponse::DeviceCount { count })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceGetName { ordinal } => backend
-            .device_name(*ordinal)
+        GpuRequest::DeviceGetName { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.device_name(ordinal))
             .map(|name| GpuResponse::DeviceName { name })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceTotalMem { ordinal } => backend
-            .device_total_mem(*ordinal)
+        GpuRequest::DeviceTotalMem { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.device_total_mem(ordinal))
             .map(|bytes| GpuResponse::DeviceTotalMem { bytes })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::ContextCreate { ordinal } => backend
-            .context_create(*ordinal)
+        GpuRequest::ContextCreate { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.context_create(ordinal))
             .map(|context| GpuResponse::ContextCreated { context })
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::ContextDestroy { context } => backend
@@ -229,30 +228,77 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
                 .map(|()| GpuResponse::Ok)
                 .unwrap_or_else(GpuResponse::Err)
         }
-        GpuRequest::NvmlDeviceGetCount => backend
-            .nvml_device_count()
+        GpuRequest::NvmlDeviceGetCount => visible_device_count(backend, true)
             .map(|count| GpuResponse::NvmlDeviceCount { count })
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::NvmlSystemGetDriverVersion => backend
             .nvml_driver_version()
             .map(|version| GpuResponse::NvmlDriverVersion { version })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetName { ordinal } => backend
-            .nvml_device_name(*ordinal)
+        GpuRequest::NvmlDeviceGetName { ordinal } => visible_ordinal(backend, *ordinal, true)
+            .and_then(|ordinal| backend.nvml_device_name(ordinal))
             .map(|name| GpuResponse::DeviceName { name })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetMemoryInfo { ordinal } => backend
-            .nvml_memory_info(*ordinal)
+        GpuRequest::NvmlDeviceGetMemoryInfo { ordinal } => visible_ordinal(backend, *ordinal, true)
+            .and_then(|ordinal| backend.nvml_memory_info(ordinal))
             .map(|(total, free, used)| GpuResponse::NvmlMemoryInfo { total, free, used })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetUtilizationRates { ordinal } => backend
-            .nvml_utilization(*ordinal)
-            .map(|(gpu, memory)| GpuResponse::NvmlUtilization { gpu, memory })
-            .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetCudaComputeCapability { ordinal } => backend
-            .nvml_compute_capability(*ordinal)
-            .map(|(major, minor)| GpuResponse::NvmlComputeCapability { major, minor })
-            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::NvmlDeviceGetUtilizationRates { ordinal } => {
+            visible_ordinal(backend, *ordinal, true)
+                .and_then(|ordinal| backend.nvml_utilization(ordinal))
+                .map(|(gpu, memory)| GpuResponse::NvmlUtilization { gpu, memory })
+                .unwrap_or_else(GpuResponse::Err)
+        }
+        GpuRequest::NvmlDeviceGetCudaComputeCapability { ordinal } => {
+            visible_ordinal(backend, *ordinal, true)
+                .and_then(|ordinal| backend.nvml_compute_capability(ordinal))
+                .map(|(major, minor)| GpuResponse::NvmlComputeCapability { major, minor })
+                .unwrap_or_else(GpuResponse::Err)
+        }
+    }
+}
+
+fn invalid_device(nvml: bool, message: impl Into<String>) -> GpuError {
+    GpuError::new(
+        if nvml {
+            wire::NVML_ERROR_INVALID_ARGUMENT
+        } else {
+            wire::CUDA_ERROR_INVALID_DEVICE
+        },
+        message,
+    )
+}
+
+fn visible_ordinal(
+    backend: &dyn GpuBackend,
+    guest_ordinal: u32,
+    nvml: bool,
+) -> Result<u32, GpuError> {
+    match backend.device_ordinal() {
+        None => Ok(guest_ordinal),
+        Some(host_ordinal) if guest_ordinal == 0 => Ok(host_ordinal),
+        Some(host_ordinal) => Err(invalid_device(
+            nvml,
+            format!(
+                "this VM is pinned to host GPU {host_ordinal}; only guest ordinal 0 is visible, not {guest_ordinal}"
+            ),
+        )),
+    }
+}
+
+fn visible_device_count(backend: &mut dyn GpuBackend, nvml: bool) -> Result<u32, GpuError> {
+    let count = if nvml {
+        backend.nvml_device_count()?
+    } else {
+        backend.device_count()?
+    };
+    match backend.device_ordinal() {
+        None => Ok(count),
+        Some(host_ordinal) if host_ordinal < count => Ok(1),
+        Some(host_ordinal) => Err(invalid_device(
+            nvml,
+            format!("host GPU ordinal {host_ordinal} is outside the detected device count {count}"),
+        )),
     }
 }
 
@@ -261,6 +307,12 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
 /// Implementations own their handle tables; a handle is only ever meaningful
 /// to the backend instance that minted it, on the connection that asked.
 pub trait GpuBackend: Send {
+    /// Host device exposed as guest ordinal zero, or `None` to expose every
+    /// backend device with its native ordinal.
+    fn device_ordinal(&self) -> Option<u32> {
+        None
+    }
+
     fn driver_version(&mut self) -> Result<i32, GpuError>;
     fn device_count(&mut self) -> Result<u32, GpuError>;
     fn device_name(&mut self, ordinal: u32) -> Result<String, GpuError>;
