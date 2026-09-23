@@ -129,6 +129,10 @@ pub mod stream_pump;
 /// substitution endpoint over vsock (the relay half of the guest-local forward
 /// proxy).
 pub mod substitution_client;
+
+/// Guest side of the dedicated telemetry service (authenticated session per
+/// host connection on the reserved telemetry port).
+pub mod telemetry_service;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
