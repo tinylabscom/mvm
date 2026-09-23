@@ -22,7 +22,7 @@ doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
 #3314 (`mvm-core` split) · #3315 (naming + the real section-D work) · #3316 (**claims 11 and 13** — a
 dead control and an ambiguous witness) · #3317 (no citation gate on ADRs) ·
 #3318 (ADR-001 internal defects) ·
-#3319 (four Accepted ADRs describing nothing) · #3334 (re-exports satisfy the
+#3319 (ADR implementation parity) · #3334 (re-exports satisfy the
 dormant-control caller gate). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
@@ -119,22 +119,18 @@ opposite one, `drop_page_cache`).
       duplicate/overlapping ADR pairs, of which the **045↔046↔051** cluster and
       a five-ADR networking cluster are the real consolidation candidates.
       Folded into #3311 and #3317.
-- [ ] **A2.6** Four `Accepted` ADRs describe implementations that are not in
-      the tree — a different class from a stale citation, because there is
-      nothing to re-point at. ADR-038 says "implemented end to end" and every
-      symbol it names returns zero hits; ADR-023's nftables REDIRECT mechanism
-      has no NIC to redirect from (`install_default_deny_nft` has only test
-      callers) though its substitution machinery is real and wired; ADR-026 §2
-      asserts a build-time setuid check its own §3 defers; ADR-025's
-      same-family merging gate does not exist, so the property holds vacuously.
+- [x] **A2.6** Reconcile the four ADR implementation claims in #3319.
+      ADR-038 is Proposed, names ADR-042's supersession, and scopes shipped
+      behavior to the workload kernel's IPv6 capability; ADR-023 already
+      describes the live flow-aware vsock steering path; ADR-026 keeps its
+      no-setuid image scan and runtime-euid witness explicitly deferred; and
+      ADR-025 states that active same-page merging and its policy gate do not
+      exist, leaving the same-family rule as a constraint on future work.
+- [x] **A2.7** Ground ADR-025's transparent-networking refusal in the shipped
+      architecture. The refusal still stands because a parallel translator
+      would bypass the single admitted, metered and audited vsock seam; it no
+      longer claims that workload traffic uses virtio-net or a network bridge.
       #3319.
-- [ ] **A2.7** ADR-025's refusal of transparent host-socket networking argues
-      from "the cost mvm already chose to pay by **staying on virtio-net**".
-      mvm has no virtio-net in the workload tier and no network bridge. The
-      refusal's *conclusion* survives — its own second paragraph gives the
-      correct reason, that the mechanism would move enforcement off the vsock
-      seam — but its stated rationale contradicts the shipped design, and
-      anyone reasoning forward from it will get the egress model wrong. #3319.
 - [ ] **A2.8** **CLAUDE.md understates what ships, in one place.** `:643` says
       "wasm fuel/epoch is declared and unwired". It is wired:
       `cfg.consume_fuel(bounds.fuel.is_some())` and

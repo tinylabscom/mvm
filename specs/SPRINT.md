@@ -585,7 +585,12 @@ docs commit went out as #3581). Under the
       comments and the obsolete large-enum lint allowance, and record why the
       bounded hickory DNS codec remains. Complete with CLI tests, documentation
       and ADR gates, workspace check and clippy, and the serial full workspace
-      suite.
+      suite. Follow-up #3319 (A2.6 + A2.7) has its ADR corrections prepared:
+      ADR-038 is scoped to the kernel capability that shipped, ADR-025 keeps
+      the vsock-seam refusal without inventing virtio-net or a page-merging
+      gate, and ADR-026 remains Proposed until its no-setuid image scan and
+      runtime-euid witness exist. Formatting and all 74 repository policy gates
+      pass; the correction is ready for merge-queue delivery.
 
 - [x] **Honest production file-size gate — issue #3313.**
       `specs/plans/2026-09-15-the-big-cleanup.md` C1. Count lines outside all
