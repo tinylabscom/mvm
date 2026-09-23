@@ -7,6 +7,54 @@ use super::Check;
 use super::builder::dev_vm_socket_path;
 use mvm_core::platform::{self, Platform};
 
+const LANDLOCK_REMEDIATION: &str = "enable CONFIG_SECURITY_LANDLOCK=y, include landlock in the active LSM list, and use Linux 5.19+";
+
+/// Report whether the mandatory endpoint confinement can be enforced before a
+/// build or workload pays the cost of booting a guest.
+pub(super) fn security_landlock_check() -> Check {
+    security_landlock_check_from_support(mvm_hostd::jailer::landlock_support())
+}
+
+fn security_landlock_check_from_support(support: mvm_hostd::jailer::LandlockSupport) -> Check {
+    use mvm_hostd::jailer::LandlockSupport;
+
+    let (ok, info) = match support {
+        LandlockSupport::Available { abi } => (
+            true,
+            format!("ABI {abi} available — network endpoints can enforce filesystem confinement"),
+        ),
+        LandlockSupport::TooOld { abi } => (
+            false,
+            format!("ABI {abi} is too old; ABI 2 is required — {LANDLOCK_REMEDIATION}"),
+        ),
+        LandlockSupport::Disabled => (
+            false,
+            format!("present but disabled for this boot — {LANDLOCK_REMEDIATION}"),
+        ),
+        LandlockSupport::Unavailable => (
+            false,
+            format!("not implemented by the running kernel — {LANDLOCK_REMEDIATION}"),
+        ),
+        LandlockSupport::ProbeFailed { errno } => (
+            false,
+            format!(
+                "ABI query failed (errno {}) — refusing to claim endpoint confinement; {LANDLOCK_REMEDIATION}",
+                errno.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+            ),
+        ),
+        LandlockSupport::NotApplicable => (
+            true,
+            "n/a (Landlock is a Linux-only kernel LSM)".to_string(),
+        ),
+    };
+    Check {
+        name: "landlock",
+        category: "security",
+        ok,
+        info,
+    }
+}
+
 pub(super) fn security_audit_log_check() -> Check {
     let path = mvm_core::audit::default_audit_log();
     let exists = std::path::Path::new(&path).exists();
@@ -966,6 +1014,51 @@ fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_hostd::jailer::LandlockSupport;
+
+    #[test]
+    fn landlock_v2_or_newer_passes_doctor() {
+        let check = security_landlock_check_from_support(LandlockSupport::Available { abi: 4 });
+        assert!(check.ok);
+        assert_eq!(check.name, "landlock");
+        assert_eq!(check.category, "security");
+        assert!(check.info.contains("ABI 4"), "{}", check.info);
+    }
+
+    #[test]
+    fn missing_landlock_fails_with_kernel_and_lsm_remediation() {
+        let check = security_landlock_check_from_support(LandlockSupport::Unavailable);
+        assert!(!check.ok);
+        assert!(
+            check.info.contains("CONFIG_SECURITY_LANDLOCK=y"),
+            "{}",
+            check.info
+        );
+        assert!(check.info.contains("active LSM list"), "{}", check.info);
+        assert!(check.info.contains("Linux 5.19+"), "{}", check.info);
+        let json = serde_json::to_string(&check).expect("doctor check serializes");
+        assert!(json.contains("CONFIG_SECURITY_LANDLOCK=y"), "{json}");
+        assert!(json.contains("\"ok\":false"), "{json}");
+    }
+
+    #[test]
+    fn disabled_and_too_old_landlock_are_distinct_failures() {
+        let disabled = security_landlock_check_from_support(LandlockSupport::Disabled);
+        assert!(!disabled.ok);
+        assert!(disabled.info.contains("disabled"), "{}", disabled.info);
+
+        let old = security_landlock_check_from_support(LandlockSupport::TooOld { abi: 1 });
+        assert!(!old.ok);
+        assert!(old.info.contains("ABI 1"), "{}", old.info);
+        assert!(old.info.contains("ABI 2"), "{}", old.info);
+    }
+
+    #[test]
+    fn non_linux_landlock_is_not_applicable() {
+        let check = security_landlock_check_from_support(LandlockSupport::NotApplicable);
+        assert!(check.ok);
+        assert!(check.info.contains("n/a"), "{}", check.info);
+    }
     use mvm_core::util::test_env::TestEnv;
 
     #[test]

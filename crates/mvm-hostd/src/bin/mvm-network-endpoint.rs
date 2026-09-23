@@ -524,10 +524,6 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 /// we return it up to `main`, which exits nonzero before serving secrets.
 #[cfg(target_os = "linux")]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
-    if std::env::var_os("MVM_ENDPOINT_NO_CONFINE").is_some() {
-        warn!("skipping substitution endpoint self-confinement (MVM_ENDPOINT_NO_CONFINE set)");
-        return Ok(());
-    }
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
     use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
@@ -1213,6 +1209,16 @@ mod tests {
         IngressMapping, IngressProtocol, IngressTransform, SecretBinding, SecretSource,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn endpoint_source_has_no_unconfined_escape_hatch() {
+        let source = include_str!("mvm-network-endpoint.rs");
+        let bypass_name = ["MVM", "ENDPOINT", "NO", "CONFINE"].join("_");
+        assert!(
+            !source.contains(&bypass_name),
+            "the secret-holding endpoint must never accept an unconfined bypass"
+        );
+    }
 
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {

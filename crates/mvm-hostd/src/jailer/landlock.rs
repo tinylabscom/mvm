@@ -104,14 +104,16 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     let status: RestrictionStatus = ruleset
         .restrict_self()
         .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;
-    match status.ruleset {
+    require_full_enforcement(status.ruleset)
+}
+
+fn require_full_enforcement(status: RulesetStatus) -> Result<(), JailerError> {
+    match status {
         RulesetStatus::FullyEnforced => Ok(()),
-        RulesetStatus::PartiallyEnforced | RulesetStatus::NotEnforced => {
-            Err(JailerError::LandlockApply(format!(
-                "ruleset status {:?}; refusing partial confinement",
-                status.ruleset
-            )))
-        }
+        RulesetStatus::PartiallyEnforced => Err(JailerError::LandlockApply(
+            "ruleset status PartiallyEnforced; refusing partial confinement".to_string(),
+        )),
+        RulesetStatus::NotEnforced => Err(JailerError::LandlockUnavailable),
     }
 }
 
@@ -152,6 +154,15 @@ fn path_open_error(spec_path: &std::path::Path, err: landlock::PathFdError) -> J
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_enforced_is_reported_as_an_actionable_kernel_capability_failure() {
+        let error = require_full_enforcement(RulesetStatus::NotEnforced)
+            .expect_err("a kernel without enforcing Landlock must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("CONFIG_SECURITY_LANDLOCK"), "{message}");
+        assert!(message.contains("active LSM"), "{message}");
+    }
 
     /// Defense-in-depth: a future contributor swapping the minimal
     /// grant back to `AccessFs::from_all(ABI::V2)` (or otherwise
