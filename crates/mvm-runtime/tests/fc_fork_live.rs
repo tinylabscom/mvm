@@ -24,9 +24,15 @@
 //!   The rootfs must provide `python3` so the witness can invoke `getrandom(2)`
 //!   explicitly after each restore.
 //!
-//! It is `#[ignore]` so CI never runs it; execute manually on a KVM box with
-//! `cargo test -p mvm-runtime --test fc_fork_live -- --ignored --nocapture`.
-//! Set `MVM_LIVE_HOME` to retain the VM state and console log after a failure.
+//! It is `#[ignore]` so CI never runs it. On a Linux KVM host, the one-command
+//! runner stages the toolchain, the hash-verified mvm workload kernel (the
+//! upstream Firecracker-CI kernel has no device-mapper and cannot run this),
+//! and a python3 rootfs, then executes it:
+//! `scripts/live-fork-witness-remote.sh root@<kvm-host>` (or
+//! `just live-fork-witness root@<kvm-host>`). Manual equivalent:
+//! `cargo test -p mvm-runtime --test fc_fork_live -- --ignored --nocapture`
+//! with `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS` set. Set `MVM_LIVE_HOME` to retain
+//! the VM state and console log after a failure.
 
 #![cfg(target_os = "linux")]
 
