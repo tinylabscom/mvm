@@ -84,6 +84,46 @@ pub(in crate::commands) struct Args {
     pub pty_argv: Vec<String>,
 }
 
+/// Composable inputs for one interactive console session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::commands) struct ConsoleSessionOptions {
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+}
+
+impl ConsoleSessionOptions {
+    pub(in crate::commands) fn builder() -> ConsoleSessionOptionsBuilder {
+        ConsoleSessionOptionsBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(in crate::commands) struct ConsoleSessionOptionsBuilder {
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+}
+
+impl ConsoleSessionOptionsBuilder {
+    #[must_use]
+    pub(in crate::commands) fn env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    #[must_use]
+    pub(in crate::commands) fn argv(mut self, argv: Vec<String>) -> Self {
+        self.argv = argv;
+        self
+    }
+
+    pub(in crate::commands) fn build(self) -> ConsoleSessionOptions {
+        ConsoleSessionOptions {
+            env: self.env,
+            argv: self.argv,
+        }
+    }
+}
+
 /// Refuse to attach if the VM's image was built sealed (dev = false /
 /// `passthru.mvm.accessible = false`). The state file is best-effort:
 /// missing or legacy files without the field are treated as accessible.
@@ -158,7 +198,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     } else {
         // Interactive PTY session
-        console_interactive_with_env_and_argv(name, args.env, args.pty_argv)
+        let options = ConsoleSessionOptions::builder()
+            .env(args.env)
+            .argv(args.pty_argv)
+            .build();
+        let exit_code = console_interactive(name, options)?;
+        if exit_code != 0 {
+            mvm_observability::exit(exit_code);
+        }
+        Ok(())
     }
 }
 
@@ -186,17 +234,6 @@ fn touch_activity(name: &str) {
 /// Supports Firecracker (via UDS vsock), libkrun (via per-port Unix
 /// sockets), Apple Container (via direct vsock), and vsock proxy (via
 /// daemon Unix socket for cross-process access).
-pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
-    console_interactive_with_env(name, Vec::new()).map(|_| ())
-}
-
-pub(in crate::commands) fn console_interactive_with_env(
-    name: &str,
-    env: Vec<(String, String)>,
-) -> Result<i32> {
-    console_pty_with_argv(name, env, Vec::new())
-}
-
 pub(crate) fn console_pty_command(
     name: &str,
     command: String,
@@ -209,24 +246,18 @@ pub(crate) fn console_pty_command(
     Ok(())
 }
 
-pub(in crate::commands) fn console_interactive_with_env_and_argv(
-    name: &str,
-    env: Vec<(String, String)>,
-    argv: Vec<String>,
-) -> Result<()> {
-    let exit_code = console_pty_with_argv(name, env, argv)?;
-    if exit_code != 0 {
-        mvm_observability::exit(exit_code);
-    }
-    Ok(())
-}
-
 pub(crate) fn run_pty_command_for_exit(
     name: &str,
     command: String,
     env: Vec<(String, String)>,
 ) -> Result<i32> {
-    console_pty_with_argv(name, env, shell_command_argv(command))
+    console_interactive(
+        name,
+        ConsoleSessionOptions::builder()
+            .env(env)
+            .argv(shell_command_argv(command))
+            .build(),
+    )
 }
 
 pub(crate) fn run_pty_argv_for_exit(
@@ -234,14 +265,21 @@ pub(crate) fn run_pty_argv_for_exit(
     argv: Vec<String>,
     env: Vec<(String, String)>,
 ) -> Result<i32> {
-    console_pty_with_argv(name, env, argv)
+    console_interactive(
+        name,
+        ConsoleSessionOptions::builder().env(env).argv(argv).build(),
+    )
 }
 
 fn shell_command_argv(command: String) -> Vec<String> {
     vec!["/bin/sh".to_string(), "-lc".to_string(), command]
 }
 
-fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<String>) -> Result<i32> {
+pub(in crate::commands) fn console_interactive(
+    name: &str,
+    options: ConsoleSessionOptions,
+) -> Result<i32> {
+    let ConsoleSessionOptions { env, argv } = options;
     let (cols, rows) = get_terminal_size();
 
     ui::info(&format!(
@@ -638,6 +676,20 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
 #[cfg(test)]
 mod console_relay_tests {
     use super::*;
+
+    #[test]
+    fn session_options_compose_environment_and_argv() {
+        let options = ConsoleSessionOptions::builder()
+            .env(vec![("TERM".to_string(), "xterm-256color".to_string())])
+            .argv(vec!["/bin/sh".to_string(), "-l".to_string()])
+            .build();
+
+        assert_eq!(
+            options.env,
+            vec![("TERM".to_string(), "xterm-256color".to_string())]
+        );
+        assert_eq!(options.argv, vec!["/bin/sh".to_string(), "-l".to_string()]);
+    }
 
     #[test]
     fn local_escape_is_recognized_across_input_chunks() {
