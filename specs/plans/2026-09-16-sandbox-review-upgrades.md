@@ -216,8 +216,11 @@ data directory ships owned by its own account boots with root-owned files.
   - [x] a layer file owned 999:999 round-trips;
   - [x] a uid above 65535 round-trips through the high fields;
   - [x] changing only an owner changes the fingerprint.
-- [ ] W3.6 Live test: an image whose service data directory is owned by a
-      non-root account starts that service.
+- [x] W3.6 Live test: an image whose service data directory is owned by a
+      non-root account starts that service. On 2026-09-22, pinned Firecracker
+      v1.17.0 booted the production-writer ext4 under Linux/KVM; the service
+      ran as uid/gid 901, verified its `0700` data directory and `0600` secret
+      were owned by 901:901, read the secret, and exited successfully.
 - [x] W3.7 Keep the files mvm injects root-owned whatever a layer declares
       (#3430). The owner table forces root on every injected destination,
       mount point, directory leading to one, and mvm-only tree, so a layer

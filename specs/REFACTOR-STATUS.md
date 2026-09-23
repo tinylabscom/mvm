@@ -208,8 +208,10 @@ Last updated: 2026-09-22
       measure-first and sequenced with #3360.
       W1 is complete: the live Firecracker/KVM sibling-restore witness proves
       immediate post-restore `getrandom(2)` divergence.
-      W3.1–W3.5 done (#3380): container layer owners reach the ext4 inodes;
-      the W3.6 live boot is still open. W3.7 done (#3430): files mvm injects
+      W3.1–W3.6 done (#3380): container layer owners reach the ext4 inodes,
+      and a pinned Firecracker v1.17.0 Linux/KVM boot ran the service as
+      uid/gid 901 while it verified and read its 901:901-owned data. W3.7 done
+      (#3430): files mvm injects
       stay root-owned whatever a layer declares; its #3480 follow-up refuses
       persistent and non-image `machine run --prod` paths before source
       resolution, and #3481 runs a sealed OCI image's declared Entrypoint/Cmd
