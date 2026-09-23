@@ -65,12 +65,11 @@ in
   # runtime overlay; image composition is not owned here.
   mvm-gpu-shims-glibc = pkgs.callPackage ./mvm-gpu-shims.nix {
     inherit mvmSrc;
-    static = false;
   };
 
   mvm-gpu-shims-musl = pkgs.callPackage ./mvm-gpu-shims.nix {
     inherit mvmSrc;
-    static = true;
+    buildMusl = true;
   };
 
   # A guest can only dlopen the variant matching its own libc.

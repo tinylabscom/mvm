@@ -1589,6 +1589,33 @@ fn sdk_sidecar_build_keeps_cargo_out_of_nixs_sentinel_home() {
     );
 }
 
+#[test]
+fn gpu_shim_musl_build_uses_the_prebuilt_target_toolchain() {
+    let content =
+        fs::read_to_string("nix/packages/mvm-gpu-shims.nix").expect("read GPU shim package");
+
+    assert!(
+        content.contains("./embedded-rust-toolchain.nix")
+            && content.contains("CARGO_BUILD_TARGET = muslTarget;")
+            && content.contains("target-feature=-crt-static")
+            && content.contains("linker=${muslLinker}"),
+        "musl GPU cdylibs must use the cached native Rust toolchain with the musl target and linker"
+    );
+    assert!(
+        !content.contains("pkgs.pkgsMusl.rustPlatform")
+            && !content.contains("pkgsStatic.rustPlatform"),
+        "GPU cdylibs must not rebuild a musl/static Rust and LLVM toolchain"
+    );
+    assert!(
+        content.contains("buildMusl ? false") && content.contains("isMusl = buildMusl;"),
+        "the musl selector must not be named `musl`, which callPackage auto-fills with pkgs.musl"
+    );
+    assert!(
+        content.contains("expected a musl object (NEEDED libc.so)"),
+        "the package must reject a musl-labelled shim linked against the wrong libc"
+    );
+}
+
 /// The sidecar has to ship as an attachable read-only ext4 with the exact file
 /// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
 /// alone can't be attached to a microVM.
