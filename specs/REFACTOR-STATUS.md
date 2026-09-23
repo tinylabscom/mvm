@@ -14,6 +14,13 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [x] **Request-scoped boot-admission image source — issue #3559.**
+      `specs/plans/2026-09-23-admission-image-source-context.md`. Admission
+      consumes the caller-captured local image checkout instead of rereading
+      mutable process environment; parallel release-channel requests with
+      different selector contexts are regression-tested without global
+      serialization.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard

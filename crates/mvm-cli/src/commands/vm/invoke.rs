@@ -306,6 +306,7 @@ fn admit_entrypoint_boot(
         tenant: "local",
         vm_name: params.vm_name,
         backend_name: params.backend_name,
+        configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
         rootfs_path: params.rootfs,
         kernel_path: params.kernel_path,
         precomputed_image_sha256: None,

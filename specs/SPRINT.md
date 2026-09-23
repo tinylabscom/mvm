@@ -21,6 +21,13 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
+- [x] **Make boot admission's image-source selector request-scoped — issue #3559.**
+      `AdmitPlanForBootParams` now carries the caller-captured local image
+      checkout instead of rereading `MVM_IMAGES_DIR`, and a parallel
+      release-channel regression proves configured and unconfigured admissions
+      cannot contaminate each other. See
+      `specs/plans/2026-09-23-admission-image-source-context.md`.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in
