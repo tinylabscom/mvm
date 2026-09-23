@@ -284,6 +284,7 @@ mod pair_routing_tests {
                                     owner: mvm_fs::ext4::Owner::ROOT,
                                 })
                                 .collect(),
+                            &Default::default(),
                         )
                         .expect("build the overlay ext4 fixture"),
                         format: "ext4",

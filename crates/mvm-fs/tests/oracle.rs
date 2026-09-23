@@ -96,7 +96,7 @@ fn read_symlink_target(fs: &Filesystem, ino: u32) -> Vec<u8> {
 
 #[test]
 fn empty_tree_mounts_with_root_dir() {
-    let fs = mount(build_image(Vec::new()).unwrap());
+    let fs = mount(build_image(Vec::new(), &Default::default()).unwrap());
     let (root, _) = fs.read_inode_verified(2).unwrap();
     assert_eq!(root.mode & 0o170000, 0o040000, "root must be a directory");
     let names: Vec<String> = list_dir(&fs, 2).into_iter().map(|(n, ..)| n).collect();
@@ -135,7 +135,7 @@ fn tree_round_trips_through_real_reader() {
             owner: Owner::ROOT,
         },
     ];
-    let fs = mount(build_image(nodes).unwrap());
+    let fs = mount(build_image(nodes, &Default::default()).unwrap());
 
     // Root lists /etc (dir) + /hello (file).
     let root = list_dir(&fs, 2);
@@ -198,7 +198,7 @@ fn symlink_targets_round_trip_across_fast_slow_boundary() {
         });
     }
 
-    let fs = mount(build_image(nodes).unwrap());
+    let fs = mount(build_image(nodes, &Default::default()).unwrap());
     let (links_ino, links_ft) = find(&list_dir(&fs, 2), "links").expect("/links present");
     assert_eq!(links_ft, DirEntryType::Directory);
     let entries = list_dir(&fs, links_ino);
@@ -272,8 +272,8 @@ fn output_is_deterministic() {
             owner: Owner::ROOT,
         },
     ];
-    let one = build_image(nodes.clone()).unwrap();
-    let two = build_image(nodes).unwrap();
+    let one = build_image(nodes.clone(), &Default::default()).unwrap();
+    let two = build_image(nodes, &Default::default()).unwrap();
     assert_eq!(one, two, "same input must produce byte-identical images");
 }
 
@@ -313,7 +313,7 @@ fn multi_group_image_round_trips_through_real_reader() {
         },
     ];
 
-    let image = build_image(nodes).unwrap();
+    let image = build_image(nodes, &Default::default()).unwrap();
     assert!(
         image.len() > ONE_GROUP_BYTES,
         "image ({} bytes) should span more than one block group",
@@ -358,7 +358,7 @@ fn depth1_extent_tree_file_round_trips_through_real_reader() {
         xattrs: Vec::new(),
         owner: Owner::ROOT,
     }];
-    let image = build_image(nodes).unwrap();
+    let image = build_image(nodes, &Default::default()).unwrap();
 
     let fs = mount(image);
     let (ino, ft) = find(&list_dir(&fs, 2), "huge").expect("/huge present");
@@ -426,7 +426,7 @@ fn root_owned_fixture() -> Vec<Node> {
 #[test]
 fn root_owned_image_bytes_are_pinned() {
     use sha2::Digest as _;
-    let image = build_image(root_owned_fixture()).unwrap();
+    let image = build_image(root_owned_fixture(), &Default::default()).unwrap();
     assert_eq!(
         hex::encode(sha2::Sha256::digest(&image)),
         "42b16364352722d7b9ade5566df33b278339c5b8204dc8f8497b1fb813a4dd03",
@@ -496,7 +496,7 @@ fn owners_round_trip_through_real_reader() {
             owner: Owner::ROOT,
         },
     ];
-    let fs = mount(build_image(nodes).unwrap());
+    let fs = mount(build_image(nodes, &Default::default()).unwrap());
     assert_eq!(owner_of(&fs, "/data"), svc);
     assert_eq!(owner_of(&fs, "/data/state"), wide);
     assert_eq!(owner_of(&fs, "/data/current"), widest);

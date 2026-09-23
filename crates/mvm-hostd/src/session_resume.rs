@@ -898,7 +898,8 @@ mod tests {
                 owner: Owner::ROOT,
             })
             .collect();
-        let ext4 = mvm_fs::ext4::build_image(nodes).expect("build runtime overlay fixture");
+        let ext4 = mvm_fs::ext4::build_image(nodes, &Default::default())
+            .expect("build runtime overlay fixture");
         std::fs::write(source.join("overlay.ext4"), ext4).expect("write overlay ext4");
         std::fs::write(source.join("overlay.verity"), b"verity-sidecar")
             .expect("write overlay verity sidecar");

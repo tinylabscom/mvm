@@ -76,7 +76,7 @@ fn main() {
             owner: Owner::ROOT,
         },
     ];
-    let image = build_image(nodes).expect("build ext4 image");
+    let image = build_image(nodes, &Default::default()).expect("build ext4 image");
     std::fs::write(&out, &image).expect("write image file");
     eprintln!("wrote {} bytes to {out}", image.len());
 

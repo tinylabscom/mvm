@@ -669,8 +669,7 @@ mod tests {
         let walk = crate::rootfs::WalkOptions::default()
             .with_xattr_policy(crate::rootfs::XattrPolicy::Ignore);
         let nodes = crate::rootfs::collect_nodes(&staged.root, walk).expect("collect nodes");
-        let dense =
-            crate::ext4::build_image_with_options(nodes, &build_options).expect("dense image");
+        let dense = crate::ext4::build_image(nodes, &build_options).expect("dense image");
 
         let materialized = materialize_in_process(&staged.root, &output, &options, &build_options)
             .expect("streamed in-process materialize");

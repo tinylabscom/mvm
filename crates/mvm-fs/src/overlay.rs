@@ -796,7 +796,8 @@ mod tests {
                 owner: Owner::ROOT,
             })
             .collect();
-        crate::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
+        crate::ext4::build_image(nodes, &Default::default())
+            .expect("build valid overlay ext4 fixture")
     }
 
     #[test]

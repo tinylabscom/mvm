@@ -678,26 +678,9 @@ impl RegionAllocator {
 
 /// Build a deterministic read-only ext4 image containing `nodes` (plus the
 /// implicit root directory). Returns the raw image bytes.
-pub fn build_image(nodes: Vec<Node>) -> Result<Vec<u8>, Ext4Error> {
-    build_image_with_options(nodes, &BuildOptions::default())
-}
-
-/// Emit a deterministic read-only ext4 image containing `nodes` as a series of
-/// sparse `(offset, bytes)` chunks. Returns the final image length in bytes so
-/// callers can size the destination file without guessing.
-pub fn emit_image<E, F>(nodes: Vec<Node>, emit: F) -> Result<u64, EmitImageError<E>>
-where
-    F: FnMut(u64, &[u8]) -> Result<(), E>,
-{
-    emit_image_with_options(nodes, &BuildOptions::default(), emit)
-}
-
-pub fn build_image_with_options(
-    nodes: Vec<Node>,
-    options: &BuildOptions,
-) -> Result<Vec<u8>, Ext4Error> {
+pub fn build_image(nodes: Vec<Node>, options: &BuildOptions) -> Result<Vec<u8>, Ext4Error> {
     let mut dense = Vec::new();
-    let total_bytes = match emit_image_with_options(nodes, options, |offset, bytes| {
+    let total_bytes = match emit_image(nodes, options, |offset, bytes| {
         let start = offset as usize;
         let end = start + bytes.len();
         if dense.len() < end {
@@ -714,7 +697,10 @@ pub fn build_image_with_options(
     Ok(dense)
 }
 
-pub fn emit_image_with_options<E, F>(
+/// Emit a deterministic read-only ext4 image containing `nodes` as a series of
+/// sparse `(offset, bytes)` chunks. Returns the final image length in bytes so
+/// callers can size the destination file without guessing.
+pub fn emit_image<E, F>(
     nodes: Vec<Node>,
     options: &BuildOptions,
     mut emit: F,
@@ -1470,7 +1456,7 @@ fn leaf_name(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildOptions, EmitImageError, build_image_with_options, emit_image_with_options};
+    use super::{BuildOptions, EmitImageError, build_image, emit_image};
 
     #[test]
     fn build_options_stamp_superblock_uuid_and_volume_name() {
@@ -1478,7 +1464,7 @@ mod tests {
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
             0xee, 0xff,
         ];
-        let image = build_image_with_options(
+        let image = build_image(
             Vec::new(),
             &BuildOptions::default()
                 .with_uuid(uuid)
@@ -1520,10 +1506,9 @@ mod tests {
                 owner: super::Owner::ROOT,
             },
         ];
-        let dense =
-            build_image_with_options(nodes.clone(), &BuildOptions::default()).expect("dense");
+        let dense = build_image(nodes.clone(), &BuildOptions::default()).expect("dense");
         let mut streamed = Vec::new();
-        let total = emit_image_with_options(nodes, &BuildOptions::default(), |offset, bytes| {
+        let total = emit_image(nodes, &BuildOptions::default(), |offset, bytes| {
             let start = offset as usize;
             let end = start + bytes.len();
             if streamed.len() < end {
@@ -1546,7 +1531,7 @@ mod tests {
             xattrs: Vec::new(),
             owner: super::Owner::ROOT,
         }];
-        let err = emit_image_with_options(nodes, &BuildOptions::default(), |_offset, _bytes| {
+        let err = emit_image(nodes, &BuildOptions::default(), |_offset, _bytes| {
             Err::<(), _>("synthetic sink failure")
         })
         .expect_err("sink error must surface");

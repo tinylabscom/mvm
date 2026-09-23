@@ -177,7 +177,7 @@ fn build_minimal_rootfs() -> Vec<u8> {
             owner: mvm_fs::ext4::Owner::ROOT,
         },
     ];
-    mvm_fs::ext4::build_image(nodes).expect("build minimal ext4 rootfs")
+    mvm_fs::ext4::build_image(nodes, &Default::default()).expect("build minimal ext4 rootfs")
 }
 
 fn verity_root_hash(image: &[u8]) -> String {
