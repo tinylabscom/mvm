@@ -1,9 +1,8 @@
 # Extract the image release train into `mvm-images`
 
 Backing: preview
-Validation: none — this plan describes a repository migration that has not
-started. Each workstream names the tests and live evidence required before its
-checkbox may be completed.
+Validation: each completed workstream names the tests and live evidence that
+back its checked boxes; unchecked workstreams remain in progress.
 
 **Issues:** [#3363](https://github.com/tinylabscom/mvm/issues/3363) (W1) ·
 [#3367](https://github.com/tinylabscom/mvm/issues/3367) (W2) ·
@@ -478,12 +477,12 @@ Delivery slices, one PR each:
 ### W4 — Move image sources and reproduce current bytes (#3362)
 
 - [x] Inventory the exact image-owned paths and shared helper edges.
-- [ ] Move image flakes, locks, assembly scripts, and image-specific tests to
+- [x] Move image flakes, locks, assembly scripts, and image-specific tests to
       `mvm-images` without copying product runtime source.
-- [ ] Build guest/builder binaries from an explicit `mvm` source commit.
-- [ ] Compare the new repository's outputs with the existing release for file
+- [x] Build guest/builder binaries from an explicit `mvm` source commit.
+- [x] Compare the new repository's outputs with the existing release for file
       set, boot behavior, manifest semantics, and explained byte differences.
-- [ ] Preserve both x86_64 and aarch64 builds and live boot evidence.
+- [x] Preserve both x86_64 and aarch64 builds and live boot evidence.
 
 Acceptance: both architecture sets build, verify, and boot; every unexplained
 byte or closure difference blocks publication.
@@ -557,11 +556,10 @@ Delivery slices, one PR each:
       pack, with every `mvm` import rewritten onto an `mvm` input pinned to an
       exact commit, plus a no-publish build workflow for both architectures.
       Landed as tinylabscom/mvm-images#4, pinned to `6717e2451e`.
-- [ ] W4c (`mvm-images`) — compare the outputs against the published
+- [x] W4c (`mvm-images`) — compare the outputs against the published
       `boot-image/v0.1.5` set: file set, digests, closures, and boot on
       Firecracker (x86_64 and aarch64) and HVF, with every difference explained.
-      Comparison and the workload boot matrix are done; a physical Apple
-      Silicon HVF builder build remains outstanding
+      The comparison and workload boot matrix are complete
       (`specs/sprint/delivery/3362-w4c-image-comparison.md`). Every byte
       difference from `v0.1.5` traces to a named `mvm` commit or to the
       `generatorRev` rewrite. None is unexplained, and none comes from the build
@@ -583,8 +581,10 @@ Delivery slices, one PR each:
       by #3577 (a hardcoded `--enable-pci` that breaks GICv2 hosts, worked
       around in the witness build) and #3578 (the endpoint's Landlock
       confinement refuses the Pi OS kernel), both filed from the witness. The
-      aarch64 builder build on physical Apple Silicon HVF remains open. Also
-      found: #3500 (the Nix initramfs says `VERSION` `0.18.0`,
+      final builder build completed end to end on physical Apple Silicon HVF
+      after the #3522 egress fix: the in-guest build finished, its sealed
+      workload launched, and the expected exit code was observed. Also found:
+      #3500 (the Nix initramfs says `VERSION` `0.18.0`,
       which an rc CLI refuses) and #3502 (a Firecracker run rewrites the cached
       dev rootfs). Issue #3491 is resolved: every direct published or
       reproducibility builder-image host-binary build selects the Rust version

@@ -1,9 +1,10 @@
 # Compare the mvm-images build with the published image set
 
-Backing: preview
-Validation: none — this records a comparison and live boots run by hand
-against CI artifacts; no code in this repository changed. The comparison
-lane it relies on is `tinylabscom/mvm-images` `.github/workflows/reproduce.yml`.
+Backing: shipped-source
+Validation: check-sprint-append; live comparison and boot evidence below
+
+The comparison lane used for the reproducibility evidence is
+`tinylabscom/mvm-images` `.github/workflows/reproduce.yml`.
 
 W4c of `specs/plans/2026-09-16-image-repository-extraction.md` asks whether
 the images `tinylabscom/mvm-images` builds are the images `mvm` ships, with

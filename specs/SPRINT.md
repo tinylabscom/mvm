@@ -449,16 +449,17 @@ docs commit went out as #3581). Under the
       are removed; the pack-signing smoke now signs a real image set and runs
       the command — the full round-trip on a release tag, a signature-stage
       refusal of the branch-minted bundle nightly.
-      W4 (#3362) inventory: the image flakes, kernel, initramfs and QEMU-wasm
-      pack move; the guest binary recipes stay in `mvm` and are consumed from a
-      pinned `mvm` flake input, so nothing is copied between the repositories.
+      W4 (#3362), complete: the inventory established that the image flakes,
+      kernel, initramfs and QEMU-wasm pack move; the guest binary recipes stay
+      in `mvm` and are consumed from a pinned `mvm` flake input, so nothing is
+      copied between the repositories.
       W4 (#3362) slice W4a: the guest recipes that compile `mvm` source are
       exported from `nix/flake.nix` and the in-tree image flakes build through
       them, so the interface `mvm-images` will pin is already the one in use;
       no image or check derivation changed.
       W4 (#3362) slice W4b: `tinylabscom/mvm-images` builds every image from
       `mvm` pinned at `6717e2451e`, on both architectures, without publishing.
-      W4 (#3362) slice W4c, in progress: every byte difference between that
+      W4 (#3362) slice W4c, complete: every byte difference between that
       build and `boot-image/v0.1.5` traces to a named `mvm` commit or to the
       `generatorRev` rewrite. The in-tree and `mvm-images` builds have the same
       derivations. Independent builds differ only in filesystem and verity
@@ -466,9 +467,10 @@ docs commit went out as #3581). Under the
       isolated `MVM_HOME`, at the development tier, and the `mvm-images`
       builder built and booted a workload on Firecracker. The aarch64 image set
       from `mvm-images` build 35462836122 also boots through `mvmctl` on
-      Firecracker/KVM and completes a transient command. Outstanding: a build
-      through the builder on physical Apple Silicon HVF, which did not finish
-      on the loaded host.
+      Firecracker/KVM and completes a transient command. After the #3522 egress
+      fix, the builder also completed an in-guest build on physical Apple
+      Silicon HVF, launched the sealed workload, and observed its expected exit
+      code; every W4c comparison and live-boot leg is now witnessed.
       W5 (#3364) slice W5a: `MVM_IMAGES_DIR` names a local `mvm-images`
       checkout explicitly (canonical root, commit and dirty fingerprint
       recorded, re-verified before use); `local-dev` and `verified-release` are
