@@ -40,6 +40,11 @@ use mvm_vmm::driver::traits::{
 /// its snapshot. Generous: the write is proportional to guest RAM.
 const SNAPSHOT_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long the detached supervisor gets to bind the host side of the guest
+/// agent bridge after publishing its PID. The PID proves ownership, while the
+/// socket proves an immediate activation can actually dial the guest channel.
+const AGENT_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge, not
@@ -385,8 +390,23 @@ fn boot_with_handoff(
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
-    drop(child);
+
     let agent_socket = hvf_agent_socket(&paths.state_dir);
+    if let Err(error) = wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
+        child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|e| anyhow!("poll hvf supervisor while waiting for agent socket: {e}"))
+    }) {
+        let _ = child.kill();
+        return Err(error).context(format!(
+            "HVF supervisor failed readiness; see {}{}",
+            paths.console_log.display(),
+            mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+        ));
+    }
+
+    drop(child);
     Ok(Box::new(HvfRunningVm {
         id: VmId(spec.name.clone()),
         state_dir: paths.state_dir,
@@ -775,6 +795,36 @@ fn link_child_state(child_dir: &Path, parent_dir: &Path) -> std::io::Result<()> 
 /// guest agent unreachable and every RPC time out.
 fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
     mvm_core::config::vm_hvf_agent_socket_at(state_dir)
+}
+
+fn wait_for_agent_socket(
+    socket: &Path,
+    timeout: std::time::Duration,
+    mut supervisor_running: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let deadline = Instant::now() + timeout;
+    let mut attempt = 0u32;
+    loop {
+        if std::fs::metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            return Ok(());
+        }
+        if !supervisor_running()? {
+            bail!(
+                "hvf supervisor exited before binding agent socket {}",
+                socket.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "hvf supervisor did not bind agent socket {} within {timeout:?}",
+                socket.display()
+            );
+        }
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 /// Do not capture a factory parent until its guest agent has completed init.
@@ -1400,6 +1450,37 @@ mod tests {
         // The running-vm / attach handle re-derives via the same driver helper, so
         // vsock_connect(GUEST_AGENT_PORT) reaches the identical socket.
         assert_eq!(hvf_agent_socket(&paths.state_dir), resolver);
+    }
+
+    #[test]
+    fn agent_socket_readiness_accepts_only_a_bound_unix_socket() {
+        use mvm_vmm::test_support::bind_unix_listener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("hvf-agent.sock");
+        std::fs::write(&socket, b"not a socket").expect("write decoy");
+        let error =
+            wait_for_agent_socket(&socket, std::time::Duration::from_millis(5), || Ok(true))
+                .expect_err("a regular file must not satisfy readiness");
+        assert!(error.to_string().contains("did not bind"), "{error:#}");
+
+        std::fs::remove_file(&socket).expect("remove decoy");
+        let Some(_listener) = bind_unix_listener(&socket) else {
+            return;
+        };
+        wait_for_agent_socket(&socket, std::time::Duration::ZERO, || Ok(true))
+            .expect("a bound Unix socket is ready immediately");
+    }
+
+    #[test]
+    fn agent_socket_readiness_reports_an_early_supervisor_exit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("hvf-agent.sock");
+        let error = wait_for_agent_socket(&socket, std::time::Duration::from_secs(1), || Ok(false))
+            .expect_err("a stopped supervisor cannot become ready");
+        let rendered = error.to_string();
+        assert!(rendered.contains("exited"), "{rendered}");
+        assert!(rendered.contains("hvf-agent.sock"), "{rendered}");
     }
 
     #[test]
