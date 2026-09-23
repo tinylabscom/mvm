@@ -14,6 +14,16 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [x] **Cubin and fatbin kernel-parameter metadata — issue #3564.**
+      `specs/plans/2026-09-23-cubin-fatbin-kernel-metadata.md`. A bounded,
+      dependency-free parser covers cubin ELF and basic uncompressed fatbin v1
+      launch layouts, with PTX fallback and typed malformed/truncated/endian/
+      bounds/missing-entry failures. The CUDA shim caps image discovery before
+      copying and refuses launches whose layout cannot be proved. The 17 core
+      and 2 CUDA-shim tests, serialized workspace tests and isolated doctest
+      retry, workspace all-target Clippy, gated-target compilation, formatting,
+      and all 74 repository gates pass. Ready for merge-queue delivery.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard
@@ -71,8 +81,8 @@ Last updated: 2026-09-23
       handoff), libkrun, Firecracker and QEMU, the runner-spawned per-VM
       endpoint, and the shim package recipes (overlay composition is
       mvm-images work). Open follow-ups named in the plan: CUDA-graph
-      fork-reconnect, `cuGetProcAddress`, cubin param metadata, overlay
-      image composition.
+      fork-reconnect, `cuGetProcAddress`, and overlay image composition. Cubin
+      and basic fatbin launch metadata is implemented by issue #3564.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds

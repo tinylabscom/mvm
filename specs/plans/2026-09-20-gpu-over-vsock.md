@@ -148,6 +148,11 @@ not touch.
 - [x] W10 — Docs: ADR-053 (compute-over-vsock, amends ADR-029 decision
       1's "no GPU support today"), plan checkboxes, SPRINT.md,
       REFACTOR-STATUS.md, doc-guard-compliant wording.
+- [x] F1 — Cubin/fatbin launch metadata follow-up (#3564): a bounded parser
+      reads `EIATTR_KPARAM_INFO` from cubin ELF and uncompressed fatbin v1
+      payloads, keeps PTX as the fallback, and refuses malformed or unsupported
+      images without guessing launch pointers. See
+      `specs/plans/2026-09-23-cubin-fatbin-kernel-metadata.md`.
 
 ## Test plan
 

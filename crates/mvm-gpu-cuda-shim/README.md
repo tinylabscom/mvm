@@ -13,7 +13,9 @@ CUDA result codes and output buffers are returned to the calling workload.
 Contexts, allocations, modules, and functions are represented by opaque handles.
 The handles are meaningful only to the endpoint that created them.
 Module images and launch parameters are copied into bounded protocol messages.
-The shim parses PTX metadata to determine kernel parameter sizes safely.
+The shim parses bounded PTX, cubin ELF, and basic uncompressed fatbin metadata
+to determine kernel parameter sizes safely. A layout that cannot be proved is
+refused rather than inferred from workload pointers.
 
 ## Scope
 

@@ -12,14 +12,19 @@
 //!   and re-established after failures.
 //! - [`guard`]: panic containment at the FFI edge, so a bug in the shim is
 //!   an error code in the workload, never a guest crash.
-//! - [`ptx_entry_param_sizes`]: the launch-parameter metadata reader. The
-//!   CUDA launch APIs hand the shim a `void**` with no count, so the shim
-//!   recovers each entry's parameter sizes from the PTX image it already
-//!   loaded.
+//! - [`kernel_param_sizes`]: the bounded PTX, cubin ELF, and basic fatbin
+//!   launch-parameter metadata reader. CUDA launch APIs hand the shim a
+//!   `void**` with no count, so the shim recovers each entry's sizes from the
+//!   module image it already loaded.
 
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
 
+mod kernel_params;
+
+pub use kernel_params::{
+    KernelParamError, MAX_MODULE_IMAGE_LEN, kernel_param_sizes, module_image_len_from_header,
+};
 pub use mvm_contract::protocol::gpu as wire;
 use mvm_contract::protocol::gpu::{GpuError, GpuRequest, GpuResponse, decode_frame, encode_frame};
 
@@ -302,57 +307,7 @@ pub fn cuda_error_text(code: i32) -> &'static str {
 /// entry is absent — callers then refuse the launch rather than guess.
 #[must_use]
 pub fn ptx_entry_param_sizes(image: &[u8], entry: &str) -> Option<Vec<usize>> {
-    let text = core::str::from_utf8(image).ok()?;
-    let mut lines = text.lines();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-        // `.entry NAME(` — parameters follow until the matching `)`. The
-        // directive may carry a visibility qualifier (`.visible .entry`),
-        // so it is located rather than prefix-matched.
-        let Some(idx) = trimmed.find(".entry") else {
-            continue;
-        };
-        let rest = trimmed[idx + ".entry".len()..].trim_start();
-        let name = rest.split(['(', ' ', '\t']).next().unwrap_or("");
-        if name != entry {
-            continue;
-        }
-        let mut sizes = Vec::new();
-        // The parameter list ends at the first line whose trimmed form is
-        // exactly `)` (nvcc layout), or a `)` at the end of the header line.
-        let header_has_close = rest.contains(')');
-        for param_line in lines.by_ref() {
-            let p = param_line.trim();
-            if p.starts_with(')') {
-                return Some(sizes);
-            }
-            if let Some(directive) = p.strip_prefix(".param") {
-                sizes.push(ptx_param_size(directive.trim_start()));
-            } else if header_has_close && p.is_empty() {
-                // `.entry foo()` with no params: the header line already closed.
-                return Some(sizes);
-            }
-        }
-        return Some(sizes);
-    }
-    None
-}
-
-/// Size in bytes of one `.param` directive's type (best-effort for common
-/// nvcc output; unknown types conservatively size as a pointer).
-fn ptx_param_size(directive: &str) -> usize {
-    let mut size = 4_usize;
-    let mut vector = 1_usize;
-    for token in directive.split_whitespace() {
-        match token {
-            ".u64" | ".s64" | ".f64" | ".b64" | ".pred" if size < 8 => size = 8,
-            ".u32" | ".s32" | ".f32" | ".b32" => size = size.max(4),
-            ".v2" => vector = vector.max(2),
-            ".v4" => vector = vector.max(4),
-            _ => {}
-        }
-    }
-    size * vector
+    kernel_params::ptx_param_sizes(image, entry).ok()
 }
 
 #[cfg(test)]
