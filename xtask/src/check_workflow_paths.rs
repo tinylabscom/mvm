@@ -943,12 +943,16 @@ mod tests {
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
-        assert!(!nix.contains("Boot the tree-built image"));
+        assert!(!nix.contains("Boot the mvm-images-built image"));
 
         let guest = job_block(&ci, "guest-image-boot");
         assert!(guest.contains("needs: [scope]"));
         assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
-        assert!(guest.contains("Boot the tree-built image"));
+        assert!(guest.contains("Boot the mvm-images-built image"));
+        assert!(
+            guest.contains("tinylabscom/mvm-images"),
+            "the guest-image witness must consume the external image source"
+        );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
             guest.contains("nix build --rebuild"),

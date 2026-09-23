@@ -519,6 +519,17 @@ docs commit went out as #3581). Under the
       plan gains the one-base-image constraint: a single base Linux image
       per architecture boots on every Linux-direct backend, with host-side
       adaptation as translation, not separate products (mvm-images#8).
+      Sibling-default wiring (#3364): a contributor build discovers a valid
+      `../mvm-images` sibling as the image source — `MVM_IMAGES_DIR` still
+      wins and stays strict, a discovered checkout that fails validation
+      warns and falls back to the in-tree window, release builds never look —
+      so a normal image-backed launch consumes the external image source
+      with no environment variable. The merge-queue guest-image witness
+      checks out `tinylabscom/mvm-images` and builds the default tenant and
+      runtime overlay with the `mvm` input overridden to the queue's
+      checkout, so the queue boot-tests each change against the external
+      images. The plan's "nothing searches for a sibling" bullet is amended
+      with the reasoning.
       W5 (#3364) slice W5k: admission reads the tier recorded with the image
       it boots — a production admission refuses a local-dev answer however
       the bytes were selected (a stale local install with the selector

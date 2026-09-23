@@ -98,13 +98,10 @@ pub(crate) fn images_built_from_source() -> bool {
     if find_builder_vm_flake_is_source_checkout() {
         return true;
     }
-    use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
+    use mvm_build::image_source::resolve_current_source;
     matches!(
-        resolve_image_source(
-            mvm_build::artifact_acquisition::compiled_channel(),
-            configured_images_dir().as_deref(),
-        ),
-        Ok(ImageSource::LocalCheckout(_))
+        resolve_current_source(),
+        Ok(mvm_build::image_source::ImageSource::LocalCheckout(_))
     )
 }
 #[cfg(all(test, not(feature = "release-artifact-bootstrap")))]

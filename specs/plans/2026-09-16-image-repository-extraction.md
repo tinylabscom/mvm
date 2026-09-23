@@ -634,8 +634,20 @@ Design, taken 2026-09-19 against `main` at `fd555b5ef9`.
   the working-tree state (clean, or a fingerprint over the tracked diff, the
   status listing and every untracked file). `reverify` re-resolves the path and
   re-reads the identity before anything built from it is trusted, so a
-  retargeted symlink or an edit after selection is refused. Nothing searches
-  for a sibling.
+  retargeted symlink or an edit after selection is refused.
+- **The sibling default (amended 2026-09-22, superseding "nothing searches for
+  a sibling").** When the selector is unset, a contributor build discovers a
+  sibling `mvm-images` checkout next to the compiled-from mvm checkout — the
+  standard two-repository layout — and uses it, so a normal image-backed
+  launch consumes the external image source with no environment variable.
+  `MVM_IMAGES_DIR` still wins; it stays strict (a configured path that cannot
+  be used is an error). A discovered checkout that fails validation warns and
+  falls through to the in-tree window rather than breaking the build, and
+  release builds never look. Discovery is a default, not a fallback: the tier
+  rules are unchanged (local-dev, refused by release builds and production
+  admission), and an attacker who can plant a sibling directory can equally
+  edit the in-tree flakes the build already trusts. The in-tree window now
+  serves checkouts without a sibling; W8 deletes it.
 - **Sources and tiers.** `ImageSource` is `Released`, `LocalCheckout`, or
   `InTree` (the mvm checkout's own `nix/images`, the contributor default until
   W8). `mvm_core::image_set::ImageTrustTier` has two values with no conversion

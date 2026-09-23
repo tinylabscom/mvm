@@ -1370,18 +1370,31 @@ jobs:
             staging/kernel-k8s-metrics-${{ matrix.arch }}.json
 
   guest-image-boot:
-    name: Guest image boots (tree-built)
-    # Keep this witness parallel with Nix evaluation. A live queue measurement
-    # showed that serializing it behind the Nix footprint work extended the
-    # protected critical path by about seven minutes even though both jobs
-    # build overlapping store paths. `Test` owns both results, so parallelism
-    # does not weaken the merge gate.
+    name: Guest image boots (mvm-images)
+    # The image definitions live in tinylabscom/mvm-images; this witness
+    # builds the default tenant and the runtime overlay from that repository
+    # with the `mvm` input overridden to this checkout, so the merge queue
+    # boot-tests the PR's mvm changes against the external image source — the
+    # same pairing a contributor gets from a sibling checkout. Keep this
+    # witness parallel with Nix evaluation: a live queue measurement showed
+    # that serializing it behind the Nix footprint work extended the protected
+    # critical path by about seven minutes even though both jobs build
+    # overlapping store paths. `Test` owns both results, so parallelism does
+    # not weaken the merge gate.
     needs: [scope]
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check out mvm-images
+        if: needs.scope.outputs.nix == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: main
+          path: mvm-images
 
       - uses: ./.github/actions/free-disk
         if: needs.scope.outputs.nix == 'true'
@@ -1399,11 +1412,15 @@ jobs:
         with:
           packages: lld
 
-      - name: Build the guest image from this tree
+      - name: Build the guest image from mvm-images
         if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
-          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+          # The image definitions come from tinylabscom/mvm-images; the `mvm`
+          # input is this checkout, so the queue boot-tests the PR's changes
+          # against the external image source.
+          nix build "path:$PWD/mvm-images/images#legacyPackages.x86_64-linux.default-tenant.default" \
+            --override-input mvm "path:$PWD" \
             --impure --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
           mkdir -p staging
@@ -1423,11 +1440,12 @@ jobs:
           bash nix/packaging/release/assert-kernel-format.sh \
             staging/vmlinux x86_64 "tree-built x86_64 kernel"
 
-      - name: Build the runtime overlay
+      - name: Build the runtime overlay from mvm-images
         if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
-          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+          OVERLAY_PATH=$(nix build "path:$PWD/mvm-images/images#legacyPackages.x86_64-linux.runtime-overlay.default" \
+            --override-input mvm "path:$PWD" \
             --no-link --print-out-paths | head -1)
           mkdir -p overlay-staging
           cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
@@ -1444,14 +1462,15 @@ jobs:
           # Nix compare the result with the first build: a random UUID or hash
           # seed fails the step with "may not be deterministic". Only these
           # derivations are rebuilt; everything they depend on is reused.
-          image="./nix/images/default-tenant#packages.x86_64-linux.default"
-          overlay="./nix/images/runtime-overlay#packages.x86_64-linux.default"
-          image_fs=$(nix path-info --impure -r --derivation "$image" \
+          image="path:$PWD/mvm-images/images#legacyPackages.x86_64-linux.default-tenant.default"
+          overlay="path:$PWD/mvm-images/images#legacyPackages.x86_64-linux.runtime-overlay.default"
+          override=(--override-input mvm "path:$PWD")
+          image_fs=$(nix path-info --impure -r --derivation "${override[@]}" "$image" \
             | grep -E -- '-(ext4-fs\.img|mvm-rootfs-[^/]*\.ext4)\.drv$')
           for drv in \
-            $(nix path-info --impure --derivation "$image") \
+            $(nix path-info --impure --derivation "${override[@]}" "$image") \
             $image_fs \
-            $(nix path-info --derivation "$overlay"); do
+            $(nix path-info --derivation "${override[@]}" "$overlay"); do
             echo "rebuilding $drv"
             nix build --rebuild --no-link "$drv^*"
           done
@@ -1479,7 +1498,7 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
-      - name: Boot the tree-built image
+      - name: Boot the mvm-images-built image
         if: needs.scope.outputs.nix == 'true'
         # This is a reach-userspace witness, not a latency assertion. The loose
         # budget and single run keep shared-runner variance out of the result.

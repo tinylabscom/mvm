@@ -402,15 +402,73 @@ pub(crate) fn mvm_source_checkout_at(root: &Path) -> Option<PathBuf> {
         .then(|| root.to_path_buf())
 }
 
-/// Resolve the image source for this process: the checkout the selector
-/// names, the in-tree flakes, or the released set. The one entry point for
+/// Resolve the image source for this process. The one entry point for
 /// consumers below the CLI, so "which source" is answered the same way
-/// everywhere.
+/// everywhere. Precedence, explicit before implicit:
+///
+/// 1. `${MVM_IMAGES_DIR}` when set — a valid local checkout or an error, as
+///    always; it never falls back.
+/// 2. A sibling `mvm-images` checkout next to the compiled-from mvm
+///    checkout (the standard two-repository layout) — the contributor
+///    default, so a normal image-backed launch consumes the external image
+///    source without an environment variable. A discovered checkout that
+///    fails validation warns and falls through to the in-tree window rather
+///    than breaking the build; release builds never look.
+/// 3. The in-tree flakes, while a contributor checkout still carries them;
+///    otherwise the released set.
 pub fn resolve_current_source() -> Result<ImageSource, ImageSourceError> {
-    resolve_image_source(
-        crate::artifact_acquisition::compiled_channel(),
-        configured_images_dir().as_deref(),
-    )
+    let channel = crate::artifact_acquisition::compiled_channel();
+    let configured = configured_images_dir();
+    if configured.is_some() {
+        return resolve_image_source(channel, configured.as_deref());
+    }
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(std::path::Path::to_path_buf);
+    select_with_discovery(channel, None, workspace_root.as_deref())
+}
+
+/// [`resolve_current_source`]'s precedence with the discovery root passed in,
+/// so the choice is testable without depending on the checkout the tests run
+/// from.
+fn select_with_discovery(
+    channel: DistributionChannel,
+    configured: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> Result<ImageSource, ImageSourceError> {
+    if let Some(path) = configured {
+        refuse_in_release_build(channel, Some(path))?;
+        return LocalImageCheckout::open(path).map(ImageSource::LocalCheckout);
+    }
+    if channel.permits_automatic_builds()
+        && let Some(root) = workspace_root
+        && let Some(candidate) = sibling_images_checkout(root)
+    {
+        match LocalImageCheckout::open(&candidate) {
+            Ok(checkout) => return Ok(ImageSource::LocalCheckout(checkout)),
+            Err(error) => {
+                tracing::warn!(
+                    sibling = %candidate.display(),
+                    %error,
+                    "the sibling mvm-images checkout is not usable; building from the                      in-tree flakes instead — set MVM_IMAGES_DIR to override or fix the                      checkout"
+                );
+            }
+        }
+    }
+    Ok(match in_tree_images(channel) {
+        Some(root) if channel.permits_automatic_builds() => ImageSource::InTree { root },
+        _ => ImageSource::Released,
+    })
+}
+
+/// The sibling image checkout the layout implies — `<workspace
+/// parent>/mvm-images` — when the directory names itself as one by carrying
+/// a `flake.nix`. Existence of the marker, not the directory name alone, is
+/// what makes a stray directory worth warning about.
+fn sibling_images_checkout(workspace_root: &Path) -> Option<PathBuf> {
+    let candidate = workspace_root.parent()?.join("mvm-images");
+    candidate.join("flake.nix").is_file().then_some(candidate)
 }
 
 /// The compiled-from mvm checkout while it still carries the in-tree image

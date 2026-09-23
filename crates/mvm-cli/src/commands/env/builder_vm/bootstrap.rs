@@ -173,16 +173,11 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
 /// quiet fall-through to the in-tree flake.
 pub(crate) fn selected_local_checkout()
 -> Result<Option<mvm_build::image_source::LocalImageCheckout>> {
-    use mvm_build::image_source::{ImageSource, configured_images_dir, resolve_image_source};
-    Ok(
-        match resolve_image_source(
-            mvm_build::artifact_acquisition::compiled_channel(),
-            configured_images_dir().as_deref(),
-        )? {
-            ImageSource::LocalCheckout(checkout) => Some(checkout),
-            ImageSource::Released | ImageSource::InTree { .. } => None,
-        },
-    )
+    use mvm_build::image_source::{ImageSource, resolve_current_source};
+    Ok(match resolve_current_source()? {
+        ImageSource::LocalCheckout(checkout) => Some(checkout),
+        ImageSource::Released | ImageSource::InTree { .. } => None,
+    })
 }
 
 /// Prepare the builder-VM image the local image-set build itself runs in:
