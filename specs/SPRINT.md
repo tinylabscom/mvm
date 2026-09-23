@@ -225,6 +225,14 @@ docs commit went out as #3581). Under the
       `just check-gated` pass. No runtime behavior changes; passing gap tests
       certify nothing. Evidence:
       `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
+      W1e live control baselines are measured on dedicated KVM hardware
+      (five reps of 30 Firecracker boots of the verified published image;
+      serial p50 502-549 ms, budgets worst-of-five x1.5). The exit half is a
+      recorded blocker: all 165 stops failed the graceful path (sleep-prep
+      refused under require-grant with no bench grant), so CI's boot lane
+      has only exercised the failed-stop path; a graceful-stop baseline
+      waits on a grant-provisioned bench boot. Evidence:
+      `specs/sprint/delivery/3420-telemetry-live-baselines.md`.
       W1b source inventory beyond binaries is tested: subscriber-init sites with
       a fail-closed install scan, wrapper/SDK script sources, launch edges with
       activation policy covering every guest/builder runtime gap, per-backend

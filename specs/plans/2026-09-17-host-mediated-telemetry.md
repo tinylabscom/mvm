@@ -135,6 +135,15 @@ Worker cancellation and reaping belong to the supervisor. Instrumented callbacks
 VM control/exit and producer teardown must not join/flush a worker or wait for
 tail delivery. A bounded best-effort tail remains optional and off the critical path.
 
+Boot readiness never gates on telemetry. The guest telemetry listener starts in
+the post-activation zone, after the control plane is serving; the host dials it
+asynchronously after verifying the boot-generation registration, off every
+readiness path. A guest is ready when its control agent answers, whether or not
+a telemetry session ever opens; records emitted before the session opens wait in
+the bounded guest outbox or are shed under its existing rules. Boot latency must
+be unchanged by telemetry being enabled, disabled, slow or broken — the W1e
+baseline is the pre-feature number that later measurement is judged against.
+
 Keep coalesced loss counters outside the full data queue, with reserved summary
 capacity/bandwidth. Distinguish source filtering/sampling, truncation, guest
 shedding, wire rejection, host shedding, retention pruning, follower lag and export
@@ -241,10 +250,25 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         recorded as effectively zero (first-scheduled producer monopolizes,
         ~49% contended) — a documented deficiency, not a budget. Allocation
         evidence stays with the existing native+Miri outbox regressions.
-  - [ ] W1e — Hardware-qualified control/exit latency: the live lanes
-        (`xtask perf boot` on Linux+KVM, the bench harness's interaction lane)
-        run per backend on qualified hardware; until those runs are recorded,
-        control/exit impact has a command, not a baseline.
+  - [x] W1e — Hardware-qualified control latency: five repetitions of 30
+        serial Firecracker boots of the verified published image on a
+        dedicated KVM host (i7-7700), boot-to-agent-ready p50 502–549 ms with
+        budgets by the worst-of-five ×1.5 rule, recorded with variance and
+        one unsmoothed cold outlier in
+        [the baselines doc](../telemetry/baselines.md). That figure is the
+        CI boot-latency lane's own pre-feature baseline (debug-profile
+        harness, published dm-verity image plus runtime overlay), distinct
+        from the 200/250/300 ms prepared-cold dispatch-window gate, whose
+        latest release-profile acceptance on the same CPU measured
+        171.5 ms p50 — the baselines doc's "Relation to the launch
+        contract" section carries the itemized differences. The exit half
+        is a recorded blocker, not a number: the harness now times the stop
+        it performs, and all 165 stops failed the graceful path —
+        `sleep-prep` refused under `mvm.require_grant=1` because a raw
+        bench boot provisions no verb grant — so CI's boot lane has only
+        ever exercised the failed-stop path, and a graceful-stop baseline
+        waits on a grant-provisioned bench boot (#3637). Other backends'
+        live numbers remain future hardware-lane work.
 
 ### W2 — Typed records and authenticated telemetry service
 
