@@ -21,6 +21,16 @@ pub(crate) enum KernelVariant {
     /// there fails at evaluation naming the missing attr. Used as the
     /// control when bisecting the in-guest-datapath delta.
     Rootless,
+    /// Near-stock defconfig control for kernel bisects: every base
+    /// carve-down exempted, boot essentials + the namespace/cgroup floor
+    /// enabled. Experimental; not a published posture.
+    StockTest,
+    /// Debian's arm64 config built by the nixpkgs toolchain — isolates the
+    /// compiler from the config in the clone() bisect. Experimental.
+    StockDebian,
+    /// Rootless kernel built by gcc13 — tests whether the fork-path
+    /// miscompile is gcc14-specific. Experimental.
+    RootlessGcc13,
 }
 
 #[cfg(feature = "builder-vm")]
@@ -32,6 +42,9 @@ impl KernelVariant {
             Self::Workload => "workload-kernel",
             Self::WorkloadK8s => "workload-k8s-kernel",
             Self::Rootless => "rootless-kernel",
+            Self::StockTest => "stocktest-kernel",
+            Self::StockDebian => "stockdebian-kernel",
+            Self::RootlessGcc13 => "rootless-gcc13-kernel",
         }
     }
 
@@ -46,6 +59,9 @@ impl KernelVariant {
             Self::Workload => "workload-kernel-configfile",
             Self::WorkloadK8s => "workload-k8s-kernel-configfile",
             Self::Rootless => "rootless-kernel-configfile",
+            Self::StockTest => "stocktest-kernel-configfile",
+            Self::StockDebian => "stockdebian-kernel-configfile",
+            Self::RootlessGcc13 => "rootless-gcc13-kernel-configfile",
         }
     }
 
@@ -55,6 +71,9 @@ impl KernelVariant {
             Self::Workload => "workload",
             Self::WorkloadK8s => "workload-k8s",
             Self::Rootless => "rootless",
+            Self::StockTest => "stocktest",
+            Self::StockDebian => "stockdebian",
+            Self::RootlessGcc13 => "rootless-gcc13",
         }
     }
 }
@@ -91,6 +110,9 @@ impl KernelFlakeSource {
             KernelVariant::Workload => ("workload-vmlinux", "workload-configfile"),
             KernelVariant::WorkloadK8s => ("datapath-vmlinux", "datapath-configfile"),
             KernelVariant::Rootless => ("rootless-vmlinux", "rootless-configfile"),
+            KernelVariant::StockTest => ("stocktest-vmlinux", "stocktest-configfile"),
+            KernelVariant::StockDebian => ("stockdebian-vmlinux", "stockdebian-configfile"),
+            KernelVariant::RootlessGcc13 => ("rootless-gcc13-vmlinux", "rootless-gcc13-configfile"),
         };
         Self {
             work_dir: kernel_dir,
@@ -589,6 +611,21 @@ mod tests {
                 KernelVariant::Rootless,
                 "rootless-vmlinux",
                 "rootless-configfile",
+            ),
+            (
+                KernelVariant::StockTest,
+                "stocktest-vmlinux",
+                "stocktest-configfile",
+            ),
+            (
+                KernelVariant::StockDebian,
+                "stockdebian-vmlinux",
+                "stockdebian-configfile",
+            ),
+            (
+                KernelVariant::RootlessGcc13,
+                "rootless-gcc13-vmlinux",
+                "rootless-gcc13-configfile",
             ),
         ] {
             let source =

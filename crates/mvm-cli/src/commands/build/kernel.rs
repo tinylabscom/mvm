@@ -78,6 +78,12 @@ enum Which {
     /// control kernel for datapath bisects. Defined only in the mvm-images
     /// kernel canon; a build from the in-repo flake fails at evaluation.
     Rootless,
+    /// Near-stock defconfig control for kernel bisects (mvm-images only).
+    StockTest,
+    /// Debian config + nixpkgs toolchain control (mvm-images only).
+    StockDebian,
+    /// Rootless kernel built by gcc13 (mvm-images only).
+    RootlessGcc13,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +134,9 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
             Which::Workload => vec![(KernelVariant::Workload, "workload")],
             Which::WorkloadK8s => vec![(KernelVariant::WorkloadK8s, "workload-k8s")],
             Which::Rootless => vec![(KernelVariant::Rootless, "rootless")],
+            Which::StockTest => vec![(KernelVariant::StockTest, "stocktest")],
+            Which::StockDebian => vec![(KernelVariant::StockDebian, "stockdebian")],
+            Which::RootlessGcc13 => vec![(KernelVariant::RootlessGcc13, "rootless-gcc13")],
         }
     };
 
