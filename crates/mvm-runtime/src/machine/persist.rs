@@ -101,6 +101,10 @@ pub struct MachineSpec {
     /// stop/start answers the same question the operator asked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub gpu: bool,
+    /// Optional host GPU ordinal selected for this machine. When present it
+    /// also enables GPU remoting and is exposed to the guest as ordinal zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_device: Option<u32>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -231,6 +235,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.agent_verb == b.agent_verb
         && a.grants == b.grants
         && a.gpu == b.gpu
+        && a.gpu_device == b.gpu_device
 }
 
 /// Human summary of which boot-affecting fields differ, for the loud
@@ -259,7 +264,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     if current.ports != desired.ports {
         changed.push("ports");
     }
-    if current.gpu != desired.gpu {
+    if current.gpu != desired.gpu || current.gpu_device != desired.gpu_device {
         changed.push("gpu");
     }
     if current.cpus != desired.cpus {
@@ -438,6 +443,7 @@ mod tests {
             health_check: None,
             grants: None,
             gpu: false,
+            gpu_device: None,
         }
     }
 
@@ -723,6 +729,7 @@ mod tests {
             health_check: None,
             grants: None,
             gpu: false,
+            gpu_device: None,
         }
     }
 

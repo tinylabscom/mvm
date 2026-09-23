@@ -21,13 +21,12 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
-- [ ] **Firecracker GICv2 virtio-mmio launch — issue #3577.**
-      `specs/plans/2026-09-23-firecracker-gicv2-virtio-mmio.md`. The launch
-      script no longer forces PCI for block, vsock, and entropy devices, so
-      Firecracker retains its portable virtio-mmio device model on GICv2 and
-      GICv3 hosts. The exact launch-line regression, full backend and workspace
-      suites, all-target Clippy, formatting, gated-target checks, and all 74
-      repository-policy gates are green. Merge-queue delivery remains.
+- [x] **Make boot admission's image-source selector request-scoped — issue #3559.**
+      `AdmitPlanForBootParams` now carries the caller-captured local image
+      checkout instead of rereading `MVM_IMAGES_DIR`, and a parallel
+      release-channel regression proves configured and unconfigured admissions
+      cannot contaminate each other. See
+      `specs/plans/2026-09-23-admission-image-source-context.md`.
 
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
@@ -148,8 +147,16 @@ docs commit went out as #3581). Under the
       the `GuestService::Gpu` channel across all four VMM tiers, the
       runner-spawned per-VM endpoint with reap, and the Nix package
       recipes. Runtime-overlay composition of the shims is follow-up work
-      in the mvm-images repository. Named v2 follow-ups (CUDA graphs and
-      fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
+      in the mvm-images repository. Issue #3565 adds typed streams, events,
+      asynchronous copies and completion positions across the wire, native
+      backend and both CUDA shims. The stub models per-stream ordering and
+      event readiness deterministically, including default-stream compatibility
+      and fail-closed forged or stale handles. Issue #3566 passes the backend's
+      real device count and ordinals through, gives the deterministic endpoint
+      two distinct devices, and adds `--gpu-device N` / `gpu_device = N`
+      pinning. A pinned VM sees guest ordinal zero mapped to host ordinal `N`;
+      unavailable host ordinals and hidden guest ordinals fail closed. Named follow-ups (CUDA graphs
+      and fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
       plan and ADR.
 
 - [ ] **Public function naming cleanup — issue #3315.**

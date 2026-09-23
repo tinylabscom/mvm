@@ -156,6 +156,7 @@ pub fn factory_parent_config(
         // warm child restores, so a parent that will serve GPU claims must
         // have wired it.
         gpu,
+        gpu_device,
         initrd_path,
         verity_path,
         roothash,
@@ -196,6 +197,7 @@ pub fn factory_parent_config(
         runtime_overlay_version: runtime_overlay_version.clone(),
         mem_initial_mib: *mem_initial_mib,
         gpu: *gpu,
+        gpu_device: *gpu_device,
         revision_hash: String::new(),
         flake_ref: String::new(),
         profile: None,

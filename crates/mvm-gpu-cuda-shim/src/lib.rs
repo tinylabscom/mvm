@@ -6,7 +6,7 @@
 //! the guest carries a driver or a device node.
 //!
 //! v1 ABI coverage and the deliberate limits (no `cuGetProcAddress`
-//! resolution, PTX-param launches only, no streams) are documented in
+//! resolution and PTX-param launches) are documented in
 //! `specs/plans/2026-09-20-gpu-over-vsock.md`.
 
 use std::cell::Cell;
@@ -75,6 +75,14 @@ fn unit(response: GpuResponse) -> CuResult {
         GpuResponse::Ok => SUCCESS,
         GpuResponse::Err(e) => e.code as CuResult,
         _other => wire::CUDA_ERROR_UNKNOWN as CuResult,
+    }
+}
+
+fn queued(response: GpuResponse) -> CuResult {
+    match response {
+        GpuResponse::AsyncQueued { .. } => SUCCESS,
+        GpuResponse::Err(e) => e.code as CuResult,
+        _ => unexpected(),
     }
 }
 
@@ -523,6 +531,102 @@ pub unsafe extern "C" fn cuMemcpyDtoH(dst: *mut c_void, src: u64, bytes: usize) 
 
 ///
 /// # Safety
+/// Pointer arguments must satisfy the CUDA Driver API contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuMemcpyHtoDAsync(
+    dst: u64,
+    src: *const c_void,
+    bytes: usize,
+    stream: Handle,
+) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            let Some(data) = (unsafe { read_guest_bytes(src, bytes) }) else {
+                return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+            };
+            queued(call(
+                &mvm_contract::protocol::gpu::GpuRequest::MemcpyHtoDAsync {
+                    context: ctx,
+                    dst,
+                    data,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+///
+/// # Safety
+/// Pointer arguments must satisfy the CUDA Driver API contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuMemcpyDtoHAsync(
+    dst: *mut c_void,
+    src: u64,
+    bytes: usize,
+    stream: Handle,
+) -> CuResult {
+    guard(
+        move || {
+            if dst.is_null() && bytes > 0 {
+                return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+            }
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            match call(&mvm_contract::protocol::gpu::GpuRequest::MemcpyDtoHAsync {
+                context: ctx,
+                src,
+                len: bytes as u64,
+                stream: stream as u64,
+            }) {
+                GpuResponse::DataQueued { bytes, .. } => {
+                    // SAFETY: the caller supplied a destination for this transfer.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.cast::<u8>(), bytes.len())
+                    };
+                    SUCCESS
+                }
+                GpuResponse::Err(e) => e.code as CuResult,
+                _ => unexpected(),
+            }
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// Same contract as [`cuMemcpyHtoDAsync`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuMemcpyHtoDAsync_v2(
+    dst: u64,
+    src: *const c_void,
+    bytes: usize,
+    stream: Handle,
+) -> CuResult {
+    unsafe { cuMemcpyHtoDAsync(dst, src, bytes, stream) }
+}
+
+/// # Safety
+/// Same contract as [`cuMemcpyDtoHAsync`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuMemcpyDtoHAsync_v2(
+    dst: *mut c_void,
+    src: u64,
+    bytes: usize,
+    stream: Handle,
+) -> CuResult {
+    unsafe { cuMemcpyDtoHAsync(dst, src, bytes, stream) }
+}
+
+///
+/// # Safety
 /// Pointer arguments must satisfy the API contract for this call — valid,
 /// correctly sized out-buffers — and are named by the workload itself,
 /// exactly as they would be against the real library.
@@ -708,9 +812,6 @@ fn launch_kernel(args: LaunchArgs) -> CuResult {
         if !extra.is_null() {
             return wire::CUDA_ERROR_NOT_SUPPORTED as CuResult;
         }
-        if !stream.is_null() {
-            return wire::CUDA_ERROR_NOT_SUPPORTED as CuResult;
-        }
         let ctx = current_ctx();
         if ctx == 0 {
             return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
@@ -750,6 +851,7 @@ fn launch_kernel(args: LaunchArgs) -> CuResult {
                 grid,
                 block,
                 shared_mem_bytes,
+                stream: (!stream.is_null()).then_some(stream as u64),
                 params,
             },
         ))
@@ -816,6 +918,242 @@ pub unsafe extern "C" fn cuCtxSynchronize() -> CuResult {
 
 ///
 /// # Safety
+/// `stream` must name writable storage for one CUDA stream handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamCreate(stream: *mut Handle, flags: c_uint) -> CuResult {
+    guard(
+        move || {
+            if stream.is_null() {
+                return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+            }
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            match call(&mvm_contract::protocol::gpu::GpuRequest::StreamCreate {
+                context: ctx,
+                flags,
+            }) {
+                GpuResponse::StreamCreated { stream: handle } => {
+                    // SAFETY: null-checked above.
+                    unsafe { *stream = handle as Handle };
+                    SUCCESS
+                }
+                GpuResponse::Err(e) => e.code as CuResult,
+                _ => unexpected(),
+            }
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// `stream` must be a handle returned by `cuStreamCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamDestroy_v2(stream: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamDestroy {
+                    context: ctx,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// Same contract as [`cuStreamDestroy_v2`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamDestroy(stream: Handle) -> CuResult {
+    unsafe { cuStreamDestroy_v2(stream) }
+}
+
+/// # Safety
+/// `stream` must be null or a handle returned by `cuStreamCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamSynchronize(stream: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamSynchronize {
+                    context: ctx,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// Both handles must have been returned by this shim for the current context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamWaitEvent(
+    stream: Handle,
+    event: Handle,
+    flags: c_uint,
+) -> CuResult {
+    guard(
+        move || {
+            if flags != 0 {
+                return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+            }
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            queued(call(
+                &mvm_contract::protocol::gpu::GpuRequest::StreamWaitEvent {
+                    context: ctx,
+                    stream: stream as u64,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// `event` must name writable storage for one CUDA event handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventCreate(event: *mut Handle, flags: c_uint) -> CuResult {
+    guard(
+        move || {
+            if event.is_null() {
+                return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+            }
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            match call(&mvm_contract::protocol::gpu::GpuRequest::EventCreate {
+                context: ctx,
+                flags,
+            }) {
+                GpuResponse::EventCreated { event: handle } => {
+                    // SAFETY: null-checked above.
+                    unsafe { *event = handle as Handle };
+                    SUCCESS
+                }
+                GpuResponse::Err(e) => e.code as CuResult,
+                _ => unexpected(),
+            }
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cuEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventDestroy_v2(event: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventDestroy {
+                    context: ctx,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// Same contract as [`cuEventDestroy_v2`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventDestroy(event: Handle) -> CuResult {
+    unsafe { cuEventDestroy_v2(event) }
+}
+
+/// # Safety
+/// `event` and `stream` must belong to the current context; null stream is default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventRecord(event: Handle, stream: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            queued(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventRecord {
+                    context: ctx,
+                    event: event as u64,
+                    stream: stream as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cuEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventQuery(event: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            match call(&mvm_contract::protocol::gpu::GpuRequest::EventQuery {
+                context: ctx,
+                event: event as u64,
+            }) {
+                GpuResponse::EventStatus { complete: true } => SUCCESS,
+                GpuResponse::EventStatus { complete: false } => {
+                    wire::CUDA_ERROR_NOT_READY as CuResult
+                }
+                GpuResponse::Err(e) => e.code as CuResult,
+                _ => unexpected(),
+            }
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+/// # Safety
+/// `event` must be a handle returned by `cuEventCreate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventSynchronize(event: Handle) -> CuResult {
+    guard(
+        move || {
+            let ctx = current_ctx();
+            if ctx == 0 {
+                return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
+            }
+            unit(call(
+                &mvm_contract::protocol::gpu::GpuRequest::EventSynchronize {
+                    context: ctx,
+                    event: event as u64,
+                },
+            ))
+        },
+        wire::CUDA_ERROR_UNKNOWN as CuResult,
+    )
+}
+
+///
+/// # Safety
 /// Pointer arguments must satisfy the API contract for this call — valid,
 /// correctly sized out-buffers — and are named by the workload itself,
 /// exactly as they would be against the real library.
@@ -837,6 +1175,7 @@ pub unsafe extern "C" fn cuGetErrorString(code: CuResult, message: *mut *const c
                 wire::CUDA_ERROR_INVALID_IMAGE => "invalid module image",
                 wire::CUDA_ERROR_INVALID_HANDLE => "invalid handle",
                 wire::CUDA_ERROR_NOT_FOUND => "named symbol not found",
+                wire::CUDA_ERROR_NOT_READY => "operation not ready",
                 wire::CUDA_ERROR_NOT_SUPPORTED => "operation not supported",
                 _ => "unknown error",
             };
