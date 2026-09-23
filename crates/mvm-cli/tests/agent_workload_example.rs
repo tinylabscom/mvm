@@ -96,6 +96,7 @@ fn agent_workload_smoke_uses_the_per_call_input_path() {
         read(&workspace_root().join("crates/mvm-conformance/tests/steps/agent_workload.rs"));
     let readme = read(&example_file("README.md"));
     assert!(recipe.contains(marker));
+    assert!(recipe.contains("${pkgs.coreutils}/bin/cat"));
     assert!(steps.contains(marker));
     assert!(readme.contains(marker));
 }
