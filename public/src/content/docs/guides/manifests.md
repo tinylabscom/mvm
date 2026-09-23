@@ -38,6 +38,8 @@ mem = "1024M"                 # memory cap
 mem_initial = "512M"          # optional initial host commitment
 data_disk = "0"               # flake/build flow only today
 net = false                   # default-deny unless true or allow_hosts narrows it
+gpu = false                   # opt in to the CUDA/NVML remoting plane
+# gpu_device = 1              # optional host ordinal; implies gpu = true
 
 [network]
 allow_hosts = ["api.example.com:443"]
@@ -65,12 +67,19 @@ Each field's owner:
 | `mem_initial` | mvmctl — optional balloon initial commitment | Optional |
 | `data_disk` | mvmctl — host-side block device sizing | **Yes** |
 | `net`, `[network].allow_hosts` | mvmctl — effective egress policy | Optional |
+| `gpu` | mvmctl — enable the remoted CUDA/NVML plane | Optional |
+| `gpu_device` | mvmctl — pin the VM to one host GPU ordinal | Optional; implies `gpu = true` |
 | `[dev].init` | mvmctl — future dev-only init hook | Parsed, start fails closed today |
 | `[dev].volumes` | mvmctl — host shares / persistent disks | Optional |
 | `name` | mvmctl — display in `ls`, optional S3 channel key | Optional |
 
 Anything not in this list belongs in the flake (kernel/rootfs content, NixOS
 modules, services) or in `mvmd` (multi-VM topology, tenant policy, runtime deps).
+
+An unpinned GPU launch exposes the backend's available device ordinals. Setting
+`gpu_device = N` instead pins the VM to host ordinal `N`: the guest sees one
+device at ordinal `0`, mapped to that host device. An ordinal outside the
+backend's current device count is refused before the endpoint starts.
 
 ## The everyday flow
 

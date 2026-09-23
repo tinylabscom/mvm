@@ -14,14 +14,12 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
-- [ ] **Builder image source freshness — issue #3524.**
-      `specs/plans/2026-09-22-builder-image-source-freshness.md`. Configured
-      and shared builder-image caches now use the same source-checkout and
-      embedded-host-binary fingerprint decision as Stage 0 bootstrap. Focused
-      cache-loader and pre-existing ensure-image regressions, workspace
-      checks/tests, zero-warning Clippy, gated-target compilation, formatting,
-      and repository policy gates are green; protected merge-queue delivery
-      remains.
+- [x] **Request-scoped boot-admission image source — issue #3559.**
+      `specs/plans/2026-09-23-admission-image-source-context.md`. Admission
+      consumes the caller-captured local image checkout instead of rereading
+      mutable process environment; parallel release-channel requests with
+      different selector contexts are regression-tested without global
+      serialization.
 
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
@@ -79,9 +77,15 @@ Last updated: 2026-09-23
       `GuestService::Gpu` channel across HVF (supervisor + relay + live
       handoff), libkrun, Firecracker and QEMU, the runner-spawned per-VM
       endpoint, and the shim package recipes (overlay composition is
-      mvm-images work). Open follow-ups named in the plan: CUDA-graph
-      fork-reconnect, `cuGetProcAddress`, cubin param metadata, overlay
-      image composition.
+      mvm-images work). W11 adds typed streams, events, asynchronous copies,
+      completion positions, deterministic stub ordering, native driver calls,
+      driver/runtime shim exports, and fail-closed opaque-handle validation.
+      W12 passes real device counts and ordinals through, adds deterministic
+      two-device coverage and runtime per-device contexts, and carries an
+      optional fail-closed host ordinal pin through CLI/manifest, persisted
+      machine specs, launch config, and the per-VM endpoint.
+      Open follow-ups named in the plan: CUDA-graph fork-reconnect,
+      `cuGetProcAddress`, cubin param metadata, overlay image composition.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds

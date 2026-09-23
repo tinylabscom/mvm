@@ -115,6 +115,7 @@ mod tests {
             tenant: "local",
             vm_name,
             backend_name: "libkrun",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,

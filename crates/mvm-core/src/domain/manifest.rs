@@ -165,6 +165,10 @@ pub struct Manifest {
     /// host GPU endpoint over vsock.
     #[serde(default)]
     pub gpu: bool,
+    /// Optional host GPU ordinal exposed to this VM. When set, GPU remoting
+    /// is enabled and the selected host device appears as guest ordinal zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_device: Option<u32>,
 
     /// Optional machine-oriented host allow-list. Empty means "no
     /// narrowing beyond `net`".
@@ -364,7 +368,8 @@ impl Manifest {
         Some(ManifestMachineWorkflow {
             image: self.image.clone()?,
             net: self.net,
-            gpu: self.gpu,
+            gpu: self.gpu || self.gpu_device.is_some(),
+            gpu_device: self.gpu_device,
             allow_hosts: self.network.allow_hosts.clone(),
             ai: self.network.ai.clone(),
             init: self.dev.init.clone(),
@@ -594,6 +599,7 @@ pub struct ManifestMachineWorkflow {
     pub image: String,
     pub net: bool,
     pub gpu: bool,
+    pub gpu_device: Option<u32>,
     pub allow_hosts: Vec<String>,
     pub ai: Option<AiPolicy>,
     pub init: Vec<String>,
@@ -966,11 +972,28 @@ mod tests {
         assert_eq!(m.mem, "1024M");
         assert_eq!(m.data_disk, "0");
         assert!(!m.net);
+        assert!(!m.gpu);
+        assert_eq!(m.gpu_device, None);
         assert!(m.network.allow_hosts.is_empty());
         assert!(m.dev.init.is_empty());
         assert!(m.dev.volumes.is_empty());
         assert!(m.name.is_none());
         assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn gpu_device_pins_an_image_backed_machine_and_enables_gpu_remoting() {
+        let manifest = Manifest::from_toml_str(
+            r#"
+                image = "alpine:3.20"
+                gpu_device = 1
+            "#,
+        )
+        .expect("GPU device pin parses");
+
+        let workflow = manifest.machine_workflow().expect("machine workflow");
+        assert!(workflow.gpu);
+        assert_eq!(workflow.gpu_device, Some(1));
     }
 
     #[test]

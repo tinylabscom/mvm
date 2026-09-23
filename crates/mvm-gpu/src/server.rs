@@ -345,7 +345,7 @@ mod tests {
         let mut frame = prefix.to_vec();
         frame.extend_from_slice(&body);
         let response: GpuResponse = decode_frame(&frame).expect("decode");
-        assert_eq!(response, GpuResponse::DeviceCount { count: 1 });
+        assert_eq!(response, GpuResponse::DeviceCount { count: 2 });
         drop(client);
         served.join().expect("serve thread").expect("serve");
     }

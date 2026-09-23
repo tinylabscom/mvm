@@ -61,6 +61,13 @@ pub struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
     pub vm_name: &'a str,
     pub backend_name: &'a str,
+    /// Local image checkout selected by the process entry point, if any.
+    ///
+    /// Admission consumes this captured value instead of rereading
+    /// `MVM_IMAGES_DIR`. Besides making the authority explicit for library
+    /// callers, that keeps one admission stable if unrelated code changes the
+    /// process environment concurrently.
+    pub configured_images_dir: Option<&'a std::path::Path>,
     pub rootfs_path: &'a std::path::Path,
     /// The kernel this launch will boot, pinned into the plan's
     /// `EnvironmentRef` and re-checked by the admitted-environment gate.
@@ -311,6 +318,21 @@ fn admission_variant(restrict_agent_verbs: bool) -> Variant {
     }
 }
 
+fn enforce_image_source_admission(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    variant: Variant,
+    configured_images_dir: Option<&std::path::Path>,
+    rootfs_path: &std::path::Path,
+) -> Result<()> {
+    if !channel.permits_automatic_builds() {
+        mvm_build::image_source::refuse_in_production(variant, configured_images_dir)?;
+    }
+    if let Some(tier) = mvm_build::image_source::recorded_tier_for(rootfs_path) {
+        mvm_build::image_source::refuse_tier_in_production(variant, tier)?;
+    }
+    Ok(())
+}
+
 pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionContext> {
     admit_plan_for_boot_with_ingress(p, Vec::new())
 }
@@ -330,15 +352,13 @@ pub fn admit_plan_for_boot_with_ingress(
     // development flow — a sealed workload the developer just built from
     // their own flake must boot.
     let variant = admission_variant(p.restrict_agent_verbs);
-    if !mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds() {
-        mvm_build::image_source::refuse_in_production(
-            variant,
-            mvm_build::image_source::configured_images_dir().as_deref(),
-        )?;
-    }
-    if let Some(tier) = mvm_build::image_source::recorded_tier_for(p.rootfs_path) {
-        mvm_build::image_source::refuse_tier_in_production(variant, tier)?;
-    }
+    enforce_image_source_admission(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        variant,
+        p.configured_images_dir,
+        p.rootfs_path,
+    )?;
+
     // Refuse before any hashing, bundle reads, or signing: a rejection here
     // must not have already spent the boot work it exists to avoid. Gated on
     // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
@@ -1320,6 +1340,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-pinned",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1458,6 +1479,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-happy",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1523,6 +1545,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-missing",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1605,6 +1628,7 @@ mod admit_plan_tests {
                 tenant: "local",
                 vm_name: "vm-transport",
                 backend_name: "firecracker",
+                configured_images_dir: None,
                 rootfs_path: &rootfs,
                 kernel_path: None,
                 precomputed_image_sha256: None,
@@ -1659,6 +1683,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-1",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1693,6 +1718,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-2",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1741,6 +1767,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name,
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1867,6 +1894,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-local-default",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1927,6 +1955,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -1997,6 +2026,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-unrestricted",
             backend_name: "hvf",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2170,6 +2200,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-non-shell-granted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2234,6 +2265,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-shell-ungranted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2287,6 +2319,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-shell-granted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2349,6 +2382,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-entrypoint-unknown",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2407,6 +2441,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2457,6 +2492,7 @@ mod admit_plan_tests {
             tenant: "local",
             vm_name: "vm-dev-shell",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2523,7 +2559,6 @@ mod admit_plan_tests {
     #[test]
     fn a_production_admission_refuses_a_locally_built_image_in_the_cache() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let (_home, rootfs) = staged_default_image(&mut env, "local-pair");
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -2553,7 +2588,6 @@ mod admit_plan_tests {
     #[test]
     fn a_development_admission_accepts_a_locally_built_image_in_the_cache() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let (_home, rootfs) = staged_default_image(&mut env, "local-pair");
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -2573,7 +2607,6 @@ mod admit_plan_tests {
     #[test]
     fn a_production_admission_accepts_a_fetched_image_in_the_cache() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let (_home, rootfs) = staged_default_image(&mut env, "fetched");
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -2588,6 +2621,38 @@ mod admit_plan_tests {
         .expect("a sealed boot admits an image the cache records as fetched");
     }
 
+    #[test]
+    fn parallel_admissions_keep_their_captured_image_source_contexts() {
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"parallel admission image");
+        let configured = std::path::Path::new("/nonexistent/mvm-images");
+
+        std::thread::scope(|scope| {
+            for index in 0..64 {
+                let rootfs = rootfs.as_path();
+                scope.spawn(move || {
+                    let selected = (index % 2 == 0).then_some(configured);
+                    let result = enforce_image_source_admission(
+                        mvm_build::artifact_acquisition::DistributionChannel::Release,
+                        Variant::Prod,
+                        selected,
+                        rootfs,
+                    );
+                    if selected.is_some() {
+                        assert!(
+                            result.is_err(),
+                            "a release admission with a captured local selector must refuse"
+                        );
+                    } else {
+                        result.expect(
+                            "a parallel admission with no captured selector must stay independent",
+                        );
+                    }
+                });
+            }
+        });
+    }
+
     /// A contributor build's sealed boot is not refused by the selector
     /// alone: the paired workflow is how a developer boots a workload built
     /// from their own flake against images from a sibling checkout. The
@@ -2595,13 +2660,9 @@ mod admit_plan_tests {
     /// rootfs here is unmanaged, so nothing records a tier); the selector
     /// itself is refused only on release-channel binaries, which refuse it at
     /// CLI entry before any verb runs.
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn a_contributor_sealed_boot_with_a_configured_checkout_and_an_unmanaged_image_is_admitted() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set(
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-            "/nonexistent/mvm-images",
-        );
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2612,6 +2673,7 @@ mod admit_plan_tests {
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: true,
+            configured_images_dir: Some(std::path::Path::new("/nonexistent/mvm-images")),
             ..pinning_params(&rootfs, &ledger)
         })
         .expect("a contributor sealed boot admits its own-flake workload");
@@ -2621,11 +2683,6 @@ mod admit_plan_tests {
     /// scoped to the production tier, not to the variable.
     #[test]
     fn a_development_admission_is_not_refused_for_a_configured_local_image_checkout() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set(
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-            "/nonexistent/mvm-images",
-        );
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2636,6 +2693,7 @@ mod admit_plan_tests {
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: false,
+            configured_images_dir: Some(std::path::Path::new("/nonexistent/mvm-images")),
             ..pinning_params(&rootfs, &ledger)
         })
         .expect("a development boot is not refused for a configured checkout");
@@ -2833,6 +2891,7 @@ allow_hosts = ["localhost:8443"]
             tenant: "local",
             vm_name: "vm-shares",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -2939,6 +2998,7 @@ allow_hosts = ["localhost:8443"]
             tenant: "local",
             vm_name: "vm-granted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -3111,6 +3171,7 @@ allow_hosts = ["localhost:8443"]
             tenant: "local",
             vm_name: "vm-over-ceiling",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,
@@ -3177,6 +3238,7 @@ allow_hosts = ["localhost:8443"]
             tenant: "local",
             vm_name: "vm-ungranted",
             backend_name: "firecracker",
+            configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
             precomputed_image_sha256: None,

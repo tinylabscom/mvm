@@ -42,6 +42,8 @@ pub struct VmStartParams<'a> {
     /// never mention it get the `false` default, which is the answer every
     /// launch gave before the flag existed.
     pub gpu: bool,
+    /// Optional host GPU ordinal exposed as guest ordinal zero.
+    pub gpu_device: Option<u32>,
 }
 
 impl<'a> VmStartParams<'a> {
@@ -76,6 +78,7 @@ pub struct VmStartParamsBuilder<'a> {
     warm_pool_size: Option<u32>,
     network_policy: Option<mvm_core::network_policy::NetworkPolicy>,
     gpu: Option<bool>,
+    gpu_device: Option<u32>,
 }
 
 impl<'a> VmStartParamsBuilder<'a> {
@@ -102,6 +105,7 @@ impl<'a> VmStartParamsBuilder<'a> {
             warm_pool_size: None,
             network_policy: None,
             gpu: None,
+            gpu_device: None,
         }
     }
 
@@ -247,6 +251,14 @@ impl<'a> VmStartParamsBuilder<'a> {
         self
     }
 
+    /// Pin the VM to one host GPU ordinal. Setting a pin enables the GPU
+    /// remoting plane even when `gpu` was not set separately.
+    #[must_use]
+    pub fn gpu_device(mut self, gpu_device: impl Into<Option<u32>>) -> Self {
+        self.gpu_device = gpu_device.into();
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<VmStartParams<'a>, BuilderError> {
         Ok(VmStartParams {
@@ -294,7 +306,8 @@ impl<'a> VmStartParamsBuilder<'a> {
             network_policy: self
                 .network_policy
                 .ok_or(BuilderError::missing("VmStartParams", "network_policy"))?,
-            gpu: self.gpu.unwrap_or_default(),
+            gpu: self.gpu.unwrap_or_default() || self.gpu_device.is_some(),
+            gpu_device: self.gpu_device,
         })
     }
 }
@@ -368,6 +381,7 @@ impl VmStartParams<'_> {
                 .collect(),
             runner_dir: None,
             gpu: self.gpu,
+            gpu_device: self.gpu_device,
             // Runtime overlay wiring lives behind the `mvmctl run
             // --runtime-overlay` opt-in surface, not this generic
             // params struct. Leaving the three overlay fields at
