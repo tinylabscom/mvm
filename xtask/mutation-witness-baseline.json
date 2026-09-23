@@ -820,7 +820,7 @@
     },
     {
       "file": "crates/mvm-cli/src/update.rs",
-      "mutant": "replace < with <= in is_some_and",
+      "mutant": "replace < with <= in install_announcement",
       "reason": "provably equivalent: the `latest == current` equality short-circuits to `ForceReinstall` before this closure runs, so inside it `latest != current` holds and `latest <= current` coincides exactly with `latest < current`. No input can distinguish the two comparisons."
     },
     {
