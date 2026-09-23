@@ -73,9 +73,6 @@
       "package": "mvm-build",
       "claims": [
         6
-      ],
-      "features": [
-        "pure-mkfs"
       ]
     },
     {

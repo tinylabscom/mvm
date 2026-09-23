@@ -163,7 +163,8 @@ jobs:
         # recipe while crossing the runner's passwordless-sudo boundary.
         run: |
           sudo --preserve-env=HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION \
-            env "PATH=$PATH" "$HOME/.cargo/bin/just" bdd-live-warm-claim
+            env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
+              "PATH=$PATH" "$HOME/.cargo/bin/just" bdd-live-warm-claim
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here

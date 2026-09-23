@@ -21,6 +21,16 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
+- [ ] **Repair all open GitHub Actions issues — #3601, #3598, #3495, and #3428.**
+      `specs/plans/2026-09-22-github-actions-open-issues.md`. Security mutation
+      survivors and baseline failures, Extended CI privilege/input/registry
+      failures, claim-evidence freshness, and the Linux 6.12.111 synchronized
+      pin are repaired. Focused mutation, serial workspace, workspace doctest,
+      check, Clippy, gated-target, builder-VM kernel, formatting, and all 74
+      repository-policy gates pass. Fresh scheduled-workflow evidence remains
+      before merge. See
+      `specs/sprint/delivery/3428-3495-3598-3601-scheduled-ci-repair.md`.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in

@@ -26,8 +26,12 @@ Then send a prompt to the baked per-call entrypoint:
 printf '%s\n' 'Summarize the security boundary in this repository.' | \
   mvmctl machine run --flake examples/agent-workload --entrypoint \
     --from-workload-ir examples/agent-workload/workload.json \
-    --allow-host api.anthropic.com:443 --stdin - --timeout 120
+    --allow-host api.anthropic.com:443 --timeout 120
 ```
+
+The pipe is the complete input for this invocation. The baked entrypoint reads
+it directly; `--stdin -` would instead request an interactive streaming grant,
+which sealed workloads deliberately do not receive.
 
 `--from-workload-ir` is required for this secret-bearing workload. It lowers
 the `SecretRef` into the signed execution plan; the host endpoint mints an
@@ -44,10 +48,9 @@ placeholder and prints the pinned CLI version:
 ```bash
 printf '%s' 'not-a-real-key' | \
   mvmctl secret set agent-workload-smoke --provider anthropic --value -
-printf '' | \
-  mvmctl machine run --flake examples/agent-workload --entrypoint \
-    --from-workload-ir examples/agent-workload/workload-smoke.json \
-    --allow-host api.anthropic.com:443 --stdin - --timeout 120
+mvmctl machine run --flake examples/agent-workload --entrypoint \
+  --from-workload-ir examples/agent-workload/workload-smoke.json \
+  --allow-host api.anthropic.com:443 --timeout 120
 mvmctl secret rm agent-workload-smoke
 ```
 

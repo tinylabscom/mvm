@@ -14,6 +14,14 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [ ] **Scheduled CI and kernel freshness repair — issues #3601, #3598, #3495, and #3428.**
+      `specs/plans/2026-09-22-github-actions-open-issues.md`. Deterministic
+      Security and Extended CI defects are repaired, claim evidence can become
+      fresh once Security is green, and both kernel consumers pin verified
+      Linux 6.12.111. Local mutation, workspace, doctest, Clippy, gated-target,
+      builder-VM kernel, formatting, and all 74 policy gates pass; fresh
+      scheduled-workflow evidence remains open.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard

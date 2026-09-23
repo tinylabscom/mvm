@@ -1,0 +1,3 @@
+# Source-image tests derive checkout identities from Git metadata. Keep that
+# metadata in isolated mutation copies so their unmutated baseline can run.
+copy_vcs = true
