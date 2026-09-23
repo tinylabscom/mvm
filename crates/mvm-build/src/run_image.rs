@@ -143,7 +143,20 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// The lock file sits beside the tree as `<name>.tree.lock`, so it survives
 /// the tree being removed and re-unpacked under it.
 pub fn lock_unpacked_tree(root: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
-    lock_beside(root, "tree")
+    lock_unpacked_tree_observed(root, || {})
+}
+
+/// Hold an unpacked tree lock and report only when another holder makes this
+/// acquisition wait.
+///
+/// The observer runs after a non-blocking acquisition proves contention and
+/// immediately before the blocking acquisition. It is primarily useful to
+/// coordinate tests around the real locking seam without timing guesses.
+pub fn lock_unpacked_tree_observed(
+    root: &Path,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_beside_with_wait(root, "tree", on_wait)
 }
 
 /// Hold the materialized image at `output` exclusively.
@@ -154,7 +167,14 @@ pub fn lock_unpacked_tree(root: &Path) -> Result<mvm_core::util::atomic_io::File
 /// waiting would then hold a lock on the unlinked file while the next run
 /// took one on a new file, and both would build.
 fn lock_output(output: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
-    take_lock(&output_lock_key(output)?, output, "output")
+    lock_output_with_wait(output, || {})
+}
+
+fn lock_output_with_wait(
+    output: &Path,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
+    take_lock_with_wait(&output_lock_key(output)?, output, "output", on_wait)
 }
 
 /// `<dir>/../.locks/<dir name>.<file name>.output.key` for an output at
@@ -180,14 +200,23 @@ fn output_lock_key(output: &Path) -> Result<std::path::PathBuf> {
     Ok(locks.join(key))
 }
 
-fn lock_beside(path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
-    take_lock(&lock_key(path, role)?, path, role)
+fn lock_beside_with_wait(
+    path: &Path,
+    role: &str,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
+    take_lock_with_wait(&lock_key(path, role)?, path, role, on_wait)
 }
 
 /// Take the lock at `key` for `path` in `role`, saying so when another holder
 /// makes this wait: a run that stops while another materializes the same
 /// image would otherwise look hung.
-fn take_lock(key: &Path, path: &Path, role: &str) -> Result<mvm_core::util::atomic_io::FileLock> {
+fn take_lock_with_wait(
+    key: &Path,
+    path: &Path,
+    role: &str,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
     let context = || format!("lock {} ({role})", path.display());
     if let Some(held) =
         mvm_core::util::atomic_io::FileLock::try_acquire(key).with_context(context)?
@@ -199,6 +228,7 @@ fn take_lock(key: &Path, path: &Path, role: &str) -> Result<mvm_core::util::atom
         role,
         "another run is materializing this image; waiting for it"
     );
+    on_wait();
     mvm_core::util::atomic_io::FileLock::acquire(key).with_context(context)
 }
 
@@ -232,9 +262,15 @@ impl HeldTreeLocks {
     /// Take the tree's lock, then the output's. Every holder of both takes
     /// them in this order.
     pub fn acquire(tree: &Path, output: &Path) -> Result<Self> {
+        Self::acquire_observed(tree, output, || {})
+    }
+
+    /// Take the tree and output locks in canonical order, reporting each
+    /// acquisition that must wait for another holder.
+    pub fn acquire_observed(tree: &Path, output: &Path, mut on_wait: impl FnMut()) -> Result<Self> {
         Ok(Self {
-            _tree: lock_unpacked_tree(tree)?,
-            _output: lock_output(output)?,
+            _tree: lock_unpacked_tree_observed(tree, &mut on_wait)?,
+            _output: lock_output_with_wait(output, on_wait)?,
         })
     }
 }
@@ -391,6 +427,14 @@ fn remove_stale_builds(rootfs_dir: &Path) -> Result<()> {
 /// and the new sidecar is renamed in last. A run that dies at any point leaves
 /// either the old set whole or a set with no sidecar, which is rebuilt.
 fn publish_rootfs_build(staging: &Path, rootfs_dir: &Path) -> Result<()> {
+    publish_rootfs_build_with(staging, rootfs_dir, mvm_core::util::atomic_io::sync_dir)
+}
+
+fn publish_rootfs_build_with(
+    staging: &Path,
+    rootfs_dir: &Path,
+    sync_dir: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let sidecar = crate::builder_vm::SIDECAR_FILENAME;
     // On disk before the published set is touched, so a crash after a rename
     // cannot leave a published name pointing at data that never reached it.
@@ -424,7 +468,9 @@ fn publish_rootfs_build(staging: &Path, rootfs_dir: &Path) -> Result<()> {
             .with_context(|| format!("publish {}", target.display()))?;
     }
     std::fs::rename(staging.join(sidecar), rootfs_dir.join(sidecar))
-        .with_context(|| format!("publish the sidecar in {}", rootfs_dir.display()))
+        .with_context(|| format!("publish the sidecar in {}", rootfs_dir.display()))?;
+    sync_dir(rootfs_dir)
+        .with_context(|| format!("sync published rootfs directory {}", rootfs_dir.display()))
 }
 
 /// Whether the artifact set beside `rootfs` finished publishing: its guest
@@ -460,6 +506,15 @@ pub fn published_build_matches(rootfs: &Path, sealed: bool) -> bool {
 /// whether to reuse it: no build can be publishing while the lock is held.
 pub fn lock_rootfs_output(rootfs: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
     lock_output(rootfs)
+}
+
+/// Hold a materialized image lock and report only when another holder makes
+/// this acquisition wait.
+pub fn lock_rootfs_output_observed(
+    rootfs: &Path,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
+    lock_output_with_wait(rootfs, on_wait)
 }
 
 /// Write the signed provenance mark into the tree being sealed, when the
@@ -976,6 +1031,29 @@ mod tests {
         assert_eq!(std::fs::read(live.join("rootfs.ext4")).unwrap(), b"new");
         assert_eq!(std::fs::read(live.join("rootfs.verity")).unwrap(), b"new");
         assert!(rootfs_build_is_complete(&live.join("rootfs.ext4")));
+    }
+
+    /// The sidecar rename is not a durable commit until the containing
+    /// directory has been synced. A sync failure must be visible to the
+    /// caller instead of reporting a crash-safe publication.
+    #[test]
+    fn a_publish_reports_directory_sync_failure_after_renames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("rootfs");
+        write_set(&live, "old");
+        let staging = tmp.path().join("rootfs/.rootfs-build-x");
+        write_set(&staging, "new");
+        let sync_called = std::cell::Cell::new(false);
+
+        let err = publish_rootfs_build_with(&staging, &live, |dir| {
+            assert_eq!(dir, live);
+            sync_called.set(true);
+            Err(anyhow::anyhow!("injected directory sync failure"))
+        })
+        .expect_err("directory sync failure must fail publication");
+
+        assert!(sync_called.get(), "the published directory was not synced");
+        assert!(format!("{err:#}").contains("sync published rootfs directory"));
     }
 
     /// A publish that fails part-way — here one file cannot be renamed over a

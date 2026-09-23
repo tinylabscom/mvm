@@ -61,15 +61,55 @@ pub(super) fn inspect_image(cache_root: &Path, reference: &str) -> Result<Inspec
 }
 
 pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveOutcome> {
-    let mut index = load_index(cache_root)?;
-    let Some(position) = index
-        .images
-        .iter()
-        .position(|image| image_matches(image, reference))
-    else {
-        bail!("cached OCI image not found for '{reference}'");
-    };
+    remove_image_with(cache_root, reference, || {})
+}
 
+fn remove_image_with(
+    cache_root: &Path,
+    reference: &str,
+    resources_locked: impl FnMut(),
+) -> Result<RemoveOutcome> {
+    remove_image_with_wait_observer(cache_root, reference, |_| {}, resources_locked)
+}
+
+fn remove_image_with_wait_observer(
+    cache_root: &Path,
+    reference: &str,
+    mut on_wait: impl FnMut(CacheLockWait),
+    mut resources_locked: impl FnMut(),
+) -> Result<RemoveOutcome> {
+    loop {
+        let snapshot = load_index(cache_root)?;
+        let image = find_image(&snapshot, reference)
+            .with_context(|| format!("cached OCI image not found for '{reference}'"))?
+            .clone();
+        let resources = ImageResources::for_image(cache_root, &image)?;
+        let _resource_locks =
+            resources.acquire_with_wait_observer(|| on_wait(CacheLockWait::Resource))?;
+        let _index_lock =
+            lock_index_with_wait_observer(cache_root, || on_wait(CacheLockWait::Index))?;
+        let index = load_index(cache_root)?;
+        let Some(position) = index
+            .images
+            .iter()
+            .position(|current| image_matches(current, reference))
+        else {
+            bail!("cached OCI image not found for '{reference}'");
+        };
+        let current = &index.images[position];
+        if current != &image || ImageResources::for_image(cache_root, current)? != resources {
+            continue;
+        }
+        resources_locked();
+        return remove_image_holding(cache_root, index, position);
+    }
+}
+
+fn remove_image_holding(
+    cache_root: &Path,
+    mut index: OciCacheIndex,
+    position: usize,
+) -> Result<RemoveOutcome> {
     let image = index.images.remove(position);
     let mut removed_files = 0usize;
     let mut freed_bytes = 0u64;
@@ -84,6 +124,11 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
         .images
         .iter()
         .any(|other| other.resolved_digest == image.resolved_digest);
+    // The durable index commit is the ownership transfer: after it succeeds,
+    // a crash may leave unreachable cache bytes, but never a live entry whose
+    // files were already reclaimed. The index lock stays held through cleanup
+    // so no concurrent upsert can start referring to those files mid-sweep.
+    save_index(cache_root, &index)?;
     for path in metadata_paths(&image) {
         if shared_paths.contains(&path) {
             continue;
@@ -99,8 +144,14 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
     }
     if !rootfs_shared {
         for dir in rootfs_dirs_of(cache_root, &image)? {
-            remove_rootfs_dir(cache_root, &dir, &mut removed_files, &mut freed_bytes)?;
+            remove_directory_tree(cache_root, &dir, &mut removed_files, &mut freed_bytes)?;
         }
+        remove_unpacked_state_holding(
+            cache_root,
+            &image.resolved_digest,
+            &mut removed_files,
+            &mut freed_bytes,
+        )?;
     }
 
     for layer in &image.layers {
@@ -113,7 +164,6 @@ pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveO
         remove_cache_file(cache_root, path, &mut removed_files, &mut freed_bytes)?;
     }
 
-    save_index(cache_root, &index)?;
     Ok(RemoveOutcome {
         reference: image.reference,
         removed_files,
@@ -143,7 +193,67 @@ pub(super) fn save_index(cache_root: &Path, index: &OciCacheIndex) -> Result<()>
     fs::create_dir_all(cache_root).with_context(|| format!("create {}", cache_root.display()))?;
     let path = cache_root.join(INDEX_FILE);
     let bytes = serde_json::to_vec_pretty(index).context("serialize OCI cache index")?;
-    fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))
+    mvm_core::util::atomic_io::atomic_write_durable(&path, &bytes)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+fn lock_index_with_wait_observer(
+    cache_root: &Path,
+    on_wait: impl FnOnce(),
+) -> Result<mvm_core::util::atomic_io::FileLock> {
+    fs::create_dir_all(cache_root).with_context(|| format!("create {}", cache_root.display()))?;
+    let index_path = cache_root.join(INDEX_FILE);
+    if let Some(held) = mvm_core::util::atomic_io::FileLock::try_acquire(&index_path)
+        .context("try lock OCI cache index")?
+    {
+        return Ok(held);
+    }
+    on_wait();
+    mvm_core::util::atomic_io::FileLock::acquire(&index_path).context("lock OCI cache index")
+}
+
+pub(super) fn upsert_cached_image(cache_root: &Path, image: CachedOciImage) -> Result<()> {
+    upsert_cached_image_with_wait_observer(cache_root, image, |_| {})
+}
+
+fn upsert_cached_image_with_wait_observer(
+    cache_root: &Path,
+    image: CachedOciImage,
+    mut on_wait: impl FnMut(CacheLockWait),
+) -> Result<()> {
+    let rootfs_rel = image
+        .rootfs_path
+        .as_deref()
+        .context("cannot register an OCI image without a materialized rootfs")?;
+    let rootfs = safe_cache_path(cache_root, rootfs_rel)?;
+    let hex = sha256_hex(&image.resolved_digest)?;
+    let unpacked = cache_root.join("unpacked").join(hex);
+    let _resources =
+        mvm_build::run_image::HeldTreeLocks::acquire_observed(&unpacked, &rootfs, || {
+            on_wait(CacheLockWait::Resource)
+        })?;
+    if read_cached_unpack(cache_root, &image.resolved_digest)?.is_none() {
+        bail!(
+            "refusing to register OCI image {} without its complete unpacked tree",
+            image.reference
+        );
+    }
+    if !mvm_build::run_image::rootfs_build_is_complete(&rootfs) {
+        bail!(
+            "refusing to register OCI image {} without its complete rootfs",
+            image.reference
+        );
+    }
+    let _index_lock = lock_index_with_wait_observer(cache_root, || on_wait(CacheLockWait::Index))?;
+    let mut index = load_index(cache_root)?;
+    upsert_image(&mut index, image);
+    save_index(cache_root, &index)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheLockWait {
+    Resource,
+    Index,
 }
 
 pub(super) fn read_verified_cache_file(
@@ -454,7 +564,7 @@ pub(super) fn read_json_optional(cache_root: &Path, relative: &str) -> Result<Op
 }
 
 /// Whether `relative` sits in a rootfs directory of its own under `rootfs/`,
-/// which [`remove_rootfs_dir`] removes whole.
+/// which [`remove_directory_tree`] removes whole.
 fn is_rootfs_dir_member(cache_root: &Path, relative: &str) -> Result<bool> {
     let path = safe_cache_path(cache_root, relative)?;
     Ok(path.parent().is_some_and(|dir| {
@@ -496,19 +606,79 @@ fn rootfs_dirs_of(cache_root: &Path, image: &CachedOciImage) -> Result<BTreeSet<
     Ok(dirs)
 }
 
-/// Remove a rootfs directory whole — image, verity tree, root hash, guest and
-/// provenance sidecars, locks — counting what it frees. Removing only
-/// `rootfs.ext4` left the sidecars to describe an image that was gone.
-fn remove_rootfs_dir(
+#[derive(Debug, PartialEq, Eq)]
+struct ImageResources {
+    unpacked_root: Option<PathBuf>,
+    rootfs_dirs: BTreeSet<PathBuf>,
+}
+
+impl ImageResources {
+    fn for_image(cache_root: &Path, image: &CachedOciImage) -> Result<Self> {
+        let unpacked_root = sha256_hex(&image.resolved_digest)
+            .ok()
+            .map(|hex| cache_root.join("unpacked").join(hex));
+        Ok(Self {
+            unpacked_root,
+            rootfs_dirs: rootfs_dirs_of(cache_root, image)?,
+        })
+    }
+
+    fn acquire_with_wait_observer(&self, mut on_wait: impl FnMut()) -> Result<HeldImageResources> {
+        let tree = self
+            .unpacked_root
+            .as_deref()
+            .map(|root| mvm_build::run_image::lock_unpacked_tree_observed(root, &mut on_wait))
+            .transpose()?;
+        let outputs = self
+            .rootfs_dirs
+            .iter()
+            .map(|dir| {
+                mvm_build::run_image::lock_rootfs_output_observed(
+                    &dir.join("rootfs.ext4"),
+                    &mut on_wait,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(HeldImageResources {
+            _tree: tree,
+            _outputs: outputs,
+        })
+    }
+}
+
+struct HeldImageResources {
+    _tree: Option<mvm_core::util::atomic_io::FileLock>,
+    _outputs: Vec<mvm_core::util::atomic_io::FileLock>,
+}
+
+fn remove_unpacked_state_holding(
+    cache_root: &Path,
+    resolved_digest: &str,
+    removed_files: &mut usize,
+    freed_bytes: &mut u64,
+) -> Result<()> {
+    let Ok(hex) = sha256_hex(resolved_digest) else {
+        return Ok(());
+    };
+    let unpacked_root = cache_root.join("unpacked").join(&hex);
+    remove_directory_tree(cache_root, &unpacked_root, removed_files, freed_bytes)?;
+    for suffix in ["owners.json", "deferred-nodes.json"] {
+        remove_cache_file(
+            cache_root,
+            &format!("unpacked/{hex}.{suffix}"),
+            removed_files,
+            freed_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn remove_directory_tree(
     cache_root: &Path,
     dir: &Path,
     removed_files: &mut usize,
     freed_bytes: &mut u64,
 ) -> Result<()> {
-    // The build lock, so a run building or publishing this image finishes
-    // first and none starts during the removal. Its file lives outside the
-    // directory, so removing the directory does not remove the lock.
-    let _output = mvm_build::run_image::lock_rootfs_output(&dir.join("rootfs.ext4"))?;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
         let entries = match fs::read_dir(&at) {
@@ -727,6 +897,28 @@ mod tests {
         fs::write(path, body).expect("write cache file");
     }
 
+    fn seed_materialized_state(cache_root: &Path, image: &mut CachedOciImage) {
+        let hex = sha256_hex(&image.resolved_digest).expect("valid digest");
+        let rootfs_rel = format!("rootfs/{hex}-test-dev/rootfs.ext4");
+        image.rootfs_path = Some(rootfs_rel.clone());
+        image.runtime_tag = Some("test".to_string());
+        let unpacked = cache_root.join("unpacked").join(hex);
+        fs::create_dir_all(&unpacked).expect("create unpacked tree");
+        fs::write(unpacked.join("file"), b"unpacked").expect("write unpacked file");
+        write_layer_owners(
+            cache_root,
+            &image.resolved_digest,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("write owners");
+        let rootfs = cache_root.join(rootfs_rel);
+        fs::create_dir_all(rootfs.parent().expect("rootfs parent")).expect("create rootfs dir");
+        fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(&image.reference, false, true)
+            .write_to_dir(rootfs.parent().expect("rootfs parent"))
+            .expect("write guest sidecar");
+    }
+
     #[test]
     fn upsert_replaces_existing_reference_entry() {
         let mut index = OciCacheIndex {
@@ -769,6 +961,127 @@ mod tests {
         upsert_image(&mut index, second);
 
         assert_eq!(index.images.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_remove_and_upsert_do_not_lose_the_new_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let removed = sample_image(
+            "docker.io/library/alpine:3.20",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "blobs/alpine",
+        );
+        let mut added = sample_image(
+            "docker.io/library/busybox:1",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "blobs/busybox",
+        );
+        seed_materialized_state(tmp.path(), &mut added);
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![removed],
+            },
+        );
+        let held = mvm_core::util::atomic_io::FileLock::acquire(&tmp.path().join(INDEX_FILE))
+            .expect("hold index lock");
+        let (remove_wait_tx, remove_wait_rx) = std::sync::mpsc::channel();
+        let remove_cache = tmp.path().to_path_buf();
+        let remover = std::thread::spawn(move || {
+            remove_image_with_wait_observer(
+                &remove_cache,
+                "docker.io/library/alpine:3.20",
+                |wait| remove_wait_tx.send(wait).expect("report remove wait"),
+                || {},
+            )
+        });
+        let (upsert_wait_tx, upsert_wait_rx) = std::sync::mpsc::channel();
+        let upsert_cache = tmp.path().to_path_buf();
+        let upserter = std::thread::spawn(move || {
+            upsert_cached_image_with_wait_observer(&upsert_cache, added, |wait| {
+                upsert_wait_tx.send(wait).expect("report upsert wait");
+            })
+        });
+        assert_eq!(
+            remove_wait_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("remove reaches held index lock"),
+            CacheLockWait::Index
+        );
+        assert_eq!(
+            upsert_wait_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("upsert reaches held index lock"),
+            CacheLockWait::Index
+        );
+        drop(held);
+
+        remover.join().unwrap().expect("remove");
+        upserter.join().unwrap().expect("upsert");
+        let index = load_index(tmp.path()).expect("load final index");
+        assert_eq!(index.images.len(), 1);
+        assert_eq!(index.images[0].reference, "docker.io/library/busybox:1");
+    }
+
+    #[test]
+    fn upsert_cannot_resurrect_resources_removed_while_it_waits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut existing = sample_image(
+            "docker.io/library/alpine:3.20",
+            SAMPLE_DIGEST,
+            "blobs/shared",
+        );
+        seed_materialized_state(tmp.path(), &mut existing);
+        let mut added = existing.clone();
+        added.reference = "docker.io/library/alpine:latest".to_string();
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![existing.clone()],
+            },
+        );
+        let unpacked = unpacked_dir_if_present(tmp.path(), SAMPLE_DIGEST).unwrap();
+        let rootfs = safe_cache_path(tmp.path(), existing.rootfs_path.as_deref().unwrap()).unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let remove_cache = tmp.path().to_path_buf();
+        let remover = std::thread::spawn(move || {
+            remove_image_with(&remove_cache, "docker.io/library/alpine:3.20", || {
+                locked_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+            })
+        });
+        locked_rx.recv().expect("remover holds resources");
+
+        let (wait_tx, wait_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let upsert_cache = tmp.path().to_path_buf();
+        let upserter = std::thread::spawn(move || {
+            let result = upsert_cached_image_with_wait_observer(&upsert_cache, added, |wait| {
+                wait_tx.send(wait).expect("report upsert wait");
+            });
+            result_tx.send(result).unwrap();
+        });
+        assert_eq!(
+            wait_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("upsert reaches remover's resource lock"),
+            CacheLockWait::Resource
+        );
+        continue_tx.send(()).unwrap();
+        remover.join().unwrap().expect("remove wins");
+        let err = result_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap()
+            .expect_err("deleted resources must not be registered");
+        upserter.join().unwrap();
+
+        assert!(format!("{err:#}").contains("complete unpacked tree"));
+        assert!(load_index(tmp.path()).unwrap().images.is_empty());
+        assert!(!unpacked.exists());
+        assert!(!rootfs.exists());
     }
 
     #[test]
@@ -1004,6 +1317,118 @@ mod tests {
                 "{path} goes with the last reference"
             );
         }
+    }
+
+    #[test]
+    fn unpacked_state_is_removed_only_with_the_last_digest_reference() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let mut by_tag = sample_image(
+            "docker.io/library/alpine:3.20",
+            SAMPLE_DIGEST,
+            "blobs/shared",
+        );
+        by_tag.config_path = None;
+        by_tag.claims_path = None;
+        let mut by_digest = by_tag.clone();
+        by_digest.reference = format!("docker.io/library/alpine@{SAMPLE_DIGEST}");
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![by_tag, by_digest],
+            },
+        );
+        let unpacked = tmp.path().join("unpacked").join(&hex);
+        std::fs::create_dir_all(unpacked.join("usr/bin")).unwrap();
+        std::fs::write(unpacked.join("usr/bin/tool"), b"tool").unwrap();
+        write_layer_owners(
+            tmp.path(),
+            SAMPLE_DIGEST,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .unwrap();
+        write_deferred_nodes(
+            tmp.path(),
+            SAMPLE_DIGEST,
+            &[mvm_fs::ext4::Node::Symlink {
+                path: "/usr/bin/alias".to_string(),
+                target: "tool".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            }],
+        )
+        .unwrap();
+        let owners = tmp
+            .path()
+            .join("unpacked")
+            .join(format!("{hex}.owners.json"));
+        let deferred = tmp
+            .path()
+            .join("unpacked")
+            .join(format!("{hex}.deferred-nodes.json"));
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove one ref");
+        assert!(unpacked.exists());
+        assert!(owners.exists());
+        assert!(deferred.exists());
+
+        remove_image(
+            tmp.path(),
+            &format!("docker.io/library/alpine@{SAMPLE_DIGEST}"),
+        )
+        .expect("remove last ref");
+        assert!(!unpacked.exists());
+        assert!(!owners.exists());
+        assert!(!deferred.exists());
+    }
+
+    #[test]
+    fn removing_last_reference_waits_for_unpacked_tree_readers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let image = sample_image(
+            "docker.io/library/alpine:3.20",
+            SAMPLE_DIGEST,
+            "blobs/alpine",
+        );
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        let unpacked = tmp.path().join("unpacked").join(hex);
+        std::fs::create_dir_all(&unpacked).unwrap();
+        std::fs::write(unpacked.join("file"), b"body").unwrap();
+        let reading = mvm_build::run_image::lock_unpacked_tree(&unpacked).expect("tree lock");
+        let (wait_tx, wait_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cache = tmp.path().to_path_buf();
+        let remover = std::thread::spawn(move || {
+            done_tx
+                .send(remove_image_with_wait_observer(
+                    &cache,
+                    "docker.io/library/alpine:3.20",
+                    |wait| wait_tx.send(wait).expect("report remove wait"),
+                    || {},
+                ))
+                .unwrap();
+        });
+
+        assert_eq!(
+            wait_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("remove reaches reader's unpacked-tree lock"),
+            CacheLockWait::Resource
+        );
+        drop(reading);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap()
+            .expect("remove after reader exits");
+        remover.join().unwrap();
+        assert!(!unpacked.exists());
     }
 
     /// A rootfs recorded outside `rootfs/` by an older cache is still removed.

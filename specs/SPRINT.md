@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [x] **Make OCI image publication and removal durable — issue #3538.**
+      Rootfs publication now syncs the containing directory after its
+      sidecar-last rename. Pull/rematerialize upserts and `image rm` use one
+      tree → output → index lock order with reload-and-revalidation, and the
+      index is replaced atomically and durably. Removing the last digest
+      reference reclaims its unpacked tree plus owner/deferred sidecars; shared
+      references retain them. Event-backed contention observers make the
+      remove/upsert and live-reader regressions prove the intended lock waits.
+      Focused and full workspace tests, package and workspace Clippy,
+      gated-target compilation, formatting, and all 74 repository gates pass.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in

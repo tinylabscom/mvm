@@ -6,7 +6,7 @@ evidence required before its checkbox may be ticked.
 
 **Issues:** #3378 (W1) · #3379 (W2) · #3380 (W3) · #3381 (W4) · #3382 (W5) ·
 #3383 (W6) · #3384 (W7) · #3385 (W8) · #3386 (W9) · #3387 (W10) ·
-#3404 (W1a) · #3432 (W10a)
+#3404 (W1a) · #3432 (W10a) · #3538 (W3.7a)
 
 ## Outcome
 
@@ -260,6 +260,15 @@ data directory ships owned by its own account boots with root-owned files.
   - [x] a builder-VM refusal names the route that reached it;
   - [x] owner and deferred-node sidecars are written atomically, and a corrupt
         one forces a re-unpack instead of a hard error.
+  - [x] the post-merge durability follow-up (#3538) syncs the rootfs directory
+        after the sidecar-last publication, serializes cache-index mutation,
+        and removes the unpacked tree plus its ownership/deferred sidecars only
+        after the last digest reference disappears. Resource locks precede the
+        index lock, and a losing pull/upsert refuses rather than registering
+        files a concurrent removal reclaimed. Event-backed contention tests
+        prove the remove/upsert and live-reader waits. Focused and full
+        workspace tests, zero-warning Clippy, gated-target compilation,
+        formatting, and all 74 repository gates are green.
 - [ ] W3.8 Builder-VM input fidelity, found while closing W3.7. An image
       materialized through the builder VM does not keep the tree it was
       given:
