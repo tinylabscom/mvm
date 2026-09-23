@@ -21,6 +21,14 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
+- [x] **Make missing Landlock an actionable host diagnostic — issue #3578.**
+      `specs/plans/2026-09-23-landlock-host-diagnostics.md`. Keep the network
+      endpoint fail-closed, report the read-only Landlock ABI probe in
+      `mvmctl doctor`, turn `NotEnforced` into kernel/LSM remediation, and
+      remove the undocumented unconfined endpoint bypass. Focused coverage,
+      the host workspace suite, Linux/feature-gated compilation, all-target
+      Clippy, formatting, and repository policy gates pass.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in

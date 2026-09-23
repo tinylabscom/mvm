@@ -80,16 +80,23 @@ preventing it from reading its own helper binary at all.
 ## Refusal posture
 
 `apply()` only returns `Ok(())` when the kernel reports
-`RulesetStatus::FullyEnforced`. `PartiallyEnforced` / `NotEnforced`
-return `JailerError::LandlockApply` so the caller can decide to abort
-(the confined role aborts in that case — partial
-confinement is no confinement). See the partial-confinement contract
-doc on `confine_self` in `lib.rs` for the hard-exit requirement when
-seccomp fails *after* Landlock succeeds.
+`RulesetStatus::FullyEnforced`. `PartiallyEnforced` returns
+`JailerError::LandlockApply`; `NotEnforced` returns the actionable
+`JailerError::LandlockUnavailable`, naming the kernel config, active LSM list,
+and minimum kernel version. The confined role aborts in either case — partial
+confinement is no confinement. See the partial-confinement contract doc on
+`confine_self` in `lib.rs` for the hard-exit requirement when seccomp fails
+*after* Landlock succeeds.
 
 `RulesetError::CreateRuleset(_)` at the `handle_access(AccessFs::from_all(V2))`
 step maps to `JailerError::LandlockUnavailable` so the role can
 print an actionable error on hosts older than Linux 5.19.
+
+`jailer::landlock_support()` uses the kernel's read-only ABI-version query so
+`mvmctl doctor` can report the same blocker before launching a workload. The
+query installs no ruleset and changes no process privilege. The endpoint has no
+environment or flag escape hatch: Linux serving always requires full Landlock
+and seccomp enforcement.
 
 ## Path errors
 

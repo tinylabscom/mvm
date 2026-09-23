@@ -23,7 +23,9 @@ pub enum JailerError {
     SeccompInstall(String),
     #[error("landlock ruleset apply failed: {0}")]
     LandlockApply(String),
-    #[error("kernel does not support landlock ABI v2 (need Linux 5.19+)")]
+    #[error(
+        "kernel cannot enforce landlock ABI v2; enable CONFIG_SECURITY_LANDLOCK=y, include landlock in the active LSM list, and use Linux 5.19+"
+    )]
     LandlockUnavailable,
     #[error("kernel does not support seccomp-bpf (need Linux 4.14+)")]
     SeccompUnavailable,
@@ -37,6 +39,73 @@ pub enum JailerError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// Result of the read-only Landlock ABI query for the running host.
+///
+/// The query never installs a ruleset or changes the caller's privileges. It
+/// exists so diagnostics can name an unusable kernel before a secret-holding
+/// endpoint reaches its mandatory, irreversible confinement step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandlockSupport {
+    /// The kernel exposes at least the minimum ABI used by mvm.
+    Available { abi: u32 },
+    /// Landlock exists, but its ABI predates mvm's v2 floor.
+    TooOld { abi: u32 },
+    /// Landlock is compiled in but disabled for this boot.
+    Disabled,
+    /// The running kernel does not implement the Landlock syscall.
+    Unavailable,
+    /// The ABI query failed in an unexpected way.
+    ProbeFailed { errno: Option<i32> },
+    /// Landlock is a Linux LSM and does not apply to this host OS.
+    NotApplicable,
+}
+
+#[cfg(any(target_os = "linux", test))]
+const MIN_LANDLOCK_ABI: u32 = 2;
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_landlock_abi_query(query: Result<u32, Option<i32>>) -> LandlockSupport {
+    match query {
+        Ok(abi) if abi >= MIN_LANDLOCK_ABI => LandlockSupport::Available { abi },
+        Ok(abi) => LandlockSupport::TooOld { abi },
+        Err(Some(libc::EOPNOTSUPP)) => LandlockSupport::Disabled,
+        Err(Some(libc::ENOSYS)) => LandlockSupport::Unavailable,
+        Err(errno) => LandlockSupport::ProbeFailed { errno },
+    }
+}
+
+/// Query the running kernel's Landlock ABI without installing a ruleset.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn landlock_support() -> LandlockSupport {
+    const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+    // SAFETY: a null attribute pointer and zero size are the kernel-defined
+    // read-only ABI-version query. No fd is created and no restriction is
+    // installed when LANDLOCK_CREATE_RULESET_VERSION is supplied.
+    let raw = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    let query = if raw < 0 {
+        Err(std::io::Error::last_os_error().raw_os_error())
+    } else {
+        u32::try_from(raw).map_err(|_| None)
+    };
+    classify_landlock_abi_query(query)
+}
+
+/// Landlock is a Linux-only LSM. Other hosts use their platform's existing
+/// process boundary and report this diagnostic as not applicable.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn landlock_support() -> LandlockSupport {
+    LandlockSupport::NotApplicable
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +285,36 @@ pub mod seccomp;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landlock_abi_query_requires_v2() {
+        assert_eq!(
+            classify_landlock_abi_query(Ok(2)),
+            LandlockSupport::Available { abi: 2 }
+        );
+        assert_eq!(
+            classify_landlock_abi_query(Ok(1)),
+            LandlockSupport::TooOld { abi: 1 }
+        );
+    }
+
+    #[test]
+    fn landlock_abi_query_distinguishes_missing_from_disabled() {
+        assert_eq!(
+            classify_landlock_abi_query(Err(Some(libc::ENOSYS))),
+            LandlockSupport::Unavailable
+        );
+        assert_eq!(
+            classify_landlock_abi_query(Err(Some(libc::EOPNOTSUPP))),
+            LandlockSupport::Disabled
+        );
+        assert_eq!(
+            classify_landlock_abi_query(Err(Some(libc::EPERM))),
+            LandlockSupport::ProbeFailed {
+                errno: Some(libc::EPERM)
+            }
+        );
+    }
 
     /// Distinct dirs per role, so a read-only grant is distinguishable from a
     /// writable one.

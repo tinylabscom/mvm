@@ -14,6 +14,13 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [x] **Landlock host diagnostics — issue #3578.**
+      `specs/plans/2026-09-23-landlock-host-diagnostics.md`. A read-only ABI
+      query and `doctor` security line name unsupported, disabled, or old Linux
+      Landlock before launch; endpoint `NotEnforced` uses the same remediation,
+      and the undocumented unconfined bypass is removed. Validation is green
+      and the change is ready for protected merge-queue delivery.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard

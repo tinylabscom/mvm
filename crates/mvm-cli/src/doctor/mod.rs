@@ -251,6 +251,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     });
 
     // ── Security posture (folded in from the old `mvmctl security`) ──
+    checks.push(security_checks::security_landlock_check());
     checks.push(security_checks::security_audit_log_check());
     checks.push(security_checks::security_audit_chain_check());
     checks.push(security_checks::security_host_fde_check());
