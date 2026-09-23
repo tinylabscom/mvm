@@ -395,6 +395,13 @@ Last updated: 2026-09-22
       - [x] W5l #3364: the sibling-checkout developer guide with the worked
             two-repository example, and the image-pair workflow validating
             both repositories at explicit SHAs.
+      - [x] Sibling-default wiring #3364: a contributor build discovers a
+            valid `../mvm-images` sibling as the image source (env still
+            wins, discovered-invalid warns and falls back, release never
+            looks), and the merge-queue guest-image witness builds from
+            `tinylabscom/mvm-images` with the `mvm` input overridden to the
+            queue's checkout. The plan's "nothing searches" bullet is
+            amended in place.
       - [x] W5n #3589: image-set schema v2 carries complete, profile-qualified
             default/rootless kernel-rootfs pairs; the typed selector, local
             build targets, cache identities and sibling resolver keep each pair

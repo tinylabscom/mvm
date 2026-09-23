@@ -9,7 +9,7 @@
 use mvm_build::artifact_acquisition::{DistributionChannel, compiled_channel};
 use mvm_build::image_source::{
     ImageSource, ImageSourceError, MVM_IMAGES_DIR_ENV, RepoIdentity, configured_images_dir,
-    mvm_source_checkout, probe_identity, resolve_image_source,
+    mvm_source_checkout, probe_identity, resolve_current_source,
 };
 
 use super::Check;
@@ -45,8 +45,12 @@ impl MvmOrigin {
 pub(super) fn image_source_check() -> Check {
     let channel = compiled_channel();
     let configured = configured_images_dir();
-    let selected = resolve_image_source(channel, configured.as_deref());
-    image_source_line(&selected, &MvmOrigin::detect(channel))
+    let selected = resolve_current_source();
+    image_source_line(
+        &selected,
+        &MvmOrigin::detect(channel),
+        configured.as_deref(),
+    )
 }
 
 /// `<tier> — <source> — <identities>`, the same three-segment shape as the
@@ -72,7 +76,11 @@ fn default_image_digest_suffix() -> String {
     }
 }
 
-fn image_source_line(selected: &Result<ImageSource, ImageSourceError>, mvm: &MvmOrigin) -> Check {
+fn image_source_line(
+    selected: &Result<ImageSource, ImageSourceError>,
+    mvm: &MvmOrigin,
+    configured: Option<&std::path::Path>,
+) -> Check {
     let digests = default_image_digest_suffix();
     let mvm_with_digests = format!("{}{digests}", mvm.describe());
     let (ok, info) = match selected {
@@ -84,17 +92,24 @@ fn image_source_line(selected: &Result<ImageSource, ImageSourceError>, mvm: &Mvm
                 mvm_with_digests,
             ),
         ),
-        Ok(source @ ImageSource::LocalCheckout(checkout)) => (
-            true,
-            format!(
-                "{} — ${MVM_IMAGES_DIR_ENV}={} — mvm-images {}, {}; image builds consume \
-                 this selection",
-                source.tier(),
-                checkout.root().display(),
-                checkout.identity(),
-                mvm_with_digests,
-            ),
-        ),
+        Ok(source @ ImageSource::LocalCheckout(checkout)) => {
+            let how = match configured {
+                Some(_) => format!("${MVM_IMAGES_DIR_ENV}={}", checkout.root().display()),
+                None => format!(
+                    "discovered sibling checkout at {}",
+                    checkout.root().display()
+                ),
+            };
+            (
+                true,
+                format!(
+                    "{} — {how} — mvm-images {}, {}; image builds consume this selection",
+                    source.tier(),
+                    checkout.identity(),
+                    mvm_with_digests,
+                ),
+            )
+        }
         Ok(source @ ImageSource::InTree { root }) => (
             true,
             format!(
@@ -130,7 +145,7 @@ mod tests {
 
     #[test]
     fn the_released_default_reports_the_release_tier_and_the_mvm_commit() {
-        let c = image_source_line(&Ok(ImageSource::Released), &mvm_checkout());
+        let c = image_source_line(&Ok(ImageSource::Released), &mvm_checkout(), None);
         assert!(c.ok);
         assert_eq!(c.name, "image source");
         assert!(c.info.starts_with("verified-release — "), "{}", c.info);
@@ -146,6 +161,7 @@ mod tests {
                 root: std::path::PathBuf::from("/src/mvm"),
             }),
             &mvm_checkout(),
+            None,
         );
         assert!(c.ok);
         assert!(c.info.starts_with("local-dev — in-tree"), "{}", c.info);
@@ -154,7 +170,7 @@ mod tests {
 
     #[test]
     fn a_release_build_says_so_instead_of_a_commit() {
-        let c = image_source_line(&Ok(ImageSource::Released), &MvmOrigin::ReleaseBuild);
+        let c = image_source_line(&Ok(ImageSource::Released), &MvmOrigin::ReleaseBuild, None);
         assert!(c.info.ends_with("mvm release build"), "{}", c.info);
     }
 
@@ -163,6 +179,7 @@ mod tests {
         let c = image_source_line(
             &Err(ImageSourceError::RefusedInReleaseBuild),
             &MvmOrigin::ReleaseBuild,
+            None,
         );
         assert!(!c.ok);
         assert!(c.info.starts_with("refused — "), "{}", c.info);
@@ -192,7 +209,7 @@ mod tests {
         std::fs::create_dir_all(&variant).unwrap();
         std::fs::write(variant.join("rootfs.ext4"), b"cached default image").unwrap();
 
-        let c = image_source_line(&Ok(ImageSource::Released), &mvm_checkout());
+        let c = image_source_line(&Ok(ImageSource::Released), &mvm_checkout(), None);
         assert!(
             c.info.contains("default image rootfs sha256 "),
             "{}",
@@ -249,7 +266,11 @@ mod tests {
         let checkout = LocalImageCheckout::open(dir).unwrap();
         let commit = checkout.identity().commit.to_string();
 
-        let c = image_source_line(&Ok(ImageSource::LocalCheckout(checkout)), &mvm_checkout());
+        let c = image_source_line(
+            &Ok(ImageSource::LocalCheckout(checkout)),
+            &mvm_checkout(),
+            None,
+        );
 
         assert!(c.ok);
         assert!(c.info.starts_with("local-dev — "), "{}", c.info);
