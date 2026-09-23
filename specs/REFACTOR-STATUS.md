@@ -86,6 +86,10 @@ Last updated: 2026-09-22
       behavior, and `s34_telemetry_capture` holds the pending contracts as
       explicit `@wip` scenarios. Full battery passes; nothing is certified.
       Evidence: `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
+      W1e live control baselines recorded on dedicated KVM hardware; the
+      graceful-stop half is a reproduced blocker (grantless bench boots
+      refuse sleep-prep), left as named follow-up. Evidence:
+      `specs/sprint/delivery/3420-telemetry-live-baselines.md`.
       W1b source inventory (subscriber-init scan, script sources, launch edges,
       backend endpoint anchors) and the `WitnessLedger` model are tested: 17
       new gate tests, 7 ledger tests, 14,436 workspace tests, doctests, all 72

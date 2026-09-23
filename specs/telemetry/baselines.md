@@ -88,17 +88,46 @@ this hardware, not in shared CI.
 An offer budget of 63 ns is one timer-pair above the floor: any measurable
 cost added to admission fails it.
 
-## Open: hardware-qualified control/exit latency
+## Live control latency (Firecracker, dedicated KVM hardware)
 
-VM control and workload-exit latency need a booted guest, which this offline
-harness deliberately does not do. The live lanes own those numbers and their
-budgets; record them with:
+Measured with the `runtime_boot_bench` harness against the pinned published
+image (signature- and checksum-verified exactly as CI's boot-latency lane
+does), five repetitions of 30 serial boots plus a 3-wide concurrent fan-out
+per repetition, boot-to-guest-agent-ready.
 
-```sh
-cargo run -p xtask -- perf boot --runs 30 --rootfs <rootfs.ext4>   # Linux + KVM
-```
+- Host: Hetzner dedicated, Intel i7-7700 (8 logical), 62 GiB, Ubuntu 24.04
+  (kernel 6.8), Firecracker v1.17.0, pinned Rust 1.97.1, debug-profile
+  harness (matching the CI lane).
+- Commands: the CI "Boot latency ceiling" recipe verbatim, with
+  `MVM_RUNTIME_BOOT_RUNS=30 MVM_RUNTIME_BOOT_CONCURRENT=3`, five times.
 
-plus the `mvm-cli` bench harness's interaction lane for launch-latency
-distributions. Until those runs are recorded per backend on qualified
-hardware, control/exit telemetry impact has a command, not a baseline, and
-nothing here claims otherwise.
+| repetition | serial p50 | serial p95 | serial max | concurrent-3 p50 |
+|---|---|---|---|---|
+| 1 | 502 ms | 564 ms | 695 ms | 635 ms |
+| 2 | 527 ms | 1,324 ms | 2,330 ms | 517 ms |
+| 3 | 513 ms | 588 ms | 606 ms | 584 ms |
+| 4 | 547 ms | 700 ms | 881 ms | 637 ms |
+| 5 | 549 ms | 620 ms | 633 ms | 759 ms |
+
+Serial p50 spread is 502–549 ms (~4.5% CV); repetition 2 caught one cold
+outlier (2.3 s max) that also lifted its p95 — recorded, not smoothed away.
+Budgets by the same rule as the offline set (worst-of-five × 1.5, `max`
+unbudgeted): serial boot p50 ≤ 824 ms, p95 ≤ 1,986 ms on this hardware.
+
+## Exit latency: a recorded blocker, not a number
+
+The harness times the stop it already performs, and on this image **every
+one of the 165 stops failed the graceful path**: the stop-time filesystem
+flush verb (`sleep-prep`) is refused with `VerbNotAuthorized`, because every
+backend boots guests under `mvm.require_grant=1` and the bench's raw
+`backend.start` provisions no signed verb grant. The VMM is still killed —
+no processes leak — but the timed graceful-stop distribution is empty
+(`stopped=0 failed=30` per repetition), and per this harness's rule failed
+stops are counted rather than folded into percentiles.
+
+Two honest consequences. First, CI's boot-latency lane has exercised only
+the failed-stop path since it exists; nothing noticed because the warning is
+non-fatal. Second, a graceful-stop baseline requires a bench boot that
+provisions a verb grant the way admitted runs do — that harness capability
+is the remaining work, and until it lands, exit latency has a reproduced
+refusal and a follow-up, not a baseline. Nothing here claims otherwise.

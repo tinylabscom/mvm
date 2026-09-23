@@ -241,10 +241,19 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         recorded as effectively zero (first-scheduled producer monopolizes,
         ~49% contended) — a documented deficiency, not a budget. Allocation
         evidence stays with the existing native+Miri outbox regressions.
-  - [ ] W1e — Hardware-qualified control/exit latency: the live lanes
-        (`xtask perf boot` on Linux+KVM, the bench harness's interaction lane)
-        run per backend on qualified hardware; until those runs are recorded,
-        control/exit impact has a command, not a baseline.
+  - [x] W1e — Hardware-qualified control latency: five repetitions of 30
+        serial Firecracker boots of the verified published image on a
+        dedicated KVM host (i7-7700), boot-to-agent-ready p50 502–549 ms with
+        budgets by the worst-of-five ×1.5 rule, recorded with variance and
+        one unsmoothed cold outlier in
+        [the baselines doc](../telemetry/baselines.md). The exit half is a
+        recorded blocker, not a number: the harness now times the stop it
+        performs, and all 165 stops failed the graceful path — `sleep-prep`
+        refused under `mvm.require_grant=1` because a raw bench boot
+        provisions no verb grant — so CI's boot lane has only ever exercised
+        the failed-stop path, and a graceful-stop baseline waits on a
+        grant-provisioned bench boot. Other backends' live numbers remain
+        future hardware-lane work.
 
 ### W2 — Typed records and authenticated telemetry service
 
