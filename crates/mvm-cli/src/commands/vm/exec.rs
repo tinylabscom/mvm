@@ -756,6 +756,7 @@ pub(in crate::commands) fn run_secure_with_source(
             vm_name,
             kernel_path: kernel,
             backend_name: &admit_backend,
+            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,

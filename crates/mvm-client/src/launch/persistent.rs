@@ -213,6 +213,7 @@ pub fn start_persistent_oci_machine(
             tenant: "local",
             vm_name: name,
             backend_name,
+            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
             rootfs_path,
             kernel_path: Some(std::path::Path::new(&kernel_path)),
             precomputed_image_sha256: None,
