@@ -632,12 +632,12 @@ pub(in crate::commands) mod attested_builder_pack {
     use super::SYNTHESIZED_BUILDER_VM_CMDLINE;
     #[cfg(feature = "manifest-verify")]
     use super::builder_vm_artifact_names;
-    #[cfg(feature = "manifest-verify")]
-    use crate::commands::env::artifact_verify::download_file;
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
         write_builder_vm_cache_sidecars,
     };
+    #[cfg(feature = "manifest-verify")]
+    use crate::commands::env::artifact_verify::download_file;
     use crate::ui;
 
     const SYNTHESIZED_BUILDER_VM_CACHE_MANIFEST: &str =
