@@ -86,6 +86,21 @@ fn agent_workload_documents_and_live_tests_the_secure_run() {
 }
 
 #[test]
+fn agent_workload_smoke_uses_the_per_call_input_path() {
+    let smoke = read(&example_file("workload-smoke.json"));
+    assert!(!smoke.contains("MVM_AGENT_SMOKE"));
+
+    let marker = "mvm-agent-smoke";
+    let recipe = read(&workspace_root().join("nix/images/examples/llm-agent/default.nix"));
+    let steps =
+        read(&workspace_root().join("crates/mvm-conformance/tests/steps/agent_workload.rs"));
+    let readme = read(&example_file("README.md"));
+    assert!(recipe.contains(marker));
+    assert!(steps.contains(marker));
+    assert!(readme.contains(marker));
+}
+
+#[test]
 fn the_network_preset_citation_resolves_to_a_real_recipe() {
     let recipe = workspace_root().join("nix/images/examples/llm-agent/default.nix");
     assert!(recipe.is_file(), "{} must exist", recipe.display());

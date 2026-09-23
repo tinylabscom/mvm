@@ -48,13 +48,16 @@ placeholder and prints the pinned CLI version:
 ```bash
 printf '%s' 'not-a-real-key' | \
   mvmctl secret set agent-workload-smoke --provider anthropic --value -
-mvmctl machine run --flake examples/agent-workload --entrypoint \
-  --from-workload-ir examples/agent-workload/workload-smoke.json \
-  --allow-host api.anthropic.com:443 --timeout 120
+printf '%s' 'mvm-agent-smoke' | \
+  mvmctl machine run --flake examples/agent-workload --entrypoint \
+    --from-workload-ir examples/agent-workload/workload-smoke.json \
+    --allow-host api.anthropic.com:443 --timeout 120
 mvmctl secret rm agent-workload-smoke
 ```
 
-The smoke path makes no outbound request and never transmits the test value.
+The non-secret marker uses the same bounded per-call input path as a real
+prompt. The smoke path makes no outbound request and never transmits the test
+value.
 
 ## Audit trail
 
