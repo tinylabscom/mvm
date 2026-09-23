@@ -46,9 +46,33 @@ directory owned by root, and the service failed once it dropped privileges.
   It refuses an image whose layers assign a non-root owner, the same way it
   already refused deferred nodes.
 
+## Live proof
+
+On 2026-09-22, the repository's pure in-process production ext4 writer built a
+rootfs containing a static service and its mode-restricted data. The rootfs was
+booted under Linux/KVM with pinned Firecracker v1.17.0. The service became PID 1,
+dropped to uid/gid 901, checked the inode owners and modes, and read its secret:
+
+```text
+ISSUE_3380_LIVE_UID901_SERVICE_OK uid=901 gid=901 dir=901:901:700 file=901:901:600 payload=service-data-owned-by-901
+```
+
+The kernel independently reported `UID: 901 PID: 1 Comm: service-witness`.
+Firecracker exited successfully after the deliberate PID 1 exit and reboot.
+The rootfs SHA-256 was
+`d4db9287179996ec886f0270f8c055ac4bee8a52d4f6db759bb147afa0b03337`;
+the Firecracker binary SHA-256 was
+`fe726e0b43c04363ac07e358be4dee982c3947c65ed3ae10c770fef5e1cd756c`.
+A negative run against deliberately wrong ownership emitted the failure marker
+and exited 1.
+
+Two earlier boots through the universal initramfs reached the authenticated
+activation acknowledgement but their post-pivot command channel did not return
+in the Lima KVM test-provider environment. That is provider/environment
+evidence, not a product-failure claim: the direct pinned-Firecracker boot above
+proved the ownership and service-start acceptance criteria.
+
 ## Not covered
 
 - The dev-only rootfs-only tree served as a host directory share still presents
   host ids; it is a host directory, not an image.
-- The live boot of an image whose service data directory is owned by a non-root
-  account (W3.6) was not run.

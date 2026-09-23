@@ -348,6 +348,10 @@ docs commit went out as #3581). Under the
       only their declared descriptors. The W10 review follow-ups (issue
       #3432) are implemented: detection can no longer outrun the misplaced
       image-reference refusal, and every agent-facing failure carries a code.
+      W3.1-W3.6 (issue #3380) are complete: a pinned Firecracker v1.17.0
+      Linux/KVM boot ran the service as uid/gid 901 from a production-writer
+      ext4, verified its `0700` data directory and `0600` secret were owned by
+      901:901, and read the secret successfully.
       W3.7 (issue #3430) keeps every file mvm
       injects into a container-layer rootfs root-owned whatever a layer
       declares, on both the in-process and the builder-VM writer. Its
