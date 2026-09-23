@@ -653,7 +653,7 @@ pub fn measure_ext4_pure(
     let walk_micros = elapsed_micros(walk_started.elapsed());
 
     let build_started = Instant::now();
-    let image = crate::ext4::build_image_with_options(nodes, &options.build)?;
+    let image = crate::ext4::build_image(nodes, &options.build)?;
     let image_size_bytes = image.len() as u64;
     let image_sha256 = hex::encode(sha2::Sha256::digest(&image));
     let build_micros = elapsed_micros(build_started.elapsed());
@@ -909,7 +909,7 @@ pub fn build_ext4_pure(
     options: &MaterializeOptions,
 ) -> Result<(Vec<u8>, u64), MaterializeError> {
     let nodes = collect_image_nodes(root, options)?;
-    let image = crate::ext4::build_image_with_options(nodes, &options.build)?;
+    let image = crate::ext4::build_image(nodes, &options.build)?;
     let size_bytes = image.len() as u64;
     Ok((image, size_bytes))
 }
@@ -973,7 +973,7 @@ fn stream_ext4_to_file(
         path: output.to_path_buf(),
         source,
     })?;
-    let size_bytes = match crate::ext4::emit_image_with_options(nodes, options, |offset, bytes| {
+    let size_bytes = match crate::ext4::emit_image(nodes, options, |offset, bytes| {
         file.seek(SeekFrom::Start(offset))
             .and_then(|_| file.write_all(bytes))
     }) {
@@ -1178,12 +1178,16 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         spread_of_file_sizes(src.path());
 
-        let eager =
-            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::ReadDuringWalk))
-                .expect("eager image");
-        let deferred =
-            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::DeferToEmit))
-                .expect("deferred image");
+        let eager = crate::ext4::build_image(
+            nodes_with(src.path(), FileContentPolicy::ReadDuringWalk),
+            &Default::default(),
+        )
+        .expect("eager image");
+        let deferred = crate::ext4::build_image(
+            nodes_with(src.path(), FileContentPolicy::DeferToEmit),
+            &Default::default(),
+        )
+        .expect("deferred image");
 
         assert_eq!(
             eager.len(),
@@ -1201,13 +1205,15 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         spread_of_file_sizes(src.path());
 
-        let eager =
-            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::ReadDuringWalk))
-                .expect("eager image");
-        let verified = crate::ext4::build_image(nodes_with(
-            src.path(),
-            FileContentPolicy::DeferToEmitVerified,
-        ))
+        let eager = crate::ext4::build_image(
+            nodes_with(src.path(), FileContentPolicy::ReadDuringWalk),
+            &Default::default(),
+        )
+        .expect("eager image");
+        let verified = crate::ext4::build_image(
+            nodes_with(src.path(), FileContentPolicy::DeferToEmitVerified),
+            &Default::default(),
+        )
         .expect("verified deferred image");
 
         assert_eq!(eager, verified);
@@ -1241,7 +1247,7 @@ mod tests {
 
         std::fs::write(&path, b"after!").unwrap();
 
-        let error = crate::ext4::build_image(nodes).unwrap_err();
+        let error = crate::ext4::build_image(nodes, &Default::default()).unwrap_err();
         assert!(
             matches!(error, crate::ext4::Ext4Error::HostFileChanged(changed) if changed == path)
         );
@@ -1332,7 +1338,8 @@ mod tests {
         // Shrink after the walk has stat'd it, before the image is emitted.
         std::fs::write(src.path().join("a-shrinks"), vec![b'a'; 10]).unwrap();
 
-        let image = crate::ext4::build_image(nodes).expect("image still builds");
+        let image =
+            crate::ext4::build_image(nodes, &Default::default()).expect("image still builds");
         assert!(
             !image.windows(4096).any(|w| w.iter().all(|b| *b == b'a')),
             "a full block of the shrunk file's bytes survived, so it was not re-read"
@@ -1566,7 +1573,7 @@ mod tests {
         std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
 
         let nodes = collect_nodes(src.path(), WalkOptions::default()).expect("collect nodes");
-        let dense = crate::ext4::build_image(nodes).expect("dense ext4 image");
+        let dense = crate::ext4::build_image(nodes, &Default::default()).expect("dense ext4 image");
 
         let out = tempfile::tempdir().unwrap();
         let out_path = out.path().join("rootfs.ext4");

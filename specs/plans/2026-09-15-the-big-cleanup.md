@@ -401,10 +401,14 @@ So the remaining work is not where the brief pointed.
       `console_interactive_with_env_and_argv` family with one
       `console_interactive` entry point taking builder-backed
       `ConsoleSessionOptions`; the session, command, and machine callers retain
-      their existing exit-status semantics explicitly. A fresh pre-change scan
-      found 61 pairs rather than the gate's allowed 62; the post-change gate is
-      ratcheted to 59 and prevents all four cleared modules from regressing.
-      Continue per-module rather than as one sweep. #3315.
+      their existing exit-status semantics explicitly. A fifth slice removes
+      `mvm-fs::ext4`'s `build_image_with_options` and
+      `emit_image_with_options` siblings: the base entry points now accept the
+      existing `BuildOptions` parameter object, including explicit defaults at
+      callers. A fresh pre-change scan found 61 pairs rather than the gate's
+      allowed 62; the post-change gate is ratcheted to 57 and prevents all five
+      cleared modules from regressing. Continue per-module rather than as one
+      sweep. #3315.
 - [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
       builder methods exist only on the variant they apply to — an
       unrepresentable-illegal-states fix, not a panic-removal exercise.

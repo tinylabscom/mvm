@@ -214,11 +214,10 @@ pub fn build_runtime_overlay_from_guest_binaries(
     .collect::<Result<(), _>>()?;
     std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
 
-    let image = mvm_fs::ext4::build_image(collect_overlay_nodes(&root)?).map_err(|e| {
-        RuntimeOverlayError::DirectBuildFailed {
+    let image = mvm_fs::ext4::build_image(collect_overlay_nodes(&root)?, &Default::default())
+        .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
             reason: format!("build ext4 image: {e}"),
-        }
-    })?;
+        })?;
     let verity = mvm_fs::ext4::verity::format(
         &image,
         &DIRECT_OVERLAY_VERITY_SALT,
@@ -1240,7 +1239,8 @@ mod tests {
             xattrs: Vec::new(),
             owner: Owner::ROOT,
         });
-        mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
+        mvm_fs::ext4::build_image(nodes, &Default::default())
+            .expect("build valid overlay ext4 fixture")
     }
 
     #[test]

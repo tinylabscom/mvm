@@ -491,7 +491,8 @@ mod tests {
                 owner: Owner::ROOT,
             },
         ];
-        mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")
+        mvm_fs::ext4::build_image(nodes, &Default::default())
+            .expect("build the sidecar ext4 fixture")
     }
 
     fn stage_sidecar_dir(root: &Path, version: &str, image: &[u8]) {

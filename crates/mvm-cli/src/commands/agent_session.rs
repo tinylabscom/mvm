@@ -1465,7 +1465,7 @@ mod tests {
                 owner: Owner::ROOT,
             })
             .collect();
-        let ext4 = mvm_fs::ext4::build_image(nodes).unwrap();
+        let ext4 = mvm_fs::ext4::build_image(nodes, &Default::default()).unwrap();
         std::fs::write(source.join("overlay.ext4"), ext4).unwrap();
         std::fs::write(source.join("overlay.verity"), b"verity-sidecar").unwrap();
         std::fs::write(

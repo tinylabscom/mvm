@@ -72,10 +72,12 @@ Last updated: 2026-09-22
       the third replaces both `mvm-vmm` run-loop overloads with one `run`
       function taking composable `RunHooks`; the fourth replaces the three
       console entry-point overloads with one `console_interactive` function and
-      builder-backed `ConsoleSessionOptions`. A fresh pre-change scan found 61
-      remaining pairs; the repository gate now ratchets the post-change count
-      at 59 and prevents all four cleared modules from regressing. The other
-      modules plus D1/D2 remain open.
+      builder-backed `ConsoleSessionOptions`; the fifth makes `build_image` and
+      `emit_image` the only ext4 writer entry points, both accepting the
+      existing `BuildOptions` parameter object. A fresh pre-change scan found
+      61 remaining pairs; the repository gate now ratchets the post-change
+      count at 57 and prevents all five cleared modules from regressing. The
+      other modules plus D1/D2 remain open.
 
 - [ ] **Every-VM host-mediated tracing.**
       `specs/plans/2026-09-17-host-mediated-telemetry.md`.

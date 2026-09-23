@@ -213,7 +213,7 @@ impl GuestIdentityMaterial {
         path: &Path,
         contents: &IdentityDriveContents<'_>,
     ) -> Result<()> {
-        use mvm_fs::ext4::{BuildOptions, Node, Owner, build_image_with_options};
+        use mvm_fs::ext4::{BuildOptions, Node, Owner, build_image};
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -272,7 +272,7 @@ impl GuestIdentityMaterial {
                 owner: Owner::ROOT,
             });
         }
-        let image = build_image_with_options(
+        let image = build_image(
             nodes,
             &BuildOptions::default().with_volume_name(IDENTITY_DRIVE_LABEL.as_bytes()),
         )
