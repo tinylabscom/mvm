@@ -2362,8 +2362,20 @@ mod tests {
         }
     }
 
+    /// `resolve_run_mode` reads `MVM_SDK_MODE_ENV` from the process env. Every
+    /// test that calls it must hold the env guard and pin the variable absent:
+    /// otherwise a concurrent test that sets it (the writer below) leaks
+    /// through and the resolution changes mid-test. This returned guard must
+    /// stay alive for the rest of the test.
+    fn sdk_mode_free_env() -> mvm_core::util::test_env::TestEnv {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_sdk::env::MVM_SDK_MODE_ENV);
+        env
+    }
+
     #[test]
     fn resolve_run_mode_returns_none_when_no_mode_flag() {
+        let _env = sdk_mode_free_env();
         let args = run_args(RunProfile::Standard);
         let mode = resolve_run_mode(&sdk(None, false), &args).expect("no flag resolves to None");
         assert!(mode.is_none());
@@ -2371,6 +2383,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_returns_plan_when_mode_plan() {
+        let _env = sdk_mode_free_env();
         let args = run_args(RunProfile::Standard);
         let mode = resolve_run_mode(&sdk(Some(RunMode::Plan), false), &args)
             .expect("plan resolves")
@@ -2401,6 +2414,7 @@ mod tests {
     /// `--dev` is the SDK live mode too, and refuses `--prod` the same way.
     #[test]
     fn the_dev_alias_refuses_prod() {
+        let _env = sdk_mode_free_env();
         let mut args = run_args(RunProfile::Standard);
         args.prod = true;
         let err = resolve_run_mode(&sdk(None, true), &args).expect_err("--dev --prod must refuse");
@@ -2409,6 +2423,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_returns_live_for_dev_alias() {
+        let _env = sdk_mode_free_env();
         let args = run_args(RunProfile::Standard);
         let mode = resolve_run_mode(&sdk(None, true), &args)
             .expect("--dev resolves to Some(Live)")
@@ -2418,6 +2433,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_bails_redirect_for_prod_alias() {
+        let _env = sdk_mode_free_env();
         let mut args = run_args(RunProfile::Standard);
         args.prod = true;
         let err = resolve_run_mode(&sdk(None, false), &args).expect_err("--prod must bail");
@@ -2426,6 +2442,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_leaves_image_prod_for_oci_policy() {
+        let _env = sdk_mode_free_env();
         let mut args = run_args(RunProfile::Standard);
         args.image = Some(
             "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -2438,6 +2455,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_returns_live_for_mode_live() {
+        let _env = sdk_mode_free_env();
         let args = run_args(RunProfile::Standard);
         let mode = resolve_run_mode(&sdk(Some(RunMode::Live), false), &args)
             .expect("--mode live resolves to Some(Live)")
@@ -2447,6 +2465,7 @@ mod tests {
 
     #[test]
     fn resolve_run_mode_bails_redirect_for_mode_record() {
+        let _env = sdk_mode_free_env();
         let args = run_args(RunProfile::Standard);
         let err = resolve_run_mode(&sdk(Some(RunMode::Record), false), &args)
             .expect_err("--mode record must bail");
