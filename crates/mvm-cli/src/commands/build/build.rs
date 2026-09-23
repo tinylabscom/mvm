@@ -230,6 +230,12 @@ fn build_manifest(
         PersistedManifest::from_manifest(&manifest, &canonical, &backend, Provenance::current())?;
     persisted.flake_ref = resolved_flake;
 
+    // A selected checkout is the workload kernel's source here too: the
+    // template's kernel fallback otherwise reaches the builder kernel,
+    // which has no device-mapper and cannot activate a sealed rootfs.
+    #[cfg(feature = "builder-vm")]
+    crate::commands::env::builder_vm::seed_pair_workload_kernel_cache()?;
+
     let revision = match tmpl::template_build_from_manifest(&persisted, force, update_hash, mode) {
         Ok(r) => r,
         Err(e) => {
