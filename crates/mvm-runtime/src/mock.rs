@@ -498,6 +498,7 @@ mod tests {
             network_policy: Default::default(),
             dev_console: false,
             gpu: false,
+            gpu_device: None,
         }
     }
 

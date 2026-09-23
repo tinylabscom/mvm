@@ -213,6 +213,9 @@ pub struct VmStartConfig {
     /// the GPU itself never enters the guest. Default `false`: no GPU
     /// channel, no host endpoint, no guest shims.
     pub gpu: bool,
+    /// Optional host GPU ordinal pinned to this VM. The endpoint exposes the
+    /// selected host device as guest ordinal zero and hides every other GPU.
+    pub gpu_device: Option<u32>,
 }
 
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.

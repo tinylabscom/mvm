@@ -187,6 +187,8 @@ pub struct LaunchShape<'a> {
     /// resolved backend must advertise the `gpu` capability or selection
     /// refuses before anything boots.
     pub gpu: bool,
+    /// Optional host GPU ordinal exposed to this launch as guest device zero.
+    pub gpu_device: Option<u32>,
 }
 
 /// All inputs to the orchestrator.
@@ -264,6 +266,8 @@ pub struct ExecRequest {
     /// endpoint over vsock. Carried here so the launch shape and the
     /// backend's required capabilities both see the same answer.
     pub gpu: bool,
+    /// Optional host GPU ordinal exposed to this launch as guest device zero.
+    pub gpu_device: Option<u32>,
 }
 
 impl ExecRequest {
@@ -287,6 +291,7 @@ impl ExecRequest {
             declared_libc: self.declared_libc,
             hypervisor: self.hypervisor.as_deref(),
             gpu: self.gpu,
+            gpu_device: self.gpu_device,
         }
     }
 }
@@ -1219,6 +1224,7 @@ fn build_start_config(
         roothash: if is_wasm { None } else { boot.roothash.clone() },
         dev_console,
         gpu: shape.gpu,
+        gpu_device: shape.gpu_device,
         revision_hash: resolved.revision.clone(),
         flake_ref: resolved.flake_ref.clone(),
         profile: resolved.profile.clone(),
@@ -1511,6 +1517,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         }
@@ -1642,6 +1649,7 @@ mod tests {
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("wasm"),
             gpu: false,
+            gpu_device: None,
         };
         let mut marks = LaunchResolveMarks::new(false);
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
@@ -1746,6 +1754,7 @@ mod tests {
             healthcheck: None,
             hypervisor: Some("mock".into()),
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1819,6 +1828,7 @@ mod tests {
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
             gpu: false,
+            gpu_device: None,
         };
 
         let resolved = resolve_launch(
@@ -1903,6 +1913,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1933,6 +1944,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -1971,6 +1983,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2028,6 +2041,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2065,6 +2079,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
@@ -2112,6 +2127,7 @@ mod tests {
             healthcheck: None,
             hypervisor: None,
             gpu: false,
+            gpu_device: None,
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };

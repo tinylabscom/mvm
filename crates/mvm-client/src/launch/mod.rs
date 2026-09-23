@@ -511,6 +511,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         // CLI persistent path (`machine create/start --gpu`) is the
         // supported route for GPU machines.
         gpu: false,
+        gpu_device: None,
         caller_commitment: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,

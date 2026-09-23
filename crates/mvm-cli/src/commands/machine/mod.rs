@@ -22,6 +22,7 @@ pub(crate) mod prewarm;
 mod receipt;
 pub(crate) mod runtime;
 mod spec_ops;
+mod start_create_flags;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -65,6 +66,7 @@ use receipt::{
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
 use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
+pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -670,7 +672,8 @@ fn machine_run_spec(
             args.health_start_period,
         ),
         grants: resolved.plan_grants,
-        gpu: args.run.gpu,
+        gpu: args.run.gpu || args.run.gpu_device.is_some(),
+        gpu_device: args.run.gpu_device,
     })
 }
 
@@ -700,6 +703,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
+    /// Pin this machine to one host GPU ordinal, exposed as guest device zero.
+    #[arg(long, value_name = "ORDINAL")]
+    pub gpu_device: Option<u32>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -778,54 +784,6 @@ pub(in crate::commands) struct MachineRemoveArgs {
     /// Print a JSON deletion summary.
     #[arg(long)]
     pub json: bool,
-}
-
-/// Optional source/config flags for `machine start`. When a persistent machine
-/// does not already exist, these flags are used to create it on demand.
-#[derive(ClapArgs, Debug, Clone, Default)]
-pub(in crate::commands) struct MachineStartCreateFlags {
-    /// OCI image reference to boot when creating the machine.
-    #[arg(long, value_name = "REF", conflicts_with = "manifest")]
-    pub image: Option<String>,
-    /// Image-backed machine manifest to source defaults from.
-    #[arg(long, value_name = "PATH", conflicts_with = "image")]
-    pub manifest: Option<String>,
-    /// Enable dev-tier outbound networking for the created machine.
-    #[arg(long)]
-    pub net: bool,
-    /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
-    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
-    pub allow_host: Vec<String>,
-    /// Bind a peer route this machine may dial (repeatable).
-    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
-    pub peer: Vec<String>,
-    /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
-    #[arg(long)]
-    pub gpu: bool,
-    /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
-    #[arg(long)]
-    pub cpus: Option<u32>,
-    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
-    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
-    pub cpu_limit: Option<u32>,
-    /// Bound each start's wall-clock runtime in seconds.
-    #[arg(long, value_name = "SECS")]
-    pub timeout: Option<u64>,
-    /// Read grants (CPU, wall clock, egress) from a JSON file.
-    #[arg(long = "grants-file", value_name = "PATH")]
-    pub grants_file: Option<PathBuf>,
-    /// Memory for lifecycle starts (supports human-readable: 512M, 1G, ...).
-    #[arg(long)]
-    pub memory: Option<String>,
-    /// Optional initial host memory commitment for lifecycle starts.
-    #[arg(long, value_name = "SIZE")]
-    pub mem_initial: Option<String>,
-    /// Security profile for lifecycle starts.
-    #[arg(long, value_enum)]
-    pub profile: Option<RunProfile>,
-    /// Overwrite an existing machine spec if the config changed.
-    #[arg(long)]
-    pub force: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1102,6 +1060,8 @@ struct MachineSpecInputs<'a> {
     peer: &'a [String],
     /// `--gpu` (or the manifest's `gpu = true`): the GPU remoting plane.
     gpu: bool,
+    /// Explicit CLI ordinal, or the manifest's `gpu_device` selection.
+    gpu_device: Option<u32>,
     ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
@@ -1129,7 +1089,10 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         }
     };
     let net = inputs.net || workflow.is_some_and(|workflow| workflow.net);
-    let gpu = inputs.gpu || workflow.is_some_and(|workflow| workflow.gpu);
+    let gpu_device = inputs
+        .gpu_device
+        .or_else(|| workflow.and_then(|workflow| workflow.gpu_device));
+    let gpu = inputs.gpu || gpu_device.is_some() || workflow.is_some_and(|workflow| workflow.gpu);
     let allow_host = if inputs.allow_host.is_empty() {
         workflow
             .map(|workflow| workflow.allow_hosts.clone())
@@ -1204,6 +1167,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         health_check: None,
         grants: resolved.plan_grants,
         gpu,
+        gpu_device,
     })
 }
 
@@ -1247,6 +1211,7 @@ impl MachineCreateArgs {
             allow_host: &self.allow_host,
             peer: &self.peer,
             gpu: self.gpu,
+            gpu_device: self.gpu_device,
             ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,
