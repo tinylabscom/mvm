@@ -24,6 +24,9 @@ claim-bearing evidence, and move both kernel consumers to the latest Linux
       while this repair was in progress.
 - [x] Keep the privileged warm-claim run off the hosted runner user's session
       bus and gate the workflow shape.
+- [x] Preserve the complete Firecracker warm-restore error chain and carry the
+      standby parent's FlowMux identity drive through checkpoint capture and
+      child materialization.
 - [x] Keep the sealed agent-workload example on its baked per-call input path
       and persist the runtime state directory in named-machine registration.
 - [x] Verify and synchronize the Linux 6.12.111 source pin for the Nix kernels

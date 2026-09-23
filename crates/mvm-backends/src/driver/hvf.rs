@@ -979,6 +979,7 @@ impl VmFullControl for HvfVmFullControl {
             rootfs_verity,
             config: None,
             secrets: None,
+            identity: None,
             vsock: hvf_agent_socket(&self.state_dir),
         })
     }

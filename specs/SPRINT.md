@@ -24,8 +24,9 @@
 - [ ] **Repair all open GitHub Actions issues — #3601, #3598, #3495, and #3428.**
       `specs/plans/2026-09-22-github-actions-open-issues.md`. Security mutation
       survivors and baseline failures, Extended CI privilege/input/registry
-      failures, claim-evidence freshness, and the Linux 6.12.111 synchronized
-      pin are repaired. Focused mutation, serial workspace, workspace doctest,
+      failures plus the missing warm-child identity anchor, claim-evidence
+      freshness, and the Linux 6.12.111 synchronized pin are repaired. Focused
+      mutation and identity-anchor tests, serial workspace, workspace doctest,
       check, Clippy, gated-target, builder-VM kernel, formatting, and all 74
       repository-policy gates pass. Fresh scheduled-workflow evidence remains
       before merge. See

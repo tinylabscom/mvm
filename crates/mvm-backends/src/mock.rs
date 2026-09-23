@@ -508,6 +508,7 @@ impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
             rootfs_verity: None,
             config: None,
             secrets: None,
+            identity: None,
             vsock: PathBuf::from("/mock/vsock"),
         })
     }

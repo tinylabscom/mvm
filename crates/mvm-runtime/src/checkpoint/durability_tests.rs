@@ -45,6 +45,7 @@ impl VmFullControl for Control {
             rootfs_verity: None,
             config: None,
             secrets: None,
+            identity: None,
             vsock: self.rootfs.with_file_name("v.sock"),
         })
     }

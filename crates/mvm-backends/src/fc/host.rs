@@ -589,6 +589,7 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
             rootfs_verity: None,
             config: None,
             secrets: None,
+            identity: None,
             vsock: PathBuf::from(crate::fc::firecracker_vsock_uds_path(&vm_dir)),
         };
 
@@ -603,6 +604,11 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
         let secrets = PathBuf::from(&vm_dir).join("secrets.ext4");
         if secrets.exists() {
             anchors.secrets = Some(secrets);
+        }
+        let identity =
+            PathBuf::from(&vm_dir).join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+        if identity.exists() {
+            anchors.identity = Some(identity);
         }
 
         Ok(anchors)
@@ -1087,7 +1093,8 @@ mod tests {
     }
 
     /// `device_anchors` gathers the absolute paths Firecracker has open for
-    /// a VM, including optional verity/config/secrets sidecars when they exist.
+    /// a VM, including optional verity/config/secrets/identity sidecars when
+    /// they exist.
     #[test]
     fn fc_vm_full_control_device_anchors_collects_present_sidecars() {
         let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
@@ -1105,6 +1112,8 @@ mod tests {
         std::fs::File::create(&rootfs).unwrap();
         std::fs::File::create(rootfs_parent.join("rootfs.verity")).unwrap();
         std::fs::File::create(vm_dir.join("config.ext4")).unwrap();
+        std::fs::File::create(vm_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE))
+            .unwrap();
         // secrets.ext4 intentionally absent.
 
         let meta = serde_json::json!({
@@ -1122,6 +1131,10 @@ mod tests {
         );
         assert_eq!(anchors.config, Some(vm_dir.join("config.ext4")));
         assert_eq!(anchors.secrets, None);
+        assert_eq!(
+            anchors.identity,
+            Some(vm_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE))
+        );
         assert_eq!(
             anchors.vsock,
             std::path::PathBuf::from(crate::fc::firecracker_vsock_uds_path(

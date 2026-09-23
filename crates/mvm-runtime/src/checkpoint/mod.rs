@@ -971,13 +971,15 @@ fn capture_vm_full_inner(
     });
 
     // Copy the anchor files the snapshot references (verity sidecar, config,
-    // secrets) into the checkpoint so the child can materialize its own copies.
+    // secrets, transport identity) into the checkpoint so the child can
+    // materialize its own copies.
     // The rootfs itself is already cloned above; the vsock UDS is recreated at
     // restore time and must not be copied while the parent is bound to it.
     for src in [
         anchors.rootfs_verity.as_deref(),
         anchors.config.as_deref(),
         anchors.secrets.as_deref(),
+        anchors.identity.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -1993,6 +1995,7 @@ mod tests {
 
     struct MockControl {
         rootfs: PathBuf,
+        identity: Option<PathBuf>,
         events: RefCell<Vec<&'static str>>,
     }
     impl VmFullControl for MockControl {
@@ -2023,6 +2026,7 @@ mod tests {
                     .then(|| dir.join("rootfs.verity")),
                 config: None,
                 secrets: None,
+                identity: self.identity.clone(),
                 vsock: dir.join("v.sock"),
             })
         }
@@ -2059,6 +2063,7 @@ mod tests {
         std::fs::write(&rootfs, b"disk").unwrap();
         let ctl = RetainingControl(MockControl {
             rootfs,
+            identity: None,
             events: RefCell::new(vec![]),
         });
         capture_vm_full(
@@ -2107,6 +2112,7 @@ mod tests {
         std::fs::write(&rootfs, b"disk").unwrap();
         let ctl = MockControl {
             rootfs,
+            identity: None,
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
@@ -2157,8 +2163,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(rootfs_dir.join("rootfs.verity"), b"verity").unwrap();
+        let identity = rootfs_dir.join("flowmux-identity.ext4");
+        std::fs::write(&identity, b"identity").unwrap();
         let ctl = MockControl {
             rootfs,
+            identity: Some(identity),
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
@@ -2183,6 +2192,10 @@ mod tests {
         assert!(
             names.contains(&mvm_build::builder_vm::SIDECAR_FILENAME),
             "expected sidecar blob in vm_full content; got {names:?}"
+        );
+        assert!(
+            names.contains(&"flowmux-identity.ext4"),
+            "expected identity anchor in vm_full content; got {names:?}"
         );
         assert_eq!(
             names
@@ -2222,6 +2235,7 @@ mod tests {
         // No sidecar in tmp.path() — the rootfs parent dir is clean.
         let ctl = MockControl {
             rootfs,
+            identity: None,
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
@@ -2284,6 +2298,7 @@ mod tests {
         std::fs::write(&config, b"{\"cfg\":true}").unwrap();
         let ctl = MockControl {
             rootfs,
+            identity: None,
             events: RefCell::new(vec![]),
         };
         capture_vm_full(
@@ -2611,6 +2626,7 @@ mod tests {
                 rootfs_verity: None,
                 config: None,
                 secrets: None,
+                identity: None,
                 vsock: dir.join("v.sock"),
             })
         }
@@ -2943,6 +2959,7 @@ mod tests {
             rootfs_verity: Some(child_dir.join("rootfs.verity")),
             config: None,
             secrets: None,
+            identity: None,
             vsock: child_dir.join("runtime/v.sock"),
         };
         std::fs::write(
