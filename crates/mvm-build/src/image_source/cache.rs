@@ -127,6 +127,26 @@ impl CachedImageSet {
     pub fn tier(&self) -> ImageTrustTier {
         self.set.tier()
     }
+
+    /// The entry file carrying one of the target's contract outputs, matched
+    /// by manifest role and the contract's file name.
+    ///
+    /// Entry files are named by the producer's manifest emitter —
+    /// `<role-kebab>-<arch>-<contract-name>` — not by the contract's plain
+    /// names, which are only how the build output names them before the
+    /// emitter copies them in. Readers must resolve through the manifest, so
+    /// a producer naming change can never desynchronize the files a consumer
+    /// installs from the digests the set was verified against.
+    pub fn contract_file(&self, manifest_role: &str, contract_name: &str) -> Option<&Path> {
+        self.set
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.role.to_string() == manifest_role
+                    && artifact.name.as_str().ends_with(contract_name)
+            })
+            .map(|artifact| artifact.path.as_path())
+    }
 }
 
 /// The result of a lookup.

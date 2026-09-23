@@ -158,8 +158,17 @@ fn build_pair_overlay(
     };
     ui::info("Building the runtime overlay from the selected image checkout...");
     let build = crate::commands::env::builder_vm::ensure_pair_built(checkout, target)?;
+    let staged = crate::commands::env::builder_vm::staged_contract_files(
+        &build.entry,
+        &[
+            ("runtime_overlay", "overlay.ext4"),
+            ("runtime_overlay", "overlay.verity"),
+            ("runtime_overlay", "overlay.roothash"),
+            ("runtime_overlay", "VERSION"),
+        ],
+    )?;
     let artifact =
-        mvm_fs::overlay::read_overlay_artifact_from_dir(&build.entry.dir, &arch.to_string())?;
+        mvm_fs::overlay::read_overlay_artifact_from_dir(staged.path(), &arch.to_string())?;
     if artifact.version != version {
         anyhow::bail!(
             "the selected checkout's runtime overlay is version {}, but version {version} is required",

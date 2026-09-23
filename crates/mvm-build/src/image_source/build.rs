@@ -497,6 +497,60 @@ fn run_tool(what: &str, cmd: &mut Command) -> Result<String, LocalImageBuildErro
     })
 }
 
+/// Hardlink `files` — each a (manifest role, contract file name) pair — from
+/// `entry` into `dest` under their canonical contract names, for consumers
+/// that read a fixed layout (the overlay reader, the sidecar installer).
+/// Hardlinks, not copies: the bytes can be large, and `dest` is a sibling
+/// staging directory on the same cache filesystem.
+pub fn stage_contract_files(
+    entry: &CachedImageSet,
+    files: &[(&str, &str)],
+    dest: &Path,
+) -> Result<(), LocalImageBuildError> {
+    std::fs::create_dir_all(dest).map_err(|source| LocalImageBuildError::Io {
+        op: "creating",
+        path: dest.to_path_buf(),
+        source,
+    })?;
+    for (role, name) in files {
+        let from = entry
+            .contract_file(role, name)
+            .ok_or_else(|| LocalImageBuildError::Tool {
+                what: format!("reading the pair's {role} artifact {name}"),
+                detail: "the verified set does not carry that contract file".to_string(),
+            })?;
+        std::fs::hard_link(from, dest.join(name)).map_err(|source| LocalImageBuildError::Io {
+            op: "hardlinking",
+            path: from.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// Hardlink the runtime-overlay contract files (`overlay.ext4`,
+/// `overlay.verity`, `overlay.roothash`, `VERSION`) from a pair entry into
+/// `dest` under their canonical names, for consumers that read the fixed
+/// overlay layout. The entry files carry the producer's manifest names
+/// (`<role>-<arch>-<name>`); the installer also derives the version file
+/// from the artifact's directory, so the canonical staging must exist on
+/// disk, not just in path arithmetic.
+pub fn stage_overlay_contract_files(
+    entry: &CachedImageSet,
+    dest: &Path,
+) -> Result<(), LocalImageBuildError> {
+    stage_contract_files(
+        entry,
+        &[
+            ("runtime_overlay", "overlay.ext4"),
+            ("runtime_overlay", "overlay.verity"),
+            ("runtime_overlay", "overlay.roothash"),
+            ("runtime_overlay", "VERSION"),
+        ],
+        dest,
+    )
+}
+
 /// One built (or cache-hit) target of a checkout pair.
 #[derive(Debug)]
 pub struct PairBuild {

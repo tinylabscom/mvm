@@ -249,8 +249,8 @@ pub fn attach_runtime_overlay_if_cached_version(
         {
             ui::info("Runtime overlay: building from the selected image checkout...");
             let entry = (pair.build)(pair.checkout, target)?;
-            let artifact =
-                mvm_fs::overlay::read_overlay_artifact_from_dir(&entry.dir, &arch.to_string())?;
+            let (_staged, artifact) =
+                crate::launch::pair_stage::staged_overlay_artifact(&entry, arch)?;
             if artifact.version != version {
                 anyhow::bail!(
                     "the selected checkout's runtime overlay is version {}, but this mvmctl requires {version}; check out matching versions or unset MVM_IMAGES_DIR",
@@ -625,21 +625,22 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
     // than boots a stale cdylib.
     let mut pair_plan: Option<(mvm_build::image_source::ImageBuildTarget, String)> = None;
     if let Some(pair) = pair.as_deref() {
-        // `Unknown` never reaches here: the caller resolves a binding's
-        // concrete libc before asking for an attachment.
+        // `Unknown` selects no sidecar at all: the resolver answers `None`
+        // for it below, and there is nothing for the pair to build. Probing
+        // a sidecar for an undetected libc would only guess.
         let attr = match libc {
-            mvm_contract::guest_libc::GuestLibc::Glibc => "sdk-sidecar-image",
-            mvm_contract::guest_libc::GuestLibc::Musl => "sdk-sidecar-image-musl",
-            mvm_contract::guest_libc::GuestLibc::Unknown => {
-                anyhow::bail!("an SDK sidecar attachment needs a concrete libc, not `unknown`")
-            }
+            mvm_contract::guest_libc::GuestLibc::Glibc => Some("sdk-sidecar-image"),
+            mvm_contract::guest_libc::GuestLibc::Musl => Some("sdk-sidecar-image-musl"),
+            mvm_contract::guest_libc::GuestLibc::Unknown => None,
         };
-        let target = PairArtifactSource::target(
-            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-            attr,
-        );
-        let fingerprint = pair.fingerprint(&target)?;
-        pair_plan = Some((target, fingerprint));
+        if let Some(attr) = attr {
+            let target = PairArtifactSource::target(
+                mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+                attr,
+            );
+            let fingerprint = pair.fingerprint(&target)?;
+            pair_plan = Some((target, fingerprint));
+        }
     }
     let pair_selected = pair_plan.is_some();
     if let (Some(pair), Some((target, fingerprint))) = (pair, pair_plan)
@@ -648,8 +649,20 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
     {
         ui::info("SDK sidecar: building from the selected image checkout...");
         let entry = (pair.build)(pair.checkout, target)?;
+        // The sidecar installer reads a fixed layout; the entry files carry
+        // the producer's manifest names, so stage the contract files under
+        // their canonical names first.
+        let role = mvm_core::image_set::ImageSetRole::SdkSidecar(libc).to_string();
+        let staged = crate::launch::pair_stage::staged_contract_files(
+            &entry,
+            &[
+                (role.as_str(), "sdk.ext4"),
+                (role.as_str(), "VERSION"),
+                (role.as_str(), "checksums-sha256.txt"),
+            ],
+        )?;
         mvm_build::sdk_sidecar::install_source_built_sidecar(
-            &entry.dir,
+            staged.path(),
             &cache_root,
             version,
             arch,

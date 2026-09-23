@@ -278,14 +278,23 @@ impl Pair {
         for (role, boot_protocol, artifacts, capabilities) in members {
             let mut manifest_artifacts = Vec::new();
             for artifact in artifacts {
-                write(&dir.join(artifact.name), &artifact.bytes);
+                // Name the file the way the image repository's manifest
+                // emitter does — <role-kebab>-<arch>-<contract-name> — so
+                // tests exercise the same layout a real build publishes.
+                let produced = format!(
+                    "{}-{}-{}",
+                    role.to_string().replace('_', "-"),
+                    arch,
+                    artifact.name
+                );
+                write(&dir.join(&produced), &artifact.bytes);
                 let format = if let Some(kind) = artifact.format.strip_prefix("kernel:") {
                     serde_json::json!({"kernel": kind})
                 } else {
                     serde_json::json!(artifact.format)
                 };
                 manifest_artifacts.push(serde_json::json!({
-                    "name": artifact.name,
+                    "name": produced,
                     "format": format,
                     "sha256": Sha256Hex::from_bytes(&artifact.bytes).as_str(),
                     "size": artifact.bytes.len(),

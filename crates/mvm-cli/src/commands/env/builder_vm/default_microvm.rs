@@ -419,14 +419,30 @@ fn ensure_pair_workload_image(
         return Ok((kernel_path, rootfs_path));
     }
 
+    let contract = mvm_build::image_source::contract_for(&target)?;
     let build = super::local_pair::ensure_pair_built(checkout, target)?;
     let fingerprint = super::local_pair::pair_fingerprint(&build.key);
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating default-image cache dir {cache_dir}"))?;
     for label in variant.required_outputs() {
-        let from = build.entry.dir.join(label);
-        std::fs::copy(&from, format!("{cache_dir}/{label}"))
-            .with_context(|| format!("copying {} into {cache_dir}", from.display()))?;
+        // Entry files are named by the producer's manifest; resolve through
+        // it so the installed bytes are the ones the set's digests verified.
+        // The manifest role for each output comes from the contract itself,
+        // so a role rename cannot desynchronize the lookup.
+        let role = contract
+            .files
+            .iter()
+            .find(|file| file.name == *label)
+            .map(|file| file.role)
+            .with_context(|| format!("the contract has no output named {label}"))?;
+        let from = build
+            .entry
+            .contract_file(role, label)
+            .with_context(|| format!("the pair's set has no {role} artifact {label}"))?;
+        super::local_pair::copy_contract_file(
+            from,
+            std::path::Path::new(&format!("{cache_dir}/{label}")),
+        )?;
     }
     // Cache entries are sealed read-only; the install owns its copies and
     // the sidecar is about to be rewritten with the pair identity.

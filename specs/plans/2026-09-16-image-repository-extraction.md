@@ -805,12 +805,19 @@ Delivery slices, one PR each:
       capability floor owned and built by `mvm-images`; `mvm` contains no
       image recipe or rebuild fallback. Both profiles retain the permanent
       no-NIC contract: external traffic is FlowMux over vsock only.
-- [ ] W5m — the acceptance witnesses: cache reuse and single-sided
+- [x] W5m — the acceptance witnesses: cache reuse and single-sided
       invalidation, two concurrent pairs, stale manifest, wrong architecture,
       a live boot from a sibling checkout, and the same pair-built base image
       booted by every Linux-direct backend the host can run — refused, never
       mis-booted, where a backend cannot satisfy the declaration (the
       one-base-image constraint above).
+      Landed with the fixes the witnessing surfaced: entry files resolve
+      through the producer's manifest names (`CachedImageSet::contract_file`
+      + canonical staging), installs lift sealed perms, `Unknown` libc skips
+      the sidecar pair arm, and admission's variable refusal gates on the
+      release channel (tier refusals carry the production gate). The live
+      boot reaches guest activation; the kernel-selection difference it
+      exposed is filed as #3615. Witness map in the delivery note.
 
 ### W6 — Publish from `mvm-images` and migrate consumer trust (#3369)
 

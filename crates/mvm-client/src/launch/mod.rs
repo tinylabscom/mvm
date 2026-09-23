@@ -10,6 +10,7 @@
 
 pub mod grants_report;
 pub mod machine_start;
+pub mod pair_stage;
 pub mod persistent;
 mod request;
 pub mod runtime_overlay;

@@ -141,6 +141,8 @@ pub(crate) use local_pair::ensure_pair_built;
 #[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::ensure_pair_workload_kernel;
 #[cfg(feature = "builder-vm")]
+pub(crate) use local_pair::staged_contract_files;
+#[cfg(feature = "builder-vm")]
 pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 #[cfg(feature = "builder-vm")]
 pub(crate) use shell_job::ShellJobBuilder;
