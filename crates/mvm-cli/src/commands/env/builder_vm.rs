@@ -228,9 +228,33 @@ fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
     stage0_cache::stage0_failure_reason_summary(err)
 }
 
-const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
-const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
-const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
+use mvm_build::cache_install::{
+    BUILDER_VM_ARTIFACT_DIGEST_FILE, BUILDER_VM_PROVENANCE_FILE, BUILDER_VM_SOURCE_FINGERPRINT_FILE,
+};
+
+/// Resolve the exact source fingerprint Stage 0 uses for cache readiness.
+///
+/// An unembedded contributor binary delegates the decision to its freshly
+/// built bootstrap helper, whose embed table is authoritative. An embedded
+/// binary can calculate the fingerprint directly and lets the low-level image
+/// loader reject stale local and shared cache entries before boot.
+pub(in crate::commands) fn current_builder_vm_source_fingerprint(
+    workspace_root: &std::path::Path,
+) -> std::result::Result<Option<String>, String> {
+    if crate::host_binaries::embedded::EMBEDDED.is_empty() {
+        return Ok(None);
+    }
+    let flake_dir = workspace_root.join("nix/images/builder-vm");
+    let flake_dir = flake_dir.to_str().ok_or_else(|| {
+        format!(
+            "builder VM flake path is not UTF-8: {}",
+            flake_dir.display()
+        )
+    })?;
+    stage0_cache::builder_vm_source_fingerprint(flake_dir)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
 /// Env var opting an installed binary into the attested-pack acceleration path:
 /// place a verified builder-image pack into the cache in lieu of the plain
 /// checksum download. Truthy: `1`, `true`, `yes`, `on`. Off/unset ⇒ the download

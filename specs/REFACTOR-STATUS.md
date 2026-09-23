@@ -14,6 +14,15 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [ ] **Builder image source freshness — issue #3524.**
+      `specs/plans/2026-09-22-builder-image-source-freshness.md`. Configured
+      and shared builder-image caches now use the same source-checkout and
+      embedded-host-binary fingerprint decision as Stage 0 bootstrap. Focused
+      cache-loader and pre-existing ensure-image regressions, workspace
+      checks/tests, zero-warning Clippy, gated-target compilation, formatting,
+      and repository policy gates are green; protected merge-queue delivery
+      remains.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard

@@ -21,6 +21,18 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
+- [ ] **Builder image source freshness — issue #3524.**
+      `specs/plans/2026-09-22-builder-image-source-freshness.md`. The generic
+      cache loader now reuses Stage 0's authoritative source fingerprint,
+      including embedded host-binary identities, before accepting either the
+      configured cache or the host-wide seed for an isolated worktree. An
+      unembedded contributor binary delegates the decision to its fresh
+      embedded bootstrap helper; installed/release and library callers without
+      a source checkout keep the existing artifact-only contract. Focused
+      regressions, workspace checks/tests, zero-warning Clippy, gated-target
+      compilation, formatting, and repository policy gates are green;
+      merge-queue delivery remains.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in
