@@ -263,13 +263,11 @@ fn copy_checkpoint_content(
     meta: &CheckpointMeta,
     child_dir: &Path,
 ) {
-    std::fs::create_dir_all(child_dir).expect("create child vm dir");
-    let content_dir = store.content_dir(checkpoint);
-    for blob in &meta.content {
-        let src = content_dir.join(&blob.name);
-        std::fs::copy(&src, child_dir.join(&blob.name))
-            .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
-    }
+    // Chunked blobs (the durable-checkpoint store) must be rebuilt from
+    // their authenticated indexes; whole-file blobs clone through the
+    // normal CoW path. A plain per-blob copy misses chunked content.
+    mvm_runtime::checkpoint::materialize_checkpoint_blobs(store, meta, child_dir)
+        .unwrap_or_else(|e| panic!("materialize checkpoint {} for {checkpoint}: {e}", meta.id));
 }
 
 fn read_getrandom(vsock_path: &str) -> Vec<u8> {
