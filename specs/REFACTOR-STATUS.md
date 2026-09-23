@@ -324,17 +324,19 @@ Last updated: 2026-09-22
       - [x] W3b #3365: offline signed verification and revocation.
       - [x] W3c #3365: checked-in lock and generated pins.
       - [x] W3d #3365: offline verifier command; `SignedManifest` family retired.
-      - [x] W4 #3362: inventory of image-owned paths, shared edges, and the
-            Rust consumers W5 must replace.
+      - [x] W4 #3362 complete: inventory of image-owned paths, shared edges,
+            and the Rust consumers W5 must replace; the W4a–W4c slices below
+            moved, reproduced, compared, and boot-witnessed both architectures.
       - [x] W4a #3362: guest recipes exported from `nix/flake.nix`; image
             flakes consume them with byte-identical derivations.
       - [x] W4b #3362: image flakes in `mvm-images` on a pinned `mvm` input
             (tinylabscom/mvm-images#4).
-      - [ ] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
+      - [x] W4c #3362: byte and boot comparison against `boot-image/v0.1.5`.
             Comparison done, every difference explained; x86_64 Firecracker
             boots and builds, HVF boots, and aarch64 Firecracker boots and runs
-            a transient command; outstanding: a completed physical Apple
-            Silicon HVF builder build. Found #3499, #3500, #3502.
+            a transient command; the physical Apple Silicon HVF builder build
+            also completed end to end and launched its sealed workload. Every
+            W4c acceptance leg is witnessed. Found #3499, #3500, #3502.
             - [x] #3491: direct published and reproducibility builder-image
                   host-binary builds select the metadata-pinned Rust toolchain;
                   the sync gate rejects workflow and action-output drift.
