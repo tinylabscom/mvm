@@ -386,7 +386,21 @@ docs commit went out as #3581). Under the
       verification measured 5.14–10.88x over serial at 1–4 GiB. Live idle
       recapture added 6.459% on HVF and 5.360% on Firecracker; two Firecracker
       sibling restores authenticated and received distinct reseeded
-      randomness. C0–C3 are complete; C4–C8 remain open.
+      randomness. C4 now keeps verified read-only materializations per index
+      and key domain, clones the nearest cached index, rewrites only changed
+      chunks, and verifies the private result before use. A deterministic
+      20 MiB fixture with one changed chunk reduced restore writes from 20 MiB
+      to 1 MiB (95%), and cache mutation after restore cannot change the
+      private file. A per-domain/per-blob lock serializes cache verification,
+      replacement, and publish; event-backed race tests cover concurrent
+      publishers and a reader crossing invalid-entry replacement. C0–C4 are
+      complete; C5–C8 remain open. The exact single-threaded workspace test run
+      passed every unit and integration crate (including 1,086 runtime tests,
+      eight ignored), then hit a transient rustdoc `E0463` resolving the
+      already-built `mvm_sdk` artifact for the `mvm-build` doctest; the
+      immediate isolated doctest rerun passed with exit status zero. Workspace
+      check, all-target clippy, and formatting pass; `xtask check-all` reports
+      74 gates clean.
   - [ ] W5 — issue #3382: copy-on-write HVF restore from a verified,
         unlinked private clone (W5.1–W5.6); no page sharing between restored
         guests; a cross-tenant restore or fork is refused as a policy guard.

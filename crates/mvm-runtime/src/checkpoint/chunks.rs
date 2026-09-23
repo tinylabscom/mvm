@@ -9,6 +9,9 @@ use sha2::{Digest as _, Sha256};
 pub(super) const CHUNK_SIZE: usize = 1024 * 1024;
 pub(super) const MEMBERSHIP_DIR: &str = ".chunks";
 const OBJECTS_DIR: &str = ".objects";
+const MATERIALIZATIONS_DIR: &str = ".materialized";
+const CACHED_BLOB_FILE: &str = "blob";
+const CACHED_INDEX_FILE: &str = "index.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -70,6 +73,19 @@ pub(super) struct ChunkIndex {
     chunks: Vec<ChunkEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materialized_sha256: Option<ChunkDigest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaterializationStats {
+    pub(super) rewritten_chunks: usize,
+    pub(super) rewritten_bytes: u64,
+}
+
+struct CachedMaterialization {
+    index: ChunkIndex,
+    path: PathBuf,
+    digest: String,
+    changed_chunks: usize,
 }
 
 impl ChunkIndex {
@@ -280,6 +296,421 @@ pub(super) fn materialize_blob(
         .with_context(|| format!("flushing {}", destination.display()))
 }
 
+/// Materialize a private contiguous blob by cloning the closest verified
+/// cached image and overwriting only chunks whose authenticated index entries
+/// changed. The completed result is verified before it is returned and then
+/// retained read-only for the next restore in the same key domain.
+pub(super) fn materialize_blob_cached(
+    store_root: &Path,
+    domain: &CheckpointKeyDomain,
+    content_dir: &Path,
+    blob: &ContentBlob,
+    destination: &Path,
+) -> Result<MaterializationStats> {
+    materialize_blob_cached_with_lock_observer(
+        store_root,
+        domain,
+        content_dir,
+        blob,
+        destination,
+        || {},
+    )
+}
+
+fn materialize_blob_cached_with_lock_observer<F>(
+    store_root: &Path,
+    domain: &CheckpointKeyDomain,
+    content_dir: &Path,
+    blob: &ContentBlob,
+    destination: &Path,
+    on_lock_contention: F,
+) -> Result<MaterializationStats>
+where
+    F: FnOnce(),
+{
+    let target = load_index(content_dir, blob)?;
+    let cache_root = materialization_blob_cache_root(store_root, domain, &blob.name);
+    ensure_materialization_cache_dirs(store_root, domain, &blob.name)?;
+    // Candidate verification, cloning, invalid-entry replacement and publish
+    // are one transaction. A blob-wide lock is deliberately coarser than an
+    // entry lock: selecting the nearest index reads every entry, so replacing
+    // any one of them must exclude readers of the whole candidate set.
+    let _cache_lock = acquire_materialization_cache_lock(&cache_root, on_lock_contention)
+        .with_context(|| format!("locking checkpoint materialization cache for {}", blob.name))?;
+
+    let stats = if let Some(base) = nearest_cached_materialization(&cache_root, &target)? {
+        crate::base::cow::clone_rootfs_for_instance(&base.path, destination)
+            .with_context(|| format!("cloning cached checkpoint blob {}", blob.name))?;
+        make_private_writable(destination)?;
+        rewrite_changed_chunks(content_dir, &base.index, &target, destination)?
+    } else {
+        materialize_blob(content_dir, blob, destination)?;
+        MaterializationStats {
+            rewritten_chunks: target.chunks.len(),
+            rewritten_bytes: stored_bytes(&target)?,
+        }
+    };
+
+    verify_materialized_file(&target, destination).with_context(|| {
+        format!(
+            "verifying materialized checkpoint blob {} at {}",
+            blob.name,
+            destination.display()
+        )
+    })?;
+    publish_cached_materialization(&cache_root, &target, destination)?;
+    tracing::debug!(
+        blob = %blob.name,
+        rewritten_chunks = stats.rewritten_chunks,
+        rewritten_bytes = stats.rewritten_bytes,
+        "materialized checkpoint blob from chunk cache"
+    );
+    Ok(stats)
+}
+
+fn acquire_materialization_cache_lock<F>(
+    cache_root: &Path,
+    on_contention: F,
+) -> Result<mvm_core::atomic_io::FileLock>
+where
+    F: FnOnce(),
+{
+    if let Some(lock) = mvm_core::atomic_io::FileLock::try_acquire(cache_root)? {
+        return Ok(lock);
+    }
+    on_contention();
+    mvm_core::atomic_io::FileLock::acquire(cache_root)
+}
+
+fn ensure_materialization_cache_dirs(
+    store_root: &Path,
+    domain: &CheckpointKeyDomain,
+    blob_name: &str,
+) -> Result<()> {
+    let root = store_root.join(MATERIALIZATIONS_DIR);
+    create_private_dir_durable(&root, store_root)?;
+    let domain_root = root.join(domain_directory_name(domain));
+    create_private_dir_durable(&domain_root, &root)?;
+    let blob_root = domain_root.join(hex::encode(Sha256::digest(blob_name.as_bytes())));
+    create_private_dir_durable(&blob_root, &domain_root)
+}
+
+fn materialization_blob_cache_root(
+    store_root: &Path,
+    domain: &CheckpointKeyDomain,
+    blob_name: &str,
+) -> PathBuf {
+    store_root
+        .join(MATERIALIZATIONS_DIR)
+        .join(domain_directory_name(domain))
+        .join(hex::encode(Sha256::digest(blob_name.as_bytes())))
+}
+
+#[cfg(test)]
+fn materialization_cache_entry(
+    store_root: &Path,
+    domain: &CheckpointKeyDomain,
+    blob_name: &str,
+    index_digest: &str,
+) -> PathBuf {
+    materialization_blob_cache_root(store_root, domain, blob_name).join(index_digest)
+}
+
+fn domain_directory_name(domain: &CheckpointKeyDomain) -> String {
+    hex::encode(Sha256::digest(domain.as_str().as_bytes()))
+}
+
+fn nearest_cached_materialization(
+    cache_root: &Path,
+    target: &ChunkIndex,
+) -> Result<Option<CachedMaterialization>> {
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(cache_root).with_context(|| {
+        format!(
+            "reading checkpoint materialization cache {}",
+            cache_root.display()
+        )
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let digest = entry.file_name().to_string_lossy().into_owned();
+        if ChunkDigest::try_from(digest.clone()).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(index) = cached_index(&path, &digest)? else {
+            continue;
+        };
+        candidates.push(CachedMaterialization {
+            changed_chunks: changed_chunk_count(&index, target),
+            index,
+            path: path.join(CACHED_BLOB_FILE),
+            digest,
+        });
+    }
+    candidates.sort_by(|left, right| {
+        left.changed_chunks
+            .cmp(&right.changed_chunks)
+            .then_with(|| left.digest.cmp(&right.digest))
+    });
+    for candidate in candidates {
+        if verify_materialized_file(&candidate.index, &candidate.path).is_ok() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn cached_index(entry: &Path, expected_digest: &str) -> Result<Option<ChunkIndex>> {
+    let bytes = match std::fs::read(entry.join(CACHED_INDEX_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", entry.display())),
+    };
+    let index = match ChunkIndex::from_canonical_bytes(&bytes) {
+        Ok(index) => index,
+        Err(_) => return Ok(None),
+    };
+    if index.content_address()?.as_str() != expected_digest {
+        return Ok(None);
+    }
+    Ok(Some(index))
+}
+
+fn changed_chunk_count(base: &ChunkIndex, target: &ChunkIndex) -> usize {
+    let count = base.chunks.len().max(target.chunks.len());
+    (0..count)
+        .filter(|position| base.chunks.get(*position) != target.chunks.get(*position))
+        .count()
+}
+
+fn rewrite_changed_chunks(
+    content_dir: &Path,
+    base: &ChunkIndex,
+    target: &ChunkIndex,
+    destination: &Path,
+) -> Result<MaterializationStats> {
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .open(destination)
+        .with_context(|| {
+            format!(
+                "opening {} for checkpoint diff restore",
+                destination.display()
+            )
+        })?;
+    output
+        .set_len(target.length_bytes)
+        .with_context(|| format!("sizing {}", destination.display()))?;
+    let mut rewritten_chunks = 0usize;
+    let mut rewritten_bytes = 0u64;
+    for (position, entry) in target.chunks.iter().enumerate() {
+        if base.chunks.get(position) == Some(entry) {
+            continue;
+        }
+        let expected_len = expected_chunk_len(target, position)?;
+        let bytes = match entry {
+            ChunkEntry::Zero if base.chunks.get(position).is_none() => {
+                rewritten_chunks += 1;
+                continue;
+            }
+            ChunkEntry::Zero => vec![0; expected_len],
+            ChunkEntry::Object(digest) => {
+                read_verified_stored_chunk(content_dir, digest, expected_len)?
+            }
+        };
+        output
+            .seek(std::io::SeekFrom::Start(chunk_offset(target, position)?))
+            .with_context(|| format!("seeking {}", destination.display()))?;
+        output
+            .write_all(&bytes)
+            .with_context(|| format!("writing {}", destination.display()))?;
+        rewritten_chunks += 1;
+        rewritten_bytes = rewritten_bytes
+            .checked_add(u64::try_from(bytes.len()).context("chunk length does not fit u64")?)
+            .context("checkpoint diff restore byte count overflow")?;
+    }
+    output
+        .flush()
+        .with_context(|| format!("flushing {}", destination.display()))?;
+    Ok(MaterializationStats {
+        rewritten_chunks,
+        rewritten_bytes,
+    })
+}
+
+fn read_verified_stored_chunk(
+    content_dir: &Path,
+    digest: &ChunkDigest,
+    expected_len: usize,
+) -> Result<Vec<u8>> {
+    let path = membership_path(content_dir, digest);
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("reading checkpoint chunk {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() == expected_len,
+        "checkpoint chunk {} has length {}, expected {expected_len}",
+        path.display(),
+        bytes.len()
+    );
+    let actual = ChunkDigest::from_bytes(&bytes);
+    anyhow::ensure!(
+        actual == *digest,
+        "checkpoint chunk {} failed integrity: expected {}, got {}",
+        path.display(),
+        digest.as_str(),
+        actual.as_str()
+    );
+    Ok(bytes)
+}
+
+fn verify_materialized_file(index: &ChunkIndex, path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("reading materialized checkpoint blob {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "materialized checkpoint blob {} is not a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() == index.length_bytes,
+        "materialized checkpoint blob {} has length {}, expected {}",
+        path.display(),
+        metadata.len(),
+        index.length_bytes
+    );
+    let tasks: Vec<_> = index.chunks.iter().cloned().enumerate().collect();
+    mvm_fs::parallel::par_map(tasks, |(position, entry)| {
+        let bytes = read_chunk(
+            path,
+            ChunkRead {
+                offset: chunk_offset(index, position)?,
+                len: expected_chunk_len(index, position)?,
+            },
+        )?;
+        match entry {
+            ChunkEntry::Zero => anyhow::ensure!(
+                bytes.iter().all(|byte| *byte == 0),
+                "materialized checkpoint blob {} chunk {position} is not zero",
+                path.display()
+            ),
+            ChunkEntry::Object(expected) => {
+                let actual = ChunkDigest::from_bytes(&bytes);
+                anyhow::ensure!(
+                    actual == expected,
+                    "materialized checkpoint blob {} chunk {position} failed integrity: expected {}, got {}",
+                    path.display(),
+                    expected.as_str(),
+                    actual.as_str()
+                );
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    Ok(())
+}
+
+fn chunk_offset(index: &ChunkIndex, position: usize) -> Result<u64> {
+    u64::try_from(position)
+        .context("checkpoint chunk position does not fit in u64")?
+        .checked_mul(index.chunk_size)
+        .context("checkpoint chunk offset overflow")
+}
+
+fn stored_bytes(index: &ChunkIndex) -> Result<u64> {
+    index
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, ChunkEntry::Object(_)))
+        .try_fold(0u64, |total, (position, _)| {
+            total
+                .checked_add(
+                    u64::try_from(expected_chunk_len(index, position)?)
+                        .context("chunk length does not fit u64")?,
+                )
+                .context("checkpoint materialization byte count overflow")
+        })
+}
+
+fn publish_cached_materialization(
+    cache_root: &Path,
+    index: &ChunkIndex,
+    materialized: &Path,
+) -> Result<()> {
+    let digest = index.content_address()?;
+    let destination = cache_root.join(digest.as_str());
+    if destination.is_dir() {
+        let cached = cached_index(&destination, digest.as_str())?;
+        if cached.as_ref().is_some_and(|cached| {
+            verify_materialized_file(cached, &destination.join(CACHED_BLOB_FILE)).is_ok()
+        }) {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&destination).with_context(|| {
+            format!(
+                "removing invalid checkpoint materialization {}",
+                destination.display()
+            )
+        })?;
+    }
+    let staged = tempfile::Builder::new()
+        .prefix(".materialized-")
+        .tempdir_in(cache_root)
+        .with_context(|| {
+            format!(
+                "staging checkpoint materialization in {}",
+                cache_root.display()
+            )
+        })?;
+    let cached_blob = staged.path().join(CACHED_BLOB_FILE);
+    crate::base::cow::clone_rootfs_for_instance(materialized, &cached_blob)
+        .context("cloning verified checkpoint materialization into cache")?;
+    make_read_only(&cached_blob)?;
+    let cached_index_path = staged.path().join(CACHED_INDEX_FILE);
+    mvm_core::atomic_io::atomic_write(&cached_index_path, &index.canonical_bytes()?)?;
+    std::fs::File::open(&cached_blob)?.sync_all()?;
+    std::fs::File::open(&cached_index_path)?.sync_all()?;
+    mvm_core::atomic_io::sync_dir(staged.path())?;
+    match std::fs::rename(staged.path(), &destination) {
+        Ok(()) => mvm_core::atomic_io::sync_dir(cache_root),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "publishing checkpoint materialization {}",
+                destination.display()
+            )
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn make_private_writable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(|| {
+        format!(
+            "making checkpoint materialization private {}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn make_private_writable(path: &Path) -> Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "making checkpoint materialization writable {}",
+            path.display()
+        )
+    })
+}
+
 fn expected_chunk_len(index: &ChunkIndex, position: usize) -> Result<usize> {
     let offset = u64::try_from(position)
         .context("checkpoint chunk position does not fit in u64")?
@@ -445,8 +876,7 @@ impl ObjectPool {
         let objects = store_root.join(OBJECTS_DIR);
         create_private_dir_durable(&objects, store_root)
             .with_context(|| format!("creating checkpoint object pool {}", objects.display()))?;
-        let domain_name = hex::encode(Sha256::digest(domain.as_str().as_bytes()));
-        let root = objects.join(domain_name);
+        let root = objects.join(domain_directory_name(domain));
         create_private_dir_durable(&root, &objects)
             .with_context(|| format!("creating checkpoint key-domain pool {}", root.display()))?;
         Ok(Self { root })
@@ -896,5 +1326,269 @@ mod tests {
         let blob = chunk_blob(&pool, &content, "rootfs.ext4", &source, true).unwrap();
         assert_eq!(materialized_sha256(&content, &blob).unwrap(), expected);
         assert_ne!(blob.sha256, expected);
+    }
+
+    #[test]
+    fn cached_materialization_rewrites_only_the_changed_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let domain = CheckpointKeyDomain::host();
+        let pool = ObjectPool::new(tmp.path(), &domain).unwrap();
+        let first_content = tmp.path().join("first/content");
+        let second_content = tmp.path().join("second/content");
+        std::fs::create_dir_all(&first_content).unwrap();
+        std::fs::create_dir_all(&second_content).unwrap();
+
+        let first_source = first_content.join("memory.bin");
+        let first_chunks: Vec<_> = (1..=20).map(nonzero).collect();
+        write_chunks(&first_source, &first_chunks);
+        let first_blob =
+            chunk_blob(&pool, &first_content, "memory.bin", &first_source, false).unwrap();
+        std::fs::remove_file(first_source).unwrap();
+        let first_destination = tmp.path().join("first-materialized.bin");
+        let first_stats = materialize_blob_cached(
+            tmp.path(),
+            &domain,
+            &first_content,
+            &first_blob,
+            &first_destination,
+        )
+        .unwrap();
+        assert_eq!(first_stats.rewritten_chunks, 20);
+        assert_eq!(first_stats.rewritten_bytes, 20 * CHUNK_SIZE as u64);
+
+        let second_source = second_content.join("memory.bin");
+        let mut second_chunks = first_chunks;
+        second_chunks[8] = nonzero(99);
+        write_chunks(&second_source, &second_chunks);
+        let second_blob =
+            chunk_blob(&pool, &second_content, "memory.bin", &second_source, false).unwrap();
+        let expected = std::fs::read(&second_source).unwrap();
+        std::fs::remove_file(second_source).unwrap();
+        let second_destination = tmp.path().join("second-materialized.bin");
+        let second_stats = materialize_blob_cached(
+            tmp.path(),
+            &domain,
+            &second_content,
+            &second_blob,
+            &second_destination,
+        )
+        .unwrap();
+
+        assert_eq!(second_stats.rewritten_chunks, 1);
+        assert_eq!(second_stats.rewritten_bytes, CHUNK_SIZE as u64);
+        assert_eq!(
+            second_stats.rewritten_bytes * 20,
+            first_stats.rewritten_bytes,
+            "one changed chunk cuts logical restore writes by 95%"
+        );
+        assert_eq!(std::fs::read(second_destination).unwrap(), expected);
+        let cached = materialization_cache_entry(
+            tmp.path(),
+            &domain,
+            &second_blob.name,
+            &second_blob.sha256,
+        );
+        assert_eq!(
+            std::fs::read(cached.join(CACHED_INDEX_FILE)).unwrap(),
+            std::fs::read(index_path(&second_content, "memory.bin")).unwrap(),
+            "the cache must record the authenticated index it was built from"
+        );
+        assert!(
+            std::fs::metadata(cached.join(CACHED_BLOB_FILE))
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "the shared materialization must not be writable"
+        );
+    }
+
+    #[test]
+    fn editing_the_cache_after_restore_cannot_change_the_private_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let domain = CheckpointKeyDomain::host();
+        let pool = ObjectPool::new(tmp.path(), &domain).unwrap();
+        let content = tmp.path().join("checkpoint/content");
+        std::fs::create_dir_all(&content).unwrap();
+        let source = content.join("memory.bin");
+        write_chunks(&source, &[nonzero(1), nonzero(2)]);
+        let blob = chunk_blob(&pool, &content, "memory.bin", &source, false).unwrap();
+        let expected = std::fs::read(&source).unwrap();
+        std::fs::remove_file(source).unwrap();
+
+        let warmup = tmp.path().join("warmup.bin");
+        materialize_blob_cached(tmp.path(), &domain, &content, &blob, &warmup).unwrap();
+        let restored = tmp.path().join("restored.bin");
+        let stats =
+            materialize_blob_cached(tmp.path(), &domain, &content, &blob, &restored).unwrap();
+        assert_eq!(stats.rewritten_chunks, 0);
+
+        let cached = materialization_cache_entry(tmp.path(), &domain, &blob.name, &blob.sha256)
+            .join(CACHED_BLOB_FILE);
+        #[cfg(unix)]
+        std::fs::set_permissions(&cached, std::fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(&cached).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&cached, permissions).unwrap();
+        }
+        let mut cache_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(cached)
+            .unwrap();
+        cache_file.write_all(b"changed-after-restore").unwrap();
+        cache_file.flush().unwrap();
+
+        assert_eq!(
+            std::fs::read(restored).unwrap(),
+            expected,
+            "a restored VM must own a private file, never a live view of the cache"
+        );
+    }
+
+    #[test]
+    fn concurrent_publishers_wait_for_the_blob_cache_transaction() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path().to_path_buf();
+        let domain = CheckpointKeyDomain::host();
+        let pool = ObjectPool::new(&store_root, &domain).unwrap();
+        let content = store_root.join("checkpoint/content");
+        std::fs::create_dir_all(&content).unwrap();
+        let source = content.join("memory.bin");
+        write_chunks(&source, &[nonzero(1), nonzero(2)]);
+        let expected = std::fs::read(&source).unwrap();
+        let blob = chunk_blob(&pool, &content, "memory.bin", &source, false).unwrap();
+        std::fs::remove_file(source).unwrap();
+        ensure_materialization_cache_dirs(&store_root, &domain, &blob.name).unwrap();
+        let cache_root = materialization_blob_cache_root(&store_root, &domain, &blob.name);
+        let transaction = mvm_core::atomic_io::FileLock::acquire(&cache_root).unwrap();
+
+        let start = Arc::new(Barrier::new(3));
+        let (contended_tx, contended_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut threads = Vec::new();
+        for number in 0..2 {
+            let start = Arc::clone(&start);
+            let contended_tx = contended_tx.clone();
+            let done_tx = done_tx.clone();
+            let store_root = store_root.clone();
+            let domain = domain.clone();
+            let content = content.clone();
+            let blob = blob.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                let destination = store_root.join(format!("restore-{number}.bin"));
+                let result = materialize_blob_cached_with_lock_observer(
+                    &store_root,
+                    &domain,
+                    &content,
+                    &blob,
+                    &destination,
+                    || contended_tx.send(()).unwrap(),
+                )
+                .map(|stats| (destination, stats));
+                done_tx.send(result).unwrap();
+            }));
+        }
+        start.wait();
+        contended_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        contended_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(transaction);
+
+        let mut rewritten = Vec::new();
+        for _ in 0..2 {
+            let (destination, stats) = done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), expected);
+            rewritten.push(stats.rewritten_chunks);
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        rewritten.sort_unstable();
+        assert_eq!(rewritten, vec![0, 2]);
+        let published: Vec<_> = std::fs::read_dir(cache_root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .collect();
+        assert_eq!(
+            published.len(),
+            1,
+            "two publishers must produce one cache entry"
+        );
+    }
+
+    #[test]
+    fn a_reader_cannot_observe_an_invalid_entry_being_replaced() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path().to_path_buf();
+        let domain = CheckpointKeyDomain::host();
+        let pool = ObjectPool::new(&store_root, &domain).unwrap();
+        let content = store_root.join("checkpoint/content");
+        std::fs::create_dir_all(&content).unwrap();
+        let source = content.join("memory.bin");
+        write_chunks(&source, &[nonzero(7), nonzero(8)]);
+        let expected = std::fs::read(&source).unwrap();
+        let blob = chunk_blob(&pool, &content, "memory.bin", &source, false).unwrap();
+        std::fs::remove_file(source).unwrap();
+        let warmup = store_root.join("warmup.bin");
+        materialize_blob_cached(&store_root, &domain, &content, &blob, &warmup).unwrap();
+
+        let cache_root = materialization_blob_cache_root(&store_root, &domain, &blob.name);
+        let entry = materialization_cache_entry(&store_root, &domain, &blob.name, &blob.sha256);
+        let transaction = mvm_core::atomic_io::FileLock::acquire(&cache_root).unwrap();
+        let old = cache_root.join(".replacing-old");
+        std::fs::rename(&entry, &old).unwrap();
+
+        let (contended_tx, contended_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let reader_root = store_root.clone();
+        let reader_domain = domain.clone();
+        let reader_content = content.clone();
+        let reader_blob = blob.clone();
+        let reader = std::thread::spawn(move || {
+            let destination = reader_root.join("reader.bin");
+            let result = materialize_blob_cached_with_lock_observer(
+                &reader_root,
+                &reader_domain,
+                &reader_content,
+                &reader_blob,
+                &destination,
+                || contended_tx.send(()).unwrap(),
+            )
+            .map(|stats| (destination, stats));
+            done_tx.send(result).unwrap();
+        });
+        contended_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let replacement = cache_root.join(".replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join(CACHED_BLOB_FILE), &expected).unwrap();
+        make_read_only(&replacement.join(CACHED_BLOB_FILE)).unwrap();
+        std::fs::copy(
+            old.join(CACHED_INDEX_FILE),
+            replacement.join(CACHED_INDEX_FILE),
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &entry).unwrap();
+        std::fs::remove_dir_all(old).unwrap();
+        drop(transaction);
+
+        let (destination, stats) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(stats.rewritten_chunks, 0);
+        assert_eq!(std::fs::read(destination).unwrap(), expected);
     }
 }

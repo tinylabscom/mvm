@@ -9,10 +9,12 @@ measurements required before its checkbox may be ticked.
 Coordinates with #3382 (W5 of that plan, copy-on-write HVF restore), which
 changes how a restored memory image is consumed.
 
-**Status: C0–C3 DONE; C4–C8 OPEN.** The capture path now stores the
+**Status: C0–C4 DONE; C5–C8 OPEN.** The capture path now stores the
 large blobs as chunks and materializes verified contiguous files for current
-restore consumers. Diff restore, garbage collection, audit-format cleanup,
-tenant-domain resolution and old-layout retirement remain separate work.
+restore consumers. Restore now keeps read-only per-domain/index
+materializations and rewrites only changed chunks into a private verified
+clone. Garbage collection, audit-format cleanup, tenant-domain resolution and
+old-layout retirement remain separate work.
 
 ## Problem
 
@@ -233,16 +235,39 @@ is the same-size serial and parallel pair, not cross-row scaling.
 
 ### C4 — Diff restore
 
-- [ ] C4.1 Keep one verified, read-only materialization per index digest per
+- [x] C4.1 Keep one verified, read-only materialization per index digest per
       key domain, recording which index it was built from.
-- [ ] C4.2 Restore clones the nearest cached materialization (copy-on-write
+- [x] C4.2 Restore clones the nearest cached materialization (copy-on-write
       where the filesystem has it) and rewrites only the chunks whose index
       entries differ, then verifies the result before handing it to the VMM.
-- [ ] C4.3 Compatibility with #3382: the file handed to the HVF restorer is a
+- [x] C4.3 Compatibility with #3382: the file handed to the HVF restorer is a
       private, verified, contiguous file that no VM process can write, which
       is what a `MAP_PRIVATE` mapping of it needs. Test that editing the cached
       materialization after a restore does not change the restored file.
-- [ ] C4.4 Measure bytes written per restore before and after.
+- [x] C4.4 Measure bytes written per restore before and after.
+
+**C4 measurement.** The deterministic 20 MiB diff-restore fixture changes one
+1 MiB chunk. A cold materialization writes 20 MiB of authenticated chunk data;
+the next restore clones the nearest cached image and writes 1 MiB, a 95%
+reduction. The measurement counts bytes issued by the chunk writer, independent
+of whether the host filesystem implements the clone as APFS `clonefile`, Linux
+`FICLONE`, or the sparse-copy fallback. A second test restores from the exact
+cached index (zero rewritten chunks), mutates the cache afterward, and checks
+that the private restored bytes do not change. A per-domain/per-blob file lock
+serializes candidate verification, cloning, invalid-entry replacement, and
+publish; deterministic contention tests check that concurrent publishers and a
+reader crossing replacement cannot observe partial cache state.
+
+**C4 validation.** The focused checkpoint namespace passes 108 tests with two
+ignored timing witnesses; the full `mvm-runtime` workspace invocation passes
+1,086 tests with eight ignored. `cargo check --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and the policy gates
+pass (`xtask check-all`: 74 gates clean). The exact single-threaded workspace
+command passed every unit and integration crate before rustdoc transiently
+failed the `mvm-build` doctest with `E0463` for an existing `mvm_sdk` artifact.
+An immediate isolated `cargo test -p mvm-build --doc -- --test-threads=1`
+rerun passed with exit status zero, confirming target-artifact churn rather
+than a C4 source failure.
 
 ### C5 — Garbage collection
 

@@ -193,8 +193,14 @@ pub fn materialize_chunked_blobs(
                     .with_context(|| format!("removing snapshot blob {}", destination.display()));
             }
         }
-        chunks::materialize_blob(&content_dir, blob, &destination)
-            .with_context(|| format!("materializing checkpoint blob {:?}", blob.name))?;
+        chunks::materialize_blob_cached(
+            store.root(),
+            &meta.key_domain,
+            &content_dir,
+            blob,
+            &destination,
+        )
+        .with_context(|| format!("materializing checkpoint blob {:?}", blob.name))?;
     }
     Ok(())
 }
@@ -219,7 +225,6 @@ pub fn materialize_checkpoint_blobs(
             destination_dir.display()
         )
     })?;
-    let content_dir = store.content_dir(&meta.id);
     for blob in &meta.content {
         let destination = destination_dir.join(&blob.name);
         match std::fs::remove_file(&destination) {
@@ -231,7 +236,7 @@ pub fn materialize_checkpoint_blobs(
                 });
             }
         }
-        clone_or_materialize_blob(&content_dir, blob, &destination)?;
+        clone_or_materialize_blob(store, meta, blob, &destination)?;
     }
     Ok(())
 }
@@ -1172,13 +1177,13 @@ pub fn restore_checkpoint(
     verify_content_except(store, &meta, restore.verifies_on_load())?;
     verify_checkpoint_against_chain(anchor, &meta)?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
-    let dir = store.content_dir(&meta.id);
     let materialized = tempfile::Builder::new()
         .prefix(".restore-")
         .tempdir_in(store.root())
         .context("creating checkpoint restore materialization")?;
-    let rootfs = materialized_source(&dir, &meta, "rootfs.ext4", materialized.path())?;
-    let memory = materialized_source(&dir, &meta, "memory.bin", materialized.path())?;
+    let rootfs = materialized_source(store, &meta, "rootfs.ext4", materialized.path())?;
+    let memory = materialized_source(store, &meta, "memory.bin", materialized.path())?;
+    let dir = store.content_dir(&meta.id);
 
     // The checkpoint carries the launch config (for checkpoints captured after
     // this landed). Hand it to the restore seam so the backend can rebuild the
@@ -1198,14 +1203,23 @@ pub fn restore_checkpoint(
 }
 
 fn clone_or_materialize_blob(
-    content_dir: &Path,
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
     blob: &ContentBlob,
     destination: &Path,
 ) -> Result<()> {
+    let content_dir = store.content_dir(&meta.id);
     chunks::validate_blob_name(&blob.name)?;
-    if chunks::is_chunked_blob(content_dir, blob) {
-        chunks::materialize_blob(content_dir, blob, destination)
-            .with_context(|| format!("materializing checkpoint blob {}", blob.name))
+    if chunks::is_chunked_blob(&content_dir, blob) {
+        chunks::materialize_blob_cached(
+            store.root(),
+            &meta.key_domain,
+            &content_dir,
+            blob,
+            destination,
+        )
+        .map(|_| ())
+        .with_context(|| format!("materializing checkpoint blob {}", blob.name))
     } else {
         crate::base::cow::clone_rootfs_for_instance(&content_dir.join(&blob.name), destination)
             .map(|_| ())
@@ -1214,22 +1228,30 @@ fn clone_or_materialize_blob(
 }
 
 fn materialized_source(
-    content_dir: &Path,
+    store: &CheckpointStore,
     meta: &CheckpointMeta,
     name: &str,
     scratch: &Path,
 ) -> Result<PathBuf> {
+    let content_dir = store.content_dir(&meta.id);
     let blob = meta
         .content
         .iter()
         .find(|blob| blob.name == name)
         .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
-    if !chunks::is_chunked_blob(content_dir, blob) {
+    if !chunks::is_chunked_blob(&content_dir, blob) {
         return Ok(content_dir.join(name));
     }
     let destination = scratch.join(name);
-    chunks::materialize_blob(content_dir, blob, &destination)
-        .with_context(|| format!("materializing checkpoint blob {name}"))?;
+    chunks::materialize_blob_cached(
+        store.root(),
+        &meta.key_domain,
+        &content_dir,
+        blob,
+        &destination,
+    )
+    .map(|_| ())
+    .with_context(|| format!("materializing checkpoint blob {name}"))?;
     Ok(destination)
 }
 
