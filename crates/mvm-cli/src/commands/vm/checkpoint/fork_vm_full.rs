@@ -343,6 +343,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             tenant: &tenant,
             vm_name: p.child_vm_name,
             backend_name: p.backend_kind.as_str(),
+            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
             rootfs_path: &rootfs_blob,
             // A fork resumes a saved VM state rather than booting a kernel of
             // its own, so this admission has no kernel to name. Deliberately

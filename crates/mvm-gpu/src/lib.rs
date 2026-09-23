@@ -34,6 +34,8 @@ pub struct LaunchConfig {
     pub grid: [u32; 3],
     pub block: [u32; 3],
     pub shared_mem_bytes: u32,
+    /// `None` selects CUDA's legacy default stream.
+    pub stream: Option<u64>,
     pub params: Vec<Vec<u8>>,
 }
 
@@ -76,20 +78,19 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
             .driver_version()
             .map(|version| GpuResponse::DriverVersion { version })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceGetCount => backend
-            .device_count()
+        GpuRequest::DeviceGetCount => visible_device_count(backend, false)
             .map(|count| GpuResponse::DeviceCount { count })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceGetName { ordinal } => backend
-            .device_name(*ordinal)
+        GpuRequest::DeviceGetName { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.device_name(ordinal))
             .map(|name| GpuResponse::DeviceName { name })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::DeviceTotalMem { ordinal } => backend
-            .device_total_mem(*ordinal)
+        GpuRequest::DeviceTotalMem { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.device_total_mem(ordinal))
             .map(|bytes| GpuResponse::DeviceTotalMem { bytes })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::ContextCreate { ordinal } => backend
-            .context_create(*ordinal)
+        GpuRequest::ContextCreate { ordinal } => visible_ordinal(backend, *ordinal, false)
+            .and_then(|ordinal| backend.context_create(ordinal))
             .map(|context| GpuResponse::ContextCreated { context })
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::ContextDestroy { context } => backend
@@ -98,6 +99,50 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::Synchronize { context } => backend
             .synchronize(*context)
+            .map(|()| GpuResponse::Ok)
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::StreamCreate { context, flags } => backend
+            .stream_create(*context, *flags)
+            .map(|stream| GpuResponse::StreamCreated { stream })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::StreamDestroy { context, stream } => backend
+            .stream_destroy(*context, *stream)
+            .map(|()| GpuResponse::Ok)
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::StreamSynchronize { context, stream } => backend
+            .stream_synchronize(*context, *stream)
+            .map(|()| GpuResponse::Ok)
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::StreamWaitEvent {
+            context,
+            stream,
+            event,
+        } => backend
+            .stream_wait_event(*context, *stream, *event)
+            .map(|completion| GpuResponse::AsyncQueued { completion })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::EventCreate { context, flags } => backend
+            .event_create(*context, *flags)
+            .map(|event| GpuResponse::EventCreated { event })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::EventDestroy { context, event } => backend
+            .event_destroy(*context, *event)
+            .map(|()| GpuResponse::Ok)
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::EventRecord {
+            context,
+            event,
+            stream,
+        } => backend
+            .event_record(*context, *event, *stream)
+            .map(|completion| GpuResponse::AsyncQueued { completion })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::EventQuery { context, event } => backend
+            .event_query(*context, *event)
+            .map(|complete| GpuResponse::EventStatus { complete })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::EventSynchronize { context, event } => backend
+            .event_synchronize(*context, *event)
             .map(|()| GpuResponse::Ok)
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::MemAlloc { context, bytes } => backend
@@ -115,6 +160,24 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
         GpuRequest::MemcpyDtoH { context, src, len } => backend
             .memcpy_dtoh(*context, *src, *len)
             .map(|bytes| GpuResponse::Data { bytes })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::MemcpyHtoDAsync {
+            context,
+            dst,
+            data,
+            stream,
+        } => backend
+            .memcpy_htod_async(*context, *dst, data, *stream)
+            .map(|completion| GpuResponse::AsyncQueued { completion })
+            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::MemcpyDtoHAsync {
+            context,
+            src,
+            len,
+            stream,
+        } => backend
+            .memcpy_dtoh_async(*context, *src, *len, *stream)
+            .map(|(bytes, completion)| GpuResponse::DataQueued { bytes, completion })
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::MemsetD8 {
             context,
@@ -147,12 +210,14 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
             grid,
             block,
             shared_mem_bytes,
+            stream,
             params,
         } => {
             let config = LaunchConfig {
                 grid: *grid,
                 block: *block,
                 shared_mem_bytes: *shared_mem_bytes,
+                stream: *stream,
                 params: params.clone(),
             };
             if let Err(e) = config.validate() {
@@ -163,30 +228,77 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
                 .map(|()| GpuResponse::Ok)
                 .unwrap_or_else(GpuResponse::Err)
         }
-        GpuRequest::NvmlDeviceGetCount => backend
-            .nvml_device_count()
+        GpuRequest::NvmlDeviceGetCount => visible_device_count(backend, true)
             .map(|count| GpuResponse::NvmlDeviceCount { count })
             .unwrap_or_else(GpuResponse::Err),
         GpuRequest::NvmlSystemGetDriverVersion => backend
             .nvml_driver_version()
             .map(|version| GpuResponse::NvmlDriverVersion { version })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetName { ordinal } => backend
-            .nvml_device_name(*ordinal)
+        GpuRequest::NvmlDeviceGetName { ordinal } => visible_ordinal(backend, *ordinal, true)
+            .and_then(|ordinal| backend.nvml_device_name(ordinal))
             .map(|name| GpuResponse::DeviceName { name })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetMemoryInfo { ordinal } => backend
-            .nvml_memory_info(*ordinal)
+        GpuRequest::NvmlDeviceGetMemoryInfo { ordinal } => visible_ordinal(backend, *ordinal, true)
+            .and_then(|ordinal| backend.nvml_memory_info(ordinal))
             .map(|(total, free, used)| GpuResponse::NvmlMemoryInfo { total, free, used })
             .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetUtilizationRates { ordinal } => backend
-            .nvml_utilization(*ordinal)
-            .map(|(gpu, memory)| GpuResponse::NvmlUtilization { gpu, memory })
-            .unwrap_or_else(GpuResponse::Err),
-        GpuRequest::NvmlDeviceGetCudaComputeCapability { ordinal } => backend
-            .nvml_compute_capability(*ordinal)
-            .map(|(major, minor)| GpuResponse::NvmlComputeCapability { major, minor })
-            .unwrap_or_else(GpuResponse::Err),
+        GpuRequest::NvmlDeviceGetUtilizationRates { ordinal } => {
+            visible_ordinal(backend, *ordinal, true)
+                .and_then(|ordinal| backend.nvml_utilization(ordinal))
+                .map(|(gpu, memory)| GpuResponse::NvmlUtilization { gpu, memory })
+                .unwrap_or_else(GpuResponse::Err)
+        }
+        GpuRequest::NvmlDeviceGetCudaComputeCapability { ordinal } => {
+            visible_ordinal(backend, *ordinal, true)
+                .and_then(|ordinal| backend.nvml_compute_capability(ordinal))
+                .map(|(major, minor)| GpuResponse::NvmlComputeCapability { major, minor })
+                .unwrap_or_else(GpuResponse::Err)
+        }
+    }
+}
+
+fn invalid_device(nvml: bool, message: impl Into<String>) -> GpuError {
+    GpuError::new(
+        if nvml {
+            wire::NVML_ERROR_INVALID_ARGUMENT
+        } else {
+            wire::CUDA_ERROR_INVALID_DEVICE
+        },
+        message,
+    )
+}
+
+fn visible_ordinal(
+    backend: &dyn GpuBackend,
+    guest_ordinal: u32,
+    nvml: bool,
+) -> Result<u32, GpuError> {
+    match backend.device_ordinal() {
+        None => Ok(guest_ordinal),
+        Some(host_ordinal) if guest_ordinal == 0 => Ok(host_ordinal),
+        Some(host_ordinal) => Err(invalid_device(
+            nvml,
+            format!(
+                "this VM is pinned to host GPU {host_ordinal}; only guest ordinal 0 is visible, not {guest_ordinal}"
+            ),
+        )),
+    }
+}
+
+fn visible_device_count(backend: &mut dyn GpuBackend, nvml: bool) -> Result<u32, GpuError> {
+    let count = if nvml {
+        backend.nvml_device_count()?
+    } else {
+        backend.device_count()?
+    };
+    match backend.device_ordinal() {
+        None => Ok(count),
+        Some(host_ordinal) if host_ordinal < count => Ok(1),
+        Some(host_ordinal) => Err(invalid_device(
+            nvml,
+            format!("host GPU ordinal {host_ordinal} is outside the detected device count {count}"),
+        )),
     }
 }
 
@@ -195,6 +307,12 @@ pub fn handle_request(backend: &mut dyn GpuBackend, request: &GpuRequest) -> Gpu
 /// Implementations own their handle tables; a handle is only ever meaningful
 /// to the backend instance that minted it, on the connection that asked.
 pub trait GpuBackend: Send {
+    /// Host device exposed as guest ordinal zero, or `None` to expose every
+    /// backend device with its native ordinal.
+    fn device_ordinal(&self) -> Option<u32> {
+        None
+    }
+
     fn driver_version(&mut self) -> Result<i32, GpuError>;
     fn device_count(&mut self) -> Result<u32, GpuError>;
     fn device_name(&mut self, ordinal: u32) -> Result<String, GpuError>;
@@ -203,11 +321,35 @@ pub trait GpuBackend: Send {
     fn context_create(&mut self, ordinal: u32) -> Result<u64, GpuError>;
     fn context_destroy(&mut self, context: u64) -> Result<(), GpuError>;
     fn synchronize(&mut self, context: u64) -> Result<(), GpuError>;
+    fn stream_create(&mut self, context: u64, flags: u32) -> Result<u64, GpuError>;
+    fn stream_destroy(&mut self, context: u64, stream: u64) -> Result<(), GpuError>;
+    fn stream_synchronize(&mut self, context: u64, stream: u64) -> Result<(), GpuError>;
+    fn stream_wait_event(&mut self, context: u64, stream: u64, event: u64)
+    -> Result<u64, GpuError>;
+    fn event_create(&mut self, context: u64, flags: u32) -> Result<u64, GpuError>;
+    fn event_destroy(&mut self, context: u64, event: u64) -> Result<(), GpuError>;
+    fn event_record(&mut self, context: u64, event: u64, stream: u64) -> Result<u64, GpuError>;
+    fn event_query(&mut self, context: u64, event: u64) -> Result<bool, GpuError>;
+    fn event_synchronize(&mut self, context: u64, event: u64) -> Result<(), GpuError>;
 
     fn mem_alloc(&mut self, context: u64, bytes: u64) -> Result<u64, GpuError>;
     fn mem_free(&mut self, context: u64, ptr: u64) -> Result<(), GpuError>;
     fn memcpy_htod(&mut self, context: u64, dst: u64, data: &[u8]) -> Result<(), GpuError>;
     fn memcpy_dtoh(&mut self, context: u64, src: u64, len: u64) -> Result<Vec<u8>, GpuError>;
+    fn memcpy_htod_async(
+        &mut self,
+        context: u64,
+        dst: u64,
+        data: &[u8],
+        stream: u64,
+    ) -> Result<u64, GpuError>;
+    fn memcpy_dtoh_async(
+        &mut self,
+        context: u64,
+        src: u64,
+        len: u64,
+        stream: u64,
+    ) -> Result<(Vec<u8>, u64), GpuError>;
     fn memset_d8(&mut self, context: u64, dst: u64, value: u8, len: u64) -> Result<(), GpuError>;
 
     fn module_load(&mut self, context: u64, image: &[u8]) -> Result<u64, GpuError>;
@@ -273,6 +415,33 @@ mod tests {
         fn synchronize(&mut self, _: u64) -> Result<(), GpuError> {
             self.record("synchronize").map(|_| ())
         }
+        fn stream_create(&mut self, _: u64, _: u32) -> Result<u64, GpuError> {
+            self.record("stream_create").map(|_| 0)
+        }
+        fn stream_destroy(&mut self, _: u64, _: u64) -> Result<(), GpuError> {
+            self.record("stream_destroy").map(|_| ())
+        }
+        fn stream_synchronize(&mut self, _: u64, _: u64) -> Result<(), GpuError> {
+            self.record("stream_synchronize").map(|_| ())
+        }
+        fn stream_wait_event(&mut self, _: u64, _: u64, _: u64) -> Result<u64, GpuError> {
+            self.record("stream_wait_event").map(|_| 0)
+        }
+        fn event_create(&mut self, _: u64, _: u32) -> Result<u64, GpuError> {
+            self.record("event_create").map(|_| 0)
+        }
+        fn event_destroy(&mut self, _: u64, _: u64) -> Result<(), GpuError> {
+            self.record("event_destroy").map(|_| ())
+        }
+        fn event_record(&mut self, _: u64, _: u64, _: u64) -> Result<u64, GpuError> {
+            self.record("event_record").map(|_| 0)
+        }
+        fn event_query(&mut self, _: u64, _: u64) -> Result<bool, GpuError> {
+            self.record("event_query").map(|_| false)
+        }
+        fn event_synchronize(&mut self, _: u64, _: u64) -> Result<(), GpuError> {
+            self.record("event_synchronize").map(|_| ())
+        }
         fn mem_alloc(&mut self, _: u64, _: u64) -> Result<u64, GpuError> {
             self.record("mem_alloc").map(|_| 0)
         }
@@ -284,6 +453,18 @@ mod tests {
         }
         fn memcpy_dtoh(&mut self, _: u64, _: u64, _: u64) -> Result<Vec<u8>, GpuError> {
             self.record("memcpy_dtoh").map(|_| Vec::new())
+        }
+        fn memcpy_htod_async(&mut self, _: u64, _: u64, _: &[u8], _: u64) -> Result<u64, GpuError> {
+            self.record("memcpy_htod_async").map(|_| 0)
+        }
+        fn memcpy_dtoh_async(
+            &mut self,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<(Vec<u8>, u64), GpuError> {
+            self.record("memcpy_dtoh_async").map(|_| (Vec::new(), 0))
         }
         fn memset_d8(&mut self, _: u64, _: u64, _: u8, _: u64) -> Result<(), GpuError> {
             self.record("memset_d8").map(|_| ())
@@ -338,6 +519,71 @@ mod tests {
             (GpuRequest::ContextDestroy { context: 1 }, "context_destroy"),
             (GpuRequest::Synchronize { context: 1 }, "synchronize"),
             (
+                GpuRequest::StreamCreate {
+                    context: 1,
+                    flags: 0,
+                },
+                "stream_create",
+            ),
+            (
+                GpuRequest::StreamDestroy {
+                    context: 1,
+                    stream: 2,
+                },
+                "stream_destroy",
+            ),
+            (
+                GpuRequest::StreamSynchronize {
+                    context: 1,
+                    stream: 2,
+                },
+                "stream_synchronize",
+            ),
+            (
+                GpuRequest::StreamWaitEvent {
+                    context: 1,
+                    stream: 2,
+                    event: 3,
+                },
+                "stream_wait_event",
+            ),
+            (
+                GpuRequest::EventCreate {
+                    context: 1,
+                    flags: 0,
+                },
+                "event_create",
+            ),
+            (
+                GpuRequest::EventDestroy {
+                    context: 1,
+                    event: 3,
+                },
+                "event_destroy",
+            ),
+            (
+                GpuRequest::EventRecord {
+                    context: 1,
+                    event: 3,
+                    stream: 2,
+                },
+                "event_record",
+            ),
+            (
+                GpuRequest::EventQuery {
+                    context: 1,
+                    event: 3,
+                },
+                "event_query",
+            ),
+            (
+                GpuRequest::EventSynchronize {
+                    context: 1,
+                    event: 3,
+                },
+                "event_synchronize",
+            ),
+            (
                 GpuRequest::MemAlloc {
                     context: 1,
                     bytes: 8,
@@ -360,6 +606,24 @@ mod tests {
                     len: 3,
                 },
                 "memcpy_dtoh",
+            ),
+            (
+                GpuRequest::MemcpyHtoDAsync {
+                    context: 1,
+                    dst: 2,
+                    data: vec![1],
+                    stream: 3,
+                },
+                "memcpy_htod_async",
+            ),
+            (
+                GpuRequest::MemcpyDtoHAsync {
+                    context: 1,
+                    src: 2,
+                    len: 3,
+                    stream: 4,
+                },
+                "memcpy_dtoh_async",
             ),
             (
                 GpuRequest::MemsetD8 {
@@ -439,6 +703,7 @@ mod tests {
                 grid: [1, 1, 1],
                 block: [1, 1, 1],
                 shared_mem_bytes: 0,
+                stream: None,
                 params,
             },
         );

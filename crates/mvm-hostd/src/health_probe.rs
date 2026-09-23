@@ -593,6 +593,7 @@ mod tests {
             health_check,
             grants: None,
             gpu: false,
+            gpu_device: None,
         }
     }
 

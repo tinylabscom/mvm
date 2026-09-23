@@ -49,6 +49,25 @@ fn bind_proof(transport: &EndpointTransport) -> Option<PathBuf> {
     }
 }
 
+fn endpoint_command(
+    endpoint: &Path,
+    listen: &str,
+    vm_name: &str,
+    device_ordinal: Option<u32>,
+) -> Command {
+    let mut command = Command::new(endpoint);
+    command
+        .arg("--listen")
+        .arg(listen)
+        .arg("--backend")
+        .arg("auto");
+    if let Some(ordinal) = device_ordinal {
+        command.arg("--device").arg(ordinal.to_string());
+    }
+    command.arg("--vm").arg(vm_name);
+    command
+}
+
 /// Spawn this VM's GPU endpoint and wait until its listener is bound.
 ///
 /// `transport` is backend-shaped exactly like the network endpoint's:
@@ -58,6 +77,7 @@ pub fn spawn_gpu_endpoint(
     vm_name: &str,
     state_dir: &Path,
     transport: EndpointTransport,
+    device_ordinal: Option<u32>,
 ) -> Result<()> {
     let endpoint = resolve_gpu_endpoint_path()?;
     let listen = match &transport {
@@ -67,13 +87,7 @@ pub fn spawn_gpu_endpoint(
     let log_path = state_dir.join(GPU_ENDPOINT_LOG_FILE);
     let log = std::fs::File::create(&log_path)
         .with_context(|| format!("creating {}", log_path.display()))?;
-    let mut child = Command::new(&endpoint)
-        .arg("--listen")
-        .arg(&listen)
-        .arg("--backend")
-        .arg("auto")
-        .arg("--vm")
-        .arg(vm_name)
+    let mut child = endpoint_command(&endpoint, &listen, vm_name, device_ordinal)
         .stdin(Stdio::null())
         .stdout(log.try_clone().context("cloning the GPU endpoint log")?)
         .stderr(log)
@@ -225,5 +239,32 @@ mod tests {
             Some(PathBuf::from("/run/gpu.sock"))
         );
         assert_eq!(uds_bind_path("vsock:5256"), None);
+    }
+
+    #[test]
+    fn a_device_pin_is_forwarded_to_the_endpoint_command() {
+        let command = endpoint_command(
+            Path::new("mvm-gpu-endpoint"),
+            "unix:/run/gpu.sock",
+            "worker",
+            Some(3),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "--listen",
+                "unix:/run/gpu.sock",
+                "--backend",
+                "auto",
+                "--device",
+                "3",
+                "--vm",
+                "worker"
+            ]
+        );
     }
 }

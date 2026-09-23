@@ -21,16 +21,12 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
-- [x] **Cubin and fatbin kernel-parameter metadata — issue #3564.**
-      `specs/plans/2026-09-23-cubin-fatbin-kernel-metadata.md`. The guest CUDA
-      shim now recovers bounded launch layouts from cubin ELF
-      `.nv.info.<entry>` records and basic uncompressed fatbin v1 containers,
-      while retaining PTX fallback. Malformed, truncated, over-cap,
-      unsupported-endian, compressed-only, sparse, or conflicting layouts
-      fail closed before guessed workload-pointer reads. The 17 core and 2
-      CUDA-shim tests, serialized workspace tests and isolated doctest retry,
-      workspace all-target Clippy, gated-target compilation, formatting, and
-      all 74 repository gates are green. Ready for merge-queue delivery.
+- [x] **Make boot admission's image-source selector request-scoped — issue #3559.**
+      `AdmitPlanForBootParams` now carries the caller-captured local image
+      checkout instead of rereading `MVM_IMAGES_DIR`, and a parallel
+      release-channel regression proves configured and unconfigured admissions
+      cannot contaminate each other. See
+      `specs/plans/2026-09-23-admission-image-source-context.md`.
 
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
@@ -151,9 +147,17 @@ docs commit went out as #3581). Under the
       the `GuestService::Gpu` channel across all four VMM tiers, the
       runner-spawned per-VM endpoint with reap, and the Nix package
       recipes. Runtime-overlay composition of the shims is follow-up work
-      in the mvm-images repository. Cubin and basic fatbin parameter metadata
-      is implemented by issue #3564; CUDA graphs/fork-reconnect and
-      `cuGetProcAddress` remain named follow-ups in the plan and ADR.
+      in the mvm-images repository. Issue #3565 adds typed streams, events,
+      asynchronous copies and completion positions across the wire, native
+      backend and both CUDA shims. The stub models per-stream ordering and
+      event readiness deterministically, including default-stream compatibility
+      and fail-closed forged or stale handles. Issue #3566 passes the backend's
+      real device count and ordinals through, gives the deterministic endpoint
+      two distinct devices, and adds `--gpu-device N` / `gpu_device = N`
+      pinning. A pinned VM sees guest ordinal zero mapped to host ordinal `N`;
+      unavailable host ordinals and hidden guest ordinals fail closed. Named follow-ups (CUDA graphs
+      and fork-reconnect, cuGetProcAddress, cubin param metadata) sit in the
+      plan and ADR.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.

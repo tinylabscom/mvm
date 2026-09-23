@@ -13,9 +13,10 @@ CUDA result codes and output buffers are returned to the calling workload.
 Contexts, allocations, modules, and functions are represented by opaque handles.
 The handles are meaningful only to the endpoint that created them.
 Module images and launch parameters are copied into bounded protocol messages.
-The shim parses bounded PTX, cubin ELF, and basic uncompressed fatbin metadata
-to determine kernel parameter sizes safely. A layout that cannot be proved is
-refused rather than inferred from workload pointers.
+The shim parses PTX metadata to determine kernel parameter sizes safely.
+Streams and events are opaque endpoint handles. Stream-backed kernel launches,
+asynchronous host/device copies, event record/query/synchronize, and stream
+waits all use the same request ordering as the host backend.
 
 ## Scope
 

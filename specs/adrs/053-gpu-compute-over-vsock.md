@@ -52,7 +52,9 @@ on the host.
    path, the dedicated GPU vsock channel (port 5256,
    `mvm_contract::protocol::gpu::GPU_RPC_PORT`), and a per-VM
    `mvm-gpu-endpoint` host process spawned by the workload runner and
-   reaped with the VM.
+   reaped with the VM. An optional `--gpu-device N` / `gpu_device = N`
+   selection pins the VM to host ordinal `N`, exposed as guest ordinal zero;
+   without a pin, backend ordinals pass through unchanged.
 2. **The endpoint owns the backend selection.** It loads the real
    `libcuda.so.1` / `libnvidia-ml.so.1` by `dlopen` when present
    (`--backend auto`, the default) and falls back to a deterministic stub
@@ -84,9 +86,9 @@ on the host.
    Apple Silicon hosts** — a second backend family behind the same
    endpoint/transport, not a fork of it. Named follow-ups:
    `cuGetProcAddress` resolution, CUDA graphs and warm device-memory
-   handoff across fork, streams/events, cubin param metadata, multi-GPU,
-   the MLX backend, and — separately, under ADR-029's option (A) rules —
-   any paravirtual display question.
+   handoff across fork, cubin param metadata, peer-device operations, the MLX
+   backend, and — separately, under ADR-029's option (A) rules — any
+   paravirtual display question.
 
 ## Consequences
 

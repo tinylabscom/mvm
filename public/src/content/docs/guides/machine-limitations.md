@@ -84,6 +84,13 @@ passthrough, which remains unsupported. Do not depend on GPU access from a
 machine that did not explicitly opt in: without the opt-in, an
 accelerator is not available to the guest.
 
+On this path, which is not part of the default machine surface, `--gpu` exposes
+the backend's available device ordinals. `--gpu-device N` is likewise not part of the default
+machine surface and pins the VM to host ordinal `N`. A pinned VM sees exactly
+one guest device at ordinal `0`; the endpoint maps it to the selected host
+device and refuses any other guest ordinal. An unavailable host ordinal is a
+startup error rather than a fallback to another device.
+
 ## Host And Guest Architecture Support
 
 Supported host/runtime combinations are listed in
@@ -104,4 +111,3 @@ complete `machine pack` / `machine run <artifact>` product workflow.
 Until the pack/run workflow lands, keep transfer, cleanup, and lower-level
 artifact operations in advanced docs and do not present `.mvm` artifacts as
 self-executing bypass blobs.
-
