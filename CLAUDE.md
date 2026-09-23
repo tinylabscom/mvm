@@ -9,6 +9,8 @@ Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handl
 
 Multi-tenant fleet orchestration (tenants, pools, instances, agents, coordinators) lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repository.
 
+The system-image train (builder VM, default and rootless workload images, workload kernel, runtime overlay, SDK sidecars) lives in the separate [mvm-images](https://github.com/tinylabscom/mvm-images) repository. A contributor build discovers a sibling `mvm-images` checkout automatically (override with `MVM_IMAGES_DIR`); the migration of building and consumer trust out of this repository is tracked in `specs/plans/2026-09-16-image-repository-extraction.md`.
+
 ```
 macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
