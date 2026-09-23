@@ -1627,6 +1627,14 @@ mod tests {
 
     #[test]
     fn resolve_launch_wasm_module_skips_kernel_initrd_and_verity() {
+        // The launch resolver validates $MVM_IMAGES_DIR even for a wasm module
+        // (which uses none of its contents), and a concurrent doctor test
+        // points it at a "missing" path to exercise the refusal. Hold the env
+        // guard and unset it: resolution then falls back to this checkout's
+        // in-tree image flakes, which is deterministic on any machine — and
+        // immune to an ambient MVM_IMAGES_DIR in the developer's shell.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let module_path = "/tmp/dummy.wasm";
         let image = ImageSource::WasmModule {
             module_path: module_path.to_string(),
