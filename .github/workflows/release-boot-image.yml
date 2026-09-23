@@ -497,9 +497,8 @@ jobs:
       - name: Install firecracker for the boot gate
         if: matrix.arch == 'x86_64'
         env:
-          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
-          # launch path passes `--enable-pci`, which older Firecracker rejects
-          # before it creates its API socket.
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT` so the
+          # release witness exercises the same VMM release as product boots.
           FC_VERSION: v1.17.0
         run: |
           set -euo pipefail

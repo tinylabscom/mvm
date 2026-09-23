@@ -166,15 +166,11 @@ layout), with one local deviation documented below.
   --no-detect` printed `hello-from-mvm-images-aarch64-rpi1`, `aarch64`,
   `6.12.110`, `witness-done` — the mvm-images default image bytes booted
   end to end through the real `mvmctl` path on real aarch64 KVM hardware.
-- **Builder build: blocked by the host kernel, not the images.** Two
-  findings, both filed:
-  - #3577 — `mvmctl` launches Firecracker with a hardcoded `--enable-pci`;
-    on GICv2 hosts the PCI device model leaves every virtio device probing
-    `-524`, so no unpatched `mvmctl` Firecracker boot runs on this Pi at
-    all. The witness build drops the flag (one line); plain-Firecracker
-    replays of mvm's exact API config with and without the flag pin the
-    diagnosis.
-  - #3578 — the substitution endpoint confines itself with Landlock and
+- **Builder build: blocked by the host kernel, not the images.** Two findings
+  came from this witness. The first is resolved: #3577 removed the hardcoded
+  `--enable-pci`, so Firecracker keeps virtio devices on MMIO and the GICv2 Pi
+  follows the same launch shape as the successful witness build. The remaining
+  blocker is #3578: the substitution endpoint confines itself with Landlock and
     the Pi OS kernel has `CONFIG_SECURITY_LANDLOCK` unset, so the endpoint
     refuses to run (`ruleset status NotEnforced; refusing partial
     confinement`), the guest egress proxy never binds, and

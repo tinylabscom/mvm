@@ -21,6 +21,14 @@
       Focused and full workspace tests, package and workspace Clippy,
       gated-target compilation, formatting, and all 74 repository gates pass.
 
+- [ ] **Firecracker GICv2 virtio-mmio launch — issue #3577.**
+      `specs/plans/2026-09-23-firecracker-gicv2-virtio-mmio.md`. The launch
+      script no longer forces PCI for block, vsock, and entropy devices, so
+      Firecracker retains its portable virtio-mmio device model on GICv2 and
+      GICv3 hosts. The exact launch-line regression, full backend and workspace
+      suites, all-target Clippy, formatting, gated-target checks, and all 74
+      repository-policy gates are green. Merge-queue delivery remains.
+
 - [x] **Keep host-only builder controls out of the resident daemon — issue #3485.**
       The path-included daemon now compiles only its request execution core:
       readiness, socket discovery, handshakes, and operation-id minting live in

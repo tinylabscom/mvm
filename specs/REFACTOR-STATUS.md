@@ -14,6 +14,13 @@ Last updated: 2026-09-23
       workspace tests, zero-warning Clippy, gated-target compilation,
       formatting, and all 74 repository gates pass.
 
+- [ ] **Firecracker GICv2 virtio-mmio launch — issue #3577.**
+      `specs/plans/2026-09-23-firecracker-gicv2-virtio-mmio.md`. The production
+      launch no longer forces PCI for Firecracker's virtio block, vsock, and
+      entropy devices. Backend and workspace suites, all-target Clippy, and
+      formatting are green; gated-target checks and all 74 repository-policy
+      gates are green. Merge-queue delivery remains.
+
 - [x] **Firecracker live-parent fork activation — issue #3552, PR #3586.**
       `specs/plans/2026-09-21-live-fork-fc-netns.md`. The vsock-only
       invariant retires the old TAP/MAC collision rationale: the fork guard

@@ -271,7 +271,7 @@ fn firecracker_launch_script_as(
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
-        {scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1" --enable-pci' {q_pid} {q_socket} \
+        {scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
         {record_launcher}
         "#,
@@ -675,6 +675,17 @@ mod tests {
         assert!(
             script.contains("exec firecracker"),
             "the shell must exec Firecracker, never leave one behind: {script}"
+        );
+    }
+
+    #[test]
+    fn the_launch_line_uses_virtio_mmio_instead_of_forcing_pci() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+
+        assert!(script.contains("exec firecracker --api-sock"), "{script}");
+        assert!(
+            !script.contains("--enable-pci"),
+            "virtio-mmio is portable across GICv2 and GICv3 hosts: {script}"
         );
     }
 

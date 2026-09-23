@@ -577,10 +577,10 @@ Delivery slices, one PR each:
       `mvm-images` build 35462836122 subsequently booted through `mvmctl` on
       Firecracker/KVM, reached the guest agent, activated, ran `/bin/true`, and
       exited 0. On real aarch64 KVM hardware (rpi1, a Pi 4), the default image
-      booted end to end through Firecracker; the builder build there is blocked
-      by #3577 (a hardcoded `--enable-pci` that breaks GICv2 hosts, worked
-      around in the witness build) and #3578 (the endpoint's Landlock
-      confinement refuses the Pi OS kernel), both filed from the witness. The
+      booted end to end through Firecracker. The GICv2 launch blocker #3577 is
+      resolved: mvm no longer forces PCI for virtio devices, matching the
+      successful witness build. The builder build there remains blocked by
+      #3578 (the endpoint's Landlock confinement refuses the Pi OS kernel). The
       final builder build completed end to end on physical Apple Silicon HVF
       after the #3522 egress fix: the in-guest build finished, its sealed
       workload launched, and the expected exit code was observed. Also found:
