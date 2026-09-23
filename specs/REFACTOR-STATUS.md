@@ -454,6 +454,11 @@ Last updated: 2026-09-23
             witness, with the fixes the live sibling boot surfaced (manifest
             entry names, sealed perms, Unknown-libc, admission rescoped to
             tier refusals); the one open leg is filed as #3615.
+      - [x] W6 #3369 (local migration): signed `mvm-images` image-set pin,
+            exact new identity plus explicit legacy window, protocol-first
+            acquisition, Stage 0/default/update/CI/WebLinux lock routing, and
+            an evidence-only pin-update PR workflow. Producer revocation
+            publication and physical HVF/KVM boot evidence remain external.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

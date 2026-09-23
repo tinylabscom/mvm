@@ -618,74 +618,25 @@ fn build_default_microvm_via_libkrun(
     Ok((kernel, rootfs))
 }
 
-pub(in crate::commands) fn default_microvm_assets(
-    cache_dir: &str,
-    arch: &str,
-) -> [(String, String); 5] {
-    [
-        (
-            format!("default-microvm-vmlinux-{arch}"),
-            format!("{cache_dir}/vmlinux"),
-        ),
-        (
-            format!("default-microvm-rootfs-{arch}.ext4"),
-            format!("{cache_dir}/rootfs.ext4"),
-        ),
-        (
-            format!("default-microvm-rootfs-{arch}.verity"),
-            format!("{cache_dir}/rootfs.verity"),
-        ),
-        (
-            format!("default-microvm-rootfs-{arch}.roothash"),
-            format!("{cache_dir}/rootfs.roothash"),
-        ),
-        (
-            format!("default-microvm-meta-{arch}.json"),
-            format!("{cache_dir}/mvm-meta.json"),
-        ),
-    ]
-}
-
 fn download_default_microvm_image(
     cache_dir: &str,
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
-    // The default microVM ships on the boot image counter, not the CLI's. See
-    // `update::boot_image_release` for why deriving this from CARGO_PKG_VERSION
-    // 404s for most of a release cycle.
-    let (tag, image_version) = crate::update::boot_image_release()?;
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
         "x86_64"
     };
-
-    let assets = default_microvm_assets(cache_dir, arch);
-    let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-
+    let guest_arch = arch.parse().context("parse host architecture")?;
+    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let tag = mvm_core::image_set::image_train_lock()
+        .image_set
+        .release_tag
+        .as_str();
     ui::info(&format!("Downloading default microVM image ({tag})..."));
-
-    let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
-    let expected = fetch_expected_hashes(
-        &ChecksumManifest {
-            base_url: &base_url,
-            asset: &checksums_name,
-            version: &image_version,
-            train: mvm_build::release_signature::ReleaseTrain::BootImage,
-        },
-        &asset_names,
-    )?;
-
-    for (name, dest) in &assets {
-        ui::info(&format!("  Fetching {name}..."));
-        let url = format!("{base_url}/{name}");
-        download_file(&url, dest).with_context(|| format!("Failed to download {url}"))?;
-        verify_artifact_hash(dest, name, expected.get(name.as_str()))?;
-    }
-
-    ui::success("Default microVM image downloaded, hash-verified, and cached.");
+    image_set.fetch_default_workload(guest_arch, std::path::Path::new(cache_dir))?;
+    ui::success("Default microVM image downloaded from the signed image set and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
 }
 

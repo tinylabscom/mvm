@@ -1375,9 +1375,12 @@ fn release_lookups_pass_the_filter_directly_to_gh_jq() {
 #[test]
 fn the_website_deployment_takes_its_runtime_pack_from_the_locked_tag() {
     let workflow = website_deploy_workflow();
+    let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
+        .expect("read WebLinux downloader");
     assert!(
-        workflow.contains(r#"BOOT_TAG="$(./scripts/locked-image-tag.sh)""#),
-        "workers.yml must read the boot image tag from images.lock"
+        workflow.contains("download-qemu-wasm-smoke-pack.sh")
+            && downloader.contains(r#"LOCKED_TAG="$("$SCRIPT_DIR/locked-image-tag.sh")""#),
+        "workers.yml must delegate to a downloader that reads the image-set tag from images.lock"
     );
     assert!(
         !workflow.contains("gh release list"),
@@ -1469,6 +1472,8 @@ fn workers_deployment_refuses_an_incomplete_weblinux_bundle() {
 fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     let boot_image = boot_image_workflow();
     let workers = website_deploy_workflow();
+    let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
+        .expect("read WebLinux downloader");
     let publish_needs = job_block(&boot_image, "publish-boot-image")
         .lines()
         .find(|line| line.trim_start().starts_with("needs:"))
@@ -1486,20 +1491,15 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
         publish_needs.contains("qemu-wasm-site-pack"),
         "the boot-image release must wait for the QEMU-WASM pack before publishing"
     );
-    for asset in [
-        "qemu-wasm-smoke-pack.tar.gz",
-        "qemu-wasm-smoke-pack.tar.gz.sha256",
-        "qemu-wasm-smoke-pack.tar.gz.sha256.bundle",
-    ] {
-        assert!(
-            boot_image.contains(asset),
-            "the boot-image release must publish {asset} for site deployments"
-        );
-        assert!(
-            workers.contains(asset),
-            "workers.yml must download and verify {asset} instead of rebuilding QEMU"
-        );
-    }
+    let asset = "qemu-wasm-smoke-pack.tar.gz";
+    assert!(
+        boot_image.contains(asset),
+        "the boot-image release must publish {asset} for site deployments"
+    );
+    assert!(
+        downloader.contains(asset),
+        "the Workers downloader must acquire and verify {asset} instead of rebuilding QEMU"
+    );
     assert!(
         !workers.contains("nix build ./nix#qemu-wasm-smoke-pack"),
         "site deployment must not rebuild the tagged QEMU-WASM pack"
@@ -1509,14 +1509,14 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
         "site deployment no longer needs Nix once the QEMU-WASM pack is released"
     );
     assert!(
-        workers.contains("cosign verify-blob")
-            && workers.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
-            && workers.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
-        "site deployment must verify the tag-built pack's release identity"
+        downloader.contains("cosign verify-blob")
+            && downloader.contains("image_set workflow")
+            && downloader.contains("image_set tag_ref")
+            && downloader.contains("sha256sum -c expected.txt"),
+        "site deployment must verify the locked root identity and member digest"
     );
     assert!(
-        workers.contains(r#"BOOT_TAG="$(./scripts/locked-image-tag.sh)""#)
-            && workers.contains("gh release view \"${BOOT_TAG}\""),
+        workers.contains("download-qemu-wasm-smoke-pack.sh") && downloader.contains("LOCKED_TAG"),
         "site deployment must take the pack from the release images.lock pins"
     );
     assert!(
@@ -1591,39 +1591,14 @@ fn weblinux_qemu_module_is_staged_below_the_cloudflare_asset_file_limit() {
 #[test]
 fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
     let tag = mvmctl::core::config::default_boot_image_tag();
-    let workflow = boot_image_workflow();
-
-    // The tag the workflow publishes under is its own ref name, so a tag push
-    // that fires this workflow is exactly the release the URL below resolves.
+    let lock = mvmctl::core::image_set::image_train_lock();
+    assert_eq!(tag, lock.image_set.release_tag.as_str());
+    assert_eq!(lock.repository.as_str(), "tinylabscom/mvm-images");
+    let url = lock.manifest_url();
     assert!(
-        push_tag_patterns(&workflow)
-            .iter()
-            .any(|pattern| tag.starts_with(pattern.trim_end_matches('*'))),
-        "{tag} would not fire release-boot-image.yml, so no release by that name \
-         is ever created"
+        url.contains("/tinylabscom/mvm-images/releases/download/image-set/v"),
+        "the composed URL must sit under the external image-set release: {url}"
     );
-    assert!(
-        workflow.contains("TAG_NAME: ${{ github.ref_name }}")
-            && workflow.contains("gh release create \"${TAG_NAME}\""),
-        "the publish job must create the release under the pushed tag verbatim"
-    );
-
-    for asset in [
-        "default-microvm-vmlinux-x86_64",
-        "default-microvm-rootfs-x86_64.ext4",
-        "default-microvm-x86_64-checksums-sha256.txt",
-    ] {
-        let url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}/{asset}");
-        assert!(
-            url.contains("/releases/download/boot-image/v"),
-            "the composed URL must sit under the boot image tag: {url}"
-        );
-        let staged = asset.replace("x86_64", "${ARCH}");
-        assert!(
-            workflow.contains(&staged),
-            "the workflow must stage {staged:?}, or {url} 404s"
-        );
-    }
 }
 
 /// A release candidate must not be published as GitHub's "Latest" release.
@@ -1683,7 +1658,7 @@ fn a_prerelease_tag_is_not_published_as_the_latest_release() {
 fn the_ci_boot_witness_resolves_the_locked_boot_image_tag() {
     let workflow = ci_workflow();
     let resolve = workflow
-        .find(r#"echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)" >> "$GITHUB_ENV""#)
+        .find(r#"echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)""#)
         .expect("the boot witness must resolve IMAGE_TAG from images.lock");
     let fetch = workflow
         .find("- name: Fetch and verify the pinned bootable image")
@@ -1992,6 +1967,56 @@ fn the_initramfs_tarball_carries_every_member_the_extractor_requires() {
         assert!(
             block.contains(member),
             "the initramfs tarball must carry {member:?}, which the extractor requires"
+        );
+    }
+}
+
+#[test]
+fn image_pin_updates_open_evidence_bearing_prs_without_merging_them() {
+    let workflow = fs::read_to_string(".github/workflows/update-image-pin.yml")
+        .expect("image pin workflow must be readable");
+    for evidence in [
+        "root manifest SHA-256",
+        "producer source commit",
+        "compatibility",
+        "keyless signature",
+    ] {
+        assert!(
+            workflow.contains(evidence),
+            "pin update PR body must record {evidence}"
+        );
+    }
+    assert!(workflow.contains("gh pr create"), "workflow must open a PR");
+    assert!(
+        !workflow.contains("gh pr merge")
+            && !workflow.contains("--auto")
+            && !workflow.contains("enablePullRequestAutoMerge"),
+        "pin update workflow must never merge or enable auto-merge"
+    );
+}
+
+#[test]
+fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let workers = fs::read_to_string(".github/workflows/workers.yml").expect("workers workflow");
+    let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
+        .expect("WebLinux downloader");
+    assert!(
+        ci.contains("locked-image-tag.sh image_set repository")
+            && ci.contains("locked-image-tag.sh image_set manifest_sha256")
+            && ci.contains("check")
+    );
+    assert!(workers.contains("download-qemu-wasm-smoke-pack.sh"));
+    for field in [
+        "image_set repository",
+        "image_set manifest_asset",
+        "image_set manifest_sha256",
+        "image_set workflow",
+        "image_set tag_ref",
+    ] {
+        assert!(
+            downloader.contains(field),
+            "WebLinux downloader must resolve {field} from images.lock"
         );
     }
 }

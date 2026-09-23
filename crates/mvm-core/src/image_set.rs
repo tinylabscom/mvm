@@ -43,13 +43,14 @@ pub use local::{
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
-    PinnedArtifact, Stage0KernelPin, image_train_lock,
+    LegacyImageTrain, PinnedArtifact, Stage0KernelPin, image_train_lock,
 };
 pub use trust_tier::ImageTrustTier;
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
-    WorkloadImageSelection, check_against_lock, check_protocol_compatibility, require_complete,
-    select_member, select_workload_image, validate_structure,
+    WorkloadImageSelection, check_against_lock, check_declared_protocol_compatibility,
+    check_protocol_compatibility, require_complete, select_member, select_workload_image,
+    validate_structure,
 };
 pub use verify::{ImageSetVerification, VerifiedArtifact, VerifiedImageSet, verify_image_set};
 

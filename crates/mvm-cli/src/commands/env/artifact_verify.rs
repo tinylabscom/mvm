@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 
+#[cfg(test)]
 use crate::ui;
 
 /// Bump the dev_image_verify_<outcome> counter.
@@ -25,6 +26,7 @@ use crate::ui;
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
 /// so `mvmctl audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
+#[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
     let m = mvm_core::observability::metrics::global();
     let counter = match outcome {
@@ -58,6 +60,7 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// URL is not enough — splitting one back apart would have to guess where the
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
+#[cfg(test)]
 pub(crate) struct ChecksumManifest<'a> {
     /// Per-version release base URL, no trailing slash.
     pub base_url: &'a str,
@@ -70,6 +73,7 @@ pub(crate) struct ChecksumManifest<'a> {
     pub train: mvm_build::release_signature::ReleaseTrain,
 }
 
+#[cfg(test)]
 impl ChecksumManifest<'_> {
     fn url(&self) -> String {
         format!("{}/{}", self.base_url, self.asset)
@@ -94,6 +98,7 @@ impl ChecksumManifest<'_> {
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
+#[cfg(test)]
 pub(crate) fn fetch_expected_hashes(
     manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
@@ -143,6 +148,7 @@ pub(crate) fn fetch_expected_hashes(
 ///
 /// A refusal here is attack-shaped, so it feeds the same counter and audit
 /// line as a bad artifact signature rather than looking like a network blip.
+#[cfg(test)]
 pub(super) fn verify_manifest_signature(
     manifest: &ChecksumManifest<'_>,
     staged: &std::path::Path,
@@ -171,6 +177,7 @@ pub(super) fn verify_manifest_signature(
 /// hex). On mismatch, delete the file and bail with a clear message.
 /// On `MVM_SKIP_HASH_VERIFY=1`, log a warning and accept — the env-var
 /// is the documented escape hatch for emergency-rotation scenarios.
+#[cfg(test)]
 pub(crate) fn verify_artifact_hash(
     path: &str,
     name: &str,

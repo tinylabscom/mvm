@@ -59,36 +59,7 @@ mod default_microvm_tests {
     use super::default_microvm::{
         default_workload_kernel_source, default_workload_kernel_source_for,
     };
-    use super::{KernelSource, default_microvm_assets, missing_workload_kernel_message};
-
-    #[test]
-    fn default_microvm_assets_pins_the_five_asset_contract() {
-        let a = default_microvm_assets("/cache/dm", "aarch64");
-        let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "default-microvm-vmlinux-aarch64",
-                "default-microvm-rootfs-aarch64.ext4",
-                "default-microvm-rootfs-aarch64.verity",
-                "default-microvm-rootfs-aarch64.roothash",
-                "default-microvm-meta-aarch64.json",
-            ],
-            "release asset names must match the default-microvm release job",
-        );
-        let dests: Vec<&str> = a.iter().map(|(_, d)| d.as_str()).collect();
-        assert_eq!(
-            dests,
-            vec![
-                "/cache/dm/vmlinux",
-                "/cache/dm/rootfs.ext4",
-                "/cache/dm/rootfs.verity",
-                "/cache/dm/rootfs.roothash",
-                "/cache/dm/mvm-meta.json",
-            ],
-            "local dests must be the rootfs siblings the backend + admit gate expect",
-        );
-    }
+    use super::{KernelSource, missing_workload_kernel_message};
 
     /// One rule for every workload boot: no default-microvm kernel stands in,
     /// dev or prod. The previous split ("prod never reuses the dev default, dev

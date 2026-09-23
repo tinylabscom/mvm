@@ -11,12 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::cache::{self, AcquiredProvenance};
-use crate::commands::env::artifact_verify::{
-    ChecksumManifest, download_file, fetch_expected_hashes, verify_artifact_hash,
-};
-use crate::commands::env::builder_vm::default_microvm::{
-    DefaultMicrovmVariant, default_microvm_assets,
-};
+use crate::commands::env::builder_vm::default_microvm::DefaultMicrovmVariant;
 use crate::ui;
 
 /// Which image to install, and whether the source-checkout refusal applies.
@@ -74,48 +69,32 @@ fn refuse_in_source_checkout(force: bool) -> Result<()> {
 }
 
 fn resolve_tag(pinned: Option<&str>) -> Result<String> {
-    if let Some(tag) = pinned {
-        return Ok(tag.to_string());
+    let locked = mvm_core::image_set::image_train_lock()
+        .image_set
+        .release_tag
+        .as_str();
+    if let Some(tag) = pinned
+        && tag != locked
+    {
+        bail!(
+            "requested image set {tag} is not the build's locked image set {locked}; update images.lock through the pin-update workflow first"
+        );
     }
-    crate::update::fetch_latest_boot_image_tag()?.context(
-        "no published boot image release to update to (no tag matching \
-         boot-image/v*). Pin one with --tag once the line publishes.",
-    )
+    Ok(locked.to_string())
 }
 
-/// Download every published asset for `tag` into `dir` and hold each one to
-/// the release's signed checksum manifest.
+/// Download the curated workload from the signed root pinned by this build.
 fn fetch_into(dir: &Path, tag: &str) -> Result<()> {
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    };
-    let base_url = crate::update::boot_image_asset_base_url(tag);
-    let assets = default_microvm_assets(&dir.display().to_string(), arch);
-    let checksums = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let names: Vec<&str> = assets.iter().map(|(name, _)| name.as_str()).collect();
-
-    // The manifest's signing identity is tag-bound, and the image train has now
-    // published, so its own identity is what belongs here.
-    let version = tag.strip_prefix("boot-image/v").unwrap_or(tag);
-    let expected = fetch_expected_hashes(
-        &ChecksumManifest {
-            base_url: &base_url,
-            asset: &checksums,
-            version,
-            train: mvm_build::release_signature::ReleaseTrain::BootImage,
-        },
-        &names,
-    )?;
-
-    for (name, dest) in &assets {
-        ui::info(&format!("  Fetching {name}..."));
-        download_file(&format!("{base_url}/{name}"), dest)
-            .with_context(|| format!("download {name} from {base_url}"))?;
-        verify_artifact_hash(dest, name, expected.get(name.as_str()))?;
+    let locked = mvm_core::image_set::image_train_lock()
+        .image_set
+        .release_tag
+        .as_str();
+    if tag != locked {
+        bail!("refusing unlocked image set {tag}; this build pins {locked}");
     }
-    Ok(())
+    let arch = mvm_core::arch::GuestArch::host();
+    crate::commands::env::published_image_set::PublishedImageSet::acquire()?
+        .fetch_default_workload(arch, dir)
 }
 
 /// A scratch directory beside the live entry, removed on drop unless it was

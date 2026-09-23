@@ -2,8 +2,8 @@
 //!
 //! Three verbs over one cache: `status` says what is on disk, `check` says
 //! whether it is behind the published line, and `update` replaces it. They are
-//! separated by what they touch — `status` reads disk, `check` adds the
-//! network, `update` adds a write — so a script can use exactly as much as it
+//! separated by what they touch — `status` and `check` read disk and the
+//! compiled lock, while `update` adds network access and a write — so a script can use exactly as much as it
 //! needs. `verify` touches none of them: it checks a published image set that
 //! is already on disk against the lock that pins it, offline.
 
@@ -26,7 +26,7 @@ pub(in crate::commands) enum BootAction {
         #[arg(long)]
         json: bool,
     },
-    /// Compare the cached boot image against the latest published release
+    /// Compare the cached boot image against this build's locked image set
     Check {
         /// Output as JSON
         #[arg(long)]
@@ -34,7 +34,7 @@ pub(in crate::commands) enum BootAction {
     },
     /// Fetch, verify, and atomically replace the cached boot image
     Update {
-        /// Pin a specific `boot-image/vX.Y.Z` release instead of the latest
+        /// Assert the exact `image-set/vX.Y.Z` release already pinned by this build
         #[arg(long, value_name = "TAG")]
         tag: Option<String>,
         /// Replace the image even in a source checkout, where the local build

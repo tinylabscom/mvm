@@ -23,6 +23,31 @@ const BOOT_IMAGE_IDENTITY_TEMPLATES: &[&str] = &[
     "https://github.com/tinylabscom/mvm/.github/workflows/release-boot-image.yml@refs/tags/boot-image/v{version}",
 ];
 
+/// Identity template for the canonical image-set producer.
+///
+/// This is intentionally separate from the legacy boot-image identities. The
+/// compatibility window accepts both *for their own repositories and tags*;
+/// it never lets either workflow sign the other producer's bytes.
+const IMAGE_SET_IDENTITY_TEMPLATES: &[&str] = &[
+    "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v{version}",
+];
+
+/// Interpolate an image-set version into the canonical producer identity.
+pub fn accepted_image_set_identities(version: &str) -> Vec<String> {
+    IMAGE_SET_IDENTITY_TEMPLATES
+        .iter()
+        .map(|template| template.replace("{version}", version))
+        .collect()
+}
+
+/// Keyless trust root for the canonical signed image-set train.
+pub fn image_set_keyless_trust(version: &str) -> KeylessTrust {
+    KeylessTrust {
+        accepted_identities: accepted_image_set_identities(version),
+        issuer: RELEASE_OIDC_ISSUER.to_string(),
+    }
+}
+
 /// Interpolate an image-line version into every boot image identity template.
 pub fn accepted_boot_image_identities(version: &str) -> Vec<String> {
     BOOT_IMAGE_IDENTITY_TEMPLATES
@@ -186,5 +211,20 @@ mod boot_image_trust_tests {
         let trust = boot_image_keyless_trust("0.1.0");
         assert_eq!(trust.issuer, RELEASE_OIDC_ISSUER);
         assert_eq!(trust.accepted_identities.len(), 1);
+    }
+
+    #[test]
+    fn the_old_and_new_image_identities_are_explicit_and_disjoint() {
+        let legacy = accepted_boot_image_identities("0.1.5");
+        let canonical = accepted_image_set_identities("0.1.0");
+        assert_eq!(
+            canonical,
+            vec![
+                "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v0.1.0"
+                    .to_string()
+            ]
+        );
+        assert!(canonical.iter().all(|identity| !legacy.contains(identity)));
+        assert_eq!(image_set_keyless_trust("0.1.0").issuer, RELEASE_OIDC_ISSUER);
     }
 }

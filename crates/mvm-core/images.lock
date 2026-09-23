@@ -23,18 +23,38 @@
 # against a checksum manifest whose signature has been verified: a pin inherits
 # exactly the trust of the manifest it was copied out of.
 
-schema_version = 1
+schema_version = 2
 
 # Where every artifact below is published. Part of the pin, not configuration:
 # moving hosting is a trust-root change.
-repository = "tinylabscom/mvm"
+repository = "tinylabscom/mvm-images"
+
+# The signed root object. The digest and identity below were verified against
+# the published Sigstore bundle before this pin was advanced.
+[image_set]
+schema_version = 1
+repository = "tinylabscom/mvm-images"
+release_tag = "image-set/v0.1.0"
+manifest_asset = "image-set.json"
+manifest_sha256 = "9bb4f0bf01895b9ebda51f6f574cfa2902ae79e1bb4404c4665942aa4ecbf2ff"
+
+[image_set.signing_identity]
+workflow = ".github/workflows/release.yml"
+tag_ref = "refs/tags/image-set/v0.1.0"
+
+# Copied from that exact signed manifest. Consumers compare this declaration
+# with the host before fetching a member; the pin-update workflow proves the
+# copy agrees with the signed root.
+[compatibility]
+guest_agent_protocol = { min = 2, max = 2 }
+builder_cache_contract = 4
 
 # The boot image release the CLI expects. The boot image ships on its own
 # counter so a rootfs or kernel fix does not have to wait for a CLI release.
 # The whole tag, not a bare version, because it is a path segment in
 # `https://github.com/<repository>/releases/download/<tag>/<asset>`.
 [boot_image]
-release_tag = "boot-image/v0.1.5"
+release_tag = "image-set/v0.1.0"
 
 # The Stage 0 bootstrap kernel — the one kernel that can be neither built nor
 # resolved by the ordinary kernel policy, because Stage 0 is what makes local
@@ -45,12 +65,23 @@ release_tag = "boot-image/v0.1.5"
 # ext4 from this kernel and nothing a newer release is likely to change, so the
 # two tags are pinned separately even when they currently name the same release.
 [stage0_kernel]
-release_tag = "boot-image/v0.1.5"
+release_tag = "image-set/v0.1.0"
 
 [stage0_kernel.artifact.aarch64]
-name = "builder-vm-vmlinux-aarch64"
-sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
+name = "stage0-vmlinux-aarch64"
+sha256 = "b73c1c6feed8722a259fae22a5a742363f73eb934627338c78c69d6e27c4c538"
 
 [stage0_kernel.artifact.x86_64]
-name = "builder-vm-vmlinux-x86_64"
-sha256 = "d07fa3dcca7eac14cd17ffe5c4daeb091676322de9e377a008ba0ec45a382435"
+name = "stage0-vmlinux-x86_64"
+sha256 = "ccd3bf13fd55fe90ca150053fd74d5f9b3f2633f62f5c39c28ec616d7836ac38"
+
+# The previous producer remains explicit throughout the compatibility window.
+# New consumers never select it implicitly; W7 owns mirroring and W8 owns its
+# eventual removal after supported old CLIs have aged out.
+[legacy]
+repository = "tinylabscom/mvm"
+release_tag = "boot-image/v0.1.5"
+
+[legacy.signing_identity]
+workflow = ".github/workflows/release-boot-image.yml"
+tag_ref = "refs/tags/boot-image/v0.1.5"

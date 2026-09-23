@@ -111,6 +111,12 @@ pub fn bootstrap_kernel_pin(arch: &str) -> Option<&'static BootstrapKernelPin> {
 /// Why a bootstrap kernel could not be produced.
 #[derive(Debug, Error)]
 pub enum Stage0KernelError {
+    /// The pinned set cannot communicate with this host. This is checked before
+    /// consulting the cache or transport so incompatible bytes are never
+    /// acquired speculatively.
+    #[error("the pinned image set is incompatible with this host: {detail}")]
+    ProtocolIncompatible { detail: String },
+
     /// No transport was registered, so nothing can download the artifact. A
     /// library-only consumer of `mvm-build` hits this; `mvmctl` registers one
     /// during startup.
@@ -187,6 +193,7 @@ pub fn resolve_bootstrap_kernel(
     cache_dir: &Path,
     arch: &str,
 ) -> Result<VerifiedKernel, Stage0KernelError> {
+    ensure_locked_image_set_compatible()?;
     let pin = bootstrap_kernel_pin(arch).ok_or_else(|| Stage0KernelError::UnsupportedArch {
         arch: arch.to_string(),
     })?;
@@ -199,6 +206,30 @@ pub fn resolve_bootstrap_kernel(
             })
         }
     }
+}
+
+/// Compatibility range compiled into the host and builder cache implementation.
+pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocolSupport {
+    mvm_core::image_set::HostProtocolSupport {
+        guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(
+            mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+            mvm_agentd::vsock::PROTOCOL_VERSION,
+        )
+        .expect("the compiled guest-agent protocol range must be ordered"),
+        builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+    }
+}
+
+/// Refuse the locked set before any member acquisition when protocols diverge.
+pub fn ensure_locked_image_set_compatible() -> Result<(), Stage0KernelError> {
+    let lock = mvm_core::image_set::image_train_lock();
+    mvm_core::image_set::check_declared_protocol_compatibility(
+        &lock.compatibility,
+        &current_image_set_protocol_support(),
+    )
+    .map_err(|error| Stage0KernelError::ProtocolIncompatible {
+        detail: error.to_string(),
+    })
 }
 
 /// Resolve the bootstrap kernel for `arch` against `pin`, downloading it through
@@ -215,6 +246,30 @@ pub fn resolve_bootstrap_kernel_with(
     pin: &BootstrapKernelPin,
     fetcher: &dyn BootstrapKernelFetcher,
 ) -> Result<VerifiedKernel, Stage0KernelError> {
+    let lock = mvm_core::image_set::image_train_lock();
+    resolve_bootstrap_kernel_with_compatibility(
+        cache_dir,
+        arch,
+        pin,
+        fetcher,
+        &lock.compatibility,
+        &current_image_set_protocol_support(),
+    )
+}
+
+fn resolve_bootstrap_kernel_with_compatibility(
+    cache_dir: &Path,
+    arch: &str,
+    pin: &BootstrapKernelPin,
+    fetcher: &dyn BootstrapKernelFetcher,
+    declared: &mvm_core::image_set::ImageSetCompatibility,
+    host: &mvm_core::image_set::HostProtocolSupport,
+) -> Result<VerifiedKernel, Stage0KernelError> {
+    mvm_core::image_set::check_declared_protocol_compatibility(declared, host).map_err(
+        |error| Stage0KernelError::ProtocolIncompatible {
+            detail: error.to_string(),
+        },
+    )?;
     if let Some(verified) = cached_pinned_kernel(cache_dir, arch, pin) {
         return Ok(verified);
     }
@@ -493,6 +548,35 @@ mod tests {
             }
             other => panic!("expected FetchFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_incompatible_lock_is_refused_before_the_transport_is_called() {
+        let incompatible = mvm_core::image_set::ImageSetCompatibility {
+            guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
+            builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+        };
+        let fetcher = FakeFetcher::new(b"must not be fetched");
+        let host = current_image_set_protocol_support();
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_bootstrap_kernel_with_compatibility(
+            tmp.path(),
+            "aarch64",
+            &pin_for(b"must not be fetched"),
+            &fetcher,
+            &incompatible,
+            &host,
+        )
+        .expect_err("disjoint protocols must refuse");
+        assert!(matches!(
+            err,
+            Stage0KernelError::ProtocolIncompatible { .. }
+        ));
+        assert_eq!(
+            fetcher.calls(),
+            0,
+            "protocol refusal must precede acquisition"
+        );
     }
 
     /// The classification this module exists for, unchanged by the move to a
