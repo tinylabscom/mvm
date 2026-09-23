@@ -319,17 +319,23 @@ pub fn admit_plan_for_boot_with_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
-    // A production boot runs only verified released images. The first
-    // refusal keys on the variable being present rather than on whether it
-    // names a usable checkout, so a sealed run cannot be steered by a local
-    // path at all; the second refuses what the boot actually resolved, so a
-    // locally built image already sitting in a managed cache is caught with
-    // the selector unset.
+    // A production boot runs only verified released images, for every
+    // managed artifact it resolves. The tiers recorded with those images
+    // decide (below): a local-dev managed image is refused however it was
+    // selected, with the selector unset as surely as set. The selector
+    // itself is refused here only on release-channel binaries: a release
+    // binary refuses the variable at CLI entry before any verb runs, so a
+    // production run cannot be steered by a local path, while a contributor
+    // build is allowed to use the paired workflow for exactly this
+    // development flow — a sealed workload the developer just built from
+    // their own flake must boot.
     let variant = admission_variant(p.restrict_agent_verbs);
-    mvm_build::image_source::refuse_in_production(
-        variant,
-        mvm_build::image_source::configured_images_dir().as_deref(),
-    )?;
+    if !mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds() {
+        mvm_build::image_source::refuse_in_production(
+            variant,
+            mvm_build::image_source::configured_images_dir().as_deref(),
+        )?;
+    }
     if let Some(tier) = mvm_build::image_source::recorded_tier_for(p.rootfs_path) {
         mvm_build::image_source::refuse_tier_in_production(variant, tier)?;
     }
@@ -2582,11 +2588,15 @@ mod admit_plan_tests {
         .expect("a sealed boot admits an image the cache records as fetched");
     }
 
-    /// A sealed boot refuses while a local image checkout is configured, and
-    /// refuses before it signs anything: the path is never examined, so a
-    /// production run cannot be steered by one whether or not it is usable.
+    /// A contributor build's sealed boot is not refused by the selector
+    /// alone: the paired workflow is how a developer boots a workload built
+    /// from their own flake against images from a sibling checkout. The
+    /// production gate keys on the tiers the managed artifacts record (the
+    /// rootfs here is unmanaged, so nothing records a tier); the selector
+    /// itself is refused only on release-channel binaries, which refuse it at
+    /// CLI entry before any verb runs.
     #[test]
-    fn a_production_admission_refuses_a_configured_local_image_checkout() {
+    fn a_contributor_sealed_boot_with_a_configured_checkout_and_an_unmanaged_image_is_admitted() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set(
             mvm_build::image_source::MVM_IMAGES_DIR_ENV,
@@ -2595,26 +2605,16 @@ mod admit_plan_tests {
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(rootfs_dir.path(), b"local-image-source-prod");
+        let rootfs = write_rootfs(rootfs_dir.path(), b"own-flake-sealed-workload");
         let ledger = InMemoryNonceLedger::new();
 
-        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        admit_plan_for_boot(AdmitPlanForBootParams {
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: true,
             ..pinning_params(&rootfs, &ledger)
         })
-        .expect_err("a sealed boot must refuse a local image source");
-
-        assert!(
-            err.to_string().contains("production admission"),
-            "unexpected refusal: {err:#}"
-        );
-        assert_eq!(
-            std::fs::read_dir(keys_dir.path()).unwrap().count(),
-            0,
-            "the refusal must precede signing"
-        );
+        .expect("a contributor sealed boot admits its own-flake workload");
     }
 
     /// The same configuration leaves a development boot alone: the refusal is

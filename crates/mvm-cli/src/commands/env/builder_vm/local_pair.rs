@@ -120,6 +120,44 @@ pub(crate) fn ensure_pair_workload_kernel(
     Ok(artifact.path.clone())
 }
 
+/// Copy a sealed (read-only) entry file into a writable cache: the entry's
+/// files are sealed at 0444, and cache consumers (the HVF bake opens the
+/// builder rootfs read-write; the sidecar stamp rewrites the default
+/// image's) must not inherit that.
+#[cfg(unix)]
+pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
+    std::fs::copy(from, to)
+        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("making {} writable", to.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
+    std::fs::copy(from, to)
+        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
+    Ok(())
+}
+
+/// A staging directory holding a pair entry's contract files under their
+/// canonical names, for installers that read a fixed layout (the overlay
+/// reader, the SDK sidecar installer). Removed on drop.
+pub(crate) fn staged_contract_files(
+    entry: &mvm_build::image_source::CachedImageSet,
+    files: &[(&str, &str)],
+) -> Result<tempfile::TempDir> {
+    let parent = Path::new(&mvm_core::config::mvm_cache_dir()).join("local-image-builds");
+    std::fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
+    let tmp = tempfile::Builder::new()
+        .prefix("contract-")
+        .tempdir_in(&parent)
+        .with_context(|| format!("creating a staging directory in {}", parent.display()))?;
+    mvm_build::image_source::stage_contract_files(entry, files, tmp.path())?;
+    Ok(tmp)
+}
+
 /// Install a pair-built `builder-vm` entry into the builder-VM cache that
 /// `up` and the build paths read, staging and promoting through the same
 /// sidecar-validated swap Stage 0 uses.
@@ -137,9 +175,13 @@ pub(crate) fn install_pair_builder_vm(
     let staging = stage0_cache::unique_builder_vm_stage0_staging_dir(out_dir_path)?;
     std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
     for name in mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
-        let from = entry.dir.join(name);
-        std::fs::copy(&from, staging.join(name))
-            .with_context(|| format!("copying {} into {}", from.display(), staging.display()))?;
+        // Entry files are named by the producer's manifest
+        // (<role>-<arch>-<name>); resolve through the manifest so the
+        // installed bytes are the ones the set's digests verified.
+        let from = entry
+            .contract_file("builder_vm", name)
+            .with_context(|| format!("the pair's set has no builder_vm artifact {name}"))?;
+        copy_contract_file(from, &staging.join(name))?;
     }
     stage0_cache::write_local_pair_cache_sidecars(&staging, fingerprint)?;
     stage0_cache::promote_local_pair_cache(&staging, out_dir_path, fingerprint)?;
@@ -187,6 +229,92 @@ mod tests {
                 format: "json",
             },
         ]
+    }
+
+    /// W5m's concurrency witness: two pairs — two image checkouts with
+    /// different content, each with its own MVM_HOME the way `bin/dev` scopes
+    /// pair state — publish the same target. Each pair's cache holds exactly
+    /// its own entry under its own key in its own home; the two entries
+    /// coexist, and neither side's build touches the other.
+    #[test]
+    fn two_pairs_publish_concurrently_without_sharing_cache_entries() {
+        let mut env = TestEnv::new();
+        // Distinct committed identities so the pair keys differ no matter
+        // when the fixtures are created.
+        let pair_a = Pair::from_builder_vm_image("# pair A builder-vm image\n");
+        let pair_b = Pair::from_builder_vm_image("# pair B builder-vm image, different\n");
+        let home_a = pair_a.tmp.path().join("home-a");
+        let home_b = pair_b.tmp.path().join("home-b");
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let members = |checkout: &str| {
+            vec![(
+                "builder_vm",
+                Some("linux_direct"),
+                {
+                    let mut files = builder_vm_files();
+                    // Make each pair's bytes distinct so the entries cannot
+                    // be confused even if a key ever collided.
+                    files[3].bytes = format!("{{\"marker\": \"{checkout}\"}}\n").into_bytes();
+                    files
+                },
+                &["virtio_vsock", "virtio_blk"][..],
+            )]
+        };
+
+        env.set("MVM_HOME", &home_a);
+        let entry_a = pair_a.publish(ImageBuildRole::BuilderVm, "default", &members("pair-a"));
+        env.set("MVM_HOME", &home_b);
+        let entry_b = pair_b.publish(ImageBuildRole::BuilderVm, "default", &members("pair-b"));
+
+        // Distinct keys, distinct entry dirs, each under its own home: no
+        // mutable state is shared, and the digest-keyed pair identities keep
+        // the two apart before any bytes are compared.
+        assert_ne!(entry_a.key, entry_b.key);
+        assert!(entry_a.dir.starts_with(home_a.join("cache")));
+        assert!(entry_b.dir.starts_with(home_b.join("cache")));
+
+        // Each home resolves its own pair's entry, and the other pair's
+        // build has not touched it: single-sided invalidation is per pair.
+        let contract = mvm_build::image_source::contract_for(&Pair::target(
+            ImageBuildRole::BuilderVm,
+            "default",
+        ))
+        .expect("builder-vm contract");
+        let mvm_root = mvm_build::image_source::mvm_source_checkout(
+            mvm_build::artifact_acquisition::compiled_channel(),
+        )
+        .unwrap();
+
+        env.set("MVM_HOME", &home_a);
+        let cache_a = mvm_build::image_source::LocalImageCache::open_default();
+        let ctx_a = mvm_build::image_source::EntryContext {
+            images: &pair_a.images,
+            mvm_checkout: &mvm_root,
+            roles: contract.set_roles,
+        };
+        assert!(
+            matches!(
+                cache_a.lookup(&entry_a.key, &ctx_a).unwrap(),
+                mvm_build::image_source::CacheLookup::Hit(_)
+            ),
+            "pair A's home still resolves pair A's entry after pair B built"
+        );
+
+        env.set("MVM_HOME", &home_b);
+        let cache_b = mvm_build::image_source::LocalImageCache::open_default();
+        let ctx_b = mvm_build::image_source::EntryContext {
+            images: &pair_b.images,
+            mvm_checkout: &mvm_root,
+            roles: contract.set_roles,
+        };
+        assert!(
+            matches!(
+                cache_b.lookup(&entry_b.key, &ctx_b).unwrap(),
+                mvm_build::image_source::CacheLookup::Hit(_)
+            ),
+            "pair B's home resolves pair B's entry"
+        );
     }
 
     #[test]

@@ -382,7 +382,10 @@ Last updated: 2026-09-22
             build targets, cache identities and sibling resolver keep each pair
             atomic. Image construction stays in `mvm-images`; both profiles
             are permanently NIC-less and use FlowMux over vsock.
-      - [ ] W5m #3364: the acceptance witnesses.
+      - [x] W5m #3364: the acceptance witnesses — every criterion mapped to a
+            witness, with the fixes the live sibling boot surfaced (manifest
+            entry names, sealed perms, Unknown-libc, admission rescoped to
+            tier refusals); the one open leg is filed as #3615.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
