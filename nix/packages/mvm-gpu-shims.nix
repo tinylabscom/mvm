@@ -12,12 +12,12 @@
   pkgs,
   lib,
   mvmSrc,
-  musl ? false,
+  buildMusl ? false,
 }:
 
 let
-  isMusl = musl;
-  variant = if musl then "musl" else "glibc";
+  isMusl = buildMusl;
+  variant = if buildMusl then "musl" else "glibc";
 
   muslTarget =
     if pkgs.stdenv.hostPlatform.isAarch64 then

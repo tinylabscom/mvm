@@ -1607,6 +1607,10 @@ fn gpu_shim_musl_build_uses_the_prebuilt_target_toolchain() {
         "GPU cdylibs must not rebuild a musl/static Rust and LLVM toolchain"
     );
     assert!(
+        content.contains("buildMusl ? false") && content.contains("isMusl = buildMusl;"),
+        "the musl selector must not be named `musl`, which callPackage auto-fills with pkgs.musl"
+    );
+    assert!(
         content.contains("expected a musl object (NEEDED libc.so)"),
         "the package must reject a musl-labelled shim linked against the wrong libc"
     );

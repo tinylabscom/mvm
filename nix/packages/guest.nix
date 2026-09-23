@@ -69,7 +69,7 @@ in
 
   mvm-gpu-shims-musl = pkgs.callPackage ./mvm-gpu-shims.nix {
     inherit mvmSrc;
-    musl = true;
+    buildMusl = true;
   };
 
   # A guest can only dlopen the variant matching its own libc.
