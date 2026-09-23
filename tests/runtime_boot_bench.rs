@@ -115,6 +115,7 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
         spec.budget.as_millis(),
     );
     assert_within_budget("serial max", serial_summary.max, spec.budget);
+    report_stop_summary("serial", &spec, &serial);
 
     let concurrent = measure_concurrent(&spec)?;
     let concurrent_summary = summarize(&concurrent);
@@ -129,8 +130,37 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
         spec.budget.as_millis(),
     );
     assert_within_budget("concurrent max", concurrent_summary.max, spec.budget);
+    report_stop_summary("concurrent", &spec, &concurrent);
 
     Ok(())
+}
+
+/// Informational stop-latency distribution, printed beside the boot summary.
+///
+/// A distribution, never an assertion: the budget gate stays about boot, and
+/// baseline readers get the teardown half of the lifecycle from the stops the
+/// harness performs anyway. Failed stops are excluded from the percentiles
+/// and counted, so a refusal shows up as a count rather than skewing a
+/// duration.
+fn report_stop_summary(label: &str, spec: &BenchSpec, measurements: &[BootMeasurement]) {
+    let mut stops: Vec<Duration> = measurements.iter().filter_map(|m| m.stop).collect();
+    let failed = measurements.len() - stops.len();
+    if stops.is_empty() {
+        eprintln!(
+            "[runtime_boot_bench] {label} stop backend={} stopped=0 failed={failed}",
+            spec.backend,
+        );
+        return;
+    }
+    stops.sort();
+    eprintln!(
+        "[runtime_boot_bench] {label} stop backend={} stopped={} failed={failed} p50={}ms p95={}ms max={}ms",
+        spec.backend,
+        stops.len(),
+        percentile(&stops, 50).as_millis(),
+        percentile(&stops, 95).as_millis(),
+        stops.last().expect("non-empty stops").as_millis(),
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +300,10 @@ impl ReadySignal {
 #[derive(Debug, Clone)]
 struct BootMeasurement {
     elapsed: Duration,
+    /// Wall clock of the backend's stop call, when it succeeded. `None` for
+    /// a failed stop, so a refused or broken teardown cannot pollute the
+    /// stop distribution while still being warned about.
+    stop: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,14 +406,18 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
         .with_context(|| format!("starting benchmark VM {name} with backend {}", spec.backend))?;
     let ready_result = wait_until_ready(spec, &name);
     let elapsed = started.elapsed();
+    let stop_started = Instant::now();
     let stop_result = backend.stop(&id);
-
-    if let Err(e) = stop_result {
-        eprintln!("[runtime_boot_bench] warning: failed to stop {name}: {e}");
-    }
+    let stop = match stop_result {
+        Ok(()) => Some(stop_started.elapsed()),
+        Err(e) => {
+            eprintln!("[runtime_boot_bench] warning: failed to stop {name}: {e}");
+            None
+        }
+    };
     ready_result?;
 
-    Ok(BootMeasurement { elapsed })
+    Ok(BootMeasurement { elapsed, stop })
 }
 
 fn wait_until_ready(spec: &BenchSpec, name: &str) -> Result<()> {
@@ -673,15 +711,19 @@ fn summary_reports_percentiles_and_max() {
     let measurements = [
         BootMeasurement {
             elapsed: Duration::from_millis(10),
+            stop: Some(Duration::from_millis(5)),
         },
         BootMeasurement {
             elapsed: Duration::from_millis(20),
+            stop: Some(Duration::from_millis(6)),
         },
         BootMeasurement {
             elapsed: Duration::from_millis(30),
+            stop: None,
         },
         BootMeasurement {
             elapsed: Duration::from_millis(40),
+            stop: Some(Duration::from_millis(7)),
         },
     ];
     let summary = summarize(&measurements);
