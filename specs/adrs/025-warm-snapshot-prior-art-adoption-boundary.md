@@ -118,15 +118,15 @@ guest.
 ### Refuse — transparent host-socket networking
 
 The studied runtime routes guest network I/O through a host-side socket
-translation layer rather than a real virtio-net device. mvm removed the
-equivalent shortcut from its own history for the same reason it refuses
-to adopt one here: bypassing virtio-net means guest traffic never crosses
-the auditable network bridge every byte leaving a guest is required to
-traverse. This ADR does not reopen that decision; the studied runtime's
-own documented limitation list for that approach — no raw sockets, no
-multicast, no TUN/TAP, no ICMP — is cited here as independent supporting
-evidence for the cost mvm already chose to pay by staying on virtio-net,
-not as a reason to reconsider.
+translation layer rather than a real virtio-net device. Host-side socket
+origination is not itself what mvm refuses: production workloads have no NIC,
+and every external connection leaves over the flow-aware vsock channel to the
+per-VM endpoint that admits, meters and audits it before opening the host
+socket. The refused mechanism is an opaque or parallel translation path that
+bypasses that single enforcement seam. The studied runtime's documented
+limitations — no raw sockets, multicast, TUN/TAP or ICMP — remain useful
+compatibility evidence, but they are not evidence that mvm stayed on
+virtio-net or retained a network bridge.
 
 A second offering runs a domain-allowlist egress proxy with header-based
 credential injection — inspiration for mvm's own richer typed-connector
@@ -141,13 +141,12 @@ Density benefits from sharing identical guest pages, but host-wide
 same-page merging across unrelated guests is a cross-VM side channel: a
 write to a merged page faults measurably slower, leaking co-residency and
 page contents over a timing channel and amplifying rowhammer. mvm
-therefore constrains page sharing to copy-on-write *within a single fork
-family* — the paused parent and the children forked from it, all the same
-sealed image — and refuses merging across tenants or across distinct
-workload images. This keeps the density win that CoW fork already provides
-(children share the parent's pages intrinsically, same-image) without
-opening a cross-workload channel. The policy gate fails closed: absent an
-explicit same-family scope, no merging occurs.
+currently shares pages only through copy-on-write *within a single fork
+family* — the paused parent and the children forked from it, all from the same
+sealed image. It does not perform active same-page merging and therefore has
+no merging policy gate. If active merging is added, it must be confined to one
+fork family and refuse sharing across tenants or distinct workload images.
+Until then the constraint holds vacuously: no such merging occurs.
 
 ## Out of scope
 
@@ -160,11 +159,12 @@ that owns it, not this one.
 
 ## Consequences
 
-The same-page-merging constraint and warm snapshot-fork restore path are
-implemented. Page-cache priming at freeze time remains a planned refinement;
-no current freeze path touches a declared working set into cache. The work is
-sequenced with the warm-path security witnesses. No existing security
-claim is relaxed: the constraints above gate the warm path more tightly
-than cold boot, extending claims 1, 3, 8, 10, and 13 into the restore path
-rather than weakening them. The full surface-by-surface enumeration lives
-in `specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.
+The warm snapshot-fork restore path is implemented. Active same-page merging
+is not; the same-family rule above is a constraint on any future mechanism.
+Page-cache priming at freeze time also remains a planned refinement; no current
+freeze path touches a declared working set into cache. The work is sequenced
+with the warm-path security witnesses. No existing security claim is relaxed:
+the implemented warm path is gated more tightly than cold boot, extending
+claims 1, 3, 8, 10, and 13 into the restore path rather than weakening them.
+The full surface-by-surface enumeration lives in
+`specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.

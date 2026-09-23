@@ -2,10 +2,10 @@
 
 ## Status
 
-Proposed. Formalizes a posture the codebase already half-implements — the
-agent runs as an unprivileged uid through the first-party static
-`/sbin/mvm-setpriv --no-new-privs` helper, each service runs under its own uid, and
-`/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts — and pins
+Proposed. Formalizes a posture the codebase already half-implements — the agent
+runs as an unprivileged uid through the first-party static
+`/sbin/mvm-setpriv --no-new-privs` helper, each service runs under its own uid,
+and `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts — and pins
 down the stronger property the product overview asserts: the runtime
 itself never runs as root, and there is no usable root account inside the
 guest. The build-time no-setuid-root check and the runtime euid witness
@@ -44,8 +44,9 @@ before anything workload-reachable runs.
 
 ## Decision
 
-Adopt privilege-drop-after-minimal-init. The rootless-runtime invariant
-is the conjunction of the following, all enforced:
+Adopt privilege-drop-after-minimal-init. The target rootless-runtime invariant
+is the conjunction below. The status section records which parts are already
+enforced and which witnesses still block acceptance.
 
 ### 1. No uid 0 for workload or guest-controlled code
 
@@ -64,20 +65,20 @@ return to uid 0. The exact, honest shape of the guarantee is "transiently
 uid 0 during fixed early boot, never uid 0 once anything
 attacker-reachable is live" — not a claim that uid 0 never exists.
 
-### 2. No usable root account
+### 2. No usable root account (target state)
 
 No root login and no root shell: the sole interactive surface is the
 dev-only PTY-over-vsock console, absent from production builds and, even
 in dev, attached to a shell running as the unprivileged workload uid,
 never as root. A sealed production guest has no interactive surface at
-all. No setuid-root path: the production rootfs ships no setuid-root
-binaries and no `su`/`sudo`/`doas`, enforced two ways — `--no-new-privs`
-neutralizes the setuid bit at `execve` time, and a build-time check
-asserts no setuid-root binary is present in the image in the first place.
-`/etc/{passwd,group,nsswitch.conf}` stay read-only bind mounts and the
-root entry carries no usable login. The dm-verity-sealed read-only
-rootfs means a workload cannot introduce a setuid-root binary at runtime
-either.
+all. `--no-new-privs` makes setuid bits inert at `execve` time. Acceptance
+also requires a build-time scan proving that the production rootfs contains no
+setuid-root binary and no `su`/`sudo`/`doas`; that scan has not shipped and is
+deferred with the runtime-euid witness below. Until it does, this ADR does not
+claim that image contents satisfy that stronger property.
+`/etc/{passwd,group,nsswitch.conf}` stay read-only bind mounts and the root
+entry carries no usable login. The dm-verity-sealed read-only rootfs prevents
+a workload from changing the image contents at runtime.
 
 ### 3. Claim numbering is deferred to the implementing change
 
@@ -101,12 +102,11 @@ leaving the workload at uid 0.
 
 ## Consequences
 
-**Positive.** The enforced posture matches the product promise: a
-workload compromise lands on an unprivileged uid with no route to root
-and no root account to target. It shrinks blast radius beyond the
-existing anti-escalation claim — even a workload that wanted to run as
-root cannot, by construction — and it is independently witnessable, so it
-can join the CI-gated claim ledger once its tests exist.
+**Positive.** Once the missing witnesses and image scan land, the posture will
+match the product promise: a workload compromise lands on an unprivileged uid
+with no route to root and no root account to target. It will shrink blast
+radius beyond the existing anti-escalation claim and is independently
+witnessable, so it can join the CI-gated claim ledger with its tests.
 
 **Costs.** Anything that genuinely needs privilege at runtime (binding a
 port below 1024, certain mounts) cannot be served by "run as root" —

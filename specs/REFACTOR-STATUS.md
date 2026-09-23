@@ -202,6 +202,15 @@ Last updated: 2026-09-22
       directly, contributor guidance covers every live ADR, and no temporary
       citation-gate exception remains.
 
+- [x] **ADR implementation claims match the shipped architecture.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A2.6 + A2.7, issue #3319.
+      ADR-038 distinguishes the shipped IPv6 kernel capability from its
+      superseded L3 proposal; ADR-025 bases its networking refusal on the live
+      flow-aware vsock seam and makes same-page merging a future constraint;
+      ADR-026 no longer calls its missing image scan enforced. ADR-023 already
+      described the live vsock substitution path and remains unchanged.
+      Formatting and all 74 repository policy gates pass.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is

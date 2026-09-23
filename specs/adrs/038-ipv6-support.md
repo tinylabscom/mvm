@@ -1,46 +1,36 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Proposed — the implementation described below is not present in the
-current tree. IPv6 remains an architectural direction, not shipped behavior.**
+**Status: Proposed — the networking design below did not ship and its L3
+transport premise was superseded for production workloads by ADR-042
+(2026-08-11).**
 **Date: 2026-08-02**
+**Superseded by: ADR-042 (one flow-aware vsock networking path). The L3
+datapaths this proposal extended are no longer supported production transports;
+new `raw_ip_stack` launches are refused. The address-class threat analysis and
+kernel measurements below remain useful design history, but the proposed
+admission, allocation, guest-configuration, feature-bit and forwarding
+mechanisms do not describe the current tree.**
 
-**What shipped.** The admission guard admits IPv6; `embedded_v4` extracts
-all four embedded forms ahead of every other rule and hands the result to
-the unchanged v4 class check; native v6 classes mirror their v4
-analogues; and the capability seam carries `ipv6_flows` separately from
-`arbitrary_ipv6`. The ordering constraint below — fuzz the ingress parser
-*before* relaxing the guard — was honoured: the fuzz target and its IPv6
-corpus landed first.
-
-**The guest kernel too.** `CONFIG_IPV6=y` in the workload kernel, at a
+**What shipped.** `CONFIG_IPV6=y` in the workload kernel, at a
 measured cost of 200,704 bytes and no IPsec — the IPsec-for-v6 options that
 would have dragged XFRM in are disabled explicitly, and the required-disable
 guard proves their absence on every build. See §"`CONFIG_IPV6` in the
 workload kernel".
 
-**And the guest agent.** A `CONFIG` carrying a v6 half now brings that half
-up beside the v4 one — address, on-link peer, default route, resolver —
-over rtnetlink, in the same privileged setup phase, before the drop. See
-§"In-guest configuration: rtnetlink, not ioctl".
-
-**And the host allocation.** A plan setting `features::IPV6` in its `l3`
-network spec is leased a unique-local `/126` at the same index as its
-`/30`; `assign_config` sends it; the granted feature bits say so; and the
-gateway requires `ipv6_flows` of whichever forwarding backend was selected.
-A plan that does not ask for IPv6 is unchanged in every byte. See §"Host
-allocation: a unique-local /126 per machine, on request".
-**Complements ADR-036 (L3 TUN-over-vsock) and ADR-052 (the userspace
-socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
-deferred set and gives it a design.**
+The guest network initializer still skips IPv6 CIDRs, and the current plan has
+no `features::IPV6`, `ipv6_flows`, `assign_config`, `/126` lease, or `l3`
+network mode. IPv6 socket-address parsing in the proxy path is not an
+implementation of this proposed raw-packet design.
 
 ## Context
 
-`l3-vsock` carries IPv4 only. IPv6 was deferred in ADR-036 as "blocked on
-`CONFIG_IPV6` in the workload kernel", with the note that the protocol and
-the host validator already handle v6. That framing understated what is
-present and overstated what blocks it.
+When this proposal was written, `l3-vsock` carried IPv4 only. ADR-036 had
+deferred IPv6 as "blocked on `CONFIG_IPV6` in the workload kernel", with the
+note that the then-current protocol and host validator already handled v6.
+That framing understated what the proposal still needed and overstated the
+kernel as the blocker.
 
-What already exists:
+The proposal recorded these then-current starting points:
 
 - `mvm_protocol::l3::ip::parse_v6` parses IPv6, walking extension headers
   under explicit bounds (`MAX_IPV6_EXT_HEADERS`, `MAX_IPV6_EXT_BYTES`) that
@@ -52,8 +42,9 @@ What already exists:
 - The userspace datapath is barely coupled to v4: its device and limits
   modules carry no v4 references at all.
 
-What actually blocks it is four admission guards that refuse any non-V4
-destination, and the fact that relaxing them turns on two surfaces at once.
+At the time, four admission guards refused any non-V4 destination, and
+relaxing them would have turned on two surfaces at once. Those L3 surfaces were
+later retired rather than extended.
 
 ## Decision
 
