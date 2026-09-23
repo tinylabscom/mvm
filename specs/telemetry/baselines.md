@@ -114,6 +114,45 @@ outlier (2.3 s max) that also lifted its p95 — recorded, not smoothed away.
 Budgets by the same rule as the offline set (worst-of-five × 1.5, `max`
 unbudgeted): serial boot p50 ≤ 824 ms, p95 ≤ 1,986 ms on this hardware.
 
+### Relation to the launch contract — this is not the prepared-cold lane
+
+These numbers do not speak to the 200/250/300 ms prepared-cold
+dispatch-window budgets
+(`public/src/content/docs/reference/performance.md`), and nothing here
+records a regression against them. The most recent live prepared-cold
+acceptance on the same CPU (i7-7700) measured 171.5/176.0/178.0 ms
+p50/p95/p99 — inside its budget
+(`specs/sprint/delivery/2574-firecracker-readiness-retry-floor.md`, raw
+evidence beside it under `specs/evidence/performance/`). The two lanes
+measure different things and differ in every input that matters:
+
+- **Profile**: this lane runs the CI boot-latency recipe verbatim, which
+  builds the host-side harness in the **debug** profile; the launch-contract
+  harness is a release build. The whole host-side start path (config
+  assembly, artifact checks, vsock probing) runs unoptimized here.
+- **Image**: this lane boots the pinned published image — dm-verity-sealed
+  rootfs plus the runtime overlay attached as a second drive, with the agent
+  resolved from the overlay at boot; the prepared-cold lane launches cached
+  local artifacts with no mount image.
+- **VMM**: Firecracker v1.17.0 launched with `--enable-pci` here, versus
+  v1.14.1 in that acceptance record.
+- **Window**: raw `backend.start` (no plan admission) to a successful guest
+  agent vsock ping over 5 ms polls, versus admitted-plan to guest command
+  dispatch.
+
+This lane exists as a regression **ceiling** for CI (budget 6,000 ms there,
+~3× headroom over its own observed median), and W1e's job was to baseline
+it on dedicated hardware before telemetry lands on any of these paths.
+Decomposing the gap between the two lanes (a release-profile and a
+`ready=start-return` A/B on the reference box) is worthwhile follow-up
+hardware-lane work, not something this record claims.
+
+**Pre-feature status:** no telemetry capture, connection, or handshake
+exists on any boot path in this tree — W3 (guest capture) and W4 (host
+collector) are unlanded. Nothing in these numbers waits on a telemetry
+hook, and the plan's nonblocking section pins that boot readiness never
+will.
+
 ## Exit latency: a recorded blocker, not a number
 
 The harness times the stop it already performs, and on this image **every
@@ -125,9 +164,17 @@ no processes leak — but the timed graceful-stop distribution is empty
 (`stopped=0 failed=30` per repetition), and per this harness's rule failed
 stops are counted rather than folded into percentiles.
 
+To be precise about what failed: no VM failed to stop, and no new failure
+appeared. The refusal is the pre-existing steady state of every grantless
+bench boot — the harness change merely started timing and reporting the stop
+it always performed, which is how the refusal became visible at all. The
+VMM is killed on the error path exactly as before.
+
 Two honest consequences. First, CI's boot-latency lane has exercised only
 the failed-stop path since it exists; nothing noticed because the warning is
 non-fatal. Second, a graceful-stop baseline requires a bench boot that
 provisions a verb grant the way admitted runs do — that harness capability
-is the remaining work, and until it lands, exit latency has a reproduced
-refusal and a follow-up, not a baseline. Nothing here claims otherwise.
+is the remaining work, filed as
+[#3637](https://github.com/tinylabscom/mvm/issues/3637), and until it
+lands, exit latency has a reproduced refusal and a follow-up, not a
+baseline. Nothing here claims otherwise.
