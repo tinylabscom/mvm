@@ -105,7 +105,7 @@ that allocate, copy, load a module, and launch kernels:
 Out of v1 (named follow-ups, not silent gaps): `cuGetProcAddress`-based
 resolution (CUDA 12 cudart's full symbol path), CUDA graphs and
 contexted fork-reconnect (warm device memory handoff), peer/multi-GPU,
-streams and events, the MLX backend for Apple Silicon hosts (second
+the MLX backend for Apple Silicon hosts (second
 backend family behind the same endpoint and transport), and the
 paravirtual-display question (ADR-029's option A) which this plan does
 not touch.
@@ -148,6 +148,10 @@ not touch.
 - [x] W10 — Docs: ADR-053 (compute-over-vsock, amends ADR-029 decision
       1's "no GPU support today"), plan checkboxes, SPRINT.md,
       REFACTOR-STATUS.md, doc-guard-compliant wording.
+- [x] W11 — Streams and events (#3565): typed stream/event/async-copy wire
+      operations; endpoint completion positions; deterministic stub ordering;
+      native CUDA bindings; driver/runtime shim exports; compatibility,
+      refusal, ordering, endpoint and workspace validation.
 
 ## Test plan
 

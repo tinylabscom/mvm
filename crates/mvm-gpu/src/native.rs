@@ -8,7 +8,7 @@
 //! GPU-less host gets a clean "no driver" answer from [`probe`] instead of
 //! a build or load failure.
 //!
-//! Handle discipline: contexts, modules, and functions are real host
+//! Handle discipline: contexts, streams, events, modules, and functions are real host
 //! pointers minted by the driver, exposed to the guest as opaque `u64`s.
 //! They leave this process only as numbers, so the guest can pass them
 //! back but can never dereference them.
@@ -27,6 +27,8 @@ const LIBNVML_CANDIDATES: [&str; 2] = ["libnvidia-ml.so.1", "libnvidia-ml.so"];
 /// Context handles minted into the high half of the u64 space, so a guest
 /// handle can never alias a real small host pointer by accident.
 const CTX_BASE: u64 = 0x0000_00c0_0000_0000;
+const STREAM_BASE: u64 = 0x0000_0050_0000_0000;
+const EVENT_BASE: u64 = 0x0000_00e0_0000_0000;
 
 // ---------------------------------------------------------------------------
 // Dynamic loading
@@ -99,6 +101,8 @@ type DevicePtr = u64;
 type ContextPtr = *mut c_void;
 type ModulePtr = *mut c_void;
 type FunctionPtr = *mut c_void;
+type StreamPtr = *mut c_void;
+type EventPtr = *mut c_void;
 
 type FnInit = unsafe extern "C" fn(c_uint) -> ResultCode;
 type FnDriverGetVersion = unsafe extern "C" fn(*mut c_int) -> ResultCode;
@@ -113,6 +117,10 @@ type FnMemAlloc = unsafe extern "C" fn(*mut DevicePtr, usize) -> ResultCode;
 type FnMemFree = unsafe extern "C" fn(DevicePtr) -> ResultCode;
 type FnMemcpyHtoD = unsafe extern "C" fn(DevicePtr, *const c_void, usize) -> ResultCode;
 type FnMemcpyDtoH = unsafe extern "C" fn(*mut c_void, DevicePtr, usize) -> ResultCode;
+type FnMemcpyHtoDAsync =
+    unsafe extern "C" fn(DevicePtr, *const c_void, usize, StreamPtr) -> ResultCode;
+type FnMemcpyDtoHAsync =
+    unsafe extern "C" fn(*mut c_void, DevicePtr, usize, StreamPtr) -> ResultCode;
 type FnMemsetD8 = unsafe extern "C" fn(DevicePtr, c_uchar, usize) -> ResultCode;
 type FnModuleLoadData = unsafe extern "C" fn(*mut ModulePtr, *const c_void) -> ResultCode;
 type FnModuleUnload = unsafe extern "C" fn(ModulePtr) -> ResultCode;
@@ -132,6 +140,15 @@ type FnLaunchKernel = unsafe extern "C" fn(
     *mut *mut c_void,
 ) -> ResultCode;
 type FnCtxSynchronize = unsafe extern "C" fn() -> ResultCode;
+type FnStreamCreate = unsafe extern "C" fn(*mut StreamPtr, c_uint) -> ResultCode;
+type FnStreamDestroy = unsafe extern "C" fn(StreamPtr) -> ResultCode;
+type FnStreamSynchronize = unsafe extern "C" fn(StreamPtr) -> ResultCode;
+type FnStreamWaitEvent = unsafe extern "C" fn(StreamPtr, EventPtr, c_uint) -> ResultCode;
+type FnEventCreate = unsafe extern "C" fn(*mut EventPtr, c_uint) -> ResultCode;
+type FnEventDestroy = unsafe extern "C" fn(EventPtr) -> ResultCode;
+type FnEventRecord = unsafe extern "C" fn(EventPtr, StreamPtr) -> ResultCode;
+type FnEventQuery = unsafe extern "C" fn(EventPtr) -> ResultCode;
+type FnEventSynchronize = unsafe extern "C" fn(EventPtr) -> ResultCode;
 type FnGetErrorString = unsafe extern "C" fn(ResultCode) -> *const c_char;
 
 struct CudaSymbols {
@@ -149,12 +166,23 @@ struct CudaSymbols {
     mem_free: FnMemFree,
     memcpy_htod: FnMemcpyHtoD,
     memcpy_dtoh: FnMemcpyDtoH,
+    memcpy_htod_async: FnMemcpyHtoDAsync,
+    memcpy_dtoh_async: FnMemcpyDtoHAsync,
     memset_d8: FnMemsetD8,
     module_load_data: FnModuleLoadData,
     module_unload: FnModuleUnload,
     module_get_function: FnModuleGetFunction,
     launch_kernel: FnLaunchKernel,
     ctx_synchronize: FnCtxSynchronize,
+    stream_create: FnStreamCreate,
+    stream_destroy: FnStreamDestroy,
+    stream_synchronize: FnStreamSynchronize,
+    stream_wait_event: FnStreamWaitEvent,
+    event_create: FnEventCreate,
+    event_destroy: FnEventDestroy,
+    event_record: FnEventRecord,
+    event_query: FnEventQuery,
+    event_synchronize: FnEventSynchronize,
     get_error_string: FnGetErrorString,
 }
 
@@ -175,12 +203,23 @@ impl CudaSymbols {
             mem_free: lib.sym("cuMemFree")?,
             memcpy_htod: lib.sym("cuMemcpyHtoD")?,
             memcpy_dtoh: lib.sym("cuMemcpyDtoH")?,
+            memcpy_htod_async: lib.sym("cuMemcpyHtoDAsync")?,
+            memcpy_dtoh_async: lib.sym("cuMemcpyDtoHAsync")?,
             memset_d8: lib.sym("cuMemsetD8")?,
             module_load_data: lib.sym("cuModuleLoadData")?,
             module_unload: lib.sym("cuModuleUnload")?,
             module_get_function: lib.sym("cuModuleGetFunction")?,
             launch_kernel: lib.sym("cuLaunchKernel")?,
             ctx_synchronize: lib.sym("cuCtxSynchronize")?,
+            stream_create: lib.sym("cuStreamCreate")?,
+            stream_destroy: lib.sym("cuStreamDestroy_v2")?,
+            stream_synchronize: lib.sym("cuStreamSynchronize")?,
+            stream_wait_event: lib.sym("cuStreamWaitEvent")?,
+            event_create: lib.sym("cuEventCreate")?,
+            event_destroy: lib.sym("cuEventDestroy_v2")?,
+            event_record: lib.sym("cuEventRecord")?,
+            event_query: lib.sym("cuEventQuery")?,
+            event_synchronize: lib.sym("cuEventSynchronize")?,
             get_error_string: lib.sym("cuGetErrorString")?,
             _lib: lib,
         })
@@ -305,9 +344,14 @@ pub struct NativeCudaBackend {
     contexts: HashMap<u64, ContextPtr>,
     next_ctx: u64,
     current: Option<u64>,
+    next_completion: u64,
+    streams: HashMap<u64, (u64, StreamPtr)>,
+    next_stream: u64,
+    events: HashMap<u64, (u64, EventPtr)>,
+    next_event: u64,
 }
 
-// The backend holds raw CUcontext/CUmodule/CUfunction pointers minted by
+// The backend holds raw CUDA context/stream/event/module/function pointers minted by
 // the driver. It is only ever used behind a `Mutex` owned by one connection
 // thread (see `server::serve_connection`), so handing it across threads
 // cannot create aliasing driver state.
@@ -333,10 +377,72 @@ pub fn probe() -> Option<NativeCudaBackend> {
         contexts: HashMap::new(),
         next_ctx: 0,
         current: None,
+        next_completion: 0,
+        streams: HashMap::new(),
+        next_stream: 0,
+        events: HashMap::new(),
+        next_event: 0,
     })
 }
 
 impl NativeCudaBackend {
+    fn mint_handle(base: u64, next: &mut u64, kind: &str) -> Result<u64, GpuError> {
+        let offset = next.checked_mul(0x1000).ok_or_else(|| {
+            GpuError::new(
+                wire::CUDA_ERROR_UNKNOWN,
+                format!("{kind} handle counter overflow"),
+            )
+        })?;
+        let handle = base.checked_add(offset).ok_or_else(|| {
+            GpuError::new(
+                wire::CUDA_ERROR_UNKNOWN,
+                format!("{kind} handle counter overflow"),
+            )
+        })?;
+        *next = next.checked_add(1).ok_or_else(|| {
+            GpuError::new(
+                wire::CUDA_ERROR_UNKNOWN,
+                format!("{kind} handle counter overflow"),
+            )
+        })?;
+        Ok(handle)
+    }
+
+    fn completion(&mut self) -> Result<u64, GpuError> {
+        self.next_completion = self.next_completion.checked_add(1).ok_or_else(|| {
+            GpuError::new(wire::CUDA_ERROR_UNKNOWN, "completion counter overflow")
+        })?;
+        Ok(self.next_completion)
+    }
+
+    fn stream_ptr(&self, context: u64, stream: u64) -> Result<StreamPtr, GpuError> {
+        if stream == 0 {
+            return Ok(std::ptr::null_mut());
+        }
+        self.streams
+            .get(&stream)
+            .filter(|(owner, _)| *owner == context)
+            .map(|(_, ptr)| *ptr)
+            .ok_or_else(|| {
+                GpuError::new(
+                    wire::CUDA_ERROR_INVALID_HANDLE,
+                    format!("unknown stream handle 0x{stream:x}"),
+                )
+            })
+    }
+
+    fn event_ptr(&self, context: u64, event: u64) -> Result<EventPtr, GpuError> {
+        self.events
+            .get(&event)
+            .filter(|(owner, _)| *owner == context)
+            .map(|(_, ptr)| *ptr)
+            .ok_or_else(|| {
+                GpuError::new(
+                    wire::CUDA_ERROR_INVALID_HANDLE,
+                    format!("unknown event handle 0x{event:x}"),
+                )
+            })
+    }
     /// Validate `handle`, make its context current on this thread (the
     /// driver API is context-stateful per thread), and return the pointer.
     fn use_context(&mut self, handle: u64) -> Result<ContextPtr, GpuError> {
@@ -448,13 +554,12 @@ impl GpuBackend for NativeCudaBackend {
 
     fn context_create(&mut self, ordinal: u32) -> Result<u64, GpuError> {
         let device = self.device(ordinal)?;
+        let handle = Self::mint_handle(CTX_BASE, &mut self.next_ctx, "context")?;
         let mut ptr: ContextPtr = std::ptr::null_mut();
         // SAFETY: `ptr` is a valid out-pointer; flags 0 requests the
         // sched-spin-free default.
         let code = unsafe { (self.cuda.ctx_create)(&mut ptr, 0, device) };
         self.cuda.check(code, "cuCtxCreate")?;
-        let handle = CTX_BASE + self.next_ctx * 0x1000;
-        self.next_ctx += 1;
         self.contexts.insert(handle, ptr);
         self.current = Some(handle);
         Ok(handle)
@@ -472,6 +577,8 @@ impl GpuBackend for NativeCudaBackend {
         let code = unsafe { (self.cuda.ctx_destroy)(ptr) };
         self.cuda.check(code, "cuCtxDestroy")?;
         self.contexts.remove(&handle);
+        self.streams.retain(|_, (owner, _)| *owner != handle);
+        self.events.retain(|_, (owner, _)| *owner != handle);
         if self.current == Some(handle) {
             self.current = None;
         }
@@ -483,6 +590,107 @@ impl GpuBackend for NativeCudaBackend {
         // SAFETY: a valid context is current on this thread.
         let code = unsafe { (self.cuda.ctx_synchronize)() };
         self.cuda.check(code, "cuCtxSynchronize")
+    }
+
+    fn stream_create(&mut self, context: u64, flags: u32) -> Result<u64, GpuError> {
+        self.use_context(context)?;
+        let handle = Self::mint_handle(STREAM_BASE, &mut self.next_stream, "stream")?;
+        let mut ptr: StreamPtr = std::ptr::null_mut();
+        // SAFETY: `ptr` is a valid out-pointer and the context is current.
+        let code = unsafe { (self.cuda.stream_create)(&mut ptr, flags) };
+        self.cuda.check(code, "cuStreamCreate")?;
+        self.streams.insert(handle, (context, ptr));
+        Ok(handle)
+    }
+
+    fn stream_destroy(&mut self, context: u64, stream: u64) -> Result<(), GpuError> {
+        self.use_context(context)?;
+        if stream == 0 {
+            return Err(GpuError::new(
+                wire::CUDA_ERROR_INVALID_HANDLE,
+                "the default stream cannot be destroyed",
+            ));
+        }
+        let ptr = self.stream_ptr(context, stream)?;
+        // SAFETY: `ptr` was minted by cuStreamCreate in this context.
+        let code = unsafe { (self.cuda.stream_destroy)(ptr) };
+        self.cuda.check(code, "cuStreamDestroy")?;
+        self.streams.remove(&stream);
+        Ok(())
+    }
+
+    fn stream_synchronize(&mut self, context: u64, stream: u64) -> Result<(), GpuError> {
+        self.use_context(context)?;
+        let ptr = self.stream_ptr(context, stream)?;
+        // SAFETY: `ptr` is null for the default stream or a validated stream.
+        let code = unsafe { (self.cuda.stream_synchronize)(ptr) };
+        self.cuda.check(code, "cuStreamSynchronize")
+    }
+
+    fn stream_wait_event(
+        &mut self,
+        context: u64,
+        stream: u64,
+        event: u64,
+    ) -> Result<u64, GpuError> {
+        self.use_context(context)?;
+        let stream = self.stream_ptr(context, stream)?;
+        let event = self.event_ptr(context, event)?;
+        // SAFETY: both handles were validated as belonging to this context.
+        let code = unsafe { (self.cuda.stream_wait_event)(stream, event, 0) };
+        self.cuda.check(code, "cuStreamWaitEvent")?;
+        self.completion()
+    }
+
+    fn event_create(&mut self, context: u64, flags: u32) -> Result<u64, GpuError> {
+        self.use_context(context)?;
+        let handle = Self::mint_handle(EVENT_BASE, &mut self.next_event, "event")?;
+        let mut ptr: EventPtr = std::ptr::null_mut();
+        // SAFETY: `ptr` is a valid out-pointer and the context is current.
+        let code = unsafe { (self.cuda.event_create)(&mut ptr, flags) };
+        self.cuda.check(code, "cuEventCreate")?;
+        self.events.insert(handle, (context, ptr));
+        Ok(handle)
+    }
+
+    fn event_destroy(&mut self, context: u64, event: u64) -> Result<(), GpuError> {
+        self.use_context(context)?;
+        let ptr = self.event_ptr(context, event)?;
+        // SAFETY: `ptr` was minted by cuEventCreate in this context.
+        let code = unsafe { (self.cuda.event_destroy)(ptr) };
+        self.cuda.check(code, "cuEventDestroy")?;
+        self.events.remove(&event);
+        Ok(())
+    }
+
+    fn event_record(&mut self, context: u64, event: u64, stream: u64) -> Result<u64, GpuError> {
+        self.use_context(context)?;
+        let event = self.event_ptr(context, event)?;
+        let stream = self.stream_ptr(context, stream)?;
+        // SAFETY: both handles were validated as belonging to this context.
+        let code = unsafe { (self.cuda.event_record)(event, stream) };
+        self.cuda.check(code, "cuEventRecord")?;
+        self.completion()
+    }
+
+    fn event_query(&mut self, context: u64, event: u64) -> Result<bool, GpuError> {
+        self.use_context(context)?;
+        let event = self.event_ptr(context, event)?;
+        // SAFETY: `event` was validated as belonging to this context.
+        let code = unsafe { (self.cuda.event_query)(event) };
+        match code {
+            wire::SUCCESS => Ok(true),
+            wire::CUDA_ERROR_NOT_READY => Ok(false),
+            other => self.cuda.check(other, "cuEventQuery").map(|()| true),
+        }
+    }
+
+    fn event_synchronize(&mut self, context: u64, event: u64) -> Result<(), GpuError> {
+        self.use_context(context)?;
+        let event = self.event_ptr(context, event)?;
+        // SAFETY: `event` was validated as belonging to this context.
+        let code = unsafe { (self.cuda.event_synchronize)(event) };
+        self.cuda.check(code, "cuEventSynchronize")
     }
 
     fn mem_alloc(&mut self, context: u64, bytes: u64) -> Result<u64, GpuError> {
@@ -528,6 +736,59 @@ impl GpuBackend for NativeCudaBackend {
         let code = unsafe { (self.cuda.memcpy_dtoh)(out.as_mut_ptr().cast::<c_void>(), src, len) };
         self.cuda.check(code, "cuMemcpyDtoH")?;
         Ok(out)
+    }
+
+    fn memcpy_htod_async(
+        &mut self,
+        context: u64,
+        dst: u64,
+        data: &[u8],
+        stream: u64,
+    ) -> Result<u64, GpuError> {
+        self.use_context(context)?;
+        let stream_ptr = self.stream_ptr(context, stream)?;
+        // SAFETY: `data` remains live until the stream synchronization below;
+        // the stream belongs to the current context.
+        let code = unsafe {
+            (self.cuda.memcpy_htod_async)(
+                dst,
+                data.as_ptr().cast::<c_void>(),
+                data.len(),
+                stream_ptr,
+            )
+        };
+        self.cuda.check(code, "cuMemcpyHtoDAsync")?;
+        // RPC owns the input bytes only for this call. Retaining CUDA's true
+        // asynchronous host-buffer lifetime would leave a borrowed frame
+        // buffer behind, so finish the driver DMA before releasing it while
+        // preserving stream ordering and endpoint completion tracking.
+        let code = unsafe { (self.cuda.stream_synchronize)(stream_ptr) };
+        self.cuda.check(code, "cuStreamSynchronize after HtoD")?;
+        self.completion()
+    }
+
+    fn memcpy_dtoh_async(
+        &mut self,
+        context: u64,
+        src: u64,
+        len: u64,
+        stream: u64,
+    ) -> Result<(Vec<u8>, u64), GpuError> {
+        self.use_context(context)?;
+        let stream_ptr = self.stream_ptr(context, stream)?;
+        let len = usize::try_from(len)
+            .map_err(|_| GpuError::new(wire::CUDA_ERROR_INVALID_VALUE, "copy length overflows"))?;
+        let mut out = vec![0_u8; len];
+        // SAFETY: `out` remains live and writable through the synchronization
+        // below; the stream belongs to the current context.
+        let code = unsafe {
+            (self.cuda.memcpy_dtoh_async)(out.as_mut_ptr().cast::<c_void>(), src, len, stream_ptr)
+        };
+        self.cuda.check(code, "cuMemcpyDtoHAsync")?;
+        let code = unsafe { (self.cuda.stream_synchronize)(stream_ptr) };
+        self.cuda.check(code, "cuStreamSynchronize after DtoH")?;
+        let completion = self.completion()?;
+        Ok((out, completion))
     }
 
     fn memset_d8(&mut self, context: u64, dst: u64, value: u8, len: u64) -> Result<(), GpuError> {
@@ -598,7 +859,9 @@ impl GpuBackend for NativeCudaBackend {
         let [bx, by, bz] = config.block;
         // SAFETY: a context is current; `function` names a function from a
         // module loaded on it; each params entry points at a live buffer;
-        // the stream is the legacy default stream (NULL); `extra` is NULL.
+        // the stream is null for the legacy default or a validated stream;
+        // `extra` is NULL.
+        let stream = self.stream_ptr(context, config.stream.unwrap_or(0))?;
         let code = unsafe {
             (self.cuda.launch_kernel)(
                 function as FunctionPtr,
@@ -609,7 +872,7 @@ impl GpuBackend for NativeCudaBackend {
                 by,
                 bz,
                 config.shared_mem_bytes,
-                std::ptr::null_mut(),
+                stream,
                 params.as_ptr(),
                 std::ptr::null_mut(),
             )

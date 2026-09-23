@@ -103,6 +103,7 @@ pub const CUDA_ERROR_RUNTIME_MEMORY_ALLOCATION: i32 = 2;
 pub const CUDA_ERROR_RUNTIME_INITIALIZATION: i32 = 3;
 pub const CUDA_ERROR_RUNTIME_INVALID_DEVICE_POINTER: i32 = 17;
 pub const CUDA_ERROR_RUNTIME_INVALID_MEMCPY_DIRECTION: i32 = 21;
+pub const CUDA_ERROR_RUNTIME_NOT_READY: i32 = 34;
 pub const CUDA_ERROR_RUNTIME_INSUFFICIENT_DRIVER: i32 = 35;
 pub const CUDA_ERROR_RUNTIME_NO_DEVICE: i32 = 38;
 pub const CUDA_ERROR_RUNTIME_NOT_SUPPORTED: i32 = 801;
@@ -194,6 +195,44 @@ pub enum GpuRequest {
     Synchronize {
         context: u64,
     },
+    StreamCreate {
+        context: u64,
+        flags: u32,
+    },
+    StreamDestroy {
+        context: u64,
+        stream: u64,
+    },
+    StreamSynchronize {
+        context: u64,
+        stream: u64,
+    },
+    StreamWaitEvent {
+        context: u64,
+        stream: u64,
+        event: u64,
+    },
+    EventCreate {
+        context: u64,
+        flags: u32,
+    },
+    EventDestroy {
+        context: u64,
+        event: u64,
+    },
+    EventRecord {
+        context: u64,
+        event: u64,
+        stream: u64,
+    },
+    EventQuery {
+        context: u64,
+        event: u64,
+    },
+    EventSynchronize {
+        context: u64,
+        event: u64,
+    },
     // Device memory.
     MemAlloc {
         context: u64,
@@ -213,6 +252,19 @@ pub enum GpuRequest {
         context: u64,
         src: u64,
         len: u64,
+    },
+    MemcpyHtoDAsync {
+        context: u64,
+        dst: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        stream: u64,
+    },
+    MemcpyDtoHAsync {
+        context: u64,
+        src: u64,
+        len: u64,
+        stream: u64,
     },
     MemsetD8 {
         context: u64,
@@ -241,6 +293,9 @@ pub enum GpuRequest {
         grid: [u32; 3],
         block: [u32; 3],
         shared_mem_bytes: u32,
+        /// Zero/absent selects CUDA's legacy default stream.
+        #[serde(default)]
+        stream: Option<u64>,
         /// Each entry is one kernel argument's raw little-endian bytes,
         /// exactly as the kernel signature expects it laid out.
         #[serde(with = "serde_bytes_vec")]
@@ -288,6 +343,23 @@ pub enum GpuResponse {
     },
     ContextCreated {
         context: u64,
+    },
+    StreamCreated {
+        stream: u64,
+    },
+    EventCreated {
+        event: u64,
+    },
+    EventStatus {
+        complete: bool,
+    },
+    AsyncQueued {
+        completion: u64,
+    },
+    DataQueued {
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+        completion: u64,
     },
     DevicePointer {
         ptr: u64,
@@ -434,6 +506,7 @@ mod tests {
             grid: [1, 2, 3],
             block: [4, 5, 6],
             shared_mem_bytes: 0,
+            stream: Some(11),
             params: vec![vec![1, 0, 0, 0], vec![0xff; 8]],
         }
     }
@@ -446,6 +519,61 @@ mod tests {
     }
 
     #[test]
+    fn stream_event_and_async_requests_round_trip_with_typed_handles() {
+        let requests = [
+            GpuRequest::StreamCreate {
+                context: 1,
+                flags: 1,
+            },
+            GpuRequest::StreamWaitEvent {
+                context: 1,
+                stream: 2,
+                event: 3,
+            },
+            GpuRequest::EventRecord {
+                context: 1,
+                event: 3,
+                stream: 2,
+            },
+            GpuRequest::EventQuery {
+                context: 1,
+                event: 3,
+            },
+            GpuRequest::EventSynchronize {
+                context: 1,
+                event: 3,
+            },
+            GpuRequest::MemcpyHtoDAsync {
+                context: 1,
+                dst: 4,
+                data: vec![5, 6],
+                stream: 2,
+            },
+            GpuRequest::MemcpyDtoHAsync {
+                context: 1,
+                src: 4,
+                len: 2,
+                stream: 2,
+            },
+        ];
+        for request in requests {
+            let frame = encode_frame(&request).expect("encode");
+            let decoded: GpuRequest = decode_frame(&frame).expect("decode");
+            assert_eq!(decoded, request);
+        }
+    }
+
+    #[test]
+    fn legacy_default_stream_launches_decode_without_a_stream_field() {
+        let json = r#"{"op":"launch_kernel","args":{"context":1,"function":2,"grid":[1,1,1],"block":[1,1,1],"shared_mem_bytes":0,"params":[]}}"#;
+        let request: GpuRequest = serde_json::from_str(json).expect("legacy launch");
+        assert!(matches!(
+            request,
+            GpuRequest::LaunchKernel { stream: None, .. }
+        ));
+    }
+
+    #[test]
     fn a_response_round_trips_through_its_frame() {
         for response in [
             GpuResponse::Ok,
@@ -455,6 +583,14 @@ mod tests {
             GpuResponse::Data {
                 bytes: vec![0xde, 0xad],
             },
+            GpuResponse::DataQueued {
+                bytes: vec![0xca, 0xfe],
+                completion: 9,
+            },
+            GpuResponse::StreamCreated { stream: 7 },
+            GpuResponse::EventCreated { event: 8 },
+            GpuResponse::AsyncQueued { completion: 9 },
+            GpuResponse::EventStatus { complete: false },
             GpuResponse::NvmlComputeCapability { major: 7, minor: 5 },
         ] {
             let frame = encode_frame(&response).expect("encode");
@@ -500,6 +636,7 @@ mod tests {
         assert_eq!(CUDA_ERROR_NOT_SUPPORTED, 801);
         assert_eq!(CUDA_ERROR_UNKNOWN, 999);
         assert_eq!(CUDA_ERROR_RUNTIME_INVALID_DEVICE_POINTER, 17);
+        assert_eq!(CUDA_ERROR_RUNTIME_NOT_READY, 34);
         assert_eq!(CUDA_ERROR_RUNTIME_NO_DEVICE, 38);
         assert_eq!(NVML_ERROR_NOT_FOUND, 6);
         assert_eq!(NVML_ERROR_UNKNOWN, 999);
