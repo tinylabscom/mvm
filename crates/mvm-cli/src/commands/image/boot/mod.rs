@@ -37,6 +37,9 @@ pub(in crate::commands) enum BootAction {
         /// Assert the exact `image-set/vX.Y.Z` release already pinned by this build
         #[arg(long, value_name = "TAG")]
         tag: Option<String>,
+        /// Roll back to an older canonical image lock without rebuilding mvmctl
+        #[arg(long, value_name = "FILE", conflicts_with = "tag")]
+        lock: Option<PathBuf>,
         /// Replace the image even in a source checkout, where the local build
         /// is otherwise authoritative
         #[arg(long)]
@@ -69,7 +72,9 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
     match action {
         BootAction::Status { json } => status::run(json),
         BootAction::Check { json } => check::run(json),
-        BootAction::Update { tag, force } => update::run(&update::UpdateRequest { tag, force }),
+        BootAction::Update { tag, lock, force } => {
+            update::run(&update::UpdateRequest { tag, lock, force })
+        }
         BootAction::Verify {
             manifest,
             bundle,

@@ -9,9 +9,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use mvm_core::image_set::{
-    ImageSetManifest, ImageSetRequirement, ImageSetRole, MemberArtifact, MemberTarget,
-    WorkloadImageProfile, check_against_lock, check_protocol_compatibility, require_complete,
-    validate_structure,
+    ImageSetManifest, ImageSetRequirement, ImageSetRole, ImageTrainLock, MemberArtifact,
+    MemberTarget, WorkloadImageProfile, check_against_lock, check_protocol_compatibility,
+    require_complete, validate_structure,
 };
 use mvm_core::packs::Sha256Hex;
 
@@ -28,9 +28,15 @@ pub(crate) struct PublishedImageSet {
 impl PublishedImageSet {
     /// Acquire and verify the root object pinned by this build.
     pub(crate) fn acquire() -> Result<Self> {
-        let train = mvm_core::image_set::image_train_lock();
+        Self::acquire_with_train(mvm_core::image_set::image_train_lock())
+    }
+
+    pub(crate) fn acquire_with_train(train: &ImageTrainLock) -> Result<Self> {
         let lock = &train.image_set;
-        let base_url = crate::update::image_set_asset_base_url(lock.release_tag.as_str());
+        let base_url = crate::update::image_set_asset_base_url_for(
+            train.repository.as_str(),
+            lock.release_tag.as_str(),
+        );
         let staged = tempfile::NamedTempFile::new().context("create image-set manifest staging")?;
         let staged_path = staged.path().to_string_lossy().to_string();
         let manifest_url = format!("{base_url}/{}", lock.manifest_asset);

@@ -46,7 +46,7 @@ fn is_nonempty_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
-fn required_assets() -> Vec<String> {
+pub(crate) fn required_assets() -> Vec<String> {
     let mut assets = Vec::new();
     for arch in ARCHITECTURES {
         assets.extend([

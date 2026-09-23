@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mvm_core::image_set::ImageTrainLock;
 
 use super::cache::{self, AcquiredProvenance};
 use crate::commands::env::builder_vm::default_microvm::DefaultMicrovmVariant;
@@ -18,6 +19,8 @@ use crate::ui;
 pub(super) struct UpdateRequest {
     /// Pinned tag, or `None` to take the latest published.
     pub(super) tag: Option<String>,
+    /// An explicitly selected older lock for a bounded rollback.
+    pub(super) lock: Option<PathBuf>,
     /// Waive the source-checkout refusal.
     pub(super) force: bool,
 }
@@ -30,12 +33,13 @@ const PUBLISHED_VARIANT: DefaultMicrovmVariant = DefaultMicrovmVariant::Prod;
 
 pub(super) fn run(request: &UpdateRequest) -> Result<()> {
     refuse_in_source_checkout(request.force)?;
-    let tag = resolve_tag(request.tag.as_deref())?;
+    let train = select_train(request.lock.as_deref())?;
+    let tag = resolve_tag(request.tag.as_deref(), &train)?;
     let target = cache::variant_dir(PUBLISHED_VARIANT);
 
     ui::info(&format!("Updating boot image to {tag}..."));
     let staging = StagingDir::beside(&target)?;
-    fetch_into(staging.path(), &tag)?;
+    fetch_into(staging.path(), &tag, &train)?;
     cache::stamp_provenance(staging.path(), &AcquiredProvenance::fetched(&tag))?;
     staging.publish_over(&target)?;
 
@@ -68,11 +72,8 @@ fn refuse_in_source_checkout(force: bool) -> Result<()> {
     )
 }
 
-fn resolve_tag(pinned: Option<&str>) -> Result<String> {
-    let locked = mvm_core::image_set::image_train_lock()
-        .image_set
-        .release_tag
-        .as_str();
+fn resolve_tag(pinned: Option<&str>, train: &ImageTrainLock) -> Result<String> {
+    let locked = train.image_set.release_tag.as_str();
     if let Some(tag) = pinned
         && tag != locked
     {
@@ -84,17 +85,74 @@ fn resolve_tag(pinned: Option<&str>) -> Result<String> {
 }
 
 /// Download the curated workload from the signed root pinned by this build.
-fn fetch_into(dir: &Path, tag: &str) -> Result<()> {
-    let locked = mvm_core::image_set::image_train_lock()
-        .image_set
-        .release_tag
-        .as_str();
+fn fetch_into(dir: &Path, tag: &str, train: &ImageTrainLock) -> Result<()> {
+    let locked = train.image_set.release_tag.as_str();
     if tag != locked {
         bail!("refusing unlocked image set {tag}; this build pins {locked}");
     }
     let arch = mvm_core::arch::GuestArch::host();
-    crate::commands::env::published_image_set::PublishedImageSet::acquire()?
+    crate::commands::env::published_image_set::PublishedImageSet::acquire_with_train(train)?
         .fetch_default_workload(arch, dir)
+}
+
+/// Select the compiled lock, or validate an explicit older lock against the
+/// same canonical producer trust root. The lock carries an exact signed-root
+/// digest, so rollback never means accepting a mutable tag or rebuilding the
+/// binary.
+fn select_train(path: Option<&Path>) -> Result<ImageTrainLock> {
+    let current = mvm_core::image_set::image_train_lock();
+    let Some(path) = path else {
+        return Ok(current.clone());
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read rollback image lock {}", path.display()))?;
+    let candidate = ImageTrainLock::parse(&text)
+        .with_context(|| format!("parse rollback image lock {}", path.display()))?;
+    validate_rollback_lock(current, &candidate)?;
+    Ok(candidate)
+}
+
+fn validate_rollback_lock(current: &ImageTrainLock, candidate: &ImageTrainLock) -> Result<()> {
+    if candidate.repository != current.repository
+        || candidate.image_set.signing_identity.workflow
+            != current.image_set.signing_identity.workflow
+    {
+        bail!(
+            "rollback lock changes the canonical image producer or workflow; only an older signed set from {} {} is accepted",
+            current.repository,
+            current.image_set.signing_identity.workflow
+        );
+    }
+    let current_namespace = current
+        .image_set
+        .release_tag
+        .as_str()
+        .strip_suffix(current.image_set.release_tag.version().as_str())
+        .expect("a validated release tag ends with its parsed version");
+    let candidate_namespace = candidate
+        .image_set
+        .release_tag
+        .as_str()
+        .strip_suffix(candidate.image_set.release_tag.version().as_str())
+        .expect("a validated release tag ends with its parsed version");
+    if candidate_namespace != current_namespace {
+        bail!(
+            "rollback lock changes the image release namespace from {current_namespace} to {candidate_namespace}"
+        );
+    }
+    match candidate
+        .image_set
+        .release_tag
+        .version()
+        .cmp_precedence(current.image_set.release_tag.version())
+    {
+        std::cmp::Ordering::Less => Ok(()),
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => bail!(
+            "rollback lock selects {}, which is not older than this build's {}",
+            candidate.image_set.release_tag,
+            current.image_set.release_tag
+        ),
+    }
 }
 
 /// A scratch directory beside the live entry, removed on drop unless it was
@@ -187,5 +245,83 @@ fn remove_dir_if_present(path: &Path) -> Result<()> {
         Err(error) => {
             Err(error).with_context(|| format!("remove the directory {}", path.display()))
         }
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use mvm_core::image_set::{ReleaseTag, RepositorySlug, TagRef};
+
+    fn older_lock_file() -> tempfile::NamedTempFile {
+        let mut candidate = mvm_core::image_set::image_train_lock().clone();
+        let tag = ReleaseTag::new("image-set/v0.0.9").expect("valid older tag");
+        candidate.image_set.release_tag = tag.clone();
+        candidate.boot_image.release_tag = tag.clone();
+        candidate.stage0_kernel.release_tag = tag;
+        candidate.image_set.signing_identity.tag_ref =
+            TagRef::new("refs/tags/image-set/v0.0.9").expect("valid older ref");
+        let file = tempfile::NamedTempFile::new().expect("create rollback lock");
+        std::fs::write(
+            file.path(),
+            toml::to_string(&candidate).expect("serialize rollback lock"),
+        )
+        .expect("write rollback lock");
+        file
+    }
+
+    #[test]
+    fn an_older_lock_from_the_same_canonical_producer_is_accepted() {
+        let file = older_lock_file();
+        let selected = select_train(Some(file.path())).expect("select older signed pin");
+        assert_eq!(selected.image_set.release_tag.as_str(), "image-set/v0.0.9");
+    }
+
+    #[test]
+    fn rollback_cannot_replace_the_canonical_trust_root() {
+        let file = older_lock_file();
+        let text = std::fs::read_to_string(file.path()).expect("read rollback lock");
+        let mut candidate = ImageTrainLock::parse(&text).expect("parse rollback lock");
+        candidate.repository = RepositorySlug::new("attacker/images").expect("valid slug");
+        candidate.image_set.repository = candidate.repository.clone();
+        std::fs::write(
+            file.path(),
+            toml::to_string(&candidate).expect("serialize changed lock"),
+        )
+        .expect("write changed lock");
+
+        let error = select_train(Some(file.path())).expect_err("trust-root drift must fail");
+        assert!(
+            error.to_string().contains("canonical image producer"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn rollback_requires_a_strictly_older_version() {
+        let current = mvm_core::image_set::image_train_lock();
+        let error = validate_rollback_lock(current, current).expect_err("same pin is not rollback");
+        assert!(
+            error.to_string().contains("not older"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn rollback_cannot_switch_to_another_tag_namespace() {
+        let current = mvm_core::image_set::image_train_lock();
+        let mut candidate = current.clone();
+        let tag = ReleaseTag::new("other-train/v0.0.9").expect("valid other tag");
+        candidate.image_set.release_tag = tag.clone();
+        candidate.boot_image.release_tag = tag.clone();
+        candidate.stage0_kernel.release_tag = tag;
+        candidate.image_set.signing_identity.tag_ref =
+            TagRef::new("refs/tags/other-train/v0.0.9").expect("valid other ref");
+        let error = validate_rollback_lock(current, &candidate)
+            .expect_err("another signed namespace is not this train");
+        assert!(
+            error.to_string().contains("release namespace"),
+            "unexpected error: {error:#}"
+        );
     }
 }

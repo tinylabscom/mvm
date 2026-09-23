@@ -597,6 +597,14 @@ docs commit went out as #3581). Under the
       scheduled/manual workflow verifies a candidate and opens an
       evidence-bearing PR without auto-merge. Producer revocation publication
       and physical HVF/KVM live boots remain external acceptance work.
+      W7 (#3368) local contract: the CLI release verifies the exact canonical
+      `mvm-images` root before mirroring the old 24-asset route, and a
+      post-publish gate compares every required canonical/mirrored byte while
+      checking signed-root declarations. Old/new URL routing has regression
+      coverage; `image boot update --lock` performs a strictly older,
+      same-producer signed rollback without rebuilding the CLI. The migration
+      starts with `0.18.0-rc.2`; mirror support ends after 2026-12-31 UTC. Live
+      publication/digest evidence remains open and is not claimed locally.
 
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal

@@ -400,47 +400,58 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Dual-publish: attach the CLI's compiled boot image train assets to this CLI
-      # release too. It re-uploads bytes, never rebuilds them — the images are
-      # built exactly once, by release-boot-image.yml.
+      # Compatibility mirror: attach the CLI's locked canonical image-set
+      # assets to this CLI release too. It re-uploads bytes, never rebuilds
+      # them — mvm-images is the sole producer.
       #
-      # This direction, rather than having that workflow push into the CLI
-      # release, because of who signs. An installed mvmctl trusts one keyless
-      # identity, this workflow's at a `v*` tag, so the bundles it verifies
-      # have to be minted here. Pulling the raw bytes in before the signing
-      # step below means they are re-signed under that identity and the
-      # consumer-path check a few steps down exercises them for real; the
-      # boot-image release's own bundles are provenance for that train and are
-      # simply overwritten here.
+      # This direction, rather than having mvm-images push into the CLI
+      # release, keeps the repositories' credentials separate. Supported old
+      # clients trust this workflow's `v*` identity, so their bundles are
+      # re-minted below; the payload bytes themselves must remain identical.
       #
-      # The window closes when the download side reads the boot-image pin
-      # instead of the CLI version. Until then this step is the only reason a
-      # fresh install still finds its boot image. A CLI release with no image
-      # assets is therefore not a degraded release, it is a broken one: every
-      # fresh install 404s on first boot. So a missing boot image release stops
-      # the publish rather than warning past it — the whole point of this gate
-      # family is that nothing ships that can only be validated afterwards.
+      # This bounded window ends on the date documented in the W7 delivery
+      # note. Until then a CLI release missing its mirror is broken for the
+      # supported old routing path, so a missing canonical release or partial
+      # mirror stops publication.
       - name: Attach the boot image release assets to this release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Read the same Rust constant embedded in the released mvmctl. An
-          # independently selected newest tag can be complete while the image
-          # users actually fetch is missing or incomplete.
-          BOOT_TAG="$(cargo run --quiet --package xtask -- release-boot-image tag)"
-          if [ -z "${BOOT_TAG}" ]; then
-            echo "::error::the compiled default boot image tag is empty; refusing to publish" >&2
+          IMAGE_REPOSITORY="$(./scripts/locked-image-tag.sh image_set repository)"
+          IMAGE_TAG="$(cargo run --quiet --package xtask -- release-boot-image tag)"
+          IMAGE_MANIFEST="$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+          IMAGE_MANIFEST_SHA256="$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+          IMAGE_WORKFLOW="$(./scripts/locked-image-tag.sh image_set workflow)"
+          IMAGE_TAG_REF="$(./scripts/locked-image-tag.sh image_set tag_ref)"
+          if [ -z "${IMAGE_TAG}" ]; then
+            echo "::error::the compiled default image-set tag is empty; refusing to publish" >&2
             exit 1
           fi
-          if ! gh release view "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null; then
-            echo "::error::the CLI embeds ${BOOT_TAG}, but no release with that tag exists. Publish that boot image release or intentionally advance the compiled default before retrying." >&2
+          if ! gh release view "${IMAGE_TAG}" --repo "${IMAGE_REPOSITORY}" --json tagName > /dev/null; then
+            echo "::error::the CLI locks ${IMAGE_REPOSITORY} ${IMAGE_TAG}, but that canonical release does not exist" >&2
             exit 1
           fi
-          echo "Attaching boot image assets from ${BOOT_TAG}"
-          mkdir -p artifacts
-          gh release download "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --dir artifacts --clobber
+          echo "Mirroring canonical image assets from ${IMAGE_REPOSITORY} ${IMAGE_TAG}"
+          mkdir -p artifacts canonical-image-set
+          gh release download "${IMAGE_TAG}" --repo "${IMAGE_REPOSITORY}" \
+            --pattern "${IMAGE_MANIFEST}" \
+            --pattern "${IMAGE_MANIFEST}.bundle" \
+            --dir canonical-image-set
+          printf '%s  %s\n' "${IMAGE_MANIFEST_SHA256}" "canonical-image-set/${IMAGE_MANIFEST}" | sha256sum -c -
+          IMAGE_IDENTITY="https://github.com/${IMAGE_REPOSITORY}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}"
+          cosign verify-blob \
+            --bundle "canonical-image-set/${IMAGE_MANIFEST}.bundle" \
+            --certificate-identity "${IMAGE_IDENTITY}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "canonical-image-set/${IMAGE_MANIFEST}"
+
+          # Fetch only after the signed root is anchored. The source release is
+          # immutable and all member names are still checked by the mirror gate.
+          gh release download "${IMAGE_TAG}" --repo "${IMAGE_REPOSITORY}" \
+            --dir canonical-image-set --clobber
+          cp canonical-image-set/* artifacts/
 
           # Existence is not usability. The producing side refuses to publish an
           # incomplete set, but it cannot retract one published before that gate
@@ -451,7 +462,9 @@ jobs:
           # check further down covers only runtime-overlay and sdk-sidecar, and
           # skips whatever is absent, so nothing else in this job would notice.
           cargo run --quiet --package xtask -- \
-            release-boot-image validate "${BOOT_TAG}" artifacts
+            release-boot-image validate "${IMAGE_TAG}" artifacts
+          cargo run --quiet --package xtask -- \
+            image-mirror "canonical-image-set/${IMAGE_MANIFEST}" canonical-image-set artifacts
           # Drop the bundles this job re-mints. The signing step below writes
           # its bundle with create-new semantics, so leaving the boot image
           # train's copy in place would fail that step outright rather than be
@@ -956,3 +969,17 @@ jobs:
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"
+
+      - name: Compare canonical and mirrored image bytes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE_REPOSITORY="$(./scripts/locked-image-tag.sh image_set repository)"
+          IMAGE_TAG="$(./scripts/locked-image-tag.sh image_set release_tag)"
+          IMAGE_MANIFEST="$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+          mkdir -p canonical-image-set
+          gh release download "${IMAGE_TAG}" --repo "${IMAGE_REPOSITORY}" \
+            --dir canonical-image-set
+          cargo run --quiet --package xtask -- \
+            image-mirror "canonical-image-set/${IMAGE_MANIFEST}" canonical-image-set release-assets

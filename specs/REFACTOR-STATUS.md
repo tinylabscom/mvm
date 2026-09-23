@@ -438,6 +438,12 @@ Last updated: 2026-09-23
             acquisition, Stage 0/default/update/CI/WebLinux lock routing, and
             an evidence-only pin-update PR workflow. Producer revocation
             publication and physical HVF/KVM boot evidence remain external.
+      - [ ] W7 #3368 (publication evidence pending): the CLI release now
+            verifies and mirrors the canonical locked release, post-publish
+            digest equality is fail-closed, old/new URL routing is pinned, and
+            an installed CLI can select an older same-producer lock for signed
+            rollback. Mirrors are required through 2026-12-31 UTC. Check this
+            item only after the `0.18.0-rc.2` remote comparison passes.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve

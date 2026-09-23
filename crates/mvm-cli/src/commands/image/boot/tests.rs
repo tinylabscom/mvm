@@ -85,6 +85,7 @@ fn a_failed_update_leaves_the_previous_image_in_place() {
 
     let err = update::run(&UpdateRequest {
         tag: Some(tag.to_string()),
+        lock: None,
         force: true,
     })
     .expect_err("an image set outside the lock must not be installed");
@@ -132,6 +133,7 @@ fn update_refuses_in_a_source_checkout_without_force() {
 
     let err = update::run(&UpdateRequest {
         tag: Some("image-set/v0.2.0".to_string()),
+        lock: None,
         force: false,
     })
     .expect_err("a source checkout's local build is authoritative");

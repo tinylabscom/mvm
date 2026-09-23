@@ -835,9 +835,7 @@ pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) ->
         .map(|(_, tag)| tag.to_string())
 }
 
-/// Release-asset base URL for the canonical image-set producer.
-pub(crate) fn image_set_asset_base_url(tag: &str) -> String {
-    let repository = mvm_core::image_set::image_train_lock().repository.as_str();
+pub(crate) fn image_set_asset_base_url_for(repository: &str, tag: &str) -> String {
     format!(
         "{}/{}/releases/download/{}",
         github_download_base(),

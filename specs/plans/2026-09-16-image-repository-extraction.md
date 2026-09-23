@@ -863,10 +863,20 @@ macOS/HVF.
 
 - [ ] For at least one image and CLI release, publish canonical assets from
       `mvm-images` while mirroring the required legacy assets to `mvm` releases.
-- [ ] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
-- [ ] Compare canonical and mirrored digests automatically.
-- [ ] Exercise rollback to the previous image-set pin without rebuilding a CLI.
-- [ ] Publish migration and support-window documentation.
+- [x] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
+- [x] Compare canonical and mirrored digests automatically.
+- [x] Exercise rollback to the previous image-set pin without rebuilding a CLI.
+- [x] Publish migration and support-window documentation.
+
+Implementation contract: the CLI release reads and verifies the canonical
+locked root, mirrors rather than rebuilds the 24 assets required by the old
+route, and compares downloaded post-publish bytes with `xtask image-mirror`.
+`image boot update --lock` admits only a strictly older lock from the same
+canonical producer/workflow and uses the normal signed acquisition path.
+Migration begins with `0.18.0-rc.2` on 2026-09-23; mirrors remain required
+through 2026-12-31 UTC, with W8 no earlier than 2027-01-01. The live
+`0.18.0-rc.2` publication and remote digest result remain the unchecked item;
+see `specs/sprint/delivery/3368-dual-publish-window.md`.
 
 Acceptance: no supported CLI version receives a 404 or accepts differently
 signed bytes during the transition.

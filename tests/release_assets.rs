@@ -1677,14 +1677,14 @@ fn the_ci_boot_witness_resolves_the_locked_boot_image_tag() {
     );
 }
 
-/// The CLI release must validate the same boot-image tag embedded in the CLI.
+/// The CLI release must mirror the same canonical image tag embedded in the CLI.
 ///
 /// Selecting an independently discovered release can produce a green gate for
 /// bytes that a fresh installation never requests. The release job therefore
 /// asks the Rust workspace for the compiled default and must not choose a tag
 /// by publication order or version sorting.
 #[test]
-fn the_cli_release_validates_the_compiled_boot_image_tag() {
+fn the_cli_release_validates_the_compiled_canonical_image_tag() {
     let workflow = release_workflow();
     let step = workflow
         .split("- name: Attach the boot image release assets to this release")
@@ -1696,22 +1696,32 @@ fn the_cli_release_validates_the_compiled_boot_image_tag() {
 
     assert!(
         step.contains(
-            "BOOT_TAG=\"$(cargo run --quiet --package xtask -- release-boot-image tag)\""
+            "IMAGE_TAG=\"$(cargo run --quiet --package xtask -- release-boot-image tag)\""
         ),
-        "the release gate must obtain BOOT_TAG from the compiled Rust default:\n{step}"
+        "the release gate must obtain IMAGE_TAG from the compiled Rust default:\n{step}"
     );
     assert!(
         !step.contains("gh release list") && !step.contains("sort_by(.v)"),
         "the release gate must not independently select a highest published tag:\n{step}"
     );
     assert!(
-        step.contains("release-boot-image validate \"${BOOT_TAG}\" artifacts"),
+        step.contains("release-boot-image validate \"${IMAGE_TAG}\" artifacts"),
         "the release gate must validate the downloaded matrix against that exact tag:\n{step}"
+    );
+    assert!(
+        step.contains("--repo \"${IMAGE_REPOSITORY}\""),
+        "the mirror must download from the canonical repository pinned by images.lock:\n{step}"
+    );
+    assert!(
+        step.contains("cosign verify-blob")
+            && step.contains("${IMAGE_MANIFEST_SHA256}")
+            && step.contains("${IMAGE_IDENTITY}"),
+        "the canonical root must be digest- and identity-verified before mirroring:\n{step}"
     );
 }
 
 #[test]
-fn the_cli_release_refuses_a_missing_compiled_boot_image_release() {
+fn the_cli_release_refuses_a_missing_canonical_image_release() {
     let workflow = release_workflow();
     let step = workflow
         .split("- name: Attach the boot image release assets to this release")
@@ -1721,11 +1731,11 @@ fn the_cli_release_refuses_a_missing_compiled_boot_image_release() {
         .next()
         .expect("the boot-image attachment step must have a body");
     let existence_check = step
-        .find("gh release view \"${BOOT_TAG}\"")
-        .expect("the compiled boot image release must be checked explicitly");
+        .find("gh release view \"${IMAGE_TAG}\"")
+        .expect("the compiled canonical image release must be checked explicitly");
     let download = step
-        .find("gh release download \"${BOOT_TAG}\"")
-        .expect("the compiled boot image release must be downloaded");
+        .find("gh release download \"${IMAGE_TAG}\"")
+        .expect("the compiled canonical image release must be downloaded");
 
     assert!(
         existence_check < download,
@@ -1733,8 +1743,42 @@ fn the_cli_release_refuses_a_missing_compiled_boot_image_release() {
     );
     assert!(
         step[existence_check..download].contains("exit 1")
-            && step[existence_check..download].contains("the CLI embeds ${BOOT_TAG}"),
+            && step[existence_check..download]
+                .contains("the CLI locks ${IMAGE_REPOSITORY} ${IMAGE_TAG}"),
         "a missing compiled-tag release must fail with an actionable error:\n{step}"
+    );
+}
+
+#[test]
+fn the_post_publish_gate_compares_canonical_and_legacy_mirror_bytes() {
+    let workflow = release_workflow();
+    let step = workflow
+        .split("- name: Compare canonical and mirrored image bytes")
+        .nth(1)
+        .expect("release.yml must compare the published mirror")
+        .split("\n      - name:")
+        .next()
+        .expect("the mirror comparison step must have a body");
+    assert!(
+        step.contains("gh release download \"${IMAGE_TAG}\" --repo \"${IMAGE_REPOSITORY}\"")
+            && step.contains("image-mirror")
+            && step.contains("canonical-image-set release-assets"),
+        "the post-publish gate must compare the canonical release with downloaded mirror bytes:\n{step}"
+    );
+}
+
+#[test]
+fn old_and_new_cli_routes_remain_explicit_during_the_window() {
+    assert_eq!(
+        mvmctl::build::runtime_overlay::release_base_url("0.17.0"),
+        "https://github.com/tinylabscom/mvm/releases/download/v0.17.0"
+    );
+    let lock = mvmctl::core::image_set::image_train_lock();
+    assert!(
+        lock.manifest_url()
+            .starts_with("https://github.com/tinylabscom/mvm-images/releases/download/image-set/"),
+        "new clients must route through the canonical locked root: {}",
+        lock.manifest_url()
     );
 }
 
