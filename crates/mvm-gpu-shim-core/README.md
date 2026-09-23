@@ -13,7 +13,9 @@ Requests and responses use the bounded GPU frames from `mvm-contract`.
 One process-wide connection is established lazily and reused.
 A failed call drops the connection and performs one bounded reconnect.
 FFI entry points use `guard` so Rust panics become API error codes.
-PTX parsing recovers kernel parameter sizes for launch requests.
+Bounded PTX, cubin ELF, and basic fatbin parsing recovers kernel parameter
+sizes for launch requests. Binary offsets, lengths, parameter ordinals, and
+input size are validated before they control allocation or pointer reads.
 CString helpers perform bounded writes with explicit NUL termination.
 
 ## Security properties
@@ -21,6 +23,8 @@ CString helpers perform bounded writes with explicit NUL termination.
 The guest receives only opaque handles, never host addresses.
 Response lengths are checked before allocating or reading frame bodies.
 Invalid transport specifications fail closed with a GPU error.
+Malformed, compressed, truncated, over-cap, or unsupported-endian CUDA module
+metadata fails closed; the CUDA shim never guesses a launch layout.
 
 ## Testing
 
