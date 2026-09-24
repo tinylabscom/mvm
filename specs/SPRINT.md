@@ -84,12 +84,18 @@
       hosts until upstream fixes it or an environmental precondition is
       found. Upstream report draft:
       `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md`; full
-      matrix on #3599; validation workflow on the mvm-images datapath
-      branch. The mvm-side kernel bridge (`mvmctl kernel build` from an
-      MVM_IMAGES_DIR checkout, the machine-run dev-tier override fix, and
-      the Stage 0 config-emit fixes) lands with this branch; the datapath
-      kernel posture lives in mvm-images PR #24 (the datapath content is
-      the real deliverable — the bisect controls are throwaway).
+      matrix on #3599; validation workflow on the mvm-images
+      `wip/clone-repro-harness` scratch branch. The mvm-side kernel bridge
+      (`mvmctl kernel build` from an MVM_IMAGES_DIR checkout, the
+      machine-run dev-tier override fix, and the Stage 0 config-emit fixes)
+      lands with this branch; the bridge refuses `--which workload-k8s`
+      against an images checkout, because the image lane rejected the
+      generically-named datapath kernel posture (mvm-images PR #24, closed:
+      bridge/veth/vxlan violate the permanent no-guest-network-device
+      invariant — the branch is historical/bisect material only). The
+      interim orchestrator kernel remains the in-repo `workload-k8s`
+      variant; the invariant-compatible durable shape is host networking in
+      the guest plus the loopback/vsock egress proxy.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.
