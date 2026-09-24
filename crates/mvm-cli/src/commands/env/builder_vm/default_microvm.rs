@@ -22,7 +22,22 @@ pub(crate) fn ensure_default_microvm_image(
 }
 
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
-    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel, workload_kernel_label};
+
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = builder_vm_host_arch();
+
+    // The dev-tier kernel-label override answers before either acquisition
+    // branch, so a machine run boots the same kernel family the launch
+    // resolve sites pick whether or not a local image checkout is selected.
+    // It only ever reads a verified cache entry: every producer below
+    // acquires the sealed kernel, so resolving the override label through
+    // them would file sealed bytes under a label that says otherwise.
+    if let Some(kernel) = dev_tier_kernel_override(&cache, arch, workload_kernel_label()) {
+        let path = kernel.display().to_string();
+        assert_workload_kernel_supports_verity(&path)?;
+        return Ok(path);
+    }
 
     // A selected checkout is the kernel's source: the pair's
     // `default-tenant` set carries the workload kernel, built from the
@@ -47,8 +62,6 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
         );
     }
 
-    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let arch = builder_vm_host_arch();
     let source_checkout = find_builder_vm_flake().is_ok();
     let mut resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
 
@@ -98,6 +111,37 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     assert_workload_kernel_supports_verity(&verified_path)?;
     ui::info(&format!("Workload kernel: {provenance} at {path}"));
     Ok(path)
+}
+
+/// The verified cache entry the dev-tier kernel label selects, if any. `None`
+/// for the sealed default label, and on a cache miss — which warns and lets
+/// the caller acquire the sealed kernel rather than refusing the boot.
+fn dev_tier_kernel_override(
+    cache: &std::path::Path,
+    arch: &str,
+    label: &str,
+) -> Option<std::path::PathBuf> {
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
+    if label == "workload" {
+        return None;
+    }
+    match resolve_kernel(cache, arch, label, false) {
+        KernelResolution::Cached(verified) => {
+            ui::info(&format!(
+                "Workload kernel: {label} override at {}",
+                verified.path().display()
+            ));
+            Some(verified.path().to_path_buf())
+        }
+        KernelResolution::NeedsBuild(_) | KernelResolution::NeedsFetch(_) => {
+            ui::warn(&format!(
+                "MVM_WORKLOAD_KERNEL_VARIANT={label} is set but the local kernel cache has no \
+                 verified {label} kernel; booting the sealed workload kernel (build it with \
+                 `mvmctl kernel build --which {label}`)"
+            ));
+            None
+        }
+    }
 }
 
 fn acquire_workload_kernel(
@@ -824,6 +868,72 @@ mod pair_default_image_tests {
         assert!(
             !cache_dir.join("vmlinux").exists(),
             "a refusal must not produce image artifacts"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dev_tier_kernel_override_tests {
+    use super::dev_tier_kernel_override;
+    use mvm_core::util::test_env::TestEnv;
+
+    /// Stage a kernel entry under `label` and record its digest, the shape a
+    /// `kernel build` leaves in the cache.
+    fn stage_labelled_kernel(cache: &std::path::Path, label: &str) -> std::path::PathBuf {
+        let kernel = mvm_build::kernel_fetch::cached_kernel_path(cache, "aarch64", label);
+        std::fs::create_dir_all(kernel.parent().expect("entry dir")).expect("mkdir entry");
+        std::fs::write(&kernel, format!("{label} kernel bytes")).expect("write kernel");
+        mvm_build::kernel_fetch::record_kernel_digest(&kernel).expect("record digest");
+        kernel
+    }
+
+    #[test]
+    fn the_sealed_label_is_never_an_override() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().expect("tempdir");
+        stage_labelled_kernel(cache.path(), "workload");
+        assert_eq!(
+            dev_tier_kernel_override(cache.path(), "aarch64", "workload"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_override_label_boots_its_verified_cache_entry() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().expect("tempdir");
+        let kernel = stage_labelled_kernel(cache.path(), "workload-k8s");
+        assert_eq!(
+            dev_tier_kernel_override(cache.path(), "aarch64", "workload-k8s"),
+            Some(kernel)
+        );
+    }
+
+    /// A miss must fall through to the sealed acquisition and leave the
+    /// override slot empty: acquiring into it would file the sealed kernel
+    /// under the override's label.
+    #[test]
+    fn an_override_label_without_a_cache_entry_falls_through_and_writes_nothing() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            dev_tier_kernel_override(cache.path(), "aarch64", "workload-k8s"),
+            None
+        );
+        let slot =
+            mvm_build::kernel_fetch::cached_kernel_path(cache.path(), "aarch64", "workload-k8s");
+        assert!(!slot.exists(), "{}", slot.display());
+    }
+
+    #[test]
+    fn a_tampered_override_entry_is_not_booted() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().expect("tempdir");
+        let kernel = stage_labelled_kernel(cache.path(), "workload-k8s");
+        std::fs::write(&kernel, b"swapped after the digest was recorded").expect("tamper");
+        assert_eq!(
+            dev_tier_kernel_override(cache.path(), "aarch64", "workload-k8s"),
+            None
         );
     }
 }

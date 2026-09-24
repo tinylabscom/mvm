@@ -74,6 +74,10 @@ enum Which {
     /// cgroup/namespace/netfilter/bridge plumbing on top of the workload
     /// kernel's verified-boot delta.
     WorkloadK8s,
+    /// Generic rootless-container floor (no network namespace) — the
+    /// control kernel for datapath bisects. Defined only in the mvm-images
+    /// kernel canon; a build from the in-repo flake fails at evaluation.
+    Rootless,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +127,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
             Which::Builder => vec![(KernelVariant::Builder, "builder")],
             Which::Workload => vec![(KernelVariant::Workload, "workload")],
             Which::WorkloadK8s => vec![(KernelVariant::WorkloadK8s, "workload-k8s")],
+            Which::Rootless => vec![(KernelVariant::Rootless, "rootless")],
         }
     };
 

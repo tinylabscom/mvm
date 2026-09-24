@@ -9,8 +9,21 @@ The shared image repositories carry no Kubernetes-specific artifacts —
 consumption is mvm kernel flake -> `mvmctl kernel build` -> launcher
 resolution. Branch: `feat/kubernetes-in-microvm` (merged).
 
-**Status: W1 (mvm runtime enabler) IMPLEMENTED, awaiting review; W2-W4
-NOT STARTED.**
+**Status: W1 + W2 merged (#3555); W3 kernel-variant and template
+scaffolds landed (#3572, tinylabscom/mvm-templates#2). W4 is BLOCKED on
+#3599, resolved to root cause 2026-09-23: the clone()-in-a-fresh-pid-ns
+failure is a long-standing upstream kernel bug under virtualization
+(Debian 6.1/6.12/6.18 kernels all reproduce under TCG, HVF, and x86_64
+KVM with pristine userspace; bare metal reportedly works). Not a config,
+toolchain, or image-train problem — no mvm-side kernel change will fix
+it; see #3599 for the full matrix and
+`specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` for the
+upstream report draft. The
+mvm-side kernel build/boot-selection bridge is tracked under W3. A generically-named datapath kernel posture in mvm-images was
+rejected by the image lane (PR #24 closed: guest network devices violate
+the permanent invariant); the interim kernel remains the in-repo
+`workload-k8s` variant, and the invariant-compatible durable shape is host
+networking plus the loopback/vsock egress proxy.**
 
 ## Product requirement
 
@@ -135,13 +148,26 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
       `VXLAN` — mvm#3572, merged. The sealed workload kernel's
       required-disables are deliberate and stay; this is a second variant,
       consumed via `mvmctl kernel build --which workload-k8s`.
+- [x] mvm-side kernel bridge: `mvmctl kernel build` compiles from the
+      selected mvm-images checkout's `kernel/` flake through the shared
+      image-source precedence (configured `MVM_IMAGES_DIR`, then the sibling
+      checkout, then the in-repo flake); `--which workload-k8s` stays
+      in-repo (refused against a configured checkout, fallen back from a
+      discovered one); `MVM_WORKLOAD_KERNEL_VARIANT` is honoured on the
+      machine-run pair and cache branches; the Stage 0 config emit uses the
+      build's flake base, the egress proxy env, streamed stderr, and its own
+      GC root.
 
 ### W4 — E2E validation, BDD, docs
 
 - [ ] Builder-VM E2E: boot the image (on the `workload-k8s` kernel), wait
       for node Ready, pull an image through the egress proxy, run a pod with
       admitted egress, exercise a declared ingress port, teardown; BDD
-      scenario under `features/suites/`
+      scenario under `features/suites/`. **Blocked by #3599** (upstream
+      kernel bug: pod sandboxes are fresh PID namespaces and their init
+      processes hit the clone() ceiling on every virtualized host tested);
+      the datapath kernel replaces `workload-k8s` naming per the image
+      train's no-consumer-names rule.
 - [ ] Docs guide page (`public/src/content/docs/guides/`)
 - [ ] Amend the "Kubernetes compatibility" deliberately-not-claimed entry in
       `public/src/content/docs/security/sandbox-parity-status.md`: the claim

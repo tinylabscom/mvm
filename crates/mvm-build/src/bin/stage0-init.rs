@@ -23,6 +23,12 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 #[path = "stage0-init/build_config.rs"]
 mod build_config;
+// Guest-side only: both the emit path and its streaming helper depend on
+// the linux-gated build orchestration; the host-side tests that exercise
+// them are linux-gated the same way.
+#[cfg(target_os = "linux")]
+#[path = "stage0-init/kernel_emit.rs"]
+mod kernel_emit;
 
 #[cfg(any(target_os = "linux", test))]
 #[path = "stage0-init/store_gc.rs"]
@@ -193,7 +199,7 @@ mod linux {
             .unwrap_or(false)
     }
 
-    fn should_enable_vsock_egress(qemu: bool, cmdline: &str) -> bool {
+    pub(crate) fn should_enable_vsock_egress(qemu: bool, cmdline: &str) -> bool {
         !qemu
             || cmdline
                 .split_whitespace()
@@ -208,7 +214,7 @@ mod linux {
             .filter(|port| *port > 0)
     }
 
-    fn apply_vsock_egress_proxy_env(cmd: &mut Command) {
+    pub(crate) fn apply_vsock_egress_proxy_env(cmd: &mut Command) {
         cmd.env("ALL_PROXY", VSOCK_EGRESS_PROXY_URL)
             .env("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL)
             .env("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL)
@@ -1109,7 +1115,8 @@ mod linux {
         // host captures to `console.log` live — that's what makes the otherwise-
         // silent multi-minute build tailable from the host.
         let (status, stderr_log, stdout) =
-            run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
+            crate::kernel_emit::run_streaming(cmd, &mut std::io::stderr())
+                .map_err(|e| format!("nix build: {e}"))?;
 
         // Persist the full log to /out for output-disk collection and host-side
         // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
@@ -1131,87 +1138,12 @@ mod linux {
         // artifact that matters.
         if mode == "kernel"
             && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
-            && let Err(e) = emit_resolved_config(&nix, &arch, config_attr)
+            && let Err(e) =
+                crate::kernel_emit::emit_resolved_config(&nix, &arch, config_attr, &flake_base)
         {
             eprintln!("stage0-init: skipping kernel-config emit: {e}");
         }
         Ok(())
-    }
-
-    /// Realise the resolved-`.config` flake attr and copy it to
-    /// `/out/mvm-kernel.config`. Cheap — it's a cached dependency of the
-    /// kernel just built.
-    fn emit_resolved_config(nix: &Path, arch: &str, config_attr: &str) -> Result<(), String> {
-        // Same default as the image build; the conf is not threaded into this
-        // helper because both refs are built from the one staged tree.
-        let flake_base = "path:/work/nix/images/builder-vm#packages";
-        let flake_ref = format!("{flake_base}.{arch}-linux.{config_attr}");
-        let mut cmd = Command::new(nix);
-        cmd.args([
-            "build",
-            &flake_ref,
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "--option",
-            "build-users-group",
-            "",
-            "--max-jobs",
-            "1",
-            "--no-link",
-            "--no-write-lock-file",
-            "--impure",
-            "--print-out-paths",
-        ]);
-        let out = cmd.output().map_err(|e| format!("nix build config: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "nix build config exit {}",
-                out.status.code().unwrap_or(-1)
-            ));
-        }
-        let store_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if store_path.is_empty() {
-            return Err("config build emitted no /nix/store path".into());
-        }
-        copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))
-    }
-
-    /// Spawn `cmd`, streaming its stderr line-by-line to `live` (flushed per
-    /// line so a host tailing the console sees progress as it arrives) while
-    /// accumulating the full stderr for a post-mortem log, and capturing stdout
-    /// (nix's single trailing out-path). Returns `(status, stderr_log, stdout)`.
-    ///
-    /// Draining stderr to EOF before reading stdout can't deadlock here: nix
-    /// writes only the short out-path to stdout (well under the pipe buffer), so
-    /// it never blocks waiting for us to read it.
-    fn run_streaming(
-        mut cmd: Command,
-        live: &mut dyn std::io::Write,
-    ) -> Result<(std::process::ExitStatus, Vec<u8>, String), String> {
-        use std::io::{BufRead, Read};
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn: {e}"))?;
-
-        let mut stderr_log: Vec<u8> = Vec::new();
-        if let Some(child_stderr) = child.stderr.take() {
-            let reader = std::io::BufReader::new(child_stderr);
-            for chunk in reader.split(b'\n') {
-                let Ok(mut chunk) = chunk else { break };
-                chunk.push(b'\n');
-                let _ = live.write_all(&chunk);
-                let _ = live.flush();
-                stderr_log.extend_from_slice(&chunk);
-            }
-        }
-        let mut stdout = String::new();
-        if let Some(mut child_stdout) = child.stdout.take() {
-            let _ = child_stdout.read_to_string(&mut stdout);
-        }
-        let status = child.wait().map_err(|e| format!("wait: {e}"))?;
-        Ok((status, stderr_log, stdout))
     }
 
     /// Output by mode: image = kernel + rootfs.ext4 + cmdline + manifest;
@@ -1443,7 +1375,7 @@ mod linux {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
+    pub(crate) fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
         mvm_build::stage0::copy_nonempty_file(src, dst)
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -1476,7 +1408,7 @@ mod linux {
     mod tests {
         use super::{
             STAGE0_NIX_CACHE_HOME, VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL,
-            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache, run_streaming,
+            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache,
             stage0_nix_store_device,
         };
         use std::os::unix::fs::symlink;
@@ -1617,7 +1549,8 @@ mod linux {
                 "printf 'log1\\nlog2\\n' >&2; printf '/nix/store/abc\\n'",
             ]);
             let mut live: Vec<u8> = Vec::new();
-            let (status, stderr_log, stdout) = run_streaming(cmd, &mut live).unwrap();
+            let (status, stderr_log, stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
             assert!(status.success());
             // Echoed live to the console sink…
             assert_eq!(live, b"log1\nlog2\n");
@@ -1632,7 +1565,8 @@ mod linux {
             let mut cmd = Command::new("sh");
             cmd.args(["-c", "echo boom >&2; exit 7"]);
             let mut live: Vec<u8> = Vec::new();
-            let (status, stderr_log, _stdout) = run_streaming(cmd, &mut live).unwrap();
+            let (status, stderr_log, _stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
             assert_eq!(status.code(), Some(7));
             assert_eq!(stderr_log, b"boom\n");
         }
