@@ -1634,7 +1634,7 @@ mod tests {
         // in-tree image flakes, which is deterministic on any machine — and
         // immune to an ambient MVM_IMAGES_DIR in the developer's shell.
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV); (feat(image): migrate publication and consumer trust)
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let module_path = "/tmp/dummy.wasm";
         let image = ImageSource::WasmModule {
             module_path: module_path.to_string(),
