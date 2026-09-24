@@ -216,7 +216,9 @@ docs commit went out as #3581). Under the
       endpoint's missing host-helper contract-probe answer and the NVML
       shim's null device handle for ordinal 0. `cuGetProcAddress`
       resolution for CUDA 12 cudart/torch/vLLM initialization is
-      PR #3652 (#3563). The stub models per-stream ordering and
+      PR #3652 (#3563). The MLX backend for Apple Silicon hosts is designed
+      (not scheduled) in `specs/plans/2026-09-24-mlx-backend-design.md`
+      behind explicit trigger conditions. The stub models per-stream ordering and
       event readiness deterministically, including default-stream compatibility
       and fail-closed forged or stale handles. Issue #3566 passes the backend's
       real device count and ordinals through, gives the deterministic endpoint

@@ -108,7 +108,9 @@ Last updated: 2026-09-24
       merged as #3653 — positive stub-answer + host-log evidence,
       negative dial-refusal) both landed; the witness flushed out the endpoint's missing
       host-helper contract-probe answer and the NVML shim's null device
-      handle for ordinal 0.
+      handle for ordinal 0. The MLX backend family for Apple Silicon hosts
+      is designed, with explicit trigger conditions, in
+      `specs/plans/2026-09-24-mlx-backend-design.md`.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds

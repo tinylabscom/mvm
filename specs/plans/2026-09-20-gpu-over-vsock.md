@@ -107,10 +107,12 @@ that allocate, copy, load a module, and launch kernels:
 `cuGetProcAddress`-based resolution (CUDA 12 cudart's full symbol
 path) moved from this list into the work items below (W13). Still out of
 v1 (named follow-ups, not silent gaps): CUDA graphs and contexted
-fork-reconnect (warm device memory handoff), peer-device access, the MLX
-backend for Apple Silicon hosts (second backend family behind the same
-endpoint and transport), and the paravirtual-display question (ADR-029's
-option A) which this plan does not touch.
+fork-reconnect (warm device memory handoff), peer-device access, and the
+paravirtual-display question (ADR-029's option A) which this plan does
+not touch. The MLX backend for Apple Silicon hosts — the second backend
+family behind the same endpoint and transport — is designed separately
+in `specs/plans/2026-09-24-mlx-backend-design.md` with explicit trigger
+conditions; it is deliberately not scheduled here.
 
 ## Work items
 
