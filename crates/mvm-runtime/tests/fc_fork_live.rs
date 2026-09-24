@@ -13,8 +13,9 @@
 //! state-dir-keyed vsock endpoint, egress keying (the per-VM endpoint socket)
 //! is name-based rather than snapshot-based, and the fresh generation tokens
 //! plus post-restore kernel randomness diverge across children. One capture
-//! serves the whole batch (the #3641 `--count` semantics at the driver seam):
-//! set `MVM_LIVE_FORK_CHILDREN` to size it, and the run prints per-child
+//! serves the whole batch — the same one-capture-N-children semantics the
+//! batch fork command exposes, at the driver seam: set
+//! `MVM_LIVE_FORK_CHILDREN` to size it, and the run prints per-child
 //! `FC_FORK_RESTORE_MS` plus a batch-wide `FC_FORK_BATCH_MS` wall time.
 //!
 //! It needs:
