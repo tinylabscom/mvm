@@ -35,6 +35,7 @@
 //! it on Linux (both a single-group and a multi-group image).
 
 mod host_file;
+pub mod journal_state;
 pub mod mkfs;
 pub mod verity;
 

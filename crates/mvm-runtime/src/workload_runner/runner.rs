@@ -2868,6 +2868,106 @@ mod tests {
         );
     }
 
+    /// [`overlay_aware_rootfs`] with a real ext4 filesystem behind it, so an
+    /// offline checker or a journal replay run against the image would have
+    /// something to rewrite. `needs_recovery` sets the superblock flag a dirty
+    /// journal leaves behind.
+    fn overlay_aware_ext4_rootfs(name: &str, needs_recovery: bool) -> (tempfile::TempDir, String) {
+        let (dir, rootfs) = overlay_aware_rootfs(name);
+        let mut image = std::fs::File::create(&rootfs).unwrap();
+        let size = 8 * 1024 * 1024;
+        image.set_len(size).unwrap();
+        mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, size).unwrap();
+        drop(image);
+        if needs_recovery {
+            let mut bytes = std::fs::read(&rootfs).unwrap();
+            // s_feature_incompat, EXT4_FEATURE_INCOMPAT_RECOVER.
+            bytes[1024 + 0x60] |= 0x4;
+            std::fs::write(&rootfs, bytes).unwrap();
+        }
+        (dir, rootfs)
+    }
+
+    /// The image a launch admitted is the image the VMM boots. Admission hashes
+    /// the rootfs before `start`, and the cached default image is shared by
+    /// every later launch, so `start` must not rewrite it — not even the
+    /// superblock timestamps an offline filesystem check stamps on a clean
+    /// image.
+    #[test]
+    fn start_boots_the_admitted_rootfs_without_rewriting_it() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let (_dir, rootfs) = overlay_aware_ext4_rootfs("runner-rootfs-unchanged", false);
+        let admitted = mvm_core::crypto::image_verify::sha256_file(Path::new(&rootfs)).unwrap();
+        let cfg = VmStartConfig {
+            name: "runner-rootfs-unchanged".into(),
+            rootfs_path: rootfs.clone(),
+            ..Default::default()
+        };
+
+        runner.start(&cfg).expect("a clean rootfs boots");
+
+        assert_eq!(
+            mvm_core::crypto::image_verify::sha256_file(Path::new(&rootfs)).unwrap(),
+            admitted,
+            "start rewrote the rootfs after it was admitted"
+        );
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs[0].blocks[0].source, PathBuf::from(&rootfs));
+        assert!(
+            specs[0].blocks[0].read_only,
+            "the guest must not be able to write the shared image either"
+        );
+    }
+
+    #[test]
+    fn start_refuses_a_rootfs_whose_journal_needs_replay_before_boot() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let (_dir, rootfs) = overlay_aware_ext4_rootfs("runner-rootfs-dirty", true);
+        let before = std::fs::read(&rootfs).unwrap();
+        let cfg = VmStartConfig {
+            name: "runner-rootfs-dirty".into(),
+            rootfs_path: rootfs.clone(),
+            ..Default::default()
+        };
+
+        let err = runner
+            .start(&cfg)
+            .expect_err("a read-only guest cannot mount a journal that needs replay");
+
+        assert!(err.to_string().contains(&rootfs), "names the image: {err}");
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "the refusal must come before any boot"
+        );
+        assert_eq!(
+            std::fs::read(&rootfs).unwrap(),
+            before,
+            "the refused image must be left exactly as it was"
+        );
+    }
+
     #[test]
     fn vmbackend_name_and_capabilities_delegate_to_the_driver() {
         let driver = MockDriver::default();
