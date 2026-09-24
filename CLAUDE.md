@@ -9,6 +9,8 @@ Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handl
 
 Multi-tenant fleet orchestration (tenants, pools, instances, agents, coordinators) lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repository.
 
+The system-image train (builder VM, default and rootless workload images, workload kernel, runtime overlay, SDK sidecars) lives in the separate [mvm-images](https://github.com/tinylabscom/mvm-images) repository. A contributor build discovers a sibling `mvm-images` checkout automatically (override with `MVM_IMAGES_DIR`).
+
 ```
 macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
@@ -239,7 +241,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 ### Key Design Decisions
 
 - **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the selected builder VM: HVF on macOS 26+ Apple Silicon, Firecracker on native Linux, and QEMU on other hosts; libkrun remains explicit-only. A selected builder failure surfaces rather than silently switching VMMs. The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
-- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is **also NIC-less** on libkrun and hvf: its `nix build` substituter traffic rides the same vsock `NetworkFlow` relay under `NetworkPolicy::trusted_build_egress()`. The one exception is the **QEMU** builder, which attaches a `virtio-net-pci` on user-mode slirp — that tier is the outlier, not the model.
+- **Workload microVMs have no NIC**: every workload _microVM_ backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is **also NIC-less** on libkrun and hvf: its `nix build` substituter traffic rides the same vsock `NetworkFlow` relay under `NetworkPolicy::trusted_build_egress()`. The one exception is the **QEMU** builder, which attaches a `virtio-net-pci` on user-mode slirp — that tier is the outlier, not the model.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon, the automatic choice is a long-lived HVF builder VM with Nix + build tools. On native Linux with KVM, it is Firecracker; other hosts select QEMU. Libkrun remains an explicit-only contributor choice. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
 - **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
@@ -386,6 +388,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    (`download_builder_vm_image`) and `.../builder_vm/default_microvm.rs`
    call them. `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
    escape; never set it in CI.
+
 7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
    and `audit` jobs in CI. Reproducibility double-build catches
    non-determinism that could mask injection.
@@ -456,6 +459,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
+
 11. **Every application-dep volume is CVE-scanned and SBOM-enumerated
     when sealed, then hash-locked, attestation-checked, and bound to the
     workload's audit chain.** ADR-014 / Plan 73 Followups A +
@@ -547,6 +551,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `placeholder_in_outbound_request_dropped_and_audited`.
 
     <!-- absent:end -->
+
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
     image provenance in the chain-signed audit log.** Row 14 of the
     ADR-001 table. Plan 85 Phase E + F wire the user-facing OCI image
@@ -730,7 +735,7 @@ this row as enforced without it.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation
-    verify`), which witnesses this claim because the attestation is signed
+verify`), which witnesses this claim because the attestation is signed
     under the same workflow identity. It is SLSA Build **L2**: the attestation
     is produced by the same workflow that produces the artifact, so a
     compromised release job forges both. Provenance adds the commit and build
@@ -784,7 +789,7 @@ sccache`).
 any target behind `required-features` — `mvm-conformance`'s cucumber runner
 needs `--features bdd`, and without it the same broken tree reports zero
 errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
-all, including Linux-gated *test* files, which `just check-linux` misses too
+all, including Linux-gated _test_ files, which `just check-linux` misses too
 because that recipe is `--lib` only. `just check-gated` covers both. Skipping
 it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
 failed", a message that names neither the file nor the field.
@@ -835,7 +840,7 @@ directory does not exist and the gate has nothing to check.
 not have to pay for twice.
 
 Write one when you learn something the diff will not say — and especially when
-you learn something is *false*. The falsifications are the notes that earn
+you learn something is _false_. The falsifications are the notes that earn
 their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
 that refuted it, and why it could not have worked, which is the difference
 between a day spent and a paragraph read. Say what not to retry, and say why.
@@ -896,7 +901,7 @@ its PR is invisible to any scan.
 
 The plans that already carry numbers keep them — renaming them would invalidate
 hundreds of `Plan NNN` references for no benefit. `xtask check-plan-names`
-freezes that set and fails a *new* number-named plan. Refer to a plan by its
+freezes that set and fails a _new_ number-named plan. Refer to a plan by its
 path or title rather than a bare number.
 
 ## Sprint Management
@@ -919,7 +924,7 @@ path or title rather than a bare number.
   items 5–7, which bind the sprint spec, the plan checkboxes, and
   `specs/REFACTOR-STATUS.md` together.
 - **Resolve a conflict in any of these by keeping BOTH sides.** Never take one
-  side wholesale: upstream may have *rewritten* an entry your branch also edited,
+  side wholesale: upstream may have _rewritten_ an entry your branch also edited,
   so `--ours`/`--theirs` silently drops someone's work. Verify after resolving
   that both entries are still present.
 
@@ -933,3 +938,4 @@ change and bump its "Last updated" date. It is a quick index, not the source of
 truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the
 rollup. `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` move together with the
 plan checkboxes — updating one and leaving the others stale is not done.
+Trigger CI rebuild
