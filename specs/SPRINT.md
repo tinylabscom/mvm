@@ -70,6 +70,27 @@
       (delegating to the entrypoint uid) — on a kernel without cgroups the
       mount skips quietly, so sealed guests boot identically.
 
+      **Blocker #3599 resolved to root cause (2026-09-23):** the
+      clone()-in-a-fresh-pid-ns failure is a long-standing UPSTREAM kernel
+      bug under virtualization, not anything mvm builds. Every hypothesis
+      was exonerated by direct control — kernel config (stock defconfig
+      fails), toolchain (nixpkgs gcc 13/14, Debian gcc, pristine upstream
+      binutils), build recipe, build host, userspace (pristine busybox+k3s),
+      VMM (TCG on two hosts/qemu versions, HVF, and x86_64 KVM), and kernel
+      version (Debian 6.1.180 / 6.12.x / 6.18.15 all fail). A "Debian kernel
+      passes" data point was an invalid test harness and is void. The bug
+      reproduces on GitHub-hosted runners with pristine userspace; only bare
+      metal reportedly works. k3s pod sandboxes stay broken on virtualized
+      hosts until upstream fixes it or an environmental precondition is
+      found. Upstream report draft:
+      `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md`; full
+      matrix on #3599; validation workflow on the mvm-images datapath
+      branch. The mvm-side kernel bridge (`mvmctl kernel build` from an
+      MVM_IMAGES_DIR checkout, the machine-run dev-tier override fix, and
+      the Stage 0 config-emit fixes) lands with this branch; the datapath
+      kernel posture lives in mvm-images PR #24 (the datapath content is
+      the real deliverable — the bisect controls are throwaway).
+
 - [ ] **Public function naming cleanup — issue #3315.**
       Fresh measurement finds 70 lexical public `f` / `f_with_*` sibling pairs.
       The first reviewable slice clears all five pairs from

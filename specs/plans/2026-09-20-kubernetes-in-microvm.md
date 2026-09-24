@@ -7,8 +7,18 @@ Validation: check-sprint-append
 (guest template PR), tinylabscom/mvm-images#9 (workload-kernel variant).
 Branch: `feat/kubernetes-in-microvm`.
 
-**Status: W1 (mvm runtime enabler) IMPLEMENTED, awaiting review; W2-W4
-NOT STARTED.**
+**Status: W1 + W2 merged (#3555); W3 kernel-variant and template
+scaffolds landed (#3572, tinylabscom/mvm-templates#2). W4 is BLOCKED on
+#3599, resolved to root cause 2026-09-23: the clone()-in-a-fresh-pid-ns
+failure is a long-standing upstream kernel bug under virtualization
+(Debian 6.1/6.12/6.18 kernels all reproduce under TCG, HVF, and x86_64
+KVM with pristine userspace; bare metal reportedly works). Not a config,
+toolchain, or image-train problem — no mvm-side kernel change will fix
+it; see #3599 for the full matrix and
+`specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` for the
+upstream report draft. The datapath kernel posture (the workload-k8s
+successor, generically named) lands in mvm-images; the mvm-side kernel
+build/boot-selection bridge lands with the kernel-variant workstream.**
 
 ## Product requirement
 
@@ -139,7 +149,11 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
 - [ ] Builder-VM E2E: boot the image (on the `workload-k8s` kernel), wait
       for node Ready, pull an image through the egress proxy, run a pod with
       admitted egress, exercise a declared ingress port, teardown; BDD
-      scenario under `features/suites/`
+      scenario under `features/suites/`. **Blocked by #3599** (upstream
+      kernel bug: pod sandboxes are fresh PID namespaces and their init
+      processes hit the clone() ceiling on every virtualized host tested);
+      the datapath kernel replaces `workload-k8s` naming per the image
+      train's no-consumer-names rule.
 - [ ] Docs guide page (`public/src/content/docs/guides/`)
 - [ ] Amend the "Kubernetes compatibility" deliberately-not-claimed entry in
       `public/src/content/docs/security/sandbox-parity-status.md`: the claim

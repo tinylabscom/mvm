@@ -84,6 +84,14 @@ enum Which {
     StockDebian,
     /// Rootless kernel built by gcc13 (mvm-images only).
     RootlessGcc13,
+    /// Rootless config via a plain make derivation (mvm-images only).
+    PlainRootless,
+    /// Rootless config via plain make + Debian gcc binaries (mvm-images only).
+    PlainDebGcc,
+    /// Rootless config via plain make + Debian as/ld (mvm-images only).
+    PlainDebBinutils,
+    /// Rootless config via plain make + upstream binutils (mvm-images only).
+    PlainUpstreamBinutils,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +145,15 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
             Which::StockTest => vec![(KernelVariant::StockTest, "stocktest")],
             Which::StockDebian => vec![(KernelVariant::StockDebian, "stockdebian")],
             Which::RootlessGcc13 => vec![(KernelVariant::RootlessGcc13, "rootless-gcc13")],
+            Which::PlainRootless => vec![(KernelVariant::PlainRootless, "plain-rootless")],
+            Which::PlainDebGcc => vec![(KernelVariant::PlainDebGcc, "plain-deb-gcc")],
+            Which::PlainDebBinutils => {
+                vec![(KernelVariant::PlainDebBinutils, "plain-deb-binutils")]
+            }
+            Which::PlainUpstreamBinutils => vec![(
+                KernelVariant::PlainUpstreamBinutils,
+                "plain-upstream-binutils",
+            )],
         }
     };
 

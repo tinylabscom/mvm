@@ -26,7 +26,10 @@ Last updated: 2026-09-21
       tinylabscom/mvm-templates#1; kernel audit tinylabscom/mvm-images#9).
       W1 device allow-list enabler and W2 cgroup2 mount + workload-uid
       delegation implemented on `feat/kubernetes-in-microvm`; template
-      integration, E2E, and docs pending.
+      integration (tinylabscom/mvm-templates#2), E2E, and docs pending —
+      all blocked on #3599, resolved 2026-09-23 to a long-standing upstream
+      kernel bug under virtualization (not config/toolchain/image-train);
+      see the plan and issue for the matrix.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds
