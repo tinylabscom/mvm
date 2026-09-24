@@ -651,23 +651,7 @@ mod tests {
     }
 
     fn images_checkout_fixture(dir: &std::path::Path) {
-        for marker in mvm_build::image_source::IMAGES_CHECKOUT_MARKERS {
-            let path = dir.join(marker);
-            std::fs::create_dir_all(path.parent().expect("marker parent")).expect("mkdir");
-            std::fs::write(&path, format!("# {marker}\n")).expect("write marker");
-        }
-        for args in [
-            vec!["init", "-q"],
-            vec!["add", "-A"],
-            vec!["commit", "-q", "-m", "images"],
-        ] {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .output()
-                .expect("run git for fixture");
-            assert!(out.status.success(), "git fixture: {out:?}");
-        }
+        super::super::test_pair::images_checkout(dir, "{}\n");
     }
 
     #[test]
