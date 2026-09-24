@@ -1,5 +1,8 @@
 # Batch live witness: fork N children from one running parent
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 Issue: tinylabscom/mvm#3641 (closed by #3645) — this is the evidence follow-up
 the #3645 PR body named: the batch path has unit/BDD coverage but never ran
 end-to-end against a live parent at N>1.
