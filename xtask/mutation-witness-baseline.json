@@ -50,6 +50,20 @@
       ]
     },
     {
+      "path": "crates/mvm-build/src/base_image_gate.rs",
+      "package": "mvm-build",
+      "claims": [
+        21
+      ]
+    },
+    {
+      "path": "crates/mvm-build/src/base_image_scan.rs",
+      "package": "mvm-build",
+      "claims": [
+        21
+      ]
+    },
+    {
       "path": "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
       "package": "mvm-build",
       "claims": [
@@ -86,7 +100,8 @@
       "path": "crates/mvm-cli/src/commands/image/pull_core.rs",
       "package": "mvm-cli",
       "claims": [
-        14
+        14,
+        21
       ]
     },
     {
@@ -205,6 +220,13 @@
       "package": "mvm-core",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-fs/src/os_inventory.rs",
+      "package": "mvm-fs",
+      "claims": [
+        21
       ]
     },
     {
