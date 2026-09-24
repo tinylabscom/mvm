@@ -167,8 +167,8 @@ docs commit went out as #3581). Under the
       aarch64-linux inside the 24 MiB overlay budget — x86_64 verifies in
       CI). Issue #3565 added typed streams, events,
       asynchronous copies and completion positions across the wire, native
-      backend and both CUDA shims. The end-to-end BDD witness (#3567,
-      PR #3653) boots a real `--gpu` VM on a GPU-less runner and asserts
+      backend and both CUDA shims. The end-to-end BDD
+      witness (#3567, merged as #3653) boots a real `--gpu` VM on a GPU-less runner and asserts
       guest-observed stub answers plus per-request host-side log
       evidence, with the no-channel negative case; it flushed out the
       endpoint's missing host-helper contract-probe answer and the NVML
