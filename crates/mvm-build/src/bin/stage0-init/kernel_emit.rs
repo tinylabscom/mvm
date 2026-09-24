@@ -70,7 +70,7 @@ pub(crate) fn emit_resolved_config(
     if store_path.is_empty() {
         return Err("config build emitted no /nix/store path".into());
     }
-    copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))?;
+    crate::linux::copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))?;
     // Root the config output separately from the kernel: it is only a
     // build-time input of the kernel derivation, so rooting the kernel
     // does not keep it, and without a root the post-build collection

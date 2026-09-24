@@ -199,7 +199,7 @@ mod linux {
             .unwrap_or(false)
     }
 
-    fn should_enable_vsock_egress(qemu: bool, cmdline: &str) -> bool {
+    pub(crate) fn should_enable_vsock_egress(qemu: bool, cmdline: &str) -> bool {
         !qemu
             || cmdline
                 .split_whitespace()
@@ -214,7 +214,7 @@ mod linux {
             .filter(|port| *port > 0)
     }
 
-    fn apply_vsock_egress_proxy_env(cmd: &mut Command) {
+    pub(crate) fn apply_vsock_egress_proxy_env(cmd: &mut Command) {
         cmd.env("ALL_PROXY", VSOCK_EGRESS_PROXY_URL)
             .env("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL)
             .env("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL)
@@ -1114,8 +1114,9 @@ mod linux {
         // Echo nix's `--print-build-logs` to the guest's own stderr, which the
         // host captures to `console.log` live — that's what makes the otherwise-
         // silent multi-minute build tailable from the host.
-        let (status, stderr_log, stdout) = kernel_emit::run_streaming(cmd, &mut std::io::stderr())
-            .map_err(|e| format!("nix build: {e}"))?;
+        let (status, stderr_log, stdout) =
+            crate::kernel_emit::run_streaming(cmd, &mut std::io::stderr())
+                .map_err(|e| format!("nix build: {e}"))?;
 
         // Persist the full log to /out for output-disk collection and host-side
         // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
@@ -1137,7 +1138,8 @@ mod linux {
         // artifact that matters.
         if mode == "kernel"
             && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
-            && let Err(e) = kernel_emit::emit_resolved_config(&nix, &arch, config_attr, &flake_base)
+            && let Err(e) =
+                crate::kernel_emit::emit_resolved_config(&nix, &arch, config_attr, &flake_base)
         {
             eprintln!("stage0-init: skipping kernel-config emit: {e}");
         }
@@ -1373,7 +1375,7 @@ mod linux {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
+    pub(crate) fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
         mvm_build::stage0::copy_nonempty_file(src, dst)
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -1406,7 +1408,7 @@ mod linux {
     mod tests {
         use super::{
             STAGE0_NIX_CACHE_HOME, VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL,
-            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache, run_streaming,
+            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache,
             stage0_nix_store_device,
         };
         use std::os::unix::fs::symlink;
@@ -1547,7 +1549,8 @@ mod linux {
                 "printf 'log1\\nlog2\\n' >&2; printf '/nix/store/abc\\n'",
             ]);
             let mut live: Vec<u8> = Vec::new();
-            let (status, stderr_log, stdout) = kernel_emit::run_streaming(cmd, &mut live).unwrap();
+            let (status, stderr_log, stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
             assert!(status.success());
             // Echoed live to the console sink…
             assert_eq!(live, b"log1\nlog2\n");
@@ -1562,7 +1565,8 @@ mod linux {
             let mut cmd = Command::new("sh");
             cmd.args(["-c", "echo boom >&2; exit 7"]);
             let mut live: Vec<u8> = Vec::new();
-            let (status, stderr_log, _stdout) = kernel_emit::run_streaming(cmd, &mut live).unwrap();
+            let (status, stderr_log, _stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
             assert_eq!(status.code(), Some(7));
             assert_eq!(stderr_log, b"boom\n");
         }
