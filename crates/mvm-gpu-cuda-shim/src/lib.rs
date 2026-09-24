@@ -5,9 +5,8 @@
 //! links `libcuda.so.1` exactly as it would the real library; nothing in
 //! the guest carries a driver or a device node.
 //!
-//! v1 ABI coverage and the deliberate limits (no `cuGetProcAddress`
-//! resolution and PTX-param launches) are documented in
-//! `specs/plans/2026-09-20-gpu-over-vsock.md`.
+//! v1 ABI coverage and the deliberate limits (no PTX-param launches)
+//! are documented in `specs/plans/2026-09-20-gpu-over-vsock.md`.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -16,7 +15,7 @@ use std::sync::Mutex;
 use mvm_contract::protocol::gpu::GpuResponse;
 use mvm_gpu_shim_core::{call, guard, wire, write_cstr};
 
-use libc::{c_char, c_int, c_uchar, c_uint, c_void};
+use libc::{c_char, c_int, c_uchar, c_uint, c_ulonglong, c_void};
 
 /// `CUresult` — the shim returns the host endpoint's numeric code verbatim.
 type CuResult = c_int;
@@ -1187,4 +1186,250 @@ pub unsafe extern "C" fn cuGetErrorString(code: CuResult, message: *mut *const c
         },
         wire::CUDA_ERROR_UNKNOWN as CuResult,
     )
+}
+
+// ---------------------------------------------------------------------------
+// cuGetProcAddress resolution
+//
+// CUDA 12 cudart, torch, and vLLM resolve driver entry points through
+// `cuGetProcAddress` rather than linking the versioned aliases directly. The
+// resolver answers every symbol this shim implements — under both its base
+// name and the versioned alias the real driver serves (e.g. `cuMemAlloc`
+// answers as `cuMemAlloc_v2`) — and refuses everything else with
+// `CUDA_ERROR_NOT_FOUND`, which is how the real driver reports a symbol it
+// does not carry. Per-thread-default-stream (`*_ptsz`) variants are out of
+// v1 scope: the flags argument is accepted and ignored, and stream-flagged
+// lookups receive the base entry point.
+// ---------------------------------------------------------------------------
+
+/// `(name, address)` pairs for every implemented entry point, base names and
+/// versioned aliases alike. Kept in one table so the test can assert the
+/// resolver and the exported symbol set agree.
+/// `(name, address)` pairs for every implemented entry point, base names and
+/// versioned aliases alike. Kept in one table so the test can assert the
+/// resolver and the exported symbol set agree. Built lazily: casting a
+/// function address to an integer is not allowed in const eval, and the
+/// table only needs to exist once per process.
+fn resolver_table() -> &'static [(&'static str, usize)] {
+    static TABLE: std::sync::OnceLock<Vec<(&'static str, usize)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        vec![
+            ("cuInit", cuInit as *const () as usize),
+            (
+                "cuDriverGetVersion",
+                cuDriverGetVersion as *const () as usize,
+            ),
+            ("cuDeviceGetCount", cuDeviceGetCount as *const () as usize),
+            ("cuDeviceGet", cuDeviceGet as *const () as usize),
+            ("cuDeviceGetName", cuDeviceGetName as *const () as usize),
+            ("cuDeviceTotalMem", cuDeviceTotalMem as *const () as usize),
+            (
+                "cuDeviceTotalMem_v2",
+                cuDeviceTotalMem as *const () as usize,
+            ),
+            ("cuCtxCreate", cuCtxCreate as *const () as usize),
+            ("cuCtxCreate_v2", cuCtxCreate as *const () as usize),
+            ("cuCtxDestroy", cuCtxDestroy as *const () as usize),
+            ("cuCtxDestroy_v2", cuCtxDestroy as *const () as usize),
+            ("cuCtxSetCurrent", cuCtxSetCurrent as *const () as usize),
+            ("cuCtxGetCurrent", cuCtxGetCurrent as *const () as usize),
+            ("cuMemAlloc", cuMemAlloc as *const () as usize),
+            ("cuMemAlloc_v2", cuMemAlloc as *const () as usize),
+            ("cuMemFree", cuMemFree as *const () as usize),
+            ("cuMemFree_v2", cuMemFree as *const () as usize),
+            ("cuMemcpyHtoD", cuMemcpyHtoD as *const () as usize),
+            ("cuMemcpyHtoD_v2", cuMemcpyHtoD as *const () as usize),
+            ("cuMemcpyDtoH", cuMemcpyDtoH as *const () as usize),
+            ("cuMemcpyDtoH_v2", cuMemcpyDtoH as *const () as usize),
+            ("cuMemcpyHtoDAsync", cuMemcpyHtoDAsync as *const () as usize),
+            (
+                "cuMemcpyHtoDAsync_v2",
+                cuMemcpyHtoDAsync as *const () as usize,
+            ),
+            ("cuMemcpyDtoHAsync", cuMemcpyDtoHAsync as *const () as usize),
+            (
+                "cuMemcpyDtoHAsync_v2",
+                cuMemcpyDtoHAsync as *const () as usize,
+            ),
+            ("cuMemsetD8", cuMemsetD8 as *const () as usize),
+            ("cuMemsetD8_v2", cuMemsetD8 as *const () as usize),
+            ("cuModuleLoadData", cuModuleLoadData as *const () as usize),
+            ("cuModuleUnload", cuModuleUnload as *const () as usize),
+            (
+                "cuModuleGetFunction",
+                cuModuleGetFunction as *const () as usize,
+            ),
+            ("cuLaunchKernel", cuLaunchKernel as *const () as usize),
+            ("cuCtxSynchronize", cuCtxSynchronize as *const () as usize),
+            ("cuGetErrorString", cuGetErrorString as *const () as usize),
+            ("cuStreamCreate", cuStreamCreate as *const () as usize),
+            ("cuStreamDestroy", cuStreamDestroy as *const () as usize),
+            (
+                "cuStreamDestroy_v2",
+                cuStreamDestroy_v2 as *const () as usize,
+            ),
+            (
+                "cuStreamSynchronize",
+                cuStreamSynchronize as *const () as usize,
+            ),
+            ("cuStreamWaitEvent", cuStreamWaitEvent as *const () as usize),
+            ("cuEventCreate", cuEventCreate as *const () as usize),
+            ("cuEventDestroy", cuEventDestroy as *const () as usize),
+            ("cuEventDestroy_v2", cuEventDestroy_v2 as *const () as usize),
+            ("cuEventQuery", cuEventQuery as *const () as usize),
+            ("cuEventRecord", cuEventRecord as *const () as usize),
+            (
+                "cuEventSynchronize",
+                cuEventSynchronize as *const () as usize,
+            ),
+            ("cuGetProcAddress", cuGetProcAddress as *const () as usize),
+            (
+                "cuGetProcAddress_v2",
+                cuGetProcAddress as *const () as usize,
+            ),
+        ]
+    })
+}
+
+/// `cuGetProcAddress` — CUDA 12's driver entry-point resolver.
+///
+/// Answers implemented symbols (base names and versioned aliases) with their
+/// function pointer; refuses everything else with `CUDA_ERROR_NOT_FOUND` and
+/// a null out-pointer, matching the real driver's contract. The version and
+/// flags arguments are accepted and ignored: v1 serves one implementation
+/// per name and has no per-thread-default-stream variants.
+///
+/// No `guard`: this performs no RPC, and the lookup cannot panic (a `CStr`
+/// view of arbitrary bytes is infallible).
+///
+/// # Safety
+/// `symbol` must name a NUL-terminated string; `func_ptr` must name writable
+/// storage for one pointer, exactly as the CUDA Driver API contract says.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGetProcAddress(
+    symbol: *const c_char,
+    func_ptr: *mut *mut c_void,
+    _cuda_version: c_uint,
+    _flags: c_ulonglong,
+) -> CuResult {
+    if symbol.is_null() || func_ptr.is_null() {
+        return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
+    }
+    // SAFETY: `func_ptr` names writable storage per the caller contract.
+    unsafe { *func_ptr = std::ptr::null_mut() };
+    let name = unsafe { std::ffi::CStr::from_ptr(symbol) }.to_bytes();
+    for &(table_name, addr) in resolver_table() {
+        if table_name.as_bytes() == name {
+            // The table stores `usize` so it can live in a `static` (raw
+            // pointers are not `Sync`); every address comes from a live
+            // function and is never null.
+            unsafe { *func_ptr = addr as *mut c_void };
+            return SUCCESS;
+        }
+    }
+    wire::CUDA_ERROR_NOT_FOUND as CuResult
+}
+
+/// `cuGetProcAddress_v2` — the CUDA 12.1+ alias; identical semantics.
+///
+/// # Safety
+/// Same contract as [`cuGetProcAddress`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGetProcAddress_v2(
+    symbol: *const c_char,
+    func_ptr: *mut *mut c_void,
+    cuda_version: c_uint,
+    flags: c_ulonglong,
+) -> CuResult {
+    unsafe { cuGetProcAddress(symbol, func_ptr, cuda_version, flags) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    fn resolve(name: &str) -> (CuResult, *mut c_void) {
+        let symbol = CString::new(name).expect("test symbol has no NUL");
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { cuGetProcAddress(symbol.as_ptr(), &mut out, 12000, 0) };
+        (rc, out)
+    }
+
+    #[test]
+    fn every_implemented_symbol_resolves_to_a_live_entry_point() {
+        assert_eq!(resolver_table().len(), 46);
+        for &(name, _) in resolver_table() {
+            let (rc, out) = resolve(name);
+            assert_eq!(rc, wire::SUCCESS as CuResult, "{name} refused");
+            assert!(!out.is_null(), "{name} resolved to null");
+        }
+    }
+
+    #[test]
+    fn versioned_aliases_answer_the_base_entry_point() {
+        for (base, alias) in [
+            ("cuDeviceTotalMem", "cuDeviceTotalMem_v2"),
+            ("cuCtxCreate", "cuCtxCreate_v2"),
+            ("cuCtxDestroy", "cuCtxDestroy_v2"),
+            ("cuMemAlloc", "cuMemAlloc_v2"),
+            ("cuMemFree", "cuMemFree_v2"),
+            ("cuMemcpyHtoD", "cuMemcpyHtoD_v2"),
+            ("cuMemcpyDtoH", "cuMemcpyDtoH_v2"),
+            ("cuMemsetD8", "cuMemsetD8_v2"),
+            ("cuGetProcAddress", "cuGetProcAddress_v2"),
+        ] {
+            let (_, base_ptr) = resolve(base);
+            let (rc, alias_ptr) = resolve(alias);
+            assert_eq!(rc, wire::SUCCESS as CuResult, "{alias} refused");
+            assert_eq!(base_ptr, alias_ptr, "{alias} != {base}");
+        }
+    }
+
+    #[test]
+    fn unimplemented_symbols_refuse_with_not_found_and_null() {
+        for name in [
+            "cuGraphicsResourceGetMappedPointer",
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+            "cuLaunchKernelEx",
+            "not_a_symbol",
+            "",
+        ] {
+            let (rc, out) = resolve(name);
+            assert_eq!(
+                rc,
+                wire::CUDA_ERROR_NOT_FOUND as CuResult,
+                "{name}: expected NOT_FOUND"
+            );
+            assert!(out.is_null(), "{name}: out-pointer not cleared");
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_invalid_value() {
+        let symbol = CString::new("cuInit").expect("test symbol has no NUL");
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { cuGetProcAddress(std::ptr::null(), &mut out, 12000, 0) };
+        assert_eq!(rc, wire::CUDA_ERROR_INVALID_VALUE as CuResult);
+        let rc = unsafe { cuGetProcAddress(symbol.as_ptr(), std::ptr::null_mut(), 12000, 0) };
+        assert_eq!(rc, wire::CUDA_ERROR_INVALID_VALUE as CuResult);
+    }
+
+    #[test]
+    fn table_names_are_unique() {
+        let mut names: Vec<&str> = resolver_table().iter().map(|&(name, _)| name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), resolver_table().len(), "duplicate table names");
+    }
+
+    #[test]
+    fn the_v2_alias_entry_point_resolves_like_the_base() {
+        let symbol = CString::new("cuMemAlloc_v2").expect("test symbol has no NUL");
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { cuGetProcAddress_v2(symbol.as_ptr(), &mut out, 13000, 2) };
+        assert_eq!(rc, wire::SUCCESS as CuResult);
+        let (_, base_ptr) = resolve("cuMemAlloc");
+        assert_eq!(out, base_ptr);
+    }
 }
