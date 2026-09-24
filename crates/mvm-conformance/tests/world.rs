@@ -221,6 +221,9 @@ pub struct CliWorld {
     /// Tempdir holding the file/directory trees the asset-identity
     /// scenarios hash; held so it outlives the scenario.
     pub asset_fixture_dir: Option<tempfile::TempDir>,
+    /// Guest-arch probe binary + glibc shim cdylibs the GPU-over-vsock
+    /// scenarios mount into the guest at `/data/shims`.
+    pub gpu_probe_staging: Option<tempfile::TempDir>,
     /// Force workload-kernel reacquisition through a closed local endpoint so
     /// invalid-cache scenarios prove eviction without network or Stage 0.
     pub kernel_reacquisition_must_fail: bool,

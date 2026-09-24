@@ -10,6 +10,7 @@ mod claim;
 pub(crate) mod cli;
 mod cold_launch;
 mod doc_examples;
+mod gpu_e2e;
 mod hvf_save_restore;
 mod initramfs;
 mod installer;

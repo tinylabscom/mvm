@@ -96,6 +96,10 @@ pub fn serve_connection<S: Read + Write>(
                 ));
             }
         };
+        // One terse line per request: this stderr is redirected into the
+        // per-VM `gpu-endpoint.log`, which is the host-side evidence that a
+        // guest call actually landed on the endpoint.
+        eprintln!("mvm-gpu-endpoint: request op={}", request.op_name());
         let response = {
             let mut backend = backend.lock().unwrap_or_else(|e| e.into_inner());
             crate::handle_request(&mut **backend, &request)

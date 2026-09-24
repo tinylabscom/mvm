@@ -147,9 +147,20 @@ docs commit went out as #3581). Under the
       the `GuestService::Gpu` channel across all four VMM tiers, the
       runner-spawned per-VM endpoint with reap, and the Nix package
       recipes. Runtime-overlay composition of the shims is follow-up work
-      in the mvm-images repository. Issue #3565 adds typed streams, events,
+      in the mvm-images repository: tinylabscom/mvm-images#17 stages both
+      shim sets under `gpu/<libc>/` in the runtime overlay (pin advanced
+      to the first musl-shim-toolchain fix; verified building on
+      aarch64-linux inside the 24 MiB overlay budget — x86_64 verifies in
+      CI). Issue #3565 added typed streams, events,
       asynchronous copies and completion positions across the wire, native
-      backend and both CUDA shims. The stub models per-stream ordering and
+      backend and both CUDA shims. The end-to-end BDD witness (#3567,
+      PR #3653) boots a real `--gpu` VM on a GPU-less runner and asserts
+      guest-observed stub answers plus per-request host-side log
+      evidence, with the no-channel negative case; it flushed out the
+      endpoint's missing host-helper contract-probe answer and the NVML
+      shim's null device handle for ordinal 0. `cuGetProcAddress`
+      resolution for CUDA 12 cudart/torch/vLLM initialization is
+      PR #3652 (#3563). The stub models per-stream ordering and
       event readiness deterministically, including default-stream compatibility
       and fail-closed forged or stale handles. Issue #3566 passes the backend's
       real device count and ordinals through, gives the deterministic endpoint

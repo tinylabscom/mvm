@@ -220,9 +220,10 @@ pub unsafe extern "C" fn nvmlDeviceGetHandleByIndex_v2(
             if device.is_null() {
                 return wire::NVML_ERROR_INVALID_ARGUMENT as NvmlReturn;
             }
-            // The handle is the ordinal; the endpoint validates it on each
-            // query. SAFETY: null-checked above.
-            unsafe { *device = u64::from(index) as *mut c_void };
+            // The handle encodes the ordinal (offset so it is never null);
+            // the endpoint validates it on each query. SAFETY: null-checked
+            // above.
+            unsafe { *device = ordinal_to_handle(index) };
             SUCCESS
         },
         wire::NVML_ERROR_UNKNOWN as NvmlReturn,
@@ -253,7 +254,7 @@ pub unsafe extern "C" fn nvmlDeviceGetName(
             }
             match call(
                 &mvm_contract::protocol::gpu::GpuRequest::NvmlDeviceGetName {
-                    ordinal: device as u64 as u32,
+                    ordinal: handle_to_ordinal(device),
                 },
             ) {
                 GpuResponse::DeviceName { name: n } => {
@@ -291,7 +292,7 @@ pub unsafe extern "C" fn nvmlDeviceGetMemoryInfo(
             }
             match call(
                 &mvm_contract::protocol::gpu::GpuRequest::NvmlDeviceGetMemoryInfo {
-                    ordinal: device as u64 as u32,
+                    ordinal: handle_to_ordinal(device),
                 },
             ) {
                 GpuResponse::NvmlMemoryInfo { total, free, used } => {
@@ -331,7 +332,7 @@ pub unsafe extern "C" fn nvmlDeviceGetUtilizationRates(
             }
             match call(
                 &mvm_contract::protocol::gpu::GpuRequest::NvmlDeviceGetUtilizationRates {
-                    ordinal: device as u64 as u32,
+                    ordinal: handle_to_ordinal(device),
                 },
             ) {
                 GpuResponse::NvmlUtilization { gpu, memory } => {
@@ -371,7 +372,7 @@ pub unsafe extern "C" fn nvmlDeviceGetCudaComputeCapability(
             }
             match call(
                 &mvm_contract::protocol::gpu::GpuRequest::NvmlDeviceGetCudaComputeCapability {
-                    ordinal: device as u64 as u32,
+                    ordinal: handle_to_ordinal(device),
                 },
             ) {
                 GpuResponse::NvmlComputeCapability {
@@ -391,4 +392,48 @@ pub unsafe extern "C" fn nvmlDeviceGetCudaComputeCapability(
         },
         wire::NVML_ERROR_UNKNOWN as NvmlReturn,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Device-handle encoding
+//
+// The guest-visible handle must never be null: real NVML hands out opaque
+// non-null pointers, and callers (correctly) treat a null device as an
+// error. The ordinal is therefore encoded with a +1 offset so ordinal 0
+// still yields a live-looking handle; every query decodes with the inverse.
+// ---------------------------------------------------------------------------
+
+/// Encode a device ordinal as the guest-visible handle (never null).
+fn ordinal_to_handle(ordinal: u32) -> *mut c_void {
+    (u64::from(ordinal) + 1) as *mut c_void
+}
+
+/// Decode a guest handle back to its ordinal. A null handle is not a
+/// valid device — callers already reject it, but keep the mapping total.
+fn handle_to_ordinal(handle: *mut c_void) -> u32 {
+    (handle as u64).saturating_sub(1) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinal_zero_still_yields_a_non_null_handle() {
+        // The BDD witness caught this: with the raw ordinal as the handle,
+        // device 0 minted a null handle and every subsequent NVML query
+        // rejected it as an invalid argument.
+        let handle = ordinal_to_handle(0);
+        assert!(!handle.is_null());
+        assert_eq!(handle_to_ordinal(handle), 0);
+    }
+
+    #[test]
+    fn handle_round_trips_for_arbitrary_ordinals() {
+        for ordinal in [0, 1, 2, 7, u32::MAX - 1] {
+            let handle = ordinal_to_handle(ordinal);
+            assert!(!handle.is_null(), "ordinal {ordinal} minted a null handle");
+            assert_eq!(handle_to_ordinal(handle), ordinal);
+        }
+    }
 }

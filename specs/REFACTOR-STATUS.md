@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24
 
 ## In progress
 
@@ -85,7 +85,15 @@ Last updated: 2026-09-23
       optional fail-closed host ordinal pin through CLI/manifest, persisted
       machine specs, launch config, and the per-VM endpoint.
       Open follow-ups named in the plan: CUDA-graph fork-reconnect,
-      `cuGetProcAddress`, cubin param metadata, overlay image composition.
+      cubin param metadata, and (in the image train) overlay composition —
+      tinylabscom/mvm-images#17 stages both shim sets under `gpu/<libc>/`
+      with the pin advanced past the musl-shim toolchain fix and the
+      aarch64 overlay verified inside the 24 MiB budget. `cuGetProcAddress`
+      (#3563, PR #3652) and the BDD end-to-end witness (#3567, PR #3653 —
+      positive stub-answer + host-log evidence, negative dial-refusal) are
+      in review; the witness flushed out the endpoint's missing
+      host-helper contract-probe answer and the NVML shim's null device
+      handle for ordinal 0.
 
 - [ ] **Public function naming cleanup — issue #3315.**
       `specs/plans/2026-09-15-the-big-cleanup.md` D3. Fresh measurement finds

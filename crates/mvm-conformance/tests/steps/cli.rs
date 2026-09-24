@@ -325,6 +325,13 @@ fn record_live_request_state(world: &mut CliWorld) {
 
 #[when(expr = "I run mvmctl in an isolated live home with {string}")]
 pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
+    run_mvmctl_isolated_live_home_argv(world, mvm_conformance::doc_examples::tokenize(&args));
+}
+
+/// The live-home run with an already-tokenized argv, so steps that
+/// substitute scenario state (e.g. a staging path) into the command line
+/// reuse exactly the home/cwd/PATH wiring the plain step uses.
+pub(crate) fn run_mvmctl_isolated_live_home_argv(world: &mut CliWorld, argv: Vec<String>) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
@@ -345,7 +352,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
-        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .args(&argv)
         .isolated_home(&home);
     apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
