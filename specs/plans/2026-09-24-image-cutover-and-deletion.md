@@ -60,12 +60,24 @@ roll back without rebuilding a CLI.
 
 ### W7.2 Define and collect the health signals
 
-- [ ] Record the window's exit criteria before it opens, in this file:
+- [x] Record the window's exit criteria before it opens, in this file:
       `guest-image-boot` and boot-latency lanes green on every merge during
       the window; at least one `update-image-pin.yml` dry-run verification
       green; download counts on the `mvm-images` release observed via the
       GitHub API at window open and close; zero reported 404s against
       legacy asset URLs (GitHub release asset traffic plus issue tracker).
+      *Recorded; window opened 2026-09-24T19:24:38Z.* Baseline, from the
+      releases API: `mvm-images` `image-set/v0.1.0` 182 asset downloads
+      (`image-set.json` 39); legacy `mvm` `boot-image/v0.1.5` 5,118;
+      `v0.18.0-rc.1` 418. No open issue reports a 404. GitHub exposes no
+      per-asset 404 counter, so "zero 404s" is observed through the issue
+      tracker and the boot lanes, not through release traffic. The
+      pin-update dry run could not have gone green: its inline lock rewrite
+      named `[stage0_kernel.aarch64]` / `asset`, sections the lock does not
+      have, so every run — including the weekly schedule — exited before
+      proposing anything, and it never advanced `[stage0_kernel]`'s tag. It
+      now calls `xtask repin-image-lock`, which re-parses the lock it writes
+      (6 tests; idempotent on the real `image-set/v0.1.0` root).
 - [ ] Window length: one full CLI release train plus the observations
       above; extend once if any signal is unavailable, not silently.
 
