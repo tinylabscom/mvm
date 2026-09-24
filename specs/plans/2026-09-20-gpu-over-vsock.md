@@ -150,7 +150,7 @@ option A) which this plan does not touch.
 - [x] W10 — Docs: ADR-053 (compute-over-vsock, amends ADR-029 decision
       1's "no GPU support today"), plan checkboxes, SPRINT.md,
       REFACTOR-STATUS.md, doc-guard-compliant wording.
-- [ ] W13 — `cuGetProcAddress` in the cuda shim (#3563, PR #3652):
+- [x] W13 — `cuGetProcAddress` in the cuda shim (#3563, merged as #3652):
       resolver answers all implemented v1 symbols under their base names
       and the versioned aliases the real driver serves; refuses the rest
       with `CUDA_ERROR_NOT_FOUND`. Unit + dynamic-export tests.
