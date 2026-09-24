@@ -70,6 +70,10 @@ Last updated: 2026-09-24
       cgroup2 mount + workload-uid delegation merged as #3555; the
       workload-k8s kernel variant merged as #3572; template integration,
       E2E, and docs pending in tinylabscom/mvm-templates#1.
+      Template integration, E2E, and docs are blocked on #3599, resolved
+      2026-09-23 to a long-standing upstream kernel bug under
+      virtualization (not config/toolchain/image-train); see the plan and
+      issue for the matrix.
 
 - [ ] **GPU compute by API remoting over vsock.**
       Epic #3560; `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029's
