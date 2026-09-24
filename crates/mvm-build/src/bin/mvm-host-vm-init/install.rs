@@ -112,32 +112,15 @@ impl InstallReport {
 /// tests can inject shell stubs. Production callers use
 /// [`SystemCommandRunner`] which spawns real subprocesses.
 pub trait CommandRunner {
-    /// Run `program` with `args` (cwd: any working dir the runner
-    /// picks). Tee stdout + stderr to `log_path` if `Some`; ignore
-    /// them otherwise. Returns the child's exit code on clean exit,
-    /// or a string error otherwise (program not on PATH, spawn
-    /// failure, …).
+    /// Run `program` with `args` and `env` added to the inherited
+    /// environment (cwd: any working dir the runner picks). Tee stdout +
+    /// stderr to `log_path` if `Some`; ignore them otherwise. Returns the
+    /// child's exit code on clean exit, or a string error otherwise
+    /// (program not on PATH, spawn failure, …).
     ///
     /// `extra_path` is prepended to the runner's `PATH` lookup —
     /// production drives it from `MVM_INSTALL_TOOLS_PATH`; tests
     /// hand it a tempdir full of shell stubs.
-    fn run(
-        &self,
-        program: &str,
-        args: &[&str],
-        log_path: Option<&Path>,
-        extra_path: Option<&Path>,
-    ) -> Result<i32, String> {
-        self.run_with_env(program, args, log_path, extra_path, &[])
-    }
-
-    /// Like [`Self::run`] but accepts extra environment variables
-    /// to set on the child. The installer wrap path
-    /// ([`run_install`]) uses this to point the installer's proxy
-    /// variables at the guest's vsock egress client.
-    /// Implementors that don't need env-var injection can rely on
-    /// the default impl of
-    /// [`Self::run`] and override only this method.
     fn run_with_env(
         &self,
         program: &str,
@@ -282,6 +265,18 @@ pub struct InstallContext<'a> {
     pub egress_env: &'a [(&'a str, &'a str)],
 }
 
+/// Writable home for every tool the pipeline spawns. The builder rootfs is
+/// mounted read-only and PID 1 has no `HOME`, so `uv`, `pnpm` and the audit
+/// tools would otherwise fail creating their caches under `/.cache`. `/tmp` is
+/// the tmpfs every builder job points `HOME` at.
+const TOOL_HOME_ENV: [(&str, &str); 2] = [("HOME", "/tmp"), ("XDG_CACHE_HOME", "/tmp/.cache")];
+
+/// The environment of a pipeline step that reaches the network: the writable
+/// home plus the egress proxy variables.
+fn networked_env<'a>(egress_env: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    TOOL_HOME_ENV.iter().chain(egress_env).copied().collect()
+}
+
 /// Public entry point. Run the install pipeline for the spec in
 /// `ctx`, writing the four sealed-volume artifacts (`content/`,
 /// SBOM, fetch log, CVE) into `ctx.out_dir` and the install
@@ -302,8 +297,9 @@ pub struct InstallContext<'a> {
 /// through the guest's vsock egress client, which relays each connection
 /// to the host; the host opens the real connection and applies the
 /// builder's egress policy. `ctx.egress_env` carries the proxy variables
-/// that point `uv` / `pnpm` at that client. The SBOM and CVE sidecars
-/// run without them: they read content the installer already fetched.
+/// that point `uv` / `pnpm` at that client. The CVE scan gets them too,
+/// because it queries an advisory service; the SBOM emitter does not, since
+/// it only reads content the installer already fetched.
 pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallError> {
     let InstallContext {
         spec,
@@ -339,6 +335,7 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
         });
     }
 
+    let networked = networked_env(egress_env);
     let installer_args = installer.args(&lockfile_in_vm, &content_dir);
     let installer_args_refs: Vec<&str> = installer_args.iter().map(|s| s.as_str()).collect();
     let installer_result = runner.run_with_env(
@@ -346,7 +343,7 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
         &installer_args_refs,
         Some(&fetch_log),
         extra_path,
-        egress_env,
+        &networked,
     );
 
     let installer_exit_code = installer_result.map_err(InstallError::Io)?;
@@ -356,7 +353,14 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
     // host's audit gate decides whether a stub is acceptable for
     // `--prod`; today both gate levels accept it with a warning.
     let sbom_emitted = run_sbom(spec.language, &content_dir, &sbom, runner, extra_path);
-    let cve_emitted = run_cve(spec.language, &lockfile_in_vm, &cve, runner, extra_path);
+    let cve_emitted = run_cve(
+        spec.language,
+        &lockfile_in_vm,
+        &cve,
+        runner,
+        extra_path,
+        &networked,
+    );
 
     Ok(InstallReport {
         installer_exit_code,
@@ -460,7 +464,7 @@ fn run_sbom(
         return false;
     }
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    match runner.run(program, &args_refs, None, extra_path) {
+    match runner.run_with_env(program, &args_refs, None, extra_path, &TOOL_HOME_ENV) {
         Ok(0) => true,
         Ok(code) => {
             eprintln!(
@@ -484,6 +488,7 @@ fn run_cve(
     cve_path: &Path,
     runner: &dyn CommandRunner,
     extra_path: Option<&Path>,
+    env: &[(&str, &str)],
 ) -> bool {
     let (program, args): (&str, Vec<String>) = match language {
         Language::Python => (
@@ -516,7 +521,7 @@ fn run_cve(
         return false;
     }
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    match runner.run(program, &args_refs, None, extra_path) {
+    match runner.run_with_env(program, &args_refs, None, extra_path, env) {
         // `pip-audit` and `pnpm audit` both exit nonzero when they
         // *find* vulnerabilities — that's the whole point of the
         // scan. The output file still represents a successful
@@ -765,19 +770,19 @@ mod tests {
             .unwrap();
         assert_eq!(https, crate::VSOCK_EGRESS_PROXY_URL);
 
-        // Subsequent: cyclonedx-py + pip-audit. Sidecars run
-        // *without* the proxy env (no network — they read on-disk
-        // content the installer fetched).
+        // Subsequent: cyclonedx-py + pip-audit. The SBOM emitter reads
+        // on-disk content and gets only the writable home; the CVE scan
+        // queries an advisory service and gets the installer's env.
         let sbom_call = calls
             .iter()
             .find(|c| c.program == "cyclonedx-py")
             .expect("cyclonedx-py invoked");
-        assert!(
-            sbom_call.env.is_empty(),
-            "sidecars must not inherit proxy env: {:?}",
-            sbom_call.env
-        );
-        assert!(calls.iter().any(|c| c.program == "pip-audit"));
+        assert_eq!(sbom_call.env, env_pairs(&TOOL_HOME_ENV));
+        let cve_call = calls
+            .iter()
+            .find(|c| c.program == "pip-audit")
+            .expect("pip-audit invoked");
+        assert_eq!(cve_call.env, calls[0].env);
 
         // Artifacts on disk.
         assert!(tmp.path().join(CONTENT_SUBDIR).is_dir());
@@ -921,9 +926,16 @@ mod tests {
         );
     }
 
+    fn env_pairs(env: &[(&str, &str)]) -> Vec<(String, String)> {
+        env.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
     /// The installer's proxy variables are exactly the vsock egress
     /// environment every other builder job gets, so an install cannot drift
-    /// onto a different egress path than a flake build.
+    /// onto a different egress path than a flake build. Its home is the
+    /// writable tmpfs, because the rootfs is read-only.
     #[test]
     fn installer_env_is_the_vsock_egress_env() {
         let tmp = tempfile::tempdir().unwrap();
@@ -931,11 +943,13 @@ mod tests {
         let _ = run_install_with_fakes(&ok_spec(), &tmp.path().join("job"), tmp.path(), &runner);
         let calls = runner.calls();
         let uv_call = calls.iter().find(|c| c.program == "uv").unwrap();
-        let expected: Vec<(String, String)> = crate::VSOCK_EGRESS_PROXY_ENV
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        assert_eq!(uv_call.env, expected);
+        let (home, proxy) = uv_call.env.split_at(TOOL_HOME_ENV.len());
+        assert_eq!(home, env_pairs(&TOOL_HOME_ENV));
+        assert_eq!(proxy, env_pairs(&crate::VSOCK_EGRESS_PROXY_ENV));
+        assert!(
+            TOOL_HOME_ENV.iter().all(|(_, dir)| dir.starts_with("/tmp")),
+            "the installer's home must be on the builder's tmpfs: {TOOL_HOME_ENV:?}"
+        );
     }
 
     #[test]
