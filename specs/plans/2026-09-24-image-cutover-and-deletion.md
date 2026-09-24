@@ -4,7 +4,7 @@ Backing: preview
 Validation: each wave lands with the tests and measured evidence named in
 its boxes; unchecked waves remain in progress.
 
-**Status:** PROPOSED — planning complete, awaiting W7 window evidence
+**Status:** IN PROGRESS — W7.1 complete; W7.2–W7.4 open
 **Date opened:** 2026-09-24
 **Issues:** #3368 (W7 dual-publish window), #3366 (W8 cutover and deletion)
 **Parent plan:** `specs/plans/2026-09-16-image-repository-extraction.md`
@@ -44,19 +44,51 @@ roll back without rebuilding a CLI.
 
 ### W7.1 Mirror the pinned set into `mvm` releases
 
-- [ ] Extend the `mvm` release workflow with a mirror job that downloads the
+- [x] Extend the `mvm` release workflow with a mirror job that downloads the
       locked image-set members (both architectures, plus the default-image
       trio the legacy release used to carry) from the `mvm-images` release
       and attaches them to the `mvm` release under the historical asset
       names. The job reads every URL and digest from `images.lock` — never
       from a mutable latest release.
-- [ ] Gate the mirror on a digest comparison: every mirrored asset's
+      *Done:* `release.yml`'s "Mirror the locked image set into this release"
+      step replaces the old attach step, which asked `tinylabscom/mvm` for the
+      lock's `image-set/v0.1.0` tag — a release that exists only in
+      `mvm-images`, so the next CLI release would have failed there. Repository
+      and manifest name come from `scripts/locked-image-tag.sh`, the tag from
+      `xtask release-boot-image tag`, and the attached names from
+      `xtask release-boot-image mirror-assets` (38 assets). The mirror is
+      load-bearing for current CLIs too, not only old ones:
+      `download_runtime_overlay`, `download_sdk_sidecar` and
+      `download_initramfs` still resolve `…/tinylabscom/mvm/releases/download/v{version}/`.
+- [x] Gate the mirror on a digest comparison: every mirrored asset's
       SHA-256 must equal the corresponding member digest in the signed root
       (and the legacy default-image trio's recorded digests). A mismatch
       fails the release, loudly, before publication.
-- [ ] Tests: the digest-comparison helper accepts equal digests, refuses
+      *Done:* two gates, both before signing. The `mvmctl` being released runs
+      `image boot verify --require-complete` over the whole set; `--lock` is
+      now optional and defaults to the lock compiled into the binary, so the
+      check is "would this CLI accept these bytes". Then
+      `xtask release-boot-image validate` checks each mirrored file: members by
+      the root's digest and size, checksum manifests line by line (member lines
+      must agree with the root, every listed file must hash to its line),
+      `.sha256` sidecars against the root, and it refuses any file nothing
+      anchors — which is why `default-microvm-*.sbom.txt` is not mirrored.
+      Real-bytes evidence (2026-09-24, against the published
+      `image-set/v0.1.0`): `image boot verify` verified all 29 artifacts under
+      signer key id `6996feb9248dd8eee1e335470cbff52a`; the mirror gate
+      accepted the 38 legacy-named assets and refused a one-byte edit to
+      `default-microvm-meta-x86_64.json`.
+- [x] Tests: the digest-comparison helper accepts equal digests, refuses
       missing members, refuses size mismatches, and refuses a root whose
       member list does not cover the legacy trio.
+      *Done:* 13 tests in `xtask/src/release_boot_image.rs` (accept; tampered
+      member; wrong size; missing and empty required asset; uncovered legacy
+      name; unpinned root; checksum manifest disagreeing with the root;
+      drifted auxiliary; sidecar disagreeing with the root; unanchored file;
+      tag drift; list coverage), one in `image boot verify` for the compiled
+      default, and three `tests/release_assets.rs` structure tests: the source
+      repository is read from the lock, and verify → gate → attach all precede
+      signing.
 
 ### W7.2 Define and collect the health signals
 
