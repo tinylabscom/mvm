@@ -759,43 +759,43 @@ fn load_name_registry() -> VmNameRegistry {
     VmNameRegistry::load(&path).unwrap_or_default()
 }
 
-/// Best-effort removal of a machine name from the persistent VM name registry
-/// after a successful stop, so it stops showing as registered. A load or save
-/// failure is ignored — a direct-boot VM carries no registry entry, and the
-/// stop this follows already succeeded regardless.
 /// Remove a stopped machine's runtime state directory.
 ///
 /// A stop that leaves it behind leaves whatever the last run put there, and a
-/// same-identity restore rebuilds that directory by cloning the checkpoint's
-/// files into it, so a leftover `rootfs.ext4` from the previous restore makes
-/// the next one fail with `File exists`. Nothing else would remove it until
-/// some later command's reconcile pass happened to run.
+/// same-identity checkpoint restore rebuilds that directory by cloning the
+/// checkpoint's files into it, so a leftover `rootfs.ext4` from the previous
+/// restore makes the next one fail with `File exists`. The reconcile pass that
+/// would otherwise reap it runs only on the next state-touching command, and a
+/// checkpoint restore is not one.
 ///
 /// The directory stays when something still owns it: a supervisor that
 /// survived the stop, or a restore of the same machine in another process,
 /// which holds the machine's lifecycle lock while it fills the directory.
 fn remove_stopped_runtime_state(name: &str) -> Result<()> {
     let state_dir = vm_state_dir(name);
-    mvm_runtime::vm::reconcile::reap_unowned_state_dir(
+    let removed = mvm_runtime::vm::reconcile::reap_unowned_state_dir(
         &state_dir,
         &mvm_core::config::instance_dir(name),
     )
-    .map(|removed| {
-        if !removed {
-            tracing::debug!(
-                machine = name,
-                "state dir still owned after stop; left in place"
-            );
-        }
-    })
     .map_err(|e| {
         backend_err(format!(
             "machine {name:?} stopped, but removing its state dir {} failed: {e}",
             state_dir.display()
         ))
-    })
+    })?;
+    if !removed {
+        tracing::debug!(
+            machine = name,
+            "state dir still owned after stop; left in place"
+        );
+    }
+    Ok(())
 }
 
+/// Best-effort removal of a machine name from the persistent VM name registry
+/// after a successful stop, so it stops showing as registered. A load or save
+/// failure is ignored — a direct-boot VM carries no registry entry, and the
+/// stop this follows already succeeded regardless.
 pub(crate) fn deregister_from_name_registry(name: &str) {
     let path = mvm_runtime::vm::name_registry::registry_path();
     if let Ok(mut registry) = VmNameRegistry::load(&path) {
@@ -2360,10 +2360,10 @@ mod tests {
     }
 
     /// Restore `name` from `content` through the real HVF restore seam. It
-    /// clones every blob into the state dir first, then refuses because the
-    /// fixture carries no launch config, so the error says which step failed:
-    /// `launch config` means the clone went through, `File exists` means a
-    /// leftover from the previous run was in the way.
+    /// clones every blob into the state dir before it looks for a supervisor
+    /// to launch, and the fixture has nothing to launch, so it always fails;
+    /// the returned error says whether the clone got through. `File exists`
+    /// means a leftover from the previous run was in the way.
     #[cfg(feature = "test-support")]
     fn restore_into(name: &str, content: &Path) -> String {
         use mvm_runtime::checkpoint::VmFullRestore as _;
@@ -2392,10 +2392,13 @@ mod tests {
         for round in 1..=3 {
             let restored = restore_into(name, &content);
             assert!(
-                restored.contains("launch config"),
-                "restore {round} must clone the checkpoint into a clean state dir: {restored}"
+                !restored.contains("File exists"),
+                "restore {round} must clone into a clean state dir: {restored}"
             );
-            assert!(state_dir.join("rootfs.ext4").is_file());
+            assert!(
+                state_dir.join("rootfs.ext4").is_file(),
+                "restore {round} must get as far as cloning the rootfs: {restored}"
+            );
 
             be.stop_machine(&MachineId(name.into()))
                 .await

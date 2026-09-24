@@ -272,10 +272,6 @@ use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 ///
 /// Liveness is checked again under the lock: a restore that completed between
 /// the caller's classification and here has left a running supervisor behind.
-///
-/// The machine's socket directory goes with it when it lives apart from the
-/// state dir (the short hashed namespace a deep state dir needs): a socket
-/// left there makes the next launch under the same name fail to bind.
 pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<bool, String> {
     // Nothing to remove, and no reason to create a lock file for a machine
     // that has no state.
@@ -290,11 +286,25 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
     if state_dir_has_live_process(state_dir) {
         return Ok(false);
     }
+    remove_runtime_dirs(state_dir).map(|()| true)
+}
+
+/// Remove a machine's state dir *and* the directory its sockets live in.
+///
+/// Those are not always the same place. When the state dir is deep enough that
+/// a socket path would overflow macOS's `sun_path` limit, `vm_socket_dir_at`
+/// puts the sockets under a short hashed namespace instead. Removing only the
+/// state dir then leaves the substitution socket behind, and the next launch
+/// under that name dies binding it with "Address already in use".
+///
+/// Absent directories are not an error. The caller owns the decision that
+/// nothing is still running out of them.
+pub fn remove_runtime_dirs(state_dir: &Path) -> Result<(), String> {
     let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
     if socket_dir != state_dir {
         remove_state_dir(&socket_dir)?;
     }
-    remove_state_dir(state_dir).map(|()| true)
+    remove_state_dir(state_dir)
 }
 
 /// Best-effort recursive removal of a state dir. The dead-process
@@ -1252,6 +1262,38 @@ mod tests {
 
         assert_eq!(reaped, Ok(false));
         assert!(Path::new(&dir).exists());
+    }
+
+    /// A deep state dir keeps its sockets under a short hashed namespace; a
+    /// reap that removed only the state dir would leave a socket the next
+    /// launch under the same name fails to bind.
+    #[test]
+    fn reap_unowned_state_dir_removes_a_dead_dir_and_its_separate_socket_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("d".repeat(120)).join("vms");
+        let dir = PathBuf::from(make_state_dir(&vms_root, "stopped", None));
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        std::fs::write(socket_dir.join("substitution-endpoint.sock"), b"").unwrap();
+
+        let reaped = reap_unowned_state_dir(&dir, &tmp.path().join("instances").join("stopped"));
+
+        assert_eq!(reaped, Ok(true));
+        assert!(!dir.exists());
+        assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    fn reap_unowned_state_dir_takes_no_lock_for_a_machine_with_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let instance_dir = tmp.path().join("instances").join("never-started");
+
+        let reaped =
+            reap_unowned_state_dir(&tmp.path().join("vms").join("never-started"), &instance_dir);
+
+        assert_eq!(reaped, Ok(true));
+        assert!(!instance_dir.exists());
     }
 
     #[test]
