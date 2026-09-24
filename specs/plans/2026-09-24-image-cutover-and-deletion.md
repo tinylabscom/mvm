@@ -1,5 +1,9 @@
 # Image cutover window and in-tree image deletion (W7 + W8)
 
+Backing: preview
+Validation: each wave lands with the tests and measured evidence named in
+its boxes; unchecked waves remain in progress.
+
 **Status:** PROPOSED — planning complete, awaiting W7 window evidence
 **Date opened:** 2026-09-24
 **Issues:** #3368 (W7 dual-publish window), #3366 (W8 cutover and deletion)
@@ -35,7 +39,7 @@ closes.
 
 Goal: for at least one full image and CLI release, new CLIs consume the
 locked `mvm-images` manifest while old (pre-W6) CLIs keep working against
-the legacy `mvm` release URLs, and we can prove both, compare digests, and
+the legacy `mvm` release URLs, and we can demonstrate both, compare digests, and
 roll back without rebuilding a CLI.
 
 ### W7.1 Mirror the pinned set into `mvm` releases
