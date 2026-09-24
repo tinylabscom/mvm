@@ -861,6 +861,8 @@ macOS/HVF.
 
 ### W7 — Dual-publish compatibility window (#3368)
 
+Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
+
 - [ ] For at least one image and CLI release, publish canonical assets from
       `mvm-images` while mirroring the required legacy assets to `mvm` releases.
 - [ ] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
@@ -872,6 +874,8 @@ Acceptance: no supported CLI version receives a 404 or accepts differently
 signed bytes during the transition.
 
 ### W8 — Cut over, remove duplication, and shrink the remaining suite (#3366)
+
+Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
 
 - [ ] Remove image construction and canonical image hosting from `mvm` only
       after the compatibility window and telemetry/monitoring show the new path

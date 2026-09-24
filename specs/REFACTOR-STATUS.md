@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24
 
 ## In progress
 
@@ -3824,3 +3824,15 @@ resume` takes a `current_head` and refuses when it differs from the
     Two `dormant-controls.toml` entries keep it from going unreachable
     again. STILL OPEN: doctor reporting, persisted-spec migration, docs
     gate, BDD suite
+
+- [ ] **Image cutover window and in-tree image deletion (W7 + W8)**
+      (`specs/plans/2026-09-24-image-cutover-and-deletion.md`, issues #3368
+      and #3366). Execution detail for the image-repository extraction
+      plan's final workstreams, opened after W6 landed as #3633. W7 mirrors
+      the pinned `mvm-images` set into `mvm` releases behind a digest gate,
+      collects the window's health signals, drills the lock-file rollback,
+      and publishes the support window. W8 then deletes `nix/images` and
+      image hosting from `mvm` in four classification-first waves, keeping
+      the contract, resolver, acquisition boundary, and boot witnesses, and
+      re-measures the release against the 25-minute gate. No W8 wave lands
+      before the W7 window evidence is collected.
