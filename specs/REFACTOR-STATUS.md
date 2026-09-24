@@ -4,6 +4,12 @@ Last updated: 2026-09-24
 
 ## In progress
 
+- [x] **Base-image CVE gate — issue #3646.**
+      `specs/plans/2026-09-24-base-image-cve-gate.md`. Rootfs OS inventory
+      (mvm-fs), OSV scan + CycloneDX/cve.json sidecars (mvm-build),
+      prod-admission refusal on missing scan or high/critical findings
+      (mvm-cli image resolve), claim MVM-SEC-21.
+
 - [x] **Batch live witness — #3641 evidence follow-up.**
       `specs/plans/2026-09-24-fork-batch-live-witness.md`. One capture, four
       children, all serving, identities distinct; batch wall 35.9 s on real

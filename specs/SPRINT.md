@@ -10,6 +10,16 @@
 
 ## In progress
 
+- [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
+      `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
+      an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
+      named gap), `mvm-build` scans that inventory against OSV over the
+      repo HTTP client and gates production admission on missing scans,
+      digest mismatches, and high/critical findings, and `mvm-cli` records
+      the `cve.json` + CycloneDX SBOM sidecar pair at pull and applies the
+      gate at every `--prod` image resolve. New claim MVM-SEC-21 with
+      fn-witnesses and a registered conformance suite.
+
 - [x] **Make OCI image publication and removal durable — issue #3538.**
       Rootfs publication now syncs the containing directory after its
       sidecar-last rename. Pull/rematerialize upserts and `image rm` use one
