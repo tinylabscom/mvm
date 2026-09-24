@@ -81,23 +81,35 @@ struct KernelFlakeSource {
 #[cfg(feature = "builder-vm")]
 impl KernelFlakeSource {
     /// Attribute names on an `mvm-images` kernel flake: every variant
-    /// publishes `<name>-vmlinux` + `<name>-configfile`. The in-repo
-    /// workload-k8s variant maps onto the generically-named datapath
-    /// kernel there — the guest capability is "in-guest datapath", and
-    /// the kernel canon carries no workload name.
-    fn for_images_checkout(variant: KernelVariant, kernel_dir: std::path::PathBuf) -> Self {
+    /// publishes `<name>-vmlinux` + `<name>-configfile`.
+    ///
+    /// `WorkloadK8s` deliberately has no mapping: the in-guest-orchestrator
+    /// kernel needs an in-guest datapath (bridge/veth/netfilter), and the
+    /// mvm-images canon refuses guest network devices as a permanent
+    /// invariant — the variant is not defined there. Build it from the
+    /// in-repo flake; the durable consumer shape per the invariant is
+    /// host networking inside the guest plus the loopback/vsock egress
+    /// proxy, which needs no datapath kernel.
+    fn for_images_checkout(variant: KernelVariant, kernel_dir: std::path::PathBuf) -> Result<Self> {
         let (build_attr, config_attr) = match variant {
             KernelVariant::Builder => ("builder-vmlinux", "builder-configfile"),
             KernelVariant::Workload => ("workload-vmlinux", "workload-configfile"),
-            KernelVariant::WorkloadK8s => ("datapath-vmlinux", "datapath-configfile"),
+            KernelVariant::WorkloadK8s => {
+                anyhow::bail!(
+                    "the in-guest-orchestrator kernel is not defined in the mvm-images \
+                     kernel canon (guest network devices violate its permanent invariant); \
+                     build --which workload-k8s without MVM_IMAGES_DIR so the in-repo \
+                     flake provides it, or use --which rootless for the NIC-less floor"
+                )
+            }
             KernelVariant::Rootless => ("rootless-vmlinux", "rootless-configfile"),
         };
-        Self {
+        Ok(Self {
             work_dir: kernel_dir,
             flake_base: Some("path:/work#packages".to_string()),
             build_attr: build_attr.to_string(),
             config_attr: config_attr.to_string(),
-        }
+        })
     }
 }
 
@@ -123,7 +135,7 @@ fn resolve_kernel_flake_source(variant: KernelVariant) -> Result<KernelFlakeSour
                     "kernel source: mvm-images checkout {} (kernel flake)",
                     checkout.root().display()
                 ));
-                return Ok(KernelFlakeSource::for_images_checkout(variant, kernel_dir));
+                return KernelFlakeSource::for_images_checkout(variant, kernel_dir);
             }
             ui::info(&format!(
                 "mvm-images checkout {} has no kernel/ flake; using the in-repo kernel flake",
@@ -581,23 +593,32 @@ mod tests {
                 "workload-configfile",
             ),
             (
-                KernelVariant::WorkloadK8s,
-                "datapath-vmlinux",
-                "datapath-configfile",
-            ),
-            (
                 KernelVariant::Rootless,
                 "rootless-vmlinux",
                 "rootless-configfile",
             ),
         ] {
             let source =
-                KernelFlakeSource::for_images_checkout(variant, std::path::PathBuf::from("/k"));
+                KernelFlakeSource::for_images_checkout(variant, std::path::PathBuf::from("/k"))
+                    .expect("canon variant maps");
             assert_eq!(source.build_attr, build, "{variant:?}");
             assert_eq!(source.config_attr, config, "{variant:?}");
             assert_eq!(source.flake_base.as_deref(), Some("path:/work#packages"));
             assert_eq!(source.work_dir, std::path::PathBuf::from("/k"));
         }
+    }
+
+    #[test]
+    fn images_checkout_refuses_the_orchestrator_variant() {
+        let error = KernelFlakeSource::for_images_checkout(
+            KernelVariant::WorkloadK8s,
+            std::path::PathBuf::from("/k"),
+        )
+        .expect_err("the orchestrator variant has no mvm-images home");
+        assert!(
+            error.to_string().contains("not defined in the mvm-images"),
+            "{error:#}"
+        );
     }
 
     fn images_checkout_fixture(dir: &std::path::Path) {
@@ -627,14 +648,14 @@ mod tests {
         images_checkout_fixture(dir.path());
         env.set(mvm_build::image_source::MVM_IMAGES_DIR_ENV, dir.path());
 
-        let source = resolve_kernel_flake_source(KernelVariant::WorkloadK8s)
-            .expect("images checkout resolves");
+        let source =
+            resolve_kernel_flake_source(KernelVariant::Workload).expect("images checkout resolves");
         // The checkout root is canonicalized (`/var` -> `/private/var` on
         // macOS); the staged kernel dir inherits that.
         let canonical_root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
         assert_eq!(source.work_dir, canonical_root.join("kernel"));
-        assert_eq!(source.build_attr, "datapath-vmlinux");
-        assert_eq!(source.config_attr, "datapath-configfile");
+        assert_eq!(source.build_attr, "workload-vmlinux");
+        assert_eq!(source.config_attr, "workload-configfile");
         assert_eq!(source.flake_base.as_deref(), Some("path:/work#packages"));
     }
 
