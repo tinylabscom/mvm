@@ -50,9 +50,11 @@ pub(in crate::commands) enum BootAction {
         /// The detached cosign bundle published beside the manifest
         #[arg(long, value_name = "FILE")]
         bundle: PathBuf,
-        /// The image lock naming the manifest digest and signing identity
+        /// The image lock naming the manifest digest and signing identity.
+        /// Omitted, the set is checked against the pin compiled into this
+        /// binary — the bytes this CLI would itself accept
         #[arg(long, value_name = "FILE")]
-        lock: PathBuf,
+        lock: Option<PathBuf>,
         /// Directory holding every member artifact under its declared name
         #[arg(long, value_name = "DIR")]
         artifacts: PathBuf,

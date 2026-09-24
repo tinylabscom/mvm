@@ -1687,9 +1687,9 @@ fn the_ci_boot_witness_resolves_the_locked_boot_image_tag() {
 fn the_cli_release_validates_the_compiled_boot_image_tag() {
     let workflow = release_workflow();
     let step = workflow
-        .split("- name: Attach the boot image release assets to this release")
+        .split("- name: Mirror the locked image set into this release")
         .nth(1)
-        .expect("release.yml must attach boot image assets")
+        .expect("release.yml must mirror the locked image set")
         .split("\n      - name:")
         .next()
         .expect("the boot-image attachment step must have a body");
@@ -1705,23 +1705,94 @@ fn the_cli_release_validates_the_compiled_boot_image_tag() {
         "the release gate must not independently select a highest published tag:\n{step}"
     );
     assert!(
-        step.contains("release-boot-image validate \"${BOOT_TAG}\" artifacts"),
-        "the release gate must validate the downloaded matrix against that exact tag:\n{step}"
+        step.contains("release-boot-image validate \"${BOOT_TAG}\" \"${mirror}\""),
+        "the release gate must validate the mirrored matrix against that exact tag:\n{step}"
     );
+}
+
+/// The mirror reads where the set lives from images.lock, not from this
+/// repository: the image set is published by mvm-images, and a download from
+/// `GITHUB_REPOSITORY` would ask for a tag that exists only there.
+#[test]
+fn the_mirror_downloads_from_the_locked_image_repository() {
+    let workflow = release_workflow();
+    let step = mirror_step(&workflow);
+
+    assert!(
+        step.contains(r#"IMAGE_REPO="$(./scripts/locked-image-tag.sh image_set repository)""#),
+        "the mirror must read the image repository from images.lock:\n{step}"
+    );
+    assert!(
+        step.contains(r#"gh release download "${BOOT_TAG}" --repo "${IMAGE_REPO}""#),
+        "the mirror must download from the locked repository:\n{step}"
+    );
+    assert!(
+        !step.contains(r#"--repo "${GITHUB_REPOSITORY}""#),
+        "the mirror must not look for the image set in this repository:\n{step}"
+    );
+}
+
+/// Re-signing bytes this job did not build is safe only if both gates run on
+/// them first: the released CLI's own verifier over the signed root, then the
+/// mirror gate over every file about to be republished. Both have to precede
+/// the step that mints this workflow's signatures, or a mismatch would be
+/// signed before it was refused.
+#[test]
+fn the_mirror_is_verified_by_the_released_cli_and_gated_before_signing() {
+    let workflow = release_workflow();
+    let step = mirror_step(&workflow);
+    let verify = step
+        .find("image boot verify")
+        .expect("the released CLI must verify the image set");
+    let gate = step
+        .find("release-boot-image validate")
+        .expect("the mirror gate must run");
+    let attach = step
+        .find(r#"mv "${mirror}/${asset}" "artifacts/${asset}""#)
+        .expect("only gated assets may reach the release directory");
+    assert!(
+        verify < gate && gate < attach,
+        "verify, then gate, then attach — in that order:\n{step}"
+    );
+    assert!(
+        step[verify..gate].contains("--require-complete"),
+        "the released CLI must refuse an incomplete set:\n{step}"
+    );
+
+    let mirror = workflow
+        .find("- name: Mirror the locked image set into this release")
+        .expect("checked above");
+    let signing = workflow
+        .find("- name: Sign release tarballs, checksum manifests, and SBOM")
+        .expect("release.yml must sign what it publishes");
+    assert!(
+        mirror < signing,
+        "the mirror must be gated before anything is signed"
+    );
+}
+
+fn mirror_step(workflow: &str) -> &str {
+    workflow
+        .split("- name: Mirror the locked image set into this release")
+        .nth(1)
+        .expect("release.yml must mirror the locked image set")
+        .split("\n      - name:")
+        .next()
+        .expect("the mirror step must have a body")
 }
 
 #[test]
 fn the_cli_release_refuses_a_missing_compiled_boot_image_release() {
     let workflow = release_workflow();
     let step = workflow
-        .split("- name: Attach the boot image release assets to this release")
+        .split("- name: Mirror the locked image set into this release")
         .nth(1)
-        .expect("release.yml must attach boot image assets")
+        .expect("release.yml must mirror the locked image set")
         .split("\n      - name:")
         .next()
         .expect("the boot-image attachment step must have a body");
     let existence_check = step
-        .find("gh release view \"${BOOT_TAG}\"")
+        .find("gh release view \"${BOOT_TAG}\" --repo \"${IMAGE_REPO}\"")
         .expect("the compiled boot image release must be checked explicitly");
     let download = step
         .find("gh release download \"${BOOT_TAG}\"")
@@ -1783,9 +1854,9 @@ fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
 fn a_release_with_no_boot_image_assets_refuses_to_publish() {
     let workflow = release_workflow();
     let step = workflow
-        .split("- name: Attach the boot image release assets to this release")
+        .split("- name: Mirror the locked image set into this release")
         .nth(1)
-        .expect("release.yml must attach boot image assets");
+        .expect("release.yml must mirror the locked image set");
     let step = step
         .split("\n      - name:")
         .next()

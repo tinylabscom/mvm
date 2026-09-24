@@ -19,7 +19,8 @@ use serde_json::json;
 pub(in crate::commands) struct VerifyRequest {
     pub manifest: PathBuf,
     pub bundle: PathBuf,
-    pub lock: PathBuf,
+    /// `None` selects the lock compiled into this binary.
+    pub lock: Option<PathBuf>,
     pub artifacts: PathBuf,
     pub require_complete: bool,
     pub json: bool,
@@ -36,7 +37,10 @@ impl VerifyInputs {
     fn read(request: &VerifyRequest) -> Result<Self> {
         let manifest_bytes = read_input("image set manifest", &request.manifest)?;
         let bundle_bytes = read_input("signature bundle", &request.bundle)?;
-        let lock = read_lock(&request.lock)?;
+        let lock = match &request.lock {
+            Some(path) => read_lock(path)?,
+            None => compiled_lock(),
+        };
         require_directory(&request.artifacts)?;
         Ok(Self {
             manifest_bytes,
@@ -58,6 +62,13 @@ fn read_lock(path: &Path) -> Result<ImageLock> {
     let text = std::str::from_utf8(&bytes)
         .with_context(|| format!("{} is not UTF-8 text", path.display()))?;
     toml::from_str(text).with_context(|| format!("{} is not a valid image lock", path.display()))
+}
+
+/// The pin every acquisition path in this binary resolves. Verifying against it
+/// answers "would this CLI accept these bytes", which is what a release that
+/// republishes the set needs to know before it signs anything.
+fn compiled_lock() -> ImageLock {
+    mvm_core::image_set::image_train_lock().image_set.clone()
 }
 
 fn require_directory(path: &Path) -> Result<()> {
@@ -234,7 +245,7 @@ mod tests {
         let request = VerifyRequest {
             manifest: path("manifest.json"),
             bundle: path("manifest.json.bundle"),
-            lock: path("images.lock"),
+            lock: Some(path("images.lock")),
             artifacts,
             require_complete: false,
             json: false,
@@ -335,16 +346,40 @@ mod tests {
             "v0.0.0-smoke",
         );
         let staged = stage(MANIFEST.as_bytes(), b"", &lock);
-        let text = std::fs::read_to_string(&staged.request.lock).unwrap();
+        let lock_path = staged.request.lock.clone().unwrap();
+        let text = std::fs::read_to_string(&lock_path).unwrap();
         let branch_bound = text.replace("refs/tags/v0.0.0-smoke", "refs/heads/main");
         assert_ne!(text, branch_bound, "the fixture must name the tag ref");
-        std::fs::write(&staged.request.lock, branch_bound).unwrap();
+        std::fs::write(&lock_path, branch_bound).unwrap();
 
         let err = verify(&staged.request).expect_err("a branch-bound lock must not parse");
 
         assert!(
             err.to_string().contains("is not a valid image lock"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_omitted_lock_verifies_against_the_compiled_pin() {
+        let compiled = compiled_lock();
+        let other = lock_pinning(
+            MANIFEST.as_bytes(),
+            "tinylabscom/mvm",
+            ".github/workflows/release.yml",
+            "v0.0.0-smoke",
+        );
+        let mut staged = stage(MANIFEST.as_bytes(), b"", &other);
+        staged.request.lock = None;
+
+        let err = refused(&staged);
+
+        // The staged lock pins these exact bytes, so only the compiled pin can
+        // refuse them at the digest stage.
+        assert_eq!(err.stage(), ImageSetStage::ManifestDigest, "got: {err}");
+        assert!(
+            err.to_string().contains(compiled.manifest_sha256.as_str()),
+            "the refusal must name the compiled pin: {err}"
         );
     }
 

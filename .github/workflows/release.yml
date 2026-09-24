@@ -400,27 +400,30 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Dual-publish: attach the CLI's compiled boot image train assets to this CLI
-      # release too. It re-uploads bytes, never rebuilds them — the images are
-      # built exactly once, by release-boot-image.yml.
+      # Mirror the locked image set into this CLI release under the names a CLI
+      # release has always carried. The bytes are built and signed once, in
+      # mvm-images; this step re-uploads them, never rebuilds them.
       #
-      # This direction, rather than having that workflow push into the CLI
-      # release, because of who signs. An installed mvmctl trusts one keyless
-      # identity, this workflow's at a `v*` tag, so the bundles it verifies
-      # have to be minted here. Pulling the raw bytes in before the signing
-      # step below means they are re-signed under that identity and the
-      # consumer-path check a few steps down exercises them for real; the
-      # boot-image release's own bundles are provenance for that train and are
-      # simply overwritten here.
+      # An installed mvmctl still resolves the runtime overlay, SDK sidecar and
+      # the older image paths off its own `v{version}` release and verifies them
+      # under this workflow's identity, so the bundles for those files have to
+      # be minted here. That makes this job a re-signer of bytes it did not
+      # build, and the two gates below are what make re-signing safe:
       #
-      # The window closes when the download side reads the boot-image pin
-      # instead of the CLI version. Until then this step is the only reason a
-      # fresh install still finds its boot image. A CLI release with no image
-      # assets is therefore not a degraded release, it is a broken one: every
-      # fresh install 404s on first boot. So a missing boot image release stops
-      # the publish rather than warning past it — the whole point of this gate
-      # family is that nothing ships that can only be validated afterwards.
-      - name: Attach the boot image release assets to this release
+      # 1. The CLI being released verifies the whole set exactly as it would
+      #    on a user's machine: the root's digest against the compiled lock,
+      #    the root's cosign bundle against the lock's identity, then every
+      #    member's size and digest.
+      # 2. The mirror gate checks each file about to be republished against
+      #    that root — a member by its declared digest and size, anything else
+      #    through a checksum manifest whose member lines agree with the root —
+      #    and refuses a file nothing accounts for.
+      #
+      # Every URL comes from images.lock, never from a newest-release query. A
+      # CLI release with no image assets is a broken release, not a degraded
+      # one — every fresh install 404s on first boot — so a missing or
+      # mismatched set stops the publish rather than warning past it.
+      - name: Mirror the locked image set into this release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -434,33 +437,37 @@ jobs:
             echo "::error::the compiled default boot image tag is empty; refusing to publish" >&2
             exit 1
           fi
-          if ! gh release view "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null; then
-            echo "::error::the CLI embeds ${BOOT_TAG}, but no release with that tag exists. Publish that boot image release or intentionally advance the compiled default before retrying." >&2
+          IMAGE_REPO="$(./scripts/locked-image-tag.sh image_set repository)"
+          MANIFEST="$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+          if ! gh release view "${BOOT_TAG}" --repo "${IMAGE_REPO}" --json tagName > /dev/null; then
+            echo "::error::the CLI embeds ${BOOT_TAG}, but ${IMAGE_REPO} has no release with that tag. Publish that image set or intentionally advance images.lock before retrying." >&2
             exit 1
           fi
-          echo "Attaching boot image assets from ${BOOT_TAG}"
-          mkdir -p artifacts
-          gh release download "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --dir artifacts --clobber
+          echo "Mirroring ${IMAGE_REPO}@${BOOT_TAG}"
+          image_set="${RUNNER_TEMP}/image-set"
+          mirror="${RUNNER_TEMP}/image-mirror"
+          mkdir -p "${image_set}" "${mirror}"
+          gh release download "${BOOT_TAG}" --repo "${IMAGE_REPO}" --dir "${image_set}" --clobber
 
-          # Existence is not usability. The producing side refuses to publish an
-          # incomplete set, but it cannot retract one published before that gate
-          # existed, and this step would attach it without comment. A CLI release
-          # missing these is green and unusable: no x86_64 image means every
-          # x86_64 fresh install 404s on first boot, and no builder-vm assets
-          # means download_builder_vm_image 404s for everyone. The consumer-path
-          # check further down covers only runtime-overlay and sdk-sidecar, and
-          # skips whatever is absent, so nothing else in this job would notice.
+          tar -xzf artifacts/mvmctl-x86_64-unknown-linux-gnu.tar.gz -C "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/mvmctl-x86_64-unknown-linux-gnu/mvmctl" image boot verify \
+            --require-complete \
+            --manifest "${image_set}/${MANIFEST}" \
+            --bundle "${image_set}/${MANIFEST}.bundle" \
+            --artifacts "${image_set}"
+
+          mapfile -t mirrored < <(cargo run --quiet --package xtask -- release-boot-image mirror-assets)
+          for asset in "${MANIFEST}" "${MANIFEST}.bundle" "${mirrored[@]}"; do
+            mv "${image_set}/${asset}" "${mirror}/${asset}"
+          done
+          rm -rf "${image_set}"
           cargo run --quiet --package xtask -- \
-            release-boot-image validate "${BOOT_TAG}" artifacts
-          # Drop the bundles this job re-mints. The signing step below writes
-          # its bundle with create-new semantics, so leaving the boot image
-          # train's copy in place would fail that step outright rather than be
-          # overwritten. The pack-manifest bundles are not re-signed here and
-          # stay.
-          rm -f artifacts/runtime-overlay-*.tar.gz.bundle \
-                artifacts/sdk-sidecar-*.tar.gz.bundle \
-                artifacts/builder-vm-*-checksums-sha256.txt.bundle \
-                artifacts/default-microvm-*-checksums-sha256.txt.bundle
+            release-boot-image validate "${BOOT_TAG}" "${mirror}"
+
+          mkdir -p artifacts
+          for asset in "${mirrored[@]}"; do
+            mv "${mirror}/${asset}" "artifacts/${asset}"
+          done
           ls -la artifacts/
 
       # The attested builder pack has to be minted here, and only here.
