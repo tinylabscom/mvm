@@ -363,6 +363,69 @@ pub(crate) fn run_mvmctl_isolated_live_home_argv(world: &mut CliWorld, argv: Vec
     world.last_run = Some(output);
 }
 
+/// The cached default development rootfs in the home the last live step used.
+fn cached_default_dev_rootfs(world: &CliWorld) -> PathBuf {
+    let home = world
+        .last_live_home
+        .as_deref()
+        .expect("a live mvmctl step must run before the cached rootfs is inspected");
+    mvm_core::config::default_microvm_cache_dir_at(home)
+        .join("dev")
+        .join("rootfs.ext4")
+}
+
+fn cached_default_dev_rootfs_digest(world: &CliWorld) -> String {
+    let rootfs = cached_default_dev_rootfs(world);
+    mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap_or_else(|error| {
+        panic!(
+            "hash the cached default development rootfs {}: {error}",
+            rootfs.display()
+        )
+    })
+}
+
+#[then("the cached default development rootfs digest is recorded")]
+fn record_cached_default_dev_rootfs_digest(world: &mut CliWorld) {
+    world.cached_dev_rootfs_digest = Some(cached_default_dev_rootfs_digest(world));
+}
+
+#[then("the cached default development rootfs digest is unchanged")]
+fn cached_default_dev_rootfs_digest_is_unchanged(world: &mut CliWorld) {
+    let recorded = world
+        .cached_dev_rootfs_digest
+        .clone()
+        .expect("the cached development rootfs digest must be recorded first");
+    assert_eq!(
+        cached_default_dev_rootfs_digest(world),
+        recorded,
+        "a transient launch rewrote the cached default development rootfs"
+    );
+}
+
+/// The digest admission recorded is the digest the image still has, so the
+/// signed plan describes the bytes the VMM booted.
+#[then("the last admitted plan names the cached default development rootfs digest")]
+fn last_admitted_plan_names_the_cached_rootfs_digest(world: &mut CliWorld) {
+    let home = world
+        .last_live_home
+        .clone()
+        .expect("a live mvmctl step must run before the audit chain is inspected");
+    let chain_path = home.join("audit").join("local.jsonl");
+    let chain = fs::read_to_string(&chain_path)
+        .unwrap_or_else(|error| panic!("read audit chain {}: {error}", chain_path.display()));
+    let admitted = chain
+        .lines()
+        .filter_map(|line| serde_json::from_str::<mvm_contract::verify::SignedEnvelope>(line).ok())
+        .filter(|envelope| envelope.entry.event == "plan.admitted")
+        .last()
+        .unwrap_or_else(|| panic!("no plan.admitted entry in {}", chain_path.display()));
+    assert_eq!(
+        admitted.entry.image_sha256,
+        cached_default_dev_rootfs_digest(world),
+        "the admitted plan records a digest the cached rootfs no longer has"
+    );
+}
+
 fn apply_encrypted_volume_probe_path(world: &CliWorld, command: &mut Command) {
     if let Some(path) = &world.encrypted_volume_probe_path {
         command.env("PATH", path);

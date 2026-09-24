@@ -266,7 +266,17 @@ pub fn default_mvm_cache_dir() -> String {
 /// the cache through here, so neither can look at a directory the other does
 /// not write.
 pub fn default_microvm_cache_dir() -> String {
-    format!("{}/default-microvm", mvm_cache_dir())
+    default_microvm_cache_dir_at(mvm_home())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The default microVM boot-image cache beneath an explicit mvm home:
+/// `<mvm_home>/cache/default-microvm`. The pure variant of
+/// [`default_microvm_cache_dir`], for a harness inspecting a home its subject
+/// runs against rather than the one this process resolves.
+pub fn default_microvm_cache_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_cache_dir_at(mvm_home).join("default-microvm")
 }
 
 /// Config directory for user configuration files: `<mvm_home>/config`.
@@ -1927,6 +1937,14 @@ mod tests {
         assert_eq!(
             mvm_cache_dir_at("/isolated/mvm"),
             std::path::PathBuf::from("/isolated/mvm/cache")
+        );
+    }
+
+    #[test]
+    fn default_microvm_cache_dir_at_uses_an_explicit_isolated_home() {
+        assert_eq!(
+            default_microvm_cache_dir_at("/isolated/mvm"),
+            std::path::PathBuf::from("/isolated/mvm/cache/default-microvm")
         );
     }
 
