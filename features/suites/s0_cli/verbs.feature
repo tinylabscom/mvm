@@ -47,6 +47,15 @@ Feature: mvmctl top-level CLI surface
     And the help output contains "--as"
     And the help output contains "--branch"
 
+  Scenario: machine fork help documents the batch count
+    When I run mvmctl with "machine fork --help"
+    Then the command exits with code 0
+    And the help output contains "--count"
+
+  Scenario: machine fork refuses a zero batch count
+    When I run mvmctl with "machine fork vm-a --count 0"
+    Then the command exits with code 2
+
   Scenario: machine restore help documents the child naming options
     When I run mvmctl with "machine restore --help"
     Then the command exits with code 0

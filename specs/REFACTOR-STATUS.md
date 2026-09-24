@@ -4,6 +4,12 @@ Last updated: 2026-09-23
 
 ## In progress
 
+- [x] **Fork batch (`machine fork --count N`) — issue #3641.**
+      `specs/plans/2026-09-23-fork-batch.md`. One capture, N live children
+      through the unchanged per-child fork arm; batch naming, fail-fast with
+      running-children report, array-shaped JSON. Ready for merge-queue
+      delivery.
+
 - [x] **OCI image publication and removal durability — issue #3538.**
       The rootfs artifact-set rename now ends with a directory sync, OCI index
       read-modify-write is serialized and durably replaced, and last-reference

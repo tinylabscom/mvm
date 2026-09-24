@@ -254,13 +254,13 @@ struct CheckpointRemoveJson<'a> {
 }
 
 #[derive(Serialize)]
-struct CheckpointForkJson<'a> {
-    schema_version: u8,
-    action: &'static str,
-    parent_id: &'a CheckpointId,
-    child_vm_name: &'a str,
-    booted: bool,
-    checkpoint: &'a CheckpointMeta,
+pub(in crate::commands) struct CheckpointForkJson<'a> {
+    pub(in crate::commands) schema_version: u8,
+    pub(in crate::commands) action: &'static str,
+    pub(in crate::commands) parent_id: &'a CheckpointId,
+    pub(in crate::commands) child_vm_name: &'a str,
+    pub(in crate::commands) booted: bool,
+    pub(in crate::commands) checkpoint: &'a CheckpointMeta,
 }
 
 /// Reject a user-supplied checkpoint id that could escape the store root or
@@ -834,6 +834,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
                 declared_secrets,
                 allow_secret_drop,
             })
+            .map(|_| ())
         }
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
             store: &store,
