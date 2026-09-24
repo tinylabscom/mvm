@@ -64,6 +64,12 @@ pub(crate) fn bind_listener(vsock_port: u32) -> std::io::Result<AgentListener> {
     if unix_transport_selected() {
         return bind_unix_listener(&unix_socket_path()).map(AgentListener::Unix);
     }
+    bind_vsock_listener(vsock_port).map(AgentListener::Vsock)
+}
+
+/// Bind an AF_VSOCK listener on `port`. Shared by the control plane and the
+/// telemetry listener so there is exactly one vsock bind implementation.
+pub(crate) fn bind_vsock_listener(port: u32) -> std::io::Result<RawFd> {
     let fd = socket_cloexec(AF_VSOCK, SOCK_STREAM);
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
@@ -71,7 +77,7 @@ pub(crate) fn bind_listener(vsock_port: u32) -> std::io::Result<AgentListener> {
     let addr = SockAddrVm {
         svm_family: AF_VSOCK as u16,
         svm_reserved1: 0,
-        svm_port: vsock_port,
+        svm_port: port,
         svm_cid: VMADDR_CID_ANY,
         svm_flags: 0,
         svm_zero: [0; 3],
@@ -102,7 +108,7 @@ pub(crate) fn bind_listener(vsock_port: u32) -> std::io::Result<AgentListener> {
         }
         return Err(err);
     }
-    Ok(AgentListener::Vsock(fd))
+    Ok(fd)
 }
 
 /// Bind an AF_UNIX listener at `path`, creating the parent directory if
@@ -125,14 +131,16 @@ pub(crate) fn bind_unix_listener(path: &Path) -> std::io::Result<UnixListener> {
 /// closed; the caller re-checks its shutdown flags and retries.
 pub(crate) fn accept_control(listener: &AgentListener) -> Option<RawFd> {
     match listener {
-        AgentListener::Vsock(fd) => accept_control_vsock(*fd),
+        AgentListener::Vsock(fd) => accept_vsock(*fd, "control"),
         AgentListener::Unix(listener) => accept_control_unix(listener),
     }
 }
 
 /// AF_VSOCK accept + the host-only peer-CID gate (unchanged semantics from
-/// the original inline loop).
-fn accept_control_vsock(fd: RawFd) -> Option<RawFd> {
+/// the original inline loop). Shared by the control plane and the telemetry
+/// listener so there is exactly one peer-authorization implementation;
+/// `plane` names the caller in the rejection diagnostic.
+pub(crate) fn accept_vsock(fd: RawFd, plane: &str) -> Option<RawFd> {
     // Accept into a `sockaddr_vm` so the peer CID is captured: the control
     // port is host-only, and a guest-local workload on a loopback-capable
     // kernel could otherwise dial it and inject any GuestRequest.
@@ -164,7 +172,7 @@ fn accept_control_vsock(fd: RawFd) -> Option<RawFd> {
         peer_len >= size_of::<SockAddrVm>() as u32 && peer.svm_family == AF_VSOCK as u16;
     if !peer_known || !peer_cid_is_authorized(peer.svm_cid) {
         eprintln!(
-            "mvm-guest-agent: rejecting control connection from non-host peer (cid={}, family={})",
+            "mvm-guest-agent: rejecting {plane} connection from non-host peer (cid={}, family={})",
             peer.svm_cid, peer.svm_family
         );
         // SAFETY: `cfd` is the just-accepted connection fd, not yet wrapped

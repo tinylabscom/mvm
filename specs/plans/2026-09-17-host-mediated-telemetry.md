@@ -294,8 +294,10 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         missing, malformed-key and stale-boot expectations refuse by name, and
         an integration witness shows the encrypted session alone cannot
         distinguish two boots sharing an inherited key — the registration gate
-        is the discriminator. No guest listener, no host dialer and no
-        over-the-wire port-5254 witness yet; those remain open in this bullet.
+        is the discriminator. The guest listener and a live-stream full-chain
+        witness now land with the listener entry below; the host dialer
+        (VM-lifetime collector, W4) and a real-vsock port-5254 witness on a
+        booted guest remain open in this bullet.
         Local integration now adds the standing host-dial channel, backend
         connection routing, HVF supervisor binding, signed live-handoff bit and
         fresh child-local saved-restore endpoint. Affected-crate tests pass
@@ -318,6 +320,27 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         signer integration tests pass, as do all 69 rebuilt repository gates
         and declared backing. PR #3472 is published; CI and queued delivery
         remain open.
+  - [x] W2b — Guest telemetry listener (guest half): the agent serves the
+        authenticated telemetry session over any stream via
+        `serve_telemetry_connection`, with a fresh producer epoch per session,
+        a Coverage-Started announcement, and refusal of a wrong guest key or
+        wrong host anchor. The guest binary binds the reserved vsock telemetry
+        port (5254) through the transport module's bind and host-only peer-CID
+        gate, on a thread spawned only after PID-1 activation, one session at
+        a time, with per-connection lazy key load so a pre-provisioning
+        connection is dropped cleanly and the listener keeps serving.
+        Vsock-only: the unix/container tier gets no listener in this slice.
+        Twelve focused tests cover the receiver↔serve wire round-trip, epoch
+        freshness, both wrong-peer refusals, dead-peer handling, the glue's
+        lazy-key refusals, and — with #3597's registration merged — a
+        full-chain witness (`crates/mvm-runtime/tests/telemetry_full_chain.rs`)
+        composing register → resolve → assert-current → authenticated receive
+        against the serving guest over a live stream, including the
+        superseded-boot gate refusal and an imposter-key session failure.
+        A real-vsock over-the-wire witness on a booted guest, capture (W3)
+        and VM-lifetime collection (W4) are not claimed. Scope and evidence
+        are recorded in
+        [the delivery record](../sprint/delivery/3421-telemetry-guest-listener.md).
 - [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export
