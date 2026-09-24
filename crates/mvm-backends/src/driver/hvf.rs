@@ -300,6 +300,17 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
     })
 }
 
+/// Remediation attached when the supervisor binary cannot be resolved or
+/// verified at spawn time. A missing or stale helper is a build or install
+/// problem, not a run-time one: the raw resolution error alone sends users
+/// digging through console logs for what was fixable in one command.
+fn supervisor_unavailable_message(error: &anyhow::Error) -> String {
+    format!(
+        "HVF supervisor unavailable. Build it with `just build-supervisors` \
+         or install mvm with `mvmctl env bootstrap`, then retry.\n\nError: {error:#}"
+    )
+}
+
 /// The supervisor launch, bounded by its guest's memory and task ceilings and
 /// by whatever CPU share this VM was admitted under.
 ///
@@ -348,7 +359,8 @@ fn boot_with_handoff(
     .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
     let json =
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
-    let supervisor = resolve_supervisor_path_verified()?;
+    let supervisor = resolve_supervisor_path_verified()
+        .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1157,6 +1169,15 @@ mod tests {
     }
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
+
+    #[test]
+    fn supervisor_unavailable_message_names_the_remedies() {
+        let err = anyhow::anyhow!("mvm-hvf-supervisor not found in PATH or aux dirs");
+        let msg = supervisor_unavailable_message(&err);
+        assert!(msg.contains("just build-supervisors"), "{msg}");
+        assert!(msg.contains("mvmctl env bootstrap"), "{msg}");
+        assert!(msg.contains("mvm-hvf-supervisor not found"), "{msg}");
+    }
 
     #[test]
     fn handoff_response_reader_handles_a_ready_unix_stream() {
