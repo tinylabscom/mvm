@@ -146,7 +146,13 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
 /// The lock file that serializes resumes of one machine:
 /// `<mvm_home>/instances/<vm-name>/resume.lock`.
 fn resume_lock_path(vm_name: &str) -> PathBuf {
-    mvm_core::config::instance_dir(vm_name).join("resume")
+    resume_lock_path_in(&mvm_core::config::instance_dir(vm_name))
+}
+
+/// [`resume_lock_path`] for a machine whose instance directory is already
+/// resolved.
+fn resume_lock_path_in(instance_dir: &Path) -> PathBuf {
+    instance_dir.join("resume")
 }
 
 /// Hold the per-machine resume lock, blocking until any other resume of the
@@ -166,6 +172,21 @@ pub fn lock_resume(vm_name: &str) -> Result<mvm_core::util::atomic_io::FileLock>
 pub fn try_lock_resume(vm_name: &str) -> Result<Option<mvm_core::util::atomic_io::FileLock>> {
     mvm_core::util::atomic_io::FileLock::try_acquire(&resume_lock_path(vm_name))
         .with_context(|| format!("checking for a resume of VM {vm_name:?} in progress"))
+}
+
+/// [`try_lock_resume`] for the machine whose instance directory is
+/// `instance_dir`, for callers rooted somewhere other than the process-wide
+/// mvm home.
+pub fn try_lock_resume_in(
+    instance_dir: &Path,
+) -> Result<Option<mvm_core::util::atomic_io::FileLock>> {
+    mvm_core::util::atomic_io::FileLock::try_acquire(&resume_lock_path_in(instance_dir))
+        .with_context(|| {
+            format!(
+                "checking for a resume of {} in progress",
+                instance_dir.display()
+            )
+        })
 }
 
 /// Verify + load one VM's own instance snapshot (`~/.mvm/instances/<vm-name>/snapshot/`).
