@@ -54,64 +54,12 @@ jobs:
             echo "protocol=$(jq -c .compatibility candidate/image-set.json)"
           } >> "$GITHUB_OUTPUT"
 
+      # The rewrite reads the root through the same types every consumer uses
+      # and re-parses the lock it wrote, so a section this step failed to
+      # advance refuses here instead of proposing a lock that pins two
+      # releases at once.
       - name: Update the single image lock
-        env:
-          NEW_TAG: ${{ steps.image.outputs.tag }}
-          NEW_DIGEST: ${{ steps.image.outputs.digest }}
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib, re
-
-          path = pathlib.Path("crates/mvm-core/images.lock")
-          text = path.read_text()
-          manifest = json.loads(pathlib.Path("candidate/image-set.json").read_text())
-          tag = os.environ["NEW_TAG"]
-          digest = os.environ["NEW_DIGEST"]
-
-          def section(name, body):
-              global text
-              pattern = rf"(?ms)(^\[{re.escape(name)}\]\n)(.*?)(?=^\[|\Z)"
-              match = re.search(pattern, text)
-              if not match:
-                  raise SystemExit(f"missing [{name}] in images.lock")
-              updated = body(match.group(2))
-              text = text[:match.start(2)] + updated + text[match.end(2):]
-
-          def set_value(body, key, value):
-              return re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', f'{key} = {value}', body)
-
-          def image_set(body):
-              body = set_value(body, "release_tag", json.dumps(tag))
-              return set_value(body, "manifest_sha256", json.dumps(digest))
-          section("image_set", image_set)
-          section("image_set.signing_identity", lambda body: set_value(body, "tag_ref", json.dumps(f"refs/tags/{tag}")))
-          section("boot_image", lambda body: set_value(body, "release_tag", json.dumps(tag)))
-
-          compatibility = manifest["compatibility"]
-          def compat(body):
-              body = set_value(body, "guest_agent_protocol", "{ min = %d, max = %d }" % (
-                  compatibility["guest_agent_protocol"]["min"],
-                  compatibility["guest_agent_protocol"]["max"],
-              ))
-              return set_value(body, "builder_cache_contract", str(compatibility["builder_cache_contract"]))
-          section("compatibility", compat)
-
-          stage0 = {}
-          for member in manifest["members"]:
-              if member["role"] == "stage0_bootstrap_kernel":
-                  artifact = member["artifacts"][0]
-                  stage0[member["target"]["arch"]] = artifact
-          def kernel(arch):
-              def update(body):
-                  artifact = stage0[arch]
-                  body = set_value(body, "release_tag", json.dumps(tag))
-                  body = set_value(body, "asset", json.dumps(artifact["name"]))
-                  return set_value(body, "sha256", json.dumps(artifact["sha256"]))
-              return update
-          section("stage0_kernel.aarch64", kernel("aarch64"))
-          section("stage0_kernel.x86_64", kernel("x86_64"))
-          path.write_text(text)
-          PY
+        run: cargo run --quiet --package xtask -- repin-image-lock candidate/image-set.json
 
       - name: Open an evidence-bearing pull request
         env:
