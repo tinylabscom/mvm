@@ -132,7 +132,7 @@ fn run_mvmctl_gpu_staging(world: &mut CliWorld, args: String) {
 #[then(expr = "the gpu endpoint log for vm {word} records the probe calls")]
 fn gpu_endpoint_log_records(world: &mut CliWorld, vm: String) {
     let home = live_home_path(world);
-    let state_dir = mvm_core::config::vm_state_dir_at(&home, &vm);
+    let state_dir = mvm_core::config::vm_state_dir_at(home, &vm);
     let log_path = state_dir.join(mvm_vmm::host::gpu_endpoint_spawn::GPU_ENDPOINT_LOG_FILE);
     let log = std::fs::read_to_string(&log_path).unwrap_or_else(|error| {
         panic!("read the gpu endpoint log {}: {error}", log_path.display())
@@ -159,7 +159,7 @@ fn gpu_endpoint_log_records(world: &mut CliWorld, vm: String) {
 #[then(expr = "the vm {word} state dir has no gpu endpoint")]
 fn vm_has_no_gpu_endpoint(world: &mut CliWorld, vm: String) {
     let home = live_home_path(world);
-    let state_dir = mvm_core::config::vm_state_dir_at(&home, &vm);
+    let state_dir = mvm_core::config::vm_state_dir_at(home, &vm);
     for file in [
         mvm_vmm::host::gpu_endpoint_spawn::GPU_ENDPOINT_LOG_FILE,
         mvm_vmm::host::gpu_endpoint_spawn::GPU_ENDPOINT_PID_FILE,
