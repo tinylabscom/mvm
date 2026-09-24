@@ -2322,6 +2322,43 @@ mod tests {
     }
 
     #[test]
+    fn machine_fork_count_parses_with_a_one_minimum() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from([
+            "mvmctl", "machine", "fork", "vm-a", "--count", "4",
+        ])
+        .expect("--count parses");
+        let crate::commands::Commands::Machine(machine) = parsed.command else {
+            panic!("expected Commands::Machine");
+        };
+        let crate::commands::machine::MachineAction::Fork(fork) = machine.action else {
+            panic!("expected MachineAction::Fork");
+        };
+        assert_eq!(fork.count, 4);
+
+        let zero = crate::commands::Cli::try_parse_from([
+            "mvmctl", "machine", "fork", "vm-a", "--count", "0",
+        ]);
+        assert!(zero.is_err(), "--count 0 must be refused at parse time");
+    }
+
+    #[test]
+    fn machine_fork_count_defaults_to_one() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from(["mvmctl", "machine", "fork", "vm-a"])
+            .expect("fork parses without --count");
+        let crate::commands::Commands::Machine(machine) = parsed.command else {
+            panic!("expected Commands::Machine");
+        };
+        let crate::commands::machine::MachineAction::Fork(fork) = machine.action else {
+            panic!("expected MachineAction::Fork");
+        };
+        assert_eq!(fork.count, 1);
+    }
+
+    #[test]
     fn machine_run_shares_the_caller_commitment_flag() {
         use clap::Parser;
 

@@ -100,6 +100,20 @@ docs commit went out as #3581). Under the
       `just check-gated` are green; the recovery-path doc row now matches the
       advertised tier.
 
+- [x] **Fork batch: `machine fork --count N` — issue #3641.**
+      `specs/plans/2026-09-23-fork-batch.md`. One capture of a running
+      parent serves N children: `--count N` on `machine fork` pauses the
+      parent once, then forks N children through the existing per-child arm
+      (fresh plan, grant subset check, audit-chain verification, lineage,
+      post-restore identity — every per-child invariant unchanged). Batch
+      children are named `<parent>-fork-<i>-<timestamp>`; `--as`/`--branch`
+      refuse above 1; failure aborts the batch and names the still-running
+      children; `--json` above 1 emits one array-shaped document. count=1 is
+      wire-identical to before. CLI parse, conflict, naming, and JSON tests
+      plus a `--count` BDD scenario; mvm-cli lib 2123 green, clippy and
+      clippy-bdd clean. Motivated by the #3552 witness measuring 39–47 ms
+      per fork on real KVM.
+
 - [ ] **Kubernetes in a single microVM.**
       `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
       #3554 (W1/W2 merged as #3555), guest template and validation in

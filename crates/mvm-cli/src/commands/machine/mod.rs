@@ -998,13 +998,21 @@ pub(in crate::commands) struct MachineForkArgs {
     /// Auto-name the child as `<parent>-<branch>-<timestamp>`.
     #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
     pub branch: Option<String>,
+    /// Fork N children from one capture of the running parent. Children are
+    /// named `<parent>-fork-<i>-<timestamp>`; `--as`/`--branch` are refused
+    /// above 1. A failed child aborts the batch — already-forked children
+    /// stay running and are named in the error.
+    #[arg(long, value_name = "N", default_value_t = 1,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    pub count: u32,
     /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
     #[arg(long = "secret")]
     pub secret: Vec<String>,
     /// Permit intentionally omitting one or more parent secret bindings.
     #[arg(long)]
     pub allow_secret_drop: bool,
-    /// Output the result as JSON.
+    /// Output the result as JSON. `--count` above 1 emits one array-shaped
+    /// document; count 1 keeps the single-object shape.
     #[arg(long)]
     pub json: bool,
 }
@@ -1596,6 +1604,7 @@ fn run_fork(args: MachineForkArgs) -> Result<()> {
         parent_name: args.parent,
         child_name: args.child_name,
         branch: args.branch,
+        count: args.count,
         declared_secrets,
         allow_secret_drop: args.allow_secret_drop,
         json: args.json,

@@ -45,11 +45,15 @@ pub(in crate::commands) struct ForkVmFullArmParams<'a> {
 /// fresh claim-8 plan for the child (using the parent's saved cpu/mem — the
 /// restore shape is fixed), rewrite the supervisor config, and boot the child
 /// in restore mode. The child's admitted plan is distinct from the parent's.
-pub(in crate::commands) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
+pub(in crate::commands) fn fork_vm_full_arm(
+    p: ForkVmFullArmParams<'_>,
+) -> Result<mvm_core::checkpoint::CheckpointMeta> {
     fork_vm_full_arm_inner(p)
 }
 
-fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
+fn fork_vm_full_arm_inner(
+    p: ForkVmFullArmParams<'_>,
+) -> Result<mvm_core::checkpoint::CheckpointMeta> {
     // A vm_full fork restores a saved machine state whose cpu/mem are baked
     // into the snapshot, and a restoring VMM validates device config against
     // the saved state and refuses a mismatch. Accepting these flags
@@ -94,21 +98,18 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
             declared_secrets: p.declared_secrets,
             allow_secret_drop: p.allow_secret_drop,
         }),
-        Some(VmFullOrigin::Firecracker) => {
-            fork_vm_full_arm_fc(ForkVmFullArmFcParams {
-                store: p.store,
-                checkpoint: p.checkpoint,
-                parent_meta,
-                child_vm_name,
-                dest_dir,
-                child_id,
-                now,
-                json: p.json,
-                declared_secrets: p.declared_secrets,
-                allow_secret_drop: p.allow_secret_drop,
-            })?;
-            Ok(())
-        }
+        Some(VmFullOrigin::Firecracker) => fork_vm_full_arm_fc(ForkVmFullArmFcParams {
+            store: p.store,
+            checkpoint: p.checkpoint,
+            parent_meta,
+            child_vm_name,
+            dest_dir,
+            child_id,
+            now,
+            json: p.json,
+            declared_secrets: p.declared_secrets,
+            allow_secret_drop: p.allow_secret_drop,
+        }),
         Some(VmFullOrigin::Retired) => anyhow::bail!(
             "this vm_full checkpoint was captured under a backend that has been removed; \
              nothing on this host can load its saved machine state. Use an fs_quick fork \
@@ -440,7 +441,9 @@ struct ForkVmFullArmHvfParams<'a> {
 /// IP/MAC out of saved memory and collides with it on the shared bridge. An HVF
 /// guest has no NIC to inherit an address on: its only path off the box is the
 /// vsock relay the host binds, and the restore binds none.
-fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
+fn fork_vm_full_arm_hvf(
+    p: ForkVmFullArmHvfParams<'_>,
+) -> Result<mvm_core::checkpoint::CheckpointMeta> {
     let AdmittedForkChild {
         admission,
         child_plan_json,
@@ -517,7 +520,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
             p.child_vm_name
         ));
     }
-    Ok(())
+    Ok(meta)
 }
 
 /// A restored child that cannot prove it rotated its identity must not stay up:
