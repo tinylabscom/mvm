@@ -168,22 +168,17 @@ docs commit went out as #3581). Under the
       (delegating to the entrypoint uid) — on a kernel without cgroups the
       mount skips quietly, so sealed guests boot identically.
 
-      **Blocker #3599 resolved to root cause (2026-09-23):** the
-      clone()-in-a-fresh-pid-ns failure is a long-standing UPSTREAM kernel
-      bug under virtualization, not anything mvm builds. Every hypothesis
-      was exonerated by direct control — kernel config (stock defconfig
-      fails), toolchain (nixpkgs gcc 13/14, Debian gcc, pristine upstream
-      binutils), build recipe, build host, userspace (pristine busybox+k3s),
-      VMM (TCG on two hosts/qemu versions, HVF, and x86_64 KVM), and kernel
-      version (Debian 6.1.180 / 6.12.x / 6.18.15 all fail). A "Debian kernel
-      passes" data point was an invalid test harness and is void. The bug
-      reproduces on GitHub-hosted runners with pristine userspace; only bare
-      metal reportedly works. k3s pod sandboxes stay broken on virtualized
-      hosts until upstream fixes it or an environmental precondition is
-      found. Upstream report draft:
-      `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md`; full
-      matrix on #3599; validation workflow on the mvm-images
-      `wip/clone-repro-harness` scratch branch. The mvm-side kernel bridge
+      **Blocker #3599 reopened (2026-09-24):** the 2026-09-23 "upstream
+      kernel bug under virtualization" root cause was a reproducer artifact.
+      Every probe ran `unshare -Urmp` without `--fork`, so the namespace's
+      init was the first short-lived child; once it exits, later forks fail
+      ENOMEM and Go's `CLONE_THREAD` fails EINVAL, as pid_namespaces(7)
+      documents. The same probe fails identically on bare metal and succeeds
+      with `--fork`, so the config/toolchain/VMM/kernel-version matrix was
+      measuring the missing flag. The upstream report draft is withdrawn and
+      must not be filed. The pod-sandbox impact was inferred from these
+      probes and never observed through a real container runtime; W4 is
+      unproven rather than blocked until a real k3s pod runs. The mvm-side kernel bridge
       is reconciled onto main's image-source selector: `mvmctl kernel build`
       compiles from the selected mvm-images checkout's `kernel/` flake (a
       configured `MVM_IMAGES_DIR`, or the discovered sibling checkout), the

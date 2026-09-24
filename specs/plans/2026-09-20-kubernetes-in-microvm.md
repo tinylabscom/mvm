@@ -10,15 +10,16 @@ consumption is mvm kernel flake -> `mvmctl kernel build` -> launcher
 resolution. Branch: `feat/kubernetes-in-microvm` (merged).
 
 **Status: W1 + W2 merged (#3555); W3 kernel-variant and template
-scaffolds landed (#3572, tinylabscom/mvm-templates#2). W4 is BLOCKED on
-#3599, resolved to root cause 2026-09-23: the clone()-in-a-fresh-pid-ns
-failure is a long-standing upstream kernel bug under virtualization
-(Debian 6.1/6.12/6.18 kernels all reproduce under TCG, HVF, and x86_64
-KVM with pristine userspace; bare metal reportedly works). Not a config,
-toolchain, or image-train problem — no mvm-side kernel change will fix
-it; see #3599 for the full matrix and
-`specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` for the
-upstream report draft. The
+scaffolds landed (#3572, tinylabscom/mvm-templates#2). W4's #3599
+blocker is unproven and reopened: the 2026-09-23 "upstream kernel bug under
+virtualization" conclusion was a reproducer artifact. Every probe ran
+`unshare -Urmp` without `--fork`, which is documented PID-namespace
+behaviour (the namespace's init exits, so later forks return ENOMEM and
+`CLONE_THREAD` returns EINVAL). The same probe fails identically on bare
+metal and succeeds with `--fork`. The pod-sandbox impact was never observed
+through a real container runtime; W4 needs a real k3s pod before anything
+is called blocked. The upstream report draft is withdrawn
+(`specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md`). The
 mvm-side kernel build/boot-selection bridge is tracked under W3. A generically-named datapath kernel posture in mvm-images was
 rejected by the image lane (PR #24 closed: guest network devices violate
 the permanent invariant); the interim kernel remains the in-repo
@@ -163,11 +164,13 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
 - [ ] Builder-VM E2E: boot the image (on the `workload-k8s` kernel), wait
       for node Ready, pull an image through the egress proxy, run a pod with
       admitted egress, exercise a declared ingress port, teardown; BDD
-      scenario under `features/suites/`. **Blocked by #3599** (upstream
-      kernel bug: pod sandboxes are fresh PID namespaces and their init
-      processes hit the clone() ceiling on every virtualized host tested);
-      the datapath kernel replaces `workload-k8s` naming per the image
+      scenario under `features/suites/`. The #3599 clone ceiling
+      was an `unshare` probe without `--fork`, not a kernel defect, so this
+      is not known to be blocked; the datapath kernel replaces `workload-k8s` naming per the image
       train's no-consumer-names rule.
+- [ ] Re-diagnose #3599 with a real k3s pod on the `workload-k8s` kernel
+      (the container runtime creates the sandbox PID namespace, not an
+      `unshare` probe); any PID-namespace probe uses `--fork`
 - [ ] Docs guide page (`public/src/content/docs/guides/`)
 - [ ] Amend the "Kubernetes compatibility" deliberately-not-claimed entry in
       `public/src/content/docs/security/sandbox-parity-status.md`: the claim

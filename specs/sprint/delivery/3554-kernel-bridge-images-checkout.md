@@ -32,7 +32,8 @@ that landed separately in the meantime.
   `stage0-init/kernel_emit.rs` to keep `stage0-init.rs` under the
   production-line cap.
 - `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` and the
-  #3599 root-cause notes in the plan and sprint.
+  #3599 root-cause notes in the plan and sprint. That root cause was later
+  withdrawn: the probes lacked `unshare --fork`, and #3599 is reopened.
 
 ## What was dropped, and why
 
