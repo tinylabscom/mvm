@@ -33,6 +33,11 @@ Each numbered claim is backed by a test or a CI workflow gate.
 | 13 | The managed substitution path hands the guest placeholders, never raw secret values. | Data containment |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log. | Supply chain |
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY. | Guest confinement |
+| 21 | OCI base images are OS-package- and kernel-inventoried, CVE-scanned against OSV, and SBOM-enumerated at pull time, and production admission refuses a missing scan or any high/critical finding. | Supply chain (base image) |
+
+Claim 21 is numbered after the preview rows below (16–18) and the shipped
+rows 19–20 in ADR-001's ledger; rows are numbered in the order claims were
+added, not sorted here.
 
 ## Preview claims
 

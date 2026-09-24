@@ -325,6 +325,10 @@ fn cve_is_empty_stub(value: &serde_json::Value) -> bool {
 
 /// Walk the CVE-scan JSON for the first `high` / `critical` finding.
 ///
+/// `pub(crate)` so the base-image gate (`crate::base_image_gate`) applies
+/// the same severity semantics to its own sidecar shape instead of
+/// growing a second walker that could drift.
+///
 /// Tolerant of both `pip-audit` and `pnpm audit` shapes:
 ///
 /// - `pip-audit`: top-level `{"dependencies":[{"name":"...","vulns":[
@@ -338,7 +342,9 @@ fn cve_is_empty_stub(value: &serde_json::Value) -> bool {
 /// If the severity parses to `high` / `critical`, return its closest
 /// "name-like" sibling (`package`, `name`, `module_name`, `package_name`,
 /// or "unknown"). First hit wins.
-fn first_high_or_critical_finding(value: &serde_json::Value) -> Option<(String, String)> {
+pub(crate) fn first_high_or_critical_finding(
+    value: &serde_json::Value,
+) -> Option<(String, String)> {
     fn walk(node: &serde_json::Value, current_name: Option<String>) -> Option<(String, String)> {
         match node {
             serde_json::Value::Object(map) => {

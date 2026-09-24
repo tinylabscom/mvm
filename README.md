@@ -47,7 +47,7 @@ Linux + /dev/kvm           →  Firecracker
 - **SDKs for Python, TypeScript, and Rust** — a _decorator_ SDK for authoring
   workloads and a _runtime_ SDK for driving them, both thin wrappers over one
   conformance-pinned surface
-- **Security claims, CI-enforced** — 17+ numbered claims (signed execution
+- **Security claims, CI-enforced** — 18+ numbered claims (signed execution
   plans, chain-signed audit log, dm-verity boot, default-deny egress, run-shaped
   agent-verb grants, sealed prod images that refuse interactive access, secret
   substitution over vsock)
@@ -721,7 +721,7 @@ credential-substituting HTTP proxy, and peers are a transient-run capability —
 
 ## Security model
 
-mvm makes **seventeen numbered, CI-enforced security claims** (plus preview
+mvm makes **eighteen numbered, CI-enforced security claims** (plus preview
 claims), each backed by a named test or workflow gate. In summary:
 
 1. **No host-fs access from a guest beyond explicit shares** — per-service uid,
@@ -777,6 +777,10 @@ claims), each backed by a named test or workflow gate. In summary:
     cosign bundles, while raw kernels, root filesystems, and metadata are
     covered by digests in the signed manifests. Build and fetch paths refuse
     artifacts whose required signature is absent or invalid.
+18. **Every base image is CVE-scanned and SBOM-enumerated before production
+    admission** — the unpacked rootfs's OS packages and in-image kernel are
+    inventoried at pull, matched against OSV, and production admission refuses
+    an image with a missing scan or any high/critical finding.
 
 Claim 15 used to hold by _absence_: there was no host→guest byte path at all.
 The workload input channel built one, so refusing input is now a policy

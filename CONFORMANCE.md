@@ -43,6 +43,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-19` | `build` | Every workload asset and pinned host share is content-identified in the signed plan, and share drift after admission fails closed | `fn:admitted_share_digest_refuses_directory_changed_after_admission`, `fn:synthesized_plan_records_share_and_caller_asset_identities`, `fn:asset_identities_event_carries_kind_name_digest_labels`, `fn:asset_identity_rejects_malformed_digests`, `fn:test_audit_asset_id_parses` |
 
+## base_image_cve
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-21` | `build` | OCI base images are OS-package- and kernel-inventoried, CVE-scanned against OSV, and SBOM-enumerated at pull time, and production admission refuses a missing scan, a sidecar bound to another digest, or any high/critical finding | `fn:inventory_rootfs`, `fn:scan_inventory`, `fn:apply_base_image_gate`, `fn:a_prod_run_refuses_a_base_image_with_no_scan`, `fn:a_prod_run_refuses_a_base_image_with_a_high_severity_finding` |
+
 ## bundle_boot
 
 | ID | Level | Statement | Witnesses |

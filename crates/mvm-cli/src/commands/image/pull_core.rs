@@ -228,6 +228,10 @@ pub(super) fn resolve_or_pull_run_image_with(
         rematerialized_from.as_deref(),
     )?;
     super::materialize::refuse_unsealed_prod_rootfs(&rootfs_path, prod)?;
+    // A production run also answers for the base image's known
+    // vulnerabilities: the pull-time scan must exist, name this digest,
+    // and carry no high/critical finding. Dev runs warn and continue.
+    super::base_image::apply_prod_base_image_gate(cache_root, &image.resolved_digest, prod)?;
     let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest)
         .map(|raw| prepare_rootfs_only_tree(cache_root, &raw, &image.resolved_digest))
         .transpose()?;
@@ -408,6 +412,17 @@ fn pull_image_ref(
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
     super::cache::write_layer_owners(cache_root, &manifest.digest, &owners)?;
+    // The base-image CVE scan runs on the exact unpacked tree the
+    // materializer is about to seal. Under --prod a scan that cannot run
+    // refuses the pull before anything is materialized or registered;
+    // under dev it warns and the pull proceeds without sidecars.
+    super::base_image::scan_and_record_base_image(
+        cache_root,
+        &image_ref.canonical(),
+        &manifest.digest,
+        &unpacked_root,
+        prod,
+    )?;
     // The config blob written above is the image's own declaration of `Env`,
     // `WorkingDir` and `Entrypoint`/`Cmd`. Materializing without it discards
     // all three: the guest then falls back to `workload_env::DEFAULT_PATH`, so
@@ -838,7 +853,45 @@ mod tests {
         cache: std::path::PathBuf,
     }
 
+    /// Write a clean base-image scan sidecar pair for the fixture's
+    /// image — the artifact a real pull records after OSV answers. The
+    /// base-image gate refuses a production image without it.
+    fn seed_base_image_scan(cache: &Path, digest: &str, findings: serde_json::Value) {
+        let hex = sha256_hex(digest).unwrap();
+        write_file(
+            cache,
+            &format!("claims/{hex}.sbom.cdx.json"),
+            serde_json::to_string(&serde_json::json!({
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {"component": {"type": "container", "name": "alpine", "version": digest}},
+                "components": [{"type": "operating-system", "name": "alpine", "version": "3.20"}],
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+        write_file(
+            cache,
+            &format!("claims/{hex}.cve.json"),
+            serde_json::to_string(&serde_json::json!({
+                "schema": "mvm.base-image-cve/v1",
+                "image": {"reference": "alpine", "digest": digest},
+                "scanned_at": "2026-09-24T00:00:00Z",
+                "results": findings,
+                "summary": {"components_scanned": 1, "findings": 0},
+                "limitations": [],
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+    }
+
     fn prod_fixture() -> ProdFixture {
+        prod_fixture_with(true)
+    }
+
+    fn prod_fixture_with(scanned: bool) -> ProdFixture {
         let home = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
@@ -868,6 +921,9 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             },
         );
         create_unpacked_root(&cache, PINNED_DIGEST);
+        if scanned {
+            seed_base_image_scan(&cache, PINNED_DIGEST, serde_json::json!([]));
+        }
         ProdFixture {
             _env: env,
             _home: home,
@@ -982,6 +1038,52 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             format!("{err:#}").contains("does not record a sealed image"),
             "{err:#}"
         );
+    }
+
+    /// A production image whose pull never recorded a base-image CVE scan
+    /// (pulled before the gate existed, scanned offline, or sidecar
+    /// deleted) is refused at admission: a scan that never ran is
+    /// indistinguishable from one that was removed.
+    #[test]
+    fn a_prod_run_refuses_a_base_image_with_no_scan() {
+        let fixture = prod_fixture_with(false);
+        let err = resolve(&fixture, true, fake_runtime_materialize)
+            .expect_err("an unscanned base image must not reach a production boot");
+        assert!(format!("{err:#}").contains("base-image CVE"), "{err:#}");
+    }
+
+    /// A production image whose recorded scan carries a high/critical
+    /// finding is refused at admission.
+    #[test]
+    fn a_prod_run_refuses_a_base_image_with_a_high_severity_finding() {
+        let fixture = prod_fixture();
+        seed_base_image_scan(
+            &fixture.cache,
+            PINNED_DIGEST,
+            serde_json::json!([
+                {"id": "CVE-2026-80521", "package": "linux-kernel", "severity": "critical"}
+            ]),
+        );
+        let err = resolve(&fixture, true, fake_runtime_materialize)
+            .expect_err("a high-severity base-image finding must refuse prod admission");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("critical"), "{msg}");
+        assert!(msg.contains("linux-kernel"), "{msg}");
+    }
+
+    /// A dev run of that same image is admitted: the gate warns instead
+    /// of refusing outside `--prod`.
+    #[test]
+    fn a_dev_run_admits_a_base_image_with_a_high_severity_finding() {
+        let fixture = prod_fixture();
+        seed_base_image_scan(
+            &fixture.cache,
+            PINNED_DIGEST,
+            serde_json::json!([
+                {"id": "CVE-2026-80521", "package": "linux-kernel", "severity": "critical"}
+            ]),
+        );
+        resolve(&fixture, false, fake_runtime_materialize).expect("dev warns and admits");
     }
 
     /// The trust check runs before anything is built or signed: an image the

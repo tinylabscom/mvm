@@ -5,6 +5,14 @@ pub mod app_deps_gate;
 pub mod artifact_acquisition;
 pub mod artifacts;
 pub mod backend;
+/// Production admission gate over the base-image sidecar pair: missing
+/// scan, foreign shape, digest mismatch, or a high/critical finding
+/// refuse `--prod`; dev warns and admits.
+pub mod base_image_gate;
+/// Base-image CVE scan: correlate an `mvm_fs::os_inventory::OsInventory`
+/// against OSV over `mvm_http::blocking` and render the app-deps-shaped
+/// `cve.json` + CycloneDX SBOM sidecar pair.
+pub mod base_image_scan;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;

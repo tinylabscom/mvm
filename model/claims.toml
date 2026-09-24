@@ -382,6 +382,28 @@ witnesses = [
 ]
 
 [[claim]]
+id = "MVM-SEC-21"
+level = "build"
+witness_kinds = ["fn"]
+suite = "base_image_cve"
+statement = "OCI base images are OS-package- and kernel-inventoried, CVE-scanned against OSV, and SBOM-enumerated at pull time, and production admission refuses a missing scan, a sidecar bound to another digest, or any high/critical finding"
+# The scan sidecars live in the host-controlled OCI cache, so the gate
+# proves the recorded scan names the admitted image's digest and carries
+# no high/critical finding — it does not prove the sidecar was honestly
+# produced (a host insider can forge one; the image bytes themselves
+# remain digest-pinned and dm-verity sealed). Severity is best-effort:
+# Debian/Alpine OSV records generally carry none, and an unknown-severity
+# finding is reported but never gate-refusing. rpm databases are a named
+# unsupported gap, not a silent one.
+witnesses = [
+    "fn:inventory_rootfs",
+    "fn:scan_inventory",
+    "fn:apply_base_image_gate",
+    "fn:a_prod_run_refuses_a_base_image_with_no_scan",
+    "fn:a_prod_run_refuses_a_base_image_with_a_high_severity_finding",
+]
+
+[[claim]]
 id = "MVM-SEC-20"
 level = "build"
 witness_kinds = ["fn", "ci"]

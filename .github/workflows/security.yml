@@ -573,6 +573,7 @@ jobs:
           - mvm-cli
           - mvm-client
           - mvm-core
+          - mvm-fs
           # Six, and the number is measured rather than chosen.
           #
           # Raising the count is the second half of the fix; the first is
