@@ -1,4 +1,6 @@
-//! GPU-over-vsock end-to-end witness steps (issue #3567).
+//! GPU-over-vsock end-to-end witness steps: prove the guest's CUDA/NVML
+//! calls land on the per-VM host endpoint, and that a launch without the
+//! GPU plane carries no channel at all.
 //!
 //! The positive scenario boots a real `--gpu` microVM on a GPU-less host —
 //! the endpoint answers through the deterministic stub backend — mounts a

@@ -26,6 +26,8 @@ Scenario: a --gpu launch remotes CUDA driver and NVML calls to the host endpoint
   And the gpu endpoint log for vm bdd-gpu-witness records the probe calls
   When I run mvmctl in an isolated live home with "machine stop bdd-gpu-witness --yes"
   Then the command exits with code 0
+  When I run mvmctl in an isolated live home with "machine rm bdd-gpu-witness --yes"
+  Then the command exits with code 0
 
 @live @gpu_e2e
 Scenario: a launch without --gpu refuses the GPU channel
@@ -41,4 +43,6 @@ Scenario: a launch without --gpu refuses the GPU channel
   And the output contains "CONNECT_REFUSED"
   And the vm bdd-gpu-negative state dir has no gpu endpoint
   When I run mvmctl in an isolated live home with "machine stop bdd-gpu-negative --yes"
+  Then the command exits with code 0
+  When I run mvmctl in an isolated live home with "machine rm bdd-gpu-negative --yes"
   Then the command exits with code 0

@@ -42,19 +42,7 @@ const VMADDR_CID_HOST: u32 = 2;
 const AF_VSOCK: c_int = libc::AF_VSOCK;
 
 #[cfg(target_os = "linux")]
-use libc::{sockaddr, socklen_t};
-
-#[cfg(target_os = "linux")]
-#[repr(C)]
-struct SockaddrVm {
-    svm_family: libc::sa_family_t,
-    svm_reserved1: u16,
-    svm_port: u32,
-    svm_cid: u32,
-    svm_flags: u8,
-    svm_reserved2: u8,
-    svm_reserved3: u16,
-}
+use libc::{sockaddr, sockaddr_vm, socklen_t};
 
 #[cfg(target_os = "linux")]
 fn dial_host_endpoint() -> i32 {
@@ -65,22 +53,21 @@ fn dial_host_endpoint() -> i32 {
         println!("CONNECT_ERROR errno={} (socket)", errno());
         return EXIT_CONNECT_ERROR;
     }
-    let addr = SockaddrVm {
+    // SAFETY: `addr` is a fully initialized sockaddr_vm matching the
+    // linux/vm_sockets.h layout (libc's repr(C) mirror); connect reads it
+    // for exactly sizeof(sockaddr_vm) bytes per the AF_VSOCK contract.
+    let addr = sockaddr_vm {
         svm_family: AF_VSOCK as libc::sa_family_t,
         svm_reserved1: 0,
         svm_port: GPU_RPC_PORT,
         svm_cid: VMADDR_CID_HOST,
-        svm_flags: 0,
-        svm_reserved2: 0,
-        svm_reserved3: 0,
+        svm_zero: [0; 4],
     };
-    // SAFETY: `addr` is a fully initialized sockaddr_vm; connect reads it
-    // for exactly sizeof(sockaddr_vm) bytes per the AF_VSOCK contract.
     let rc = unsafe {
         libc::connect(
             fd,
-            &addr as *const SockaddrVm as *const sockaddr,
-            std::mem::size_of::<SockaddrVm>() as socklen_t,
+            &addr as *const sockaddr_vm as *const sockaddr,
+            std::mem::size_of::<sockaddr_vm>() as socklen_t,
         )
     };
     // SAFETY: fd is an owned socket handle in both branches.
