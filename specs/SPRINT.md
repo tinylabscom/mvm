@@ -164,10 +164,15 @@ docs commit went out as #3581). Under the
       `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md`; full
       matrix on #3599; validation workflow on the mvm-images
       `wip/clone-repro-harness` scratch branch. The mvm-side kernel bridge
-      (`mvmctl kernel build` from an MVM_IMAGES_DIR checkout, the
-      machine-run dev-tier override fix, and the Stage 0 config-emit fixes)
-      lands with this branch; the bridge refuses `--which workload-k8s`
-      against an images checkout, because the image lane rejected the
+      is reconciled onto main's image-source selector: `mvmctl kernel build`
+      compiles from the selected mvm-images checkout's `kernel/` flake (a
+      configured `MVM_IMAGES_DIR`, or the discovered sibling checkout), the
+      dev-tier `MVM_WORKLOAD_KERNEL_VARIANT` override is honoured on both
+      machine-run branches (pair and cache), and the Stage 0 config emit
+      builds from the same flake base, rides the egress proxy, streams its
+      stderr and GC-roots its output. `--which workload-k8s` refuses only
+      against an explicitly configured checkout and falls back to the
+      in-repo flake under a discovered one, because the image lane rejected the
       generically-named datapath kernel posture (mvm-images PR #24, closed:
       bridge/veth/vxlan violate the permanent no-guest-network-device
       invariant — the branch is historical/bisect material only). The

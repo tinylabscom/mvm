@@ -19,8 +19,7 @@ toolchain, or image-train problem — no mvm-side kernel change will fix
 it; see #3599 for the full matrix and
 `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` for the
 upstream report draft. The
-mvm-side kernel build/boot-selection bridge lands with the kernel-variant
-workstream. A generically-named datapath kernel posture in mvm-images was
+mvm-side kernel build/boot-selection bridge is tracked under W3. A generically-named datapath kernel posture in mvm-images was
 rejected by the image lane (PR #24 closed: guest network devices violate
 the permanent invariant); the interim kernel remains the in-repo
 `workload-k8s` variant, and the invariant-compatible durable shape is host
@@ -149,6 +148,15 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
       `VXLAN` — mvm#3572, merged. The sealed workload kernel's
       required-disables are deliberate and stay; this is a second variant,
       consumed via `mvmctl kernel build --which workload-k8s`.
+- [x] mvm-side kernel bridge: `mvmctl kernel build` compiles from the
+      selected mvm-images checkout's `kernel/` flake through the shared
+      image-source precedence (configured `MVM_IMAGES_DIR`, then the sibling
+      checkout, then the in-repo flake); `--which workload-k8s` stays
+      in-repo (refused against a configured checkout, fallen back from a
+      discovered one); `MVM_WORKLOAD_KERNEL_VARIANT` is honoured on the
+      machine-run pair and cache branches; the Stage 0 config emit uses the
+      build's flake base, the egress proxy env, streamed stderr, and its own
+      GC root.
 
 ### W4 — E2E validation, BDD, docs
 
