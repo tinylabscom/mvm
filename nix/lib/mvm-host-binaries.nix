@@ -13,10 +13,6 @@
     install_path = "/sbin/mvm-host-vm-init";
     mode = "0755";
   };
-  mvm-egress-proxy = {
-    install_path = "/sbin/mvm-egress-proxy";
-    mode = "0755";
-  };
   # Resident builder-VM control daemon, launched at boot by
   # mvm-host-vm-init.
   mvm-builderd = {

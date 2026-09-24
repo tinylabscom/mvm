@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::fs_walk::for_each_file;
-use crate::rust_source::blank_comments_and_strings;
+use crate::rust_source::{
+    blank_comments_and_strings, blank_ranges, cfg_test_item_ranges, strip_cfg_test_items,
+};
 
 const BACKEND_RS: &str = "crates/mvm-runtime/src/backend.rs";
 const APPLE_CONTAINER_RS: &str = "crates/mvm-runtime/src/apple_container_backend.rs";
@@ -103,6 +105,51 @@ const INFRA_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
     "standalone supervisor proxy component outside the admitted workload runner",
 )];
 
+/// The builder crate: its guest inits run inside every builder VM, and its
+/// host half launches those VMs.
+const BUILDER_CRATE_SRC: &str = "crates/mvm-build/src";
+
+/// A builder guest has no NIC. Its one way out is the loopback proxy the
+/// vsock egress client binds, and the host endpoint behind that client is
+/// where the builder's egress policy is decided. The only TCP connection a
+/// builder may therefore open itself is the readiness probe of that proxy,
+/// dialed at the address parsed from the egress client's listen constant.
+const BUILDER_PROBE_BINDING: &str =
+    r"let\s+Ok\(\s*proxy_addr\s*\)\s*=\s*[A-Z_]*EGRESS_PROXY_LISTEN_ADDR\s*\.\s*parse";
+const BUILDER_PROBE_DIAL: &str = r"TcpStream::connect(?:_timeout)?\(\s*&proxy_addr\b";
+const BUILDER_DIAL_TOKENS: &[&str] = &["TcpStream::connect(", "TcpStream::connect_timeout("];
+const BUILDER_LISTEN_TOKENS: &[&str] = &["TcpListener::bind(", "UdpSocket::bind("];
+
+/// The guest-side proxy that used to front dependency installs, dialing
+/// upstream itself. The host-binary manifests are what put a binary into
+/// `mvmctl`'s embedded payload and the builder rootfs, so a name here must
+/// never reappear in one.
+const RETIRED_BUILDER_BINARIES: &[&str] = &["mvm-egress-proxy"];
+const BUILDER_BINARY_MANIFESTS: &[&str] = &[
+    "crates/mvm-cli/src/host_binaries/manifest.rs",
+    "nix/lib/mvm-host-binaries.nix",
+];
+
+/// Builder-crate sources that open sockets and are allowed to, each exact and
+/// purpose-labelled. An entry that stops opening a socket, or disappears, is
+/// reported stale so the list only shrinks.
+const BUILDER_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
+    "crates/mvm-build/src/egress_proxy/proxy.rs",
+    "the retired guest proxy's source, kept while the image repository still compiles its \
+     cargo target; the retired-binary check keeps it out of every host-binary manifest",
+)];
+
+/// QEMU takes its devices as string arguments, which `production_code`
+/// blanks, so its launch code is read with only comments removed.
+const QEMU_BUILDER_RS: &str = "crates/mvm-build/src/qemu_builder.rs";
+const QEMU_NIC_ARGS: &[&str] = &[
+    "\"-netdev\"",
+    "\"-nic\"",
+    "\"-net\"",
+    "virtio-net",
+    "user,id=",
+];
+
 const SOCKET_TOKENS: &[&str] = &[
     "TcpStream::connect(",
     "TcpStream::connect_timeout(",
@@ -118,8 +165,9 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_socket_owners(workspace)?;
     check_single_peer_resolver(workspace)?;
     check_flow_audit_labels(workspace)?;
+    check_builder_egress(workspace)?;
     eprintln!(
-        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, one peer resolver, and payload-free flow audit labels"
+        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, one peer resolver, payload-free flow audit labels, and no builder egress but the vsock egress client"
     );
     Ok(())
 }
@@ -129,8 +177,7 @@ fn read(workspace: &Path, rel: &str) -> Result<String> {
 }
 
 fn production_code(source: &str) -> String {
-    let before_tests = source.split("#[cfg(test)]").next().unwrap_or(source);
-    blank_comments_and_strings(before_tests)
+    strip_cfg_test_items(&blank_comments_and_strings(source))
 }
 
 fn check_runner_shape(workspace: &Path) -> Result<()> {
@@ -569,6 +616,132 @@ fn check_socket_owners(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The builder reaches the network one way: its guest's vsock egress client.
+///
+/// Three halves. No builder code dials a TCP peer except the readiness probe
+/// of that client's loopback proxy, and none binds a listener of its own — a
+/// guest-local proxy is how dependency installs once dialed upstream directly,
+/// past the host gate. No host-binary manifest names the retired proxy
+/// binary. And the QEMU builder attaches no NIC, so there is no route for a
+/// direct dial to take even if one came back.
+fn check_builder_egress(workspace: &Path) -> Result<()> {
+    let mut sources = Vec::new();
+    scan_path(
+        workspace,
+        &workspace.join(BUILDER_CRATE_SRC),
+        &mut |rel, code| {
+            sources.push((rel.to_string(), code.to_string()));
+        },
+    )?;
+    let mut violations = Vec::new();
+    for (path, purpose) in BUILDER_SOCKET_EXEMPTIONS {
+        let opens = sources.iter().any(|(rel, code)| {
+            rel == path
+                && BUILDER_DIAL_TOKENS
+                    .iter()
+                    .chain(BUILDER_LISTEN_TOKENS)
+                    .any(|token| code.contains(token))
+        });
+        if !opens {
+            violations.push(format!(
+                "{path}: stale builder socket exemption ({purpose}); delete it from the gate"
+            ));
+        }
+    }
+    sources.retain(|(rel, _)| {
+        !BUILDER_SOCKET_EXEMPTIONS
+            .iter()
+            .any(|(path, _)| rel == path)
+    });
+    violations.extend(builder_socket_violations(&sources));
+
+    for rel in BUILDER_BINARY_MANIFESTS {
+        let raw = read(workspace, rel)?;
+        violations.extend(retired_builder_binary_violations(rel, &raw));
+    }
+
+    let qemu = read(workspace, QEMU_BUILDER_RS)?;
+    violations.extend(qemu_nic_violations(QEMU_BUILDER_RS, &qemu));
+
+    if !violations.is_empty() {
+        bail!(
+            "check-single-network-path: builder egress bypasses the vsock egress client:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+/// Check builder production code, already reduced by `production_code`.
+fn builder_socket_violations(sources: &[(String, String)]) -> Vec<String> {
+    let binding = Regex::new(BUILDER_PROBE_BINDING).expect("static probe binding regex");
+    let probe = Regex::new(BUILDER_PROBE_DIAL).expect("static probe dial regex");
+    let mut violations = Vec::new();
+    for (rel, code) in sources {
+        for token in BUILDER_LISTEN_TOKENS {
+            if code.contains(token) {
+                violations.push(format!(
+                    "{rel}: calls `{token}..)`. A builder guest runs no network listener of \
+                     its own; the vsock egress client owns the loopback proxy."
+                ));
+            }
+        }
+        let dials: usize = BUILDER_DIAL_TOKENS
+            .iter()
+            .map(|token| code.matches(token).count())
+            .sum();
+        if dials == 0 {
+            continue;
+        }
+        let probes = probe.find_iter(code).count();
+        if probes != dials || !binding.is_match(code) {
+            violations.push(format!(
+                "{rel}: opens {dials} TCP connection(s), of which {probes} dial `&proxy_addr` \
+                 parsed from the egress client's listen address. A builder has no NIC: the only \
+                 connection it may open itself is the readiness probe of the vsock egress \
+                 client, and everything else goes through that client."
+            ));
+        }
+    }
+    violations
+}
+
+fn retired_builder_binary_violations(rel: &str, raw: &str) -> Vec<String> {
+    RETIRED_BUILDER_BINARIES
+        .iter()
+        .filter(|name| raw.contains(*name))
+        .map(|name| {
+            format!(
+                "{rel}: names `{name}`, the retired guest-side proxy that dialed upstream \
+                 directly. Builder jobs reach the network through the vsock egress client."
+            )
+        })
+        .collect()
+}
+
+/// QEMU launch arguments that would give the builder guest a NIC.
+///
+/// Read with test items blanked but string literals kept, because the
+/// arguments are literals. Whole-line comments are dropped.
+fn qemu_nic_violations(rel: &str, raw: &str) -> Vec<String> {
+    let without_tests = blank_ranges(raw, &cfg_test_item_ranges(&blank_comments_and_strings(raw)));
+    let code: String = without_tests
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    QEMU_NIC_ARGS
+        .iter()
+        .filter(|arg| code.contains(*arg))
+        .map(|arg| {
+            format!(
+                "{rel}: passes `{arg}` to QEMU. The builder VM has no NIC; its egress is the \
+                 vsock device and the host endpoint behind it."
+            )
+        })
+        .collect()
+}
+
 /// Read every non-test Rust source under each entry, verbatim.
 ///
 /// An entry is a file or a directory. Verbatim because the callers that need
@@ -768,6 +941,94 @@ mod tests {
         let violations = peer_refusal_violations(&sources);
         assert_eq!(violations.len(), 1, "{violations:?}");
         assert!(violations[0].contains("found 2"));
+    }
+
+    fn builder_file(name: &str, source: &str) -> (String, String) {
+        (
+            format!("crates/mvm-build/src/bin/{name}"),
+            production_code(source),
+        )
+    }
+
+    const PROBE: &str = r#"
+fn probe() {
+    let Ok(proxy_addr) = EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else { return };
+    if TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(200)).is_ok() {}
+}
+"#;
+
+    #[test]
+    fn the_egress_client_readiness_probe_is_the_one_dial_a_builder_may_make() {
+        let sources = [
+            builder_file("init.rs", PROBE),
+            builder_file(
+                "stage0.rs",
+                &PROBE.replace("EGRESS_PROXY_LISTEN_ADDR", "VSOCK_EGRESS_PROXY_LISTEN_ADDR"),
+            ),
+            builder_file("quiet.rs", "fn nothing() {}"),
+        ];
+        assert!(builder_socket_violations(&sources).is_empty());
+    }
+
+    #[test]
+    fn a_builder_dialing_upstream_itself_is_named() {
+        let direct =
+            format!("{PROBE}\nfn forward(host: &str) {{ let _ = TcpStream::connect(host); }}\n");
+        let violations = builder_socket_violations(&[builder_file("proxy.rs", &direct)]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("opens 2 TCP connection(s), of which 1"));
+    }
+
+    #[test]
+    fn a_proxy_address_not_parsed_from_the_egress_client_is_not_a_probe() {
+        let spoofed = "fn f() { let proxy_addr = upstream(); \
+                       TcpStream::connect(&proxy_addr); }";
+        let violations = builder_socket_violations(&[builder_file("init.rs", spoofed)]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+    }
+
+    #[test]
+    fn a_guest_local_listener_in_the_builder_is_named() {
+        let listener = "fn serve() { let l = TcpListener::bind(addr); }";
+        let violations = builder_socket_violations(&[builder_file("proxy.rs", listener)]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("TcpListener::bind("));
+    }
+
+    #[test]
+    fn a_dial_inside_a_test_module_is_not_production() {
+        let tested =
+            format!("{PROBE}\n#[cfg(test)]\nmod tests {{ fn t() {{ TcpStream::connect(x); }} }}\n");
+        assert!(builder_socket_violations(&[builder_file("init.rs", &tested)]).is_empty());
+    }
+
+    #[test]
+    fn production_code_after_an_inline_test_module_is_still_read() {
+        let late = "#[cfg(test)]\nmod tests { }\nfn after() { TcpStream::connect(host); }";
+        let violations = builder_socket_violations(&[builder_file("init.rs", late)]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+    }
+
+    #[test]
+    fn the_retired_proxy_binary_in_a_manifest_is_named() {
+        let manifest = "[[bin]]\nname = \"mvm-egress-proxy\"\n";
+        assert_eq!(
+            retired_builder_binary_violations("crates/mvm-build/Cargo.toml", manifest).len(),
+            1
+        );
+        assert!(
+            retired_builder_binary_violations("crates/mvm-build/Cargo.toml", "[[bin]]\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_qemu_nic_argument_is_named_and_a_comment_or_test_is_not() {
+        let clean = "// no virtio-net here\nfn launch() { cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }\n\
+                     #[cfg(test)]\nmod tests { fn t() { assert!(!a.contains(\"-netdev\")); } }\n";
+        assert!(qemu_nic_violations(QEMU_BUILDER_RS, clean).is_empty());
+        let nic = "fn launch() { cmd.args([\"-netdev\", \"user,id=n0\"]); }";
+        assert_eq!(qemu_nic_violations(QEMU_BUILDER_RS, nic).len(), 2);
     }
 
     #[test]

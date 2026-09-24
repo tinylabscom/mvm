@@ -41,11 +41,6 @@
   #   persistent `/nix` store) + util-linux (`mount`, `umount`,
   #   `losetup`).
   # - iproute2 (used by `udhcpc` and friends; small).
-  # - iptables — defense-in-depth: `mvm-host-vm-init` installs an
-  #   OUTPUT-chain default-deny + uid-owner ACCEPT for
-  #   `mvm-egress-proxy` (uid 1801), so a build step that ignores
-  #   `HTTP_PROXY` cannot reach upstream. See
-  #   `crates/mvm-host-vm-init/src/network.rs`.
   # - **No** `procps`-interactive / `less` — kept slim.
   # - `mvm-host-vm-init` mounted at `/sbin/mvm-host-vm-init` via
   #   `extraFiles`. The kernel cmdline (`cmdline.txt` output)
@@ -174,17 +169,10 @@
       # CycloneDX-1.5 empty stub when the tool isn't on PATH and logs
       # a warning.
       #
-      # Egress posture is per-arm. The flake-build arm (`nix build`)
-      # runs with open egress so nix can fetch substitutes and pinned
-      # flake inputs directly. The install arm (`uv` / `pnpm`) locks
-      # egress at its entry via iptables OUTPUT default-deny + proxy-uid
-      # ACCEPT, so untrusted dependency code can only reach the network
-      # through `mvm-egress-proxy` (embedded in mvmctl and baked into
-      # the rootfs via `hostBinExtraFiles`). The proxy refuses anything
-      # outside `pypi.org`, `files.pythonhosted.org`,
-      # `registry.npmjs.org`, `objects.githubusercontent.com`.
-      # The persistent dispatch loop resets the chain per job kind so
-      # jobs cannot leak posture from one dispatch to the next.
+      # The VM has no NIC. Every job, flake build and dependency install
+      # alike, reaches the network only through the vsock egress client,
+      # which relays each connection to the host; the host opens the real
+      # connection under the builder's egress policy.
       builderPackages = system: pkgs: with pkgs; [
         bashInteractive
         coreutils
@@ -211,20 +199,6 @@
         curl
         jq
         iproute2
-        # iptables — installed at boot by mvm-host-vm-init's
-        # network::install_egress_lockdown. FATAL if absent.
-        #
-        # Must be the **legacy (x_tables)** backend, not the nixpkgs
-        # `iptables` default (nft). The builder kernel
-        # (kernel/default.nix) enables the x_tables cluster
-        # (NETFILTER_XTABLES / IP_NF_IPTABLES / …) and deliberately
-        # omits NF_TABLES, so the nft-backed `iptables` fails at boot
-        # with "Could not fetch rule set generation id: Invalid
-        # argument" and trips the FATAL egress lockdown — first seen
-        # on the first build that actually boots the builder rootfs and
-        # runs the lockdown. iptables-legacy's `iptables` binary speaks
-        # x_tables, matching the kernel.
-        iptables-legacy
         e2fsprogs
         util-linux
         (builderSetprivFor system)
@@ -247,10 +221,9 @@
         # the Stage 0 nix eval bails with "attribute 'cyclonedx-bom'
         # missing". Commented out until the right attribute name (or
         # a newer nixpkgs pin that has them) lands. The deps-volume
-        # audit pipeline still works at runtime via the
-        # `mvm-egress-proxy` allowlist; the SBOM/CVE tools were a
-        # nice-to-have inside the builder VM, not something a build
-        # depends on.
+        # audit pipeline still works at runtime (a missing tool yields
+        # an empty stub); the SBOM/CVE tools were a nice-to-have inside
+        # the builder VM, not something a build depends on.
         # python3Packages.cyclonedx-bom
         # python3Packages.pip-audit
       ];
@@ -296,7 +269,7 @@
       # kernel arg goes unused — same rootfs whether we're producing
       # the full builder-VM image or the Stage 0 seed.
       #
-      # Host binaries (mvm-host-vm-init, mvm-egress-proxy) are no
+      # Host binaries (mvm-host-vm-init, mvm-builderd) are no
       # longer built from source here.
       # They come in from `hostBinExtraFiles` (keyed by install_path)
       # and are read from MVM_HOST_BIN_DIR at eval time.
@@ -324,7 +297,7 @@
           # a passwd/group entry so Nix can resolve its home directory.
           builderUid = 902;
           packages = (builderPackages system pkgs) ++ extraPkgs;
-          # Host binaries (mvm-host-vm-init, mvm-egress-proxy) come
+          # Host binaries (mvm-host-vm-init, mvm-builderd) come
           # from MVM_HOST_BIN_DIR via hostBinExtraFiles — embedded
           # in mvmctl, no rustPlatform.buildRustPackage calls
           # in this flake.

@@ -12,5 +12,5 @@ fn dispatch_populates_host_bin_dir_before_builder_call() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = ensure_extracted(tmp.path()).unwrap();
     assert!(dir.join("mvm-host-vm-init").exists());
-    assert!(dir.join("mvm-egress-proxy").exists());
+    assert!(dir.join("mvm-builderd").exists());
 }

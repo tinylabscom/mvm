@@ -344,12 +344,6 @@ anchor = "chain_init"
 activation = "always"
 
 [[launch_edge]]
-producer = "mvm-build/mvm-egress-proxy"
-launcher = "crates/mvm-build/src/bin/mvm-host-vm-init/proxy.rs"
-anchor = "mvm-egress-proxy"
-activation = "always"
-
-[[launch_edge]]
 producer = "mvm-build/mvm-builderd"
 launcher = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
 anchor = "spawn_builderd"

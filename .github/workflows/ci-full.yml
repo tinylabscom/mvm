@@ -355,7 +355,6 @@ jobs:
           # Placeholder bytes — flake just needs the files to exist
           # at the names the manifest declares.
           : > "$HOST_BIN_DIR/mvm-host-vm-init"
-          : > "$HOST_BIN_DIR/mvm-egress-proxy"
           : > "$HOST_BIN_DIR/mvm-builderd"
           chmod 0755 "$HOST_BIN_DIR"/mvm-*
           MVM_HOST_BIN_DIR="$HOST_BIN_DIR" \

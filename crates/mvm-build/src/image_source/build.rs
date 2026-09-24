@@ -10,7 +10,7 @@
 //! contract, and running its scripts is how that contract is kept to one
 //! implementation:
 //!
-//! - the builder image's three static host binaries, built by the image
+//! - the builder image's static host binaries, built by the image
 //!   checkout's `scripts/build-host-binaries.sh --mvm-checkout` exactly as its
 //!   release does; the builder image has Nix and nothing else, so a
 //!   cross-compile with the pinned zig cannot run inside it;
@@ -42,8 +42,7 @@ pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
 pub const EMIT_MANIFEST_SCRIPT: &str = "scripts/emit-local-manifest.py";
 
 /// The static binaries the builder image installs from `MVM_HOST_BIN_DIR`.
-pub const BUILDER_HOST_BINARIES: [&str; 3] =
-    ["mvm-host-vm-init", "mvm-egress-proxy", "mvm-builderd"];
+pub const BUILDER_HOST_BINARIES: [&str; 2] = ["mvm-host-vm-init", "mvm-builderd"];
 
 /// Where each checkout sits inside the staged `/work` tree.
 const WORK_IMAGES: &str = "images";

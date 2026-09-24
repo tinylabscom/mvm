@@ -13,6 +13,12 @@
 //! image build fail on a missing path — and that build only runs on tags
 //! and the nightly cron, so the gap is invisible on the PR that opens
 //! it.
+//!
+//! A fourth mirror is `BUILDER_HOST_BINARIES` in
+//! `crates/mvm-build/src/image_source/build.rs`: the names a local builder
+//! image build copies out of the image checkout's host-binary script. A name
+//! left there after it leaves the manifest makes every local image build
+//! refuse on a binary nothing builds any more.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -21,6 +27,8 @@ use std::path::Path;
 const PINNED_RUST_ZIGBUILD: &str =
     r#"RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild"#;
 const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
+const IMAGE_SOURCE_BUILD: &str = "crates/mvm-build/src/image_source/build.rs";
+const BUILDER_HOST_BINARIES_DECL: &str = "pub const BUILDER_HOST_BINARIES";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let rust_entries = parse_rust_manifest(workspace)?;
@@ -34,6 +42,19 @@ pub fn run(workspace: &Path) -> Result<()> {
              same install_path.",
             rust_entries,
             nix_entries
+        );
+    }
+
+    let image_source_path = workspace.join(IMAGE_SOURCE_BUILD);
+    let image_source = std::fs::read_to_string(&image_source_path)
+        .with_context(|| format!("read {}", image_source_path.display()))?;
+    let builder_list = builder_host_binaries(&image_source)?;
+    let manifest_names: Vec<String> = rust_entries.keys().cloned().collect();
+    if builder_list != manifest_names {
+        bail!(
+            "{IMAGE_SOURCE_BUILD}: BUILDER_HOST_BINARIES lists {builder_list:?}, the manifest \
+             lists {manifest_names:?}. A local builder image build copies exactly these names \
+             out of the image checkout's host-binary build, so the two must name the same set."
         );
     }
 
@@ -209,6 +230,26 @@ fn parse_nix_attrset(root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// The names in the `BUILDER_HOST_BINARIES` array literal, sorted.
+fn builder_host_binaries(source: &str) -> Result<Vec<String>> {
+    let start = source.find(BUILDER_HOST_BINARIES_DECL).with_context(|| {
+        format!("{IMAGE_SOURCE_BUILD} no longer declares BUILDER_HOST_BINARIES")
+    })?;
+    let decl = &source[start..];
+    let body = decl
+        .find('=')
+        .and_then(|eq| decl[eq..].find("];").map(|end| &decl[eq..eq + end]))
+        .with_context(|| format!("{IMAGE_SOURCE_BUILD}: BUILDER_HOST_BINARIES is not an array"))?;
+    let mut names: Vec<String> = body
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 /// Extract the first double-quoted string on `line` that appears after
 /// `key`. Returns `None` if either `key` or a following quoted value is
 /// absent.
@@ -240,14 +281,10 @@ mod tests {
     fn rust_manifest_parses_all_entries() {
         let root = workspace_root();
         let entries = parse_rust_manifest(&root).expect("parse rust manifest");
-        assert_eq!(entries.len(), 3, "expected 3 entries, got {entries:?}");
+        assert_eq!(entries.len(), 2, "expected 2 entries, got {entries:?}");
         assert_eq!(
             entries.get("mvm-host-vm-init").map(String::as_str),
             Some("/sbin/mvm-host-vm-init")
-        );
-        assert_eq!(
-            entries.get("mvm-egress-proxy").map(String::as_str),
-            Some("/sbin/mvm-egress-proxy")
         );
         assert_eq!(
             entries.get("mvm-builderd").map(String::as_str),
@@ -259,19 +296,42 @@ mod tests {
     fn nix_attrset_parses_all_entries() {
         let root = workspace_root();
         let entries = parse_nix_attrset(&root).expect("parse nix attrset");
-        assert_eq!(entries.len(), 3, "expected 3 entries, got {entries:?}");
+        assert_eq!(entries.len(), 2, "expected 2 entries, got {entries:?}");
         assert_eq!(
             entries.get("mvm-host-vm-init").map(String::as_str),
             Some("/sbin/mvm-host-vm-init")
         );
         assert_eq!(
-            entries.get("mvm-egress-proxy").map(String::as_str),
-            Some("/sbin/mvm-egress-proxy")
-        );
-        assert_eq!(
             entries.get("mvm-builderd").map(String::as_str),
             Some("/sbin/mvm-builderd")
         );
+    }
+
+    #[test]
+    fn builder_host_binaries_reads_the_array_literal() {
+        let src = r#"
+/// doc
+pub const BUILDER_HOST_BINARIES: [&str; 2] = ["mvm-host-vm-init", "mvm-builderd"];
+const OTHER: [&str; 1] = ["not-this"];
+"#;
+        assert_eq!(
+            builder_host_binaries(src).unwrap(),
+            ["mvm-builderd", "mvm-host-vm-init"]
+        );
+        let wrapped = "pub const BUILDER_HOST_BINARIES: [&str; 3] =\n    [\"a\", \"b\", \"c\"];";
+        assert_eq!(builder_host_binaries(wrapped).unwrap(), ["a", "b", "c"]);
+        assert!(builder_host_binaries("const NOTHING: u8 = 0;").is_err());
+    }
+
+    #[test]
+    fn builder_host_binaries_match_the_manifest() {
+        let root = workspace_root();
+        let src = std::fs::read_to_string(root.join(IMAGE_SOURCE_BUILD)).unwrap();
+        let rust: Vec<String> = parse_rust_manifest(&root)
+            .expect("rust")
+            .into_keys()
+            .collect();
+        assert_eq!(builder_host_binaries(&src).unwrap(), rust);
     }
 
     #[test]
@@ -306,11 +366,10 @@ mod tests {
 
     #[test]
     fn workflow_steps_require_the_pinned_rust_output() {
-        let expected = ["mvm-host-vm-init", "mvm-egress-proxy", "mvm-builderd"];
+        let expected = ["mvm-host-vm-init", "mvm-builderd"];
         let unpinned = vec![(
             "release.yml".to_string(),
-            "cargo zigbuild -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy --bin mvm-builderd"
-                .to_string(),
+            "cargo zigbuild -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd".to_string(),
         )];
         assert_eq!(
             workflow_step_violations(&unpinned, &expected),
@@ -320,7 +379,7 @@ mod tests {
         let pinned = vec![(
             "release.yml".to_string(),
             format!(
-                "{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy --bin mvm-builderd"
+                "{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd"
             ),
         )];
         assert!(workflow_step_violations(&pinned, &expected).is_empty());
@@ -333,8 +392,8 @@ mod tests {
             format!("{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-builderd"),
         )];
         assert_eq!(
-            workflow_step_violations(&steps, &["mvm-builderd", "mvm-egress-proxy"]),
-            ["release.yml: cross-compile step omits --bin mvm-egress-proxy"]
+            workflow_step_violations(&steps, &["mvm-builderd", "mvm-host-vm-init"]),
+            ["release.yml: cross-compile step omits --bin mvm-host-vm-init"]
         );
     }
 

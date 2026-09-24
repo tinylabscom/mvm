@@ -533,6 +533,102 @@ mod tests {
         host.join().unwrap().unwrap();
     }
 
+    /// Every builder job — a flake build's fetches and a dependency install's
+    /// alike — leaves the builder through its vsock egress client and is
+    /// decided here, on the builder endpoint's gate. That gate is built by the
+    /// endpoint's own `build_egress_gate` from `trusted_build_egress`, exactly
+    /// as the builder spawns it. A reachable destination is relayed and the
+    /// open audited; cloud metadata is refused and the refusal audited,
+    /// because mandatory-deny holds even under an open build policy.
+    #[test]
+    fn builder_egress_relays_an_admitted_flow_and_audits_a_refused_one() {
+        use mvm_contract::policy::network_policy::NetworkPolicy;
+
+        const METADATA: &str = "169.254.169.254:80";
+        // Characters no signature or digest encoding produces, so its absence
+        // from the chain means something.
+        const PAYLOAD: &[u8] = b"install payload!";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let gate = crate::supervisor::network_endpoint::build_egress_gate(
+            &NetworkPolicy::trusted_build_egress(),
+        );
+        let addr = tcp_echo_server();
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate).with_recorder(Some(recorder))
+            });
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            addr.to_string().as_bytes(),
+        );
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::Opened,
+            "the builder policy admits a reachable host: {}",
+            String::from_utf8_lossy(&payload)
+        );
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, PAYLOAD);
+        let echoed = loop {
+            let (opcode, _stream_id, frame) = read_flowmux_frame(&mut guest, &mut guest_session);
+            if opcode == Opcode::Data {
+                break frame;
+            }
+        };
+        assert_eq!(&echoed[..], PAYLOAD, "the host relays the admitted flow");
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            3,
+            METADATA.as_bytes(),
+        );
+        let (opcode, stream_id) = loop {
+            let (opcode, stream_id, _frame) = read_flowmux_frame(&mut guest, &mut guest_session);
+            if stream_id == 3 {
+                break (opcode, stream_id);
+            }
+        };
+        assert_eq!(
+            (opcode, stream_id),
+            (Opcode::Refused, 3),
+            "cloud metadata is refused"
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        let allowed: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains("host.flow.allowed"))
+            .collect();
+        assert_eq!(allowed.len(), 1, "{chain}");
+        assert!(allowed[0].contains(&addr.to_string()), "{chain}");
+        let denied: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains("host.flow.denied"))
+            .collect();
+        assert_eq!(denied.len(), 1, "{chain}");
+        assert!(
+            denied[0].contains(METADATA) && denied[0].contains("policy_denied"),
+            "the refusal names the destination and the reason: {chain}"
+        );
+        assert!(
+            !chain.contains("install payload!"),
+            "no payload byte reaches the chain"
+        );
+    }
+
     #[test]
     fn open_tcp_to_denied_local_addr_is_refused() {
         let addr = tcp_echo_server();

@@ -918,8 +918,9 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 //   - vdc  virtio-blk  the input tar: `job` `work` `mvm-bins` + closure seed
 //   - vdd  virtio-blk  the output tar the guest writes its artifacts onto
 //   - vde  virtio-blk  the runtime overlay
-//   - virtio-net-pci + user-mode (slirp); slirp's DHCP feeds the guest's
-//     `udhcpc -i eth0` (we force `net.ifnames=0` so the NIC comes up `eth0`)
+//   - vhost-vsock-pci   the guest's only way out: no NIC is attached, so the
+//     job reaches the network through the vsock egress client and the host
+//     endpoint that enforces the builder's egress policy
 //
 // The job protocol is the shared one (`stage_job_dir` writes /job/cmd.sh;
 // `finalize_flake_job` reads /job/result), so `BuilderArtifacts` is
@@ -1274,7 +1275,7 @@ fn run_build_qemu(
     )?;
 
     // 9. Build the QEMU cmdline from the image's (swap hvc0 for the native
-    //    QEMU serial console, force eth0, mark the backend); `root=/dev/vda ro
+    //    QEMU serial console, mark the backend); `root=/dev/vda ro
     //    init=…` ride unchanged.
     // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
     // is required — fail closed rather than booting a builder whose guest agent

@@ -7,16 +7,17 @@
 //! wrapper that constructs an `allowlist::Allowlist`, binds the proxy
 //! with `proxy::start`, and waits for SIGTERM.
 //!
-//! Consumer: `mvm-host-vm-init`'s `run_install` spawns the proxy + sets
-//! `HTTPS_PROXY` / `HTTP_PROXY` on the installer's env before invoking
-//! `uv` / `pnpm`.
+//! Nothing in a builder VM runs it any more. The proxy dials upstream
+//! itself, which in a builder with no NIC reaches nothing, and had there
+//! been a route it would have left past the host's egress gate. Dependency
+//! installs now go out through the vsock egress client like every other
+//! builder job, and the binary is no longer in the host-binary manifests,
+//! so it is neither embedded in `mvmctl` nor installed in a builder rootfs.
+//! The source remains only because the image repository's host-binary
+//! build still names the cargo target; it goes when that build stops.
 
 pub mod allowlist;
 pub mod proxy;
-pub mod vsock_proxy;
 
 pub use allowlist::{ALLOWED_PORT, Allowlist, PRODUCTION_HOSTNAMES};
 pub use proxy::{DEFAULT_BIND, ProxyHandle, parse_connect_target, start};
-pub use vsock_proxy::{
-    ConnectPolicy, DEFAULT_VSOCK_PROXY_BIND, VsockProxyHandle, start_vsock_proxy,
-};

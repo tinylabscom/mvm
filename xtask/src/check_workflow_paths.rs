@@ -1422,7 +1422,7 @@ mod tests {
         let extended = workflow("ci-full.yml");
         let body =
             job_body(&extended, "builder-vm-image-linux").expect("builder VM image job must exist");
-        for binary in ["mvm-host-vm-init", "mvm-egress-proxy", "mvm-builderd"] {
+        for binary in ["mvm-host-vm-init", "mvm-builderd"] {
             assert!(
                 body.contains(&format!("$HOST_BIN_DIR/{binary}")),
                 "builder VM image smoke must provide the manifest binary {binary}"

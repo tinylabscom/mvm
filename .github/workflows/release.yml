@@ -99,7 +99,7 @@ jobs:
           targets: ${{ matrix.build_target }}
 
       # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
-      # binaries (mvm-host-vm-init, mvm-egress-proxy) as static
+      # binaries (mvm-host-vm-init, mvm-builderd) as static
       # aarch64-unknown-linux-musl via cargo-zigbuild — so zig +
       # cargo-zigbuild must be present at `cargo build`-of-mvmctl time, the
       # same as the ci.yml Lint job. Without this the release binary build
