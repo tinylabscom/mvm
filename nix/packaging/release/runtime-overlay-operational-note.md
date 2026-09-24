@@ -16,3 +16,13 @@ artifact under `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
 
 If you roll this release back, pair the binary downgrade with a VM restart so
 restarted guests resolve the matching older runtime overlay.
+
+## Image support window
+
+Boot images for this release come from the `mvm-images` image set pinned in
+`crates/mvm-core/images.lock`. The image assets attached to this release are
+byte-identical mirrors of that set, checked against its signed root before they
+were signed here. Earlier releases and `boot-image/v*` releases remain
+published; the legacy image producer's lock entry is kept until 2026-12-31.
+See the [releases reference](https://github.com/tinylabscom/mvm/blob/main/public/src/content/docs/reference/releases.md#image-releases-and-the-support-window)
+for which CLI versions read which URLs.

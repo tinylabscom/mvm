@@ -10,9 +10,11 @@ GitHub Release:
   (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
   `aarch64-unknown-linux-gnu`), packages each as
   `mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` +
-  man pages), generates `checksums-sha256.txt`, cosign-signs every tarball,
-  and also builds the dev / builder / default-microvm / builder-vm /
-  runtime-overlay images.
+  man pages), generates `checksums-sha256.txt`, and cosign-signs every
+  tarball. It does not build boot images: it mirrors the image set pinned by
+  `crates/mvm-core/images.lock` from
+  [`mvm-images`](https://github.com/tinylabscom/mvm-images), as described in
+  [Image releases and the support window](#image-releases-and-the-support-window).
 - **`kernel-build.yml`** builds the slim builder + workload kernels on native
   aarch64 and x86_64 runners and uploads `vmlinux-<arch>-<variant>` +
   `kernel-<arch>-checksums-sha256.txt`.
@@ -27,6 +29,51 @@ GitHub Release:
 | `mvmctl env update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
 | `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` |
+
+## Image releases and the support window
+
+Boot images — the builder VM, the default and rootless workload images, the
+workload and Stage 0 kernels, the runtime overlay and the SDK sidecars — are
+built and signed in [`tinylabscom/mvm-images`](https://github.com/tinylabscom/mvm-images)
+and published as `image-set/v*` releases. Each release carries one signed
+root, `image-set.json`, that names every member by digest and size. Image
+changes land in `mvm-images`; the `mvm` tree's own image flakes under
+`nix/images/` are scheduled for deletion, after which the `mvm` tree cannot
+build an image and says so rather than failing on a missing flake.
+
+Which URLs a CLI reads depends on its version:
+
+| `mvmctl` version | Builder VM, default image, kernels, Stage 0 | Runtime overlay, SDK sidecar, initramfs |
+|---|---|---|
+| v0.17.0 and earlier | its own `v{version}` release on `tinylabscom/mvm` | its own `v{version}` release |
+| v0.18.0-rc.1 | `tinylabscom/mvm` release `boot-image/v0.1.5`, signed by `release-boot-image.yml` | its own `v{version}` release |
+| releases cut after 2026-09-24 | the `mvm-images` `image-set/v*` release pinned by the binary's `images.lock`, admitted only after the root verifies against that release's `release.yml` identity | its own `v{version}` release, whose copies `release.yml` mirrors from the same pinned set |
+
+Nothing in that table is deleted. `boot-image/v*` and every `v*` release stay
+published, so an older CLI keeps finding the bytes it was built against. What
+changes over time is what is published next:
+
+- **Mirroring.** Every CLI release attaches the pinned set's assets under the
+  names CLI releases have always carried. The release verifies the whole set
+  with the `mvmctl` it is about to ship, then refuses any mirrored file whose
+  digest the signed root does not account for, before anything is signed. A
+  CLI release keeps mirroring until the runtime overlay, SDK sidecar and
+  initramfs are fetched from the image set directly.
+- **Legacy producer retirement.** No new `boot-image/v*` release is published
+  after the in-tree image flakes are deleted. The `legacy` entry in
+  `images.lock`, which records that producer's release and signing identity,
+  stays until 2026-12-31 and is removed in the first release after that date.
+  It is a record for the support window, not a fallback: no current CLI
+  selects it.
+- **Pin updates.** `update-image-pin.yml` runs every Monday at 09:23 UTC and on
+  demand. It verifies the newest `image-set/v*` root's keyless signature and
+  opens a pull request that advances `images.lock`; it never merges. The merge
+  queue's boot lanes then fetch, verify and boot the proposed set before it
+  lands. An image-only change therefore needs a pin update, not a CLI release.
+- **Rollback.** Selecting an earlier image set is an `images.lock` change back
+  to an existing, verified `image-set/v*` release. Rolling a current CLI back
+  to `boot-image/v*` is not possible: those releases publish no signed root for
+  the lock to pin.
 
 ## Runtime overlay release assets
 

@@ -870,7 +870,8 @@ Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
       released `mvmctl` verifies the signed root and members, then
       `xtask release-boot-image validate` gates every mirrored file.)
 - [ ] Exercise rollback to the previous image-set pin without rebuilding a CLI.
-- [ ] Publish migration and support-window documentation.
+- [x] Publish migration and support-window documentation. (W7.4:
+      `public/src/content/docs/reference/releases.md` and the release notes.)
 
 Acceptance: no supported CLI version receives a 404 or accepts differently
 signed bytes during the transition.
