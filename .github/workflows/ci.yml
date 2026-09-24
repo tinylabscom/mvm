@@ -1177,7 +1177,14 @@ jobs:
         # to end.
         run: |
           set -euo pipefail
-          echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)" >> "$GITHUB_ENV"
+          {
+            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
+            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
+            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
+            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+          } >> "$GITHUB_ENV"
 
       - name: Fetch and verify the pinned bootable image
         # Signature-verified, then hash-verified against the release's own
@@ -1186,66 +1193,38 @@ jobs:
         # surface as a boot-time mystery, and a substituted one must fail here
         # rather than boot.
         env:
-          # The boot image ships on its own train, so its manifests are signed
-          # by release-boot-image.yml rather than release.yml. Pinning the
-          # wrong workflow here would accept a signature from any other
-          # workflow in this repo.
-          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release-boot-image.yml@refs/tags/.*$"
           COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
           set -euo pipefail
           mkdir -p /tmp/boot-image && cd /tmp/boot-image
-          base="https://github.com/tinylabscom/mvm/releases/download/${IMAGE_TAG}"
+          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
+          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
+          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
+          cosign verify-blob \
+            --bundle image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            image-set.json
+          jq -e '
+            .compatibility.guest_agent_protocol.min <= 2 and
+            .compatibility.guest_agent_protocol.max >= 2 and
+            .compatibility.builder_cache_contract == 4
+          ' image-set.json >/dev/null
           for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4 \
-                   default-microvm-meta-x86_64.json; do
+                   runtime-overlay-x86_64.tar.gz; do
             curl -fL --retry 3 -o "$f" "$base/$f"
+            jq -r --arg name "$f" '
+              .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
+              select(.name == $name) | "\(.sha256)  \(.name)"
+            ' image-set.json > expected.txt
+            test -s expected.txt
+            sha256sum -c expected.txt
           done
-          # The prod rootfs has no baked agent — /init resolves it from
-          # /mvm/runtime, the runtime overlay attached as a second virtio-blk
-          # drive. Fetching kernel and rootfs alone boots a guest that panics at
-          # `Attempted to kill init!` before the agent binds vsock, which reads
-          # as a broken image rather than an incomplete fetch.
-          curl -fL --retry 3 -o runtime-overlay-x86_64.tar.gz \
-            "$base/runtime-overlay-x86_64.tar.gz"
-          curl -fL --retry 3 -o checksums.txt \
-            "$base/default-microvm-x86_64-checksums-sha256.txt"
-          # Both signature bundles, published beside what they sign.
-          curl -fL --retry 3 -o checksums.txt.bundle \
-            "$base/default-microvm-x86_64-checksums-sha256.txt.bundle"
-          curl -fL --retry 3 -o runtime-overlay-x86_64.tar.gz.bundle \
-            "$base/runtime-overlay-x86_64.tar.gz.bundle"
-          # Signature before digest, in that order and not the other way round:
-          # a digest comparison only says the bytes match what the manifest
-          # claims, and an attacker who can replace the artifact can replace the
-          # manifest beside it. `release-boot-image.yml` cosign-signs both of
-          # these on the tag push that publishes them, so the identity below is
-          # that workflow at a tag ref — the same keyless-OIDC check
-          # `verify-release-assets.sh` applies to every other manifest in this
-          # repo. Nothing here is verified against a signature this lane fetched
-          # from the same place as the thing it signs *without* pinning who
-          # signed it.
-          cosign verify-blob \
-            --bundle checksums.txt.bundle \
-            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-            checksums.txt
-          cosign verify-blob \
-            --bundle runtime-overlay-x86_64.tar.gz.bundle \
-            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-            runtime-overlay-x86_64.tar.gz
-          grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
-            checksums.txt > expected.txt
-          test -s expected.txt
-          sha256sum -c expected.txt
-          # The runtime-overlay admission gate reads `mvm-meta.json` from the
-          # rootfs's own directory and refuses to boot without it. The release
-          # publishes that sidecar under an arch-qualified asset name, so it has
-          # to be put back under the name the gate looks for. Verified above
-          # under its asset name before being renamed.
-          cp default-microvm-meta-x86_64.json mvm-meta.json
-          # The overlay tarball carries its own checksum manifest; verify
-          # against that rather than trusting the archive.
+          jq -n --arg rev "$(jq -r .mvm_source_commit image-set.json)" \
+            --argjson protocol "$(jq .compatibility.guest_agent_protocol.max image-set.json)" \
+            '{name:"mvm-default-microvm",accessible:false,sealed:true,entrypointKind:"command",entrypointArgv:[],initSystem:"busybox",expectedBootMs:300,agentBinary:"real",rootlessEntrypoint:true,hypervisor:"firecracker",overlayAware:true,runtimeLean:true,imageTag:"",source:"fetched",builtAt:"",protocolVersion:$protocol,generatorRev:$rev,libc:"unknown"}' \
+            > mvm-meta.json
           mkdir -p overlay && tar -C overlay -xzf runtime-overlay-x86_64.tar.gz
           ( cd overlay && sha256sum -c checksums-sha256.txt )
           ls -la overlay

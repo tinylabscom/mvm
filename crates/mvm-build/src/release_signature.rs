@@ -77,6 +77,9 @@ pub enum ReleaseTrain {
     /// `release-boot-image.yml`, signing images under
     /// `refs/tags/boot-image/v<version>`.
     BootImage,
+    /// `mvm-images/release.yml`, signing canonical image sets under
+    /// `refs/tags/image-set/v<version>`.
+    ImageSet,
 }
 
 /// Verify `request`'s archive against the release workflow's keyless signing
@@ -130,6 +133,9 @@ fn verify_against_release_identities(
         ReleaseTrain::Cli => mvm_core::release_trust::accepted_release_identities(request.version),
         ReleaseTrain::BootImage => {
             mvm_core::release_trust::accepted_boot_image_identities(request.version)
+        }
+        ReleaseTrain::ImageSet => {
+            mvm_core::release_trust::accepted_image_set_identities(request.version)
         }
     };
     verify_release_archive_bytes(

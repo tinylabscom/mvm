@@ -9,15 +9,15 @@
 //! The pins live in `crates/mvm-core/images.lock` now, and this gate holds the files that
 //! cannot call a Rust API to it. Two things fail:
 //!
-//!   - A boot-image tag written out as a literal that is not the locked one.
-//!   - A boot-image tag written as a *pattern* that enumerates published
+//!   - An image-set tag written out as a literal that is not the locked one.
+//!   - An image-set tag written as a *pattern* that enumerates published
 //!     releases — the mechanism by which a workflow picks "the newest one".
 //!     That makes what mvm fetches a property of whoever published last rather
 //!     than of this tree, and a pin that nobody reviewed is not a pin.
 //!
 //! Two spellings are deliberately not findings, because neither selects
-//! anything: the `boot-image/v*` push-tag glob that fires the publishing
-//! workflow, and the `boot-image/v.*` wildcard inside a keyless signing
+//! anything: the `image-set/v*` push-tag glob that fires the publishing
+//! workflow, and the `image-set/v.*` wildcard inside a keyless signing
 //! identity, which constrains who may have signed rather than what to fetch.
 
 use anyhow::{Context, Result, bail};
@@ -31,30 +31,31 @@ const LOCK_FILE: &str = "crates/mvm-core/images.lock";
 
 /// The reader every shell and YAML consumer goes through.
 const READER: &str = "scripts/locked-image-tag.sh";
+const PIN_UPDATER: &str = ".github/workflows/update-image-pin.yml";
 
-/// Trees whose files are expected to name a boot-image tag and have no way to
+/// Trees whose files are expected to name an image-set tag and have no way to
 /// call the Rust API. Documentation and specs are excluded: prose about a
 /// historical release is a record, not a pin.
 const SCANNED_DIRS: [&str; 3] = [".github/workflows", "scripts", "tests"];
 
-/// The prefix every boot-image tag starts with.
-const TAG_PREFIX: &str = "boot-image/v";
+/// The prefix every image-set tag starts with.
+const TAG_PREFIX: &str = "image-set/v";
 
-/// How one `boot-image/v…` mention behaves.
+/// How one `image-set/v…` mention behaves.
 #[derive(Debug, PartialEq, Eq)]
 enum TagMention {
     /// A concrete tag. Must be the locked one.
     Pinned(String),
-    /// `boot-image/v*` — the push-tag glob that fires the publishing workflow.
+    /// `image-set/v*` — the push-tag glob that fires the publishing workflow.
     TriggerGlob,
-    /// `boot-image/v.*` — a wildcard inside a signing-identity regexp.
+    /// `image-set/v.*` — a wildcard inside a signing-identity regexp.
     IdentityRegexp,
-    /// `boot-image/vN`, `boot-image/vX.Y.Z` — a placeholder in prose.
+    /// `image-set/vN`, `image-set/vX.Y.Z` — a placeholder in prose.
     ProsePlaceholder,
-    /// `boot-image/v` with nothing after it — the prefix itself, as a test
+    /// `image-set/v` with nothing after it — the prefix itself, as a test
     /// asserts a composed URL sits under it. Names no release.
     BarePrefix,
-    /// `boot-image/v[0-9]+\.…` — a pattern matching every published release,
+    /// `image-set/v[0-9]+\.…` — a pattern matching every published release,
     /// which exists only to pick one of them.
     Enumeration,
 }
@@ -79,7 +80,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         .with_context(|| format!("reading {}", lock_path.display()))?;
     let lock = ImageTrainLock::parse(&lock_text)
         .with_context(|| format!("parsing {}", lock_path.display()))?;
-    let locked = lock.boot_image.release_tag.as_str();
+    let locked = lock.image_set.release_tag.as_str();
 
     let mut findings = Vec::new();
     for dir in SCANNED_DIRS {
@@ -95,6 +96,9 @@ pub fn run(workspace: &Path) -> Result<()> {
                 .unwrap_or(path)
                 .display()
                 .to_string();
+            if relative == PIN_UPDATER {
+                return;
+            }
             findings.extend(findings_in(&relative, &text, locked));
         })?;
     }
@@ -102,7 +106,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !findings.is_empty() {
         let rendered: Vec<String> = findings.iter().map(Finding::render).collect();
         bail!(
-            "check-image-lock: {} boot-image pin(s) do not come from {LOCK_FILE} (locked tag: {locked}):\n{}\n\n\
+            "check-image-lock: {} image-set pin(s) do not come from {LOCK_FILE} (locked tag: {locked}):\n{}\n\n\
              Read the pin instead of copying it: `$({READER})` from shell or YAML, \
              `cargo run -p xtask -- release-boot-image tag` where a toolchain is available, \
              or `mvm_core::config::default_boot_image_tag()` from Rust.",
@@ -113,7 +117,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     check_reader_agrees(workspace, locked)?;
 
-    eprintln!("check-image-lock: clean (boot image pinned to {locked} by {LOCK_FILE})");
+    eprintln!("check-image-lock: clean (image set pinned to {locked} by {LOCK_FILE})");
     Ok(())
 }
 
@@ -151,7 +155,7 @@ fn findings_in(file: &str, text: &str, locked: &str) -> Vec<Finding> {
             let detail = match mention {
                 TagMention::Pinned(tag) if tag == locked => continue,
                 TagMention::Pinned(tag) => {
-                    format!("pins boot image {tag:?}, but {LOCK_FILE} pins {locked:?}")
+                    format!("pins image set {tag:?}, but {LOCK_FILE} pins {locked:?}")
                 }
                 TagMention::Enumeration => format!(
                     "matches every published {TAG_PREFIX}* release by pattern, which selects \
@@ -172,7 +176,7 @@ fn findings_in(file: &str, text: &str, locked: &str) -> Vec<Finding> {
     findings
 }
 
-/// Classify every `boot-image/v…` on one line.
+/// Classify every `image-set/v…` on one line.
 fn mentions_in(line: &str) -> Vec<TagMention> {
     let mut mentions = Vec::new();
     let mut rest = line;
@@ -184,11 +188,12 @@ fn mentions_in(line: &str) -> Vec<TagMention> {
     mentions
 }
 
-/// Classify by what follows `boot-image/v`, which is total over the alphabet:
+/// Classify by what follows `image-set/v`, which is total over the alphabet:
 /// a digit starts a version, `*` is the push-tag glob, `.` starts a regexp
-/// wildcard, an uppercase letter is a prose placeholder, the end of the token
-/// leaves the bare prefix, and everything else is a regexp metacharacter, which
-/// can only be there to match more than one tag.
+/// wildcard, a letter means the path names an artifact such as
+/// `image-set/vmlinux`, the end of the token leaves the bare prefix, and
+/// everything else is a regexp metacharacter, which can only be there to match
+/// more than one tag.
 fn classify(after_prefix: &str) -> TagMention {
     match after_prefix.chars().next() {
         Some(c) if c.is_ascii_digit() => TagMention::Pinned(format!(
@@ -201,7 +206,7 @@ fn classify(after_prefix: &str) -> TagMention {
         )),
         Some('*') => TagMention::TriggerGlob,
         Some('.') => TagMention::IdentityRegexp,
-        Some(c) if c.is_ascii_uppercase() => TagMention::ProsePlaceholder,
+        Some(c) if c.is_ascii_alphabetic() => TagMention::ProsePlaceholder,
         None => TagMention::BarePrefix,
         Some(c) if c.is_whitespace() || matches!(c, '"' | '\'' | '`') => TagMention::BarePrefix,
         _ => TagMention::Enumeration,
@@ -212,24 +217,24 @@ fn classify(after_prefix: &str) -> TagMention {
 mod tests {
     use super::*;
 
-    const LOCKED: &str = "boot-image/v0.1.5";
+    const LOCKED: &str = "image-set/v0.1.0";
 
     #[test]
     fn a_tree_that_names_only_the_locked_tag_passes() {
-        let text = "IMAGE_TAG: boot-image/v0.1.5\n\
-                    release boot-image/v0.1.5 2026-09-08T00:00:00Z\n";
+        let text = "IMAGE_TAG: image-set/v0.1.0\n\
+                    release image-set/v0.1.0 2026-09-08T00:00:00Z\n";
         assert_eq!(findings_in("ci.yml", text, LOCKED), Vec::new());
     }
 
     #[test]
     fn a_drifted_tag_fails_and_names_the_file_and_line() {
-        let text = "env:\n  IMAGE_TAG: boot-image/v0.1.4\n";
+        let text = "env:\n  IMAGE_TAG: image-set/v0.0.9\n";
         let findings = findings_in(".github/workflows/ci.yml", text, LOCKED);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, ".github/workflows/ci.yml");
         assert_eq!(findings[0].line, 2);
         assert!(
-            findings[0].detail.contains("boot-image/v0.1.4") && findings[0].detail.contains(LOCKED),
+            findings[0].detail.contains("image-set/v0.0.9") && findings[0].detail.contains(LOCKED),
             "the refusal must name both tags: {}",
             findings[0].detail
         );
@@ -238,7 +243,7 @@ mod tests {
     #[test]
     fn a_latest_selection_by_tag_enumeration_fails_and_names_the_file() {
         let text = "  TAG=$(gh release list --json tagName --jq '\n\
-                    \x20   [ .[].tagName | select(test(\"^boot-image/v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$\"))\n";
+                    \x20   [ .[].tagName | select(test(\"^image-set/v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$\"))\n";
         let findings = findings_in("scripts/download-qemu-wasm-smoke-pack.sh", text, LOCKED);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "scripts/download-qemu-wasm-smoke-pack.sh");
@@ -250,11 +255,11 @@ mod tests {
         );
     }
 
-    /// The glob that fires `release-boot-image.yml` selects nothing — it
+    /// The glob that fires the image publisher selects nothing — it
     /// decides which pushed tag publishes a release.
     #[test]
     fn a_push_tag_glob_is_not_a_finding() {
-        let text = "    tags:\n      - 'boot-image/v*'\n";
+        let text = "    tags:\n      - 'image-set/v*'\n";
         assert_eq!(findings_in(".github/workflows/x.yml", text, LOCKED), vec![]);
     }
 
@@ -262,42 +267,43 @@ mod tests {
     #[test]
     fn a_signing_identity_regexp_is_not_a_finding() {
         let text = "COSIGN_IDENTITY_REGEXP: \"^https://github.com/o/r/.github/workflows/\
-                    release-boot-image.yml@refs/tags/boot-image/v.*$\"\n";
+                    release.yml@refs/tags/image-set/v.*$\"\n";
         assert_eq!(findings_in(".github/workflows/x.yml", text, LOCKED), vec![]);
     }
 
     #[test]
     fn a_prose_placeholder_is_not_a_finding() {
-        let text = "/// images ship on their own boot-image/vN counter\n\
-                    # gh release download boot-image/vX.Y.Z --pattern '*'\n";
+        let text = "/// images ship on their own image-set/vN counter\n\
+                    # gh release download image-set/vX.Y.Z --pattern '*'\n\
+                    cp image-set/vmlinux cache/kernel\n";
         assert_eq!(findings_in("tests/release_assets.rs", text, LOCKED), vec![]);
     }
 
     /// A test that a composed URL sits under the tag prefix names no release.
     #[test]
     fn the_bare_prefix_is_not_a_finding() {
-        let text = "url.contains(\"/releases/download/boot-image/v\")\n\
-                    the prefix is boot-image/v\n";
+        let text = "url.contains(\"/releases/download/image-set/v\")\n\
+                    the prefix is image-set/v\n";
         assert_eq!(findings_in("tests/release_assets.rs", text, LOCKED), vec![]);
     }
 
     #[test]
     fn two_tags_on_one_line_are_classified_independently() {
-        let text = "assert boot-image/v0.1.5 != boot-image/v9.9.9\n";
+        let text = "assert image-set/v0.1.0 != image-set/v9.9.9\n";
         let findings = findings_in("tests/x.rs", text, LOCKED);
         assert_eq!(findings.len(), 1);
-        assert!(findings[0].detail.contains("boot-image/v9.9.9"));
+        assert!(findings[0].detail.contains("image-set/v9.9.9"));
     }
 
     #[test]
     fn a_version_is_read_up_to_the_first_non_version_character() {
         assert_eq!(
             classify("0.1.5/builder-vm-vmlinux-x86_64"),
-            TagMention::Pinned("boot-image/v0.1.5".to_string())
+            TagMention::Pinned("image-set/v0.1.5".to_string())
         );
         assert_eq!(
             classify("0.1.5\""),
-            TagMention::Pinned("boot-image/v0.1.5".to_string())
+            TagMention::Pinned("image-set/v0.1.5".to_string())
         );
     }
 

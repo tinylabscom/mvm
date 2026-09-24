@@ -624,16 +624,22 @@ pub(in crate::commands) mod attested_builder_pack {
         HostCapability, LocalPackPolicy, PackBackend, PackKind, host_pack_policy_hash,
     };
 
+    #[cfg(any(
+        feature = "manifest-verify",
+        feature = "release-artifact-bootstrap",
+        test
+    ))]
+    use super::SYNTHESIZED_BUILDER_VM_CMDLINE;
     #[cfg(feature = "manifest-verify")]
-    use super::{builder_vm_artifact_names, download_file};
+    use super::builder_vm_artifact_names;
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
         write_builder_vm_cache_sidecars,
     };
+    #[cfg(feature = "manifest-verify")]
+    use crate::commands::env::artifact_verify::download_file;
     use crate::ui;
 
-    const SYNTHESIZED_BUILDER_VM_CMDLINE: &str = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 \
-         loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n";
     const SYNTHESIZED_BUILDER_VM_CACHE_MANIFEST: &str =
         r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#;
 
