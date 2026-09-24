@@ -866,7 +866,9 @@ Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
 - [ ] For at least one image and CLI release, publish canonical assets from
       `mvm-images` while mirroring the required legacy assets to `mvm` releases.
 - [ ] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
-- [ ] Compare canonical and mirrored digests automatically.
+- [x] Compare canonical and mirrored digests automatically. (W7.1: the
+      released `mvmctl` verifies the signed root and members, then
+      `xtask release-boot-image validate` gates every mirrored file.)
 - [ ] Exercise rollback to the previous image-set pin without rebuilding a CLI.
 - [ ] Publish migration and support-window documentation.
 

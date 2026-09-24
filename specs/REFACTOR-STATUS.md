@@ -3861,3 +3861,10 @@ resume` takes a `current_head` and refuses when it differs from the
       the contract, resolver, acquisition boundary, and boot witnesses, and
       re-measures the release against the 25-minute gate. No W8 wave lands
       before the W7 window evidence is collected.
+      - [x] W7.1 #3368: the CLI release mirrors the locked set under its
+            historical names; the released `mvmctl` verifies the signed root
+            and every member, and `xtask release-boot-image validate` refuses
+            any mirrored file the root does not account for. Checked against
+            the real `image-set/v0.1.0` bytes.
+      - [ ] W7.2 window signals · W7.3 rollback drill · W7.4 support docs.
+      - [ ] W8 waves 0–4 and the re-measure (gated on W7 evidence).
