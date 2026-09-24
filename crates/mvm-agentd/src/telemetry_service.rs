@@ -186,6 +186,10 @@ mod tests {
         let collector = host_side(host, anchor_key, guest_key.verifying_key());
         let end = serve_telemetry_connection(&mut guest, guest_key, &wrong_anchor);
         assert_eq!(end, SessionEnd::Failed);
+        // The guest wrote nothing after refusing the anchor, so the host is
+        // still blocked in its handshake read; close the guest's socket
+        // before joining or the join deadlocks.
+        drop(guest);
         assert!(collector.join().unwrap().is_none());
     }
 
