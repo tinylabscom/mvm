@@ -11,7 +11,7 @@ attached:
 
 | Drive | Mount Point | Permissions | Purpose |
 |-------|-------------|-------------|---------|
-| `/dev/vda` | `/` | Read-write (ext4) or read-only (squashfs) | Root filesystem |
+| `/dev/vda` | `/` | Read-only (ext4 or squashfs) | Root filesystem |
 | `/dev/vdb` | `/mnt/config` | Read-only (`ro,noexec,nosuid,nodev`) | mvm instance metadata |
 | `/dev/vdc` | `/mnt/secrets` | Read-only (`ro,noexec,nosuid,nodev`) | Runtime-delivered credentials |
 
@@ -25,6 +25,14 @@ any user share that sits inside or shadows them, and `/mnt` is not an allow-root
 at all: **a user mount path must be under `/data` or `/work`.**
 
 ## Root Filesystem
+
+The root drive is attached read-only, and the host never rewrites the image
+behind it: the image is hashed when a launch is admitted, that digest is what the
+signed plan records, and a cached image such as the default development rootfs
+is shared by every later launch. An ext4 rootfs whose journal still needs replay
+cannot be mounted from a read-only device, so it is refused before boot rather
+than repaired in place — see
+[Troubleshooting](/guides/troubleshooting/#refusing-to-boot--its-ext4-journal-needs-replay).
 
 The rootfs is built by `mkGuest` and contains:
 

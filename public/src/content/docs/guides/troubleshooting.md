@@ -459,6 +459,17 @@ Re-run `mvmctl bootstrap` — it's idempotent and repaves any corrupted rootfs f
 mvmctl bootstrap
 ```
 
+### "refusing to boot ...: its ext4 journal needs replay"
+
+The guest mounts its root filesystem from a read-only drive, and ext4 cannot
+replay a journal on a read-only device, so an image whose journal still holds
+uncommitted transactions would fail to mount. mvm does not repair it on the
+host: the image was hashed when the launch was admitted and is shared by later
+launches, so repairing it would change bytes the signed plan already recorded.
+
+Rebuild the image. For the cached default development image, remove
+`$MVM_HOME/cache/default-microvm/dev/` and the next run acquires it again.
+
 ## Logging
 
 ```bash
