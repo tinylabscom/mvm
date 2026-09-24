@@ -12,7 +12,10 @@
 //! keeps serving while every child is up, each child answers on its own
 //! state-dir-keyed vsock endpoint, egress keying (the per-VM endpoint socket)
 //! is name-based rather than snapshot-based, and the fresh generation tokens
-//! plus post-restore kernel randomness diverge across children.
+//! plus post-restore kernel randomness diverge across children. One capture
+//! serves the whole batch (the #3641 `--count` semantics at the driver seam):
+//! set `MVM_LIVE_FORK_CHILDREN` to size it, and the run prints per-child
+//! `FC_FORK_RESTORE_MS` plus a batch-wide `FC_FORK_BATCH_MS` wall time.
 //!
 //! It needs:
 //!
@@ -482,10 +485,17 @@ fn fc_live_fork_n_children_from_running_parent() {
 
     let pid = std::process::id();
     let parent_id = format!("fc-fork-live-parent-{pid}");
-    let child_ids = [
-        format!("fc-fork-live-child-a-{pid}"),
-        format!("fc-fork-live-child-b-{pid}"),
-    ];
+    // Batch witness: one capture of the running parent, then N children.
+    // N is env-tunable so the batch envelope can be measured at different
+    // sizes; 4 exercises the batch path beyond the original pair.
+    let fork_children: usize = std::env::var("MVM_LIVE_FORK_CHILDREN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
+        .max(1);
+    let child_ids: Vec<String> = (1..=fork_children)
+        .map(|index| format!("fc-fork-live-child-{index}-{pid}"))
+        .collect();
 
     let driver = FcDriver::new();
     // The capability that gates the user-facing `machine fork` verb must
@@ -563,8 +573,10 @@ fn fc_live_fork_n_children_from_running_parent() {
 
     // Each child restores in its own subprocess: the fork remap unshares the
     // mount namespace of the process that launches the child VMM, so restoring
-    // two children in one process would stack both bind mounts over the
+    // several children in one process would stack bind mounts over the
     // parent's recorded paths and shadow the parent for every later lookup.
+    // The batch wall clock spans every child: clone through witness.
+    let t_batch = Instant::now();
     let mut witnesses = Vec::new();
     for (i, child_id) in child_ids.iter().enumerate() {
         let witness = fork_child_in_subprocess(
@@ -574,6 +586,7 @@ fn fc_live_fork_n_children_from_running_parent() {
         );
         witnesses.push(witness);
     }
+    println!("FC_FORK_BATCH_MS={}", t_batch.elapsed().as_millis());
 
     // The whole fork family is up now: parent plus every child reachable at
     // once, each on its own state-dir-keyed vsock endpoint. Had any child

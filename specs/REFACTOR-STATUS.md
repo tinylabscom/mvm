@@ -4,6 +4,11 @@ Last updated: 2026-09-23
 
 ## In progress
 
+- [x] **Batch live witness — #3641 evidence follow-up.**
+      `specs/plans/2026-09-24-fork-batch-live-witness.md`. One capture, four
+      children, all serving, identities distinct; batch wall 35.9 s on real
+      KVM with per-child restores at 38-46 ms. Ready for merge-queue delivery.
+
 - [x] **Fork batch (`machine fork --count N`) — issue #3641.**
       `specs/plans/2026-09-23-fork-batch.md`. One capture, N live children
       through the unchanged per-child fork arm; batch naming, fail-fast with

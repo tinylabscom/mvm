@@ -114,6 +114,16 @@ docs commit went out as #3581). Under the
       clippy-bdd clean. Motivated by the #3552 witness measuring 39–47 ms
       per fork on real KVM.
 
+- [x] **Batch live witness — #3641 evidence follow-up.**
+      `specs/plans/2026-09-24-fork-batch-live-witness.md`. `fc_fork_live.rs`
+      sizes its batch via `MVM_LIVE_FORK_CHILDREN` (default 4) and prints a
+      batch-wide `FC_FORK_BATCH_MS`. Real-KVM run green: 4 children from one
+      capture of a running parent, restores 46/38/38/39 ms, batch wall 35.9 s,
+      whole family serving, per-child endpoints/egress/tokens/randomness
+      distinct. The wall is dominated by serialized per-child spawn + agent
+      reconnect (~7-14 s each), not the 40 ms restore — the data behind any
+      parallel-fork follow-up.
+
 - [ ] **Kubernetes in a single microVM.**
       `specs/plans/2026-09-20-kubernetes-in-microvm.md`; runtime tracked in
       #3554 (W1/W2 merged as #3555), guest template and validation in
