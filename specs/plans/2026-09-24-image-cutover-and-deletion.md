@@ -78,14 +78,46 @@ roll back without rebuilding a CLI.
       CLI and must not touch the merge queue's protected state.
 - [ ] Record the drill result in `specs/sprint/delivery/`.
 
+*Finding (2026-09-24), before any drill run:* the drill cannot target the
+`legacy` entry as written. A lock whose `[image_set]` names
+`tinylabscom/mvm` `boot-image/v0.1.5` would parse, but that release publishes
+no `image-set.json`, so there is no root digest to pin and every current
+acquisition path refuses at the manifest stage before touching a member. The
+`legacy` entry is a trust record for pre-W6 CLIs, which never read the lock;
+it is not a rollback target for current ones. The drill therefore needs a
+second verified `image-set/v*` release in `mvm-images` to move between: pin
+it through `update-image-pin.yml`, dispatch `ci.yml` on that branch (both
+`Boot latency ceiling` and `Guest image boots (mvm-images)` run on
+`workflow_dispatch`, so the queue is untouched), then restore
+`image-set/v0.1.0` by lock edit alone and run the lanes again.
+
 ### W7.4 Migration and support-window documentation
 
-- [ ] Publish the support window in the docs site and the `mvm` release
+- [x] Publish the support window in the docs site and the `mvm` release
       notes: which CLI versions consume which URLs, the legacy-URL
       retirement date, and the pin-update cadence (`update-image-pin.yml`).
-- [ ] The docs must state plainly that image construction is no longer
+      *Done:* `public/src/content/docs/reference/releases.md` §"Image
+      releases and the support window" (per-version URL table taken from
+      the source at each tag; no release is deleted; `legacy` lock entry
+      kept until 2026-12-31; weekly Monday 09:23 UTC pin proposals), and a
+      matching section in the release-notes prefix
+      `nix/packaging/release/runtime-overlay-operational-note.md`.
+- [x] The docs must state plainly that image construction is no longer
       possible from the `mvm` tree after W8 — contributors land image
       changes in `mvm-images`.
+      *Done:* same section; the contributor guides already point image work
+      at the `mvm-images` sibling.
+
+Which CLI reads what, from the source at each tag (2026-09-24):
+
+| CLI | builder / default image / kernels / Stage 0 | overlay / sidecar / initramfs |
+|---|---|---|
+| v0.16.1, v0.17.0 | `tinylabscom/mvm` own `v{version}` | own `v{version}` |
+| v0.18.0-rc.1 | `tinylabscom/mvm` `boot-image/v0.1.5` | own `v{version}` |
+| main | `mvm-images` `image-set/v0.1.0` via `images.lock` | own `v{version}` |
+
+No old CLI 404s as long as existing releases stay published, which is a
+non-goal to change.
 
 Acceptance (carried from the parent plan): no supported CLI version
 receives a 404 or accepts differently signed bytes during the transition.
@@ -155,6 +187,16 @@ sibling-checkout selector minus its in-tree arm.
       `release-boot-image.yml`, strip image publication/signing from
       `release.yml`, drop image-build legs from `cache-warm.yml` and the CI
       lanes, keeping every lane that consumes the published path.
+      *Prerequisite found 2026-09-24:* CLIs built from `main` still download
+      the runtime overlay, SDK sidecar and initramfs from their own
+      `tinylabscom/mvm` `v{version}` release (`download_runtime_overlay`,
+      `download_sdk_sidecar`, `download_initramfs`), under the CLI identity.
+      Stripping the W7.1 mirror from `release.yml` before those three read
+      the image set would make every new CLI 404. The overlay and sidecars
+      are already signed-root members; the initramfs is published by
+      `mvm-images` but is not a root member, and `release.yml` still builds
+      it from `nix/images/initramfs`. Those moves are a Wave 3 precondition,
+      not a follow-up.
 - [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`, the E-class
       reference edits across remaining crates, and live-doc updates
       (`CLAUDE.md`, `AGENTS.md`, contributor docs) to state that image
