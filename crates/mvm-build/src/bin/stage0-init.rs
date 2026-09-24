@@ -148,7 +148,7 @@ mod linux {
             crate::store_gc::collect::collect_stage0_store_garbage();
         }
         let store_result = finalize_persistent_nix_store();
-        let result = build_result.and(output_result).and(store_result);
+        let result = stage0_result(build_result.and(output_result), store_result);
         match result {
             Ok(()) => {
                 eprintln!("stage0-init: done; halting");
@@ -158,6 +158,17 @@ mod linux {
                 eprintln!("stage0-init: build failed: {e}");
                 power_off()
             }
+        }
+    }
+
+    /// The run's one result line. A store fault must survive a build failure
+    /// rather than be hidden behind it: the host discards the store only when
+    /// it sees the fault reported, and a store that corrupted mid-build is
+    /// exactly the one whose build also failed.
+    fn stage0_result(build: Result<(), String>, store: Result<(), String>) -> Result<(), String> {
+        match (build, store) {
+            (Err(build), Err(store)) => Err(format!("{build}; {store}")),
+            (build, store) => build.and(store),
         }
     }
 
@@ -1530,6 +1541,29 @@ mod linux {
             std::fs::write(&errors, "7\n").expect("write nonzero count");
             let error = super::reject_ext4_errors(&errors).expect_err("errors must fail");
             assert!(error.contains("7 filesystem error(s)"), "{error}");
+        }
+
+        #[test]
+        fn a_store_fault_is_reported_alongside_a_build_failure() {
+            let store_fault = "persistent Stage 0 ext4 store reported 3 filesystem error(s)";
+
+            let both = super::stage0_result(
+                Err("nix build exit 1".to_string()),
+                Err(store_fault.to_string()),
+            )
+            .expect_err("two failures are a failure");
+            assert!(both.starts_with("nix build exit 1"), "{both}");
+            assert!(both.contains(store_fault), "{both}");
+
+            assert_eq!(
+                super::stage0_result(Ok(()), Err(store_fault.to_string())),
+                Err(store_fault.to_string())
+            );
+            assert_eq!(
+                super::stage0_result(Err("nix build exit 1".to_string()), Ok(())),
+                Err("nix build exit 1".to_string())
+            );
+            assert_eq!(super::stage0_result(Ok(()), Ok(())), Ok(()));
         }
 
         #[test]

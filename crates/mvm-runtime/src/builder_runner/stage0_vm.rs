@@ -30,8 +30,8 @@ use mvm_build::builder_vm::{
 use mvm_build::builder_vm_image::unique_job_id;
 use mvm_build::builder_vm_runtime::acquire_nix_store_image_lock_named;
 use mvm_build::stage0_host::{
-    materialize_stage0_root_disk, prepopulate_stage0_nix_store_image, stage0_nix_store_image_name,
-    stage0_result_from_console,
+    invalidate_stage0_store_after_ext4_error, materialize_stage0_root_disk,
+    prepopulate_stage0_nix_store_image, stage0_nix_store_image_name, stage0_result_from_console,
 };
 
 use super::driver_builder::copy_tree;
@@ -157,23 +157,29 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for Stage0Vm<D> {
             BuilderVmImage::new_root_dir(guest_root_dir.to_path_buf(), STAGE0_ENTRY_PATH);
         prepopulate_stage0_nix_store_image(&seed_image, store_lock.path())?;
 
-        let outcome = BuilderRunner::new(self.driver.clone())
-            .stage0(&Stage0Run {
-                name: &name,
-                kernel: kernel.path(),
-                root_disk: &root_disk,
-                nix_store: store_lock.path(),
-                workspace_src: workspace_dir,
-                host_bin_dir,
-                conf_dir: artifact_out,
-                closure_nar: self.closure_nar.as_deref(),
-                output_size: mvm_build::builder_disk_transport::OUTPUT_DISK_BYTES,
-                vcpus: STAGE0_VCPUS,
-                memory_mib: STAGE0_MEMORY_MIB,
-            })
-            .map_err(|e| BuilderVmError::VmmFailed {
-                detail: format!("{} Stage 0: {e}", self.driver.name()),
-            })?;
+        let outcome = BuilderRunner::new(self.driver.clone()).stage0(&Stage0Run {
+            name: &name,
+            kernel: kernel.path(),
+            root_disk: &root_disk,
+            nix_store: store_lock.path(),
+            workspace_src: workspace_dir,
+            host_bin_dir,
+            conf_dir: artifact_out,
+            closure_nar: self.closure_nar.as_deref(),
+            output_size: mvm_build::builder_disk_transport::OUTPUT_DISK_BYTES,
+            vcpus: STAGE0_VCPUS,
+            memory_mib: STAGE0_MEMORY_MIB,
+        });
+
+        // Before anything can return: a guest that reported ext4 errors on its
+        // store must not have that store handed to the next bootstrap, however
+        // this run ends. The superblock alone does not say so when the store
+        // is journaled.
+        let console_log = vm_state_dir.join("console.log");
+        invalidate_stage0_store_after_ext4_error(&console_log, store_lock.path())?;
+        let outcome = outcome.map_err(|e| BuilderVmError::VmmFailed {
+            detail: format!("{} Stage 0: {e}", self.driver.name()),
+        })?;
 
         // Artifacts first, result second. The guest powers off on success and
         // failure alike, so a run that produced a kernel and rootfs before an
@@ -190,7 +196,7 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for Stage0Vm<D> {
 
         // The console is the result channel: the VMM exit code only says the
         // guest powered off, which it does either way.
-        stage0_result_from_console(&vm_state_dir.join("console.log"))
+        stage0_result_from_console(&console_log)
     }
 }
 

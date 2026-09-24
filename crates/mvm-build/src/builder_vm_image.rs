@@ -458,6 +458,13 @@ pub(crate) fn marker_path(store_image: &Path) -> PathBuf {
     store_image.with_extension("stage0-seed")
 }
 
+/// Unbind the Stage 0 store from its seed when the guest reported ext4 errors
+/// on it, so the next preparation rebuilds it rather than mounting it again.
+///
+/// The superblock usually records the same thing, but not always: a journaled
+/// store never loses its valid bit, and the kernel commits the error bit
+/// asynchronously. The guest's own report is the one signal that is always
+/// written before it powers off.
 pub fn invalidate_stage0_store_after_ext4_error(
     console_log: &Path,
     store_image: &Path,
@@ -467,7 +474,13 @@ pub fn invalidate_stage0_store_after_ext4_error(
         return Ok(());
     }
     match std::fs::remove_file(marker_path(store_image)) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            eprintln!(
+                "{}",
+                stage0_store_discard_notice(store_image, StoreSuperblock::ErrorsRecorded)
+            );
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
             "remove invalid Stage 0 store marker for {}: {error}",
