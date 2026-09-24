@@ -154,7 +154,7 @@ option A) which this plan does not touch.
       resolver answers all implemented v1 symbols under their base names
       and the versioned aliases the real driver serves; refuses the rest
       with `CUDA_ERROR_NOT_FOUND`. Unit + dynamic-export tests.
-- [ ] W14 — BDD end-to-end witness (#3567, PR #3653): live-lane
+- [x] W14 — BDD end-to-end witness (#3567, merged as #3653): live-lane
       scenarios boot a real `--gpu` VM on a GPU-less runner (stub
       backend), run a guest probe that dlopens the shims and issues a
       CUDA driver + NVML call chain, and assert guest answers plus

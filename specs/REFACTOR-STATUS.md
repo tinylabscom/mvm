@@ -95,9 +95,9 @@ Last updated: 2026-09-24
       tinylabscom/mvm-images#17 stages both shim sets under `gpu/<libc>/`
       with the pin advanced past the musl-shim toolchain fix and the
       aarch64 overlay verified inside the 24 MiB budget. `cuGetProcAddress`
-      (#3563, PR #3652) and the BDD end-to-end witness (#3567, PR #3653 —
-      positive stub-answer + host-log evidence, negative dial-refusal) are
-      in review; the witness flushed out the endpoint's missing
+      (#3563, merged as #3652) and the BDD end-to-end witness (#3567,
+      merged as #3653 — positive stub-answer + host-log evidence,
+      negative dial-refusal) both landed; the witness flushed out the endpoint's missing
       host-helper contract-probe answer and the NVML shim's null device
       handle for ordinal 0.
 
