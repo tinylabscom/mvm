@@ -1,38 +1,46 @@
-# Fork batch: `machine fork --count N` — one capture, N live children
+---
 
-Issue: tinylabscom/mvm#3641. Unblocked by #3552: the live fork witness measures
-39–47 ms per child restore on real KVM (8-core host), so a 32-child batch costs
-~1.5 s of restore plus admission overhead.
+# Batch fork: `machine fork --count N`
 
-## Design
+Backing: shipped-source
+Validation: check-sprint-append
 
-- `--count N` (default 1) on `machine fork` only; `restore`/`warm-restore`
-  stay single-child.
-- One vm_full capture of the running parent (one pause window), then N child
-  forks through the existing `fork_vm_full_machine` path — every current
-  per-child invariant holds unchanged (fresh claim-8 plan, grant subset check,
-  audit-chain verification, lineage record, post-restore identity delivery).
-- Naming: count=1 keeps today's `resolve_child_name` exactly. count>1 names
-  children `<parent>-fork-<i>-<ts>` (1-based); `--as` and `--branch` refuse
-  with count>1 (one name cannot name N children; identical timestamps would
-  collide).
-- `fork_vm_full_machine` returns the child's `CheckpointMeta` instead of `()`;
-  single-child callers ignore it, the batch loop collects it.
-- Output: count=1 is wire-identical to today. count>1 emits one human success
-  line per child (from the existing arm), and with `--json` a single
-  `ForkBatchJson` array-shaped document built from the collected metas —
-  never N streamed objects.
-- Fail-fast: a child failure aborts the batch; the error names the children
-  already forked (they are live VMs the caller must clean up).
+Issue: tinylabscom/mvm#3641 — `machine fork --count N` — one capture, N live children
 
-## Tasks
+## Outcome
 
-- [x] CLI: `--count` with a 1.. range parser on `MachineForkArgs`.
-- [x] `ForkMachineInput.count`; `fork_machine` batch loop + naming helper
-      (`batch_child_name`, unit-tested) + conflict refusals.
-- [x] `fork_vm_full_machine -> Result<CheckpointMeta>`.
-- [x] Batch JSON document (`ForkBatchJson`) + human per-child lines.
-- [x] Tests: CLI parse (count, range), conflict refusals, naming, JSON shape.
-- [x] BDD: `machine fork --help` documents `--count` (s0_cli/verbs.feature).
-- [x] Gates: clippy, mvm-cli tests, check-gated; plan/SPRINT/rollups updated.
-- [x] PR referencing #3641.
+Add `--count N` flag to `machine fork` so a single capture can serve N
+copy-on-write children, all resuming from the same point. This pattern (RL
+rollouts, agent swarms) is now cheap — previously every `machine fork` call
+re-captured the parent, pausing it N times for identical snapshots.
+
+### What changes
+
+- One `vm_full` capture serves the whole batch; each child forks through the
+  **existing per-child arm unchanged** — fresh claim-8 plan, grant subset
+  check, audit-chain verification, lineage record, post-restore identity
+  delivery.
+- Batch children: `<parent>-fork-<i>-<timestamp>` (1-based). `--as`/`--branch`
+  refuse above 1 — one name cannot name N children, and siblings under one
+  timestamp would collide.
+- Fail-fast: a failed child aborts the batch; the error names the
+  already-forked children (they are live VMs the caller must clean up).
+- `--json` above 1 emits **one array-shaped document** (`fork-batch` → per-child
+  entries) instead of N streamed objects; `count=1` is wire-identical to today,
+  including output shape and fail-before-capture name validation.
+- `fork_vm_full_machine` now returns the child's `CheckpointMeta`; the
+  single-child callers ignore it.
+
+## Validation
+
+- New tests: CLI parsing (`--count 4`, the `1..` range refusal, default 1),
+  batch naming, both conflict refusals, the JSON document shape, and two BDD
+  scenarios (`machine fork --help` documents `--count`; `--count 0` exits 2).
+- Full `mvm-cli` lib suite green (2123 passed, 0 failed) rebased on the #3642
+  env-race fix; `clippy --all-targets` and `clippy-bdd` clean.
+
+Live-hardware note: the per-child restore numbers come from the #3552 witness
+runs (`just live-fork-witness root@<host>`); a batch-mode live witness
+(fork N on real KVM in one call) is a sensible follow-up once this lands.
+
+Closes #3641.
