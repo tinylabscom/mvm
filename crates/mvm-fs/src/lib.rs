@@ -38,6 +38,11 @@ pub mod oci;
 /// size caps (decompression-bomb mitigation). ext4 generation
 /// (`mke2fs -d` against the staging dir) runs inside the builder VM.
 pub mod oci_to_rootfs;
+/// OS package inventory of an unpacked rootfs tree: dpkg/apk package
+/// databases, os-release distribution identity, and the version of a
+/// kernel the image itself carries. Fail-closed per record, with every
+/// skip spelled out in the inventory's limitations.
+pub mod os_inventory;
 pub mod output;
 pub mod overlay;
 pub mod ownership;
