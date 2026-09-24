@@ -11,6 +11,14 @@ use tracing_subscriber::registry::{LookupSpan, SpanRef};
 use super::export::SpanQueue;
 use super::record::{AttrValue, EventRecord, FieldVisitor, SpanRecord, set_attribute};
 
+/// Events buffered per open span. Beyond this they are shed and counted, so
+/// a long-lived span under an event flood holds bounded memory. 128 follows
+/// the OpenTelemetry SDK's default span-event limit.
+const MAX_SPAN_EVENTS: usize = 128;
+
+/// The attribute recording how many of a span's events were shed at capture.
+const DROPPED_EVENTS_ATTR: &str = "events.dropped";
+
 /// Per-span state held in the registry's span extensions until close.
 struct OtlpSpan {
     trace_id: u128,
@@ -19,15 +27,17 @@ struct OtlpSpan {
     start: SystemTime,
     visitor: FieldVisitor,
     events: Vec<EventRecord>,
+    dropped_events: u64,
     saw_error_event: bool,
 }
 
 /// Exports every span it is enabled for.
 ///
 /// Attach it with a per-layer filter, as with the span-timing layer, so spans
-/// are constructed even when the log filter is quieter. Events are exported
-/// only as events of an enclosing span; an event outside any span is not a
-/// trace signal.
+/// are constructed even when the log filter is quieter. An event inside a
+/// span becomes one of that span's events, bounded per span; an event outside
+/// any span is captured as a standalone event record on the same bounded
+/// queue, never silently dropped.
 pub struct OtlpLayer {
     queue: SpanQueue,
 }
@@ -126,6 +136,7 @@ where
             start: SystemTime::now(),
             visitor,
             events: Vec::new(),
+            dropped_events: 0,
             saw_error_event: false,
         });
     }
@@ -139,12 +150,19 @@ where
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let Some(span) = ctx.event_span(event) else {
+            self.queue.offer_event(event_record(event));
             return;
         };
         let record = event_record(event);
         if let Some(data) = span.extensions_mut().get_mut::<OtlpSpan>() {
+            // The error mark survives shedding: a capped span that then sees
+            // an error event must still close failed.
             data.saw_error_event |= *event.metadata().level() == Level::ERROR;
-            data.events.push(record);
+            if data.events.len() < MAX_SPAN_EVENTS {
+                data.events.push(record);
+            } else {
+                data.dropped_events += 1;
+            }
         }
     }
 
@@ -158,6 +176,10 @@ where
         let mut attributes = data.visitor.attributes;
         if let Some(message) = data.visitor.message {
             set_attribute(&mut attributes, "message", AttrValue::Str(message));
+        }
+        if data.dropped_events > 0 {
+            let shed = i64::try_from(data.dropped_events).unwrap_or(i64::MAX);
+            set_attribute(&mut attributes, DROPPED_EVENTS_ATTR, AttrValue::Int(shed));
         }
         self.queue.offer(SpanRecord {
             trace_id: data.trace_id,
@@ -193,7 +215,16 @@ mod tests {
         rx.try_iter()
             .filter_map(|m| match m {
                 Message::Span(span) => Some(*span),
-                Message::Shutdown => None,
+                Message::Event(_) | Message::Shutdown => None,
+            })
+            .collect()
+    }
+
+    fn drain_events(rx: &Receiver<Message>) -> Vec<EventRecord> {
+        rx.try_iter()
+            .filter_map(|m| match m {
+                Message::Event(event) => Some(*event),
+                Message::Span(_) | Message::Shutdown => None,
             })
             .collect()
     }
@@ -308,51 +339,75 @@ mod tests {
         assert!(!named(&spans, "clean").error);
     }
 
-    /// Documents a capture gap, not desired behavior: an event emitted outside
-    /// any span is dropped with no record and no loss accounting — the layer
-    /// exports trace signals only, and nothing else picks these events up.
-    /// The telemetry contract has a standalone-event record family precisely
-    /// because of this. When outside-span capture lands, this test must flip
-    /// into the positive contract rather than being deleted.
+    /// The flipped capture-gap regression: an event outside any span becomes
+    /// a standalone event record on the bounded queue, or a counted loss when
+    /// the queue is full — never a silent drop.
     #[test]
-    fn an_event_outside_any_span_is_dropped_with_no_record_and_no_loss_evidence() {
+    fn an_event_outside_any_span_is_captured_as_a_standalone_record() {
         let (queue, rx) = span_queue(64);
         let counter = queue.clone();
         let subscriber = tracing_subscriber::registry().with(OtlpLayer::new(queue));
         tracing::subscriber::with_default(subscriber, || {
             tracing::error!(detail = "boot refused", "orphaned diagnostic");
         });
+        let events = drain_events(&rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "orphaned diagnostic");
         assert!(
-            drain(&rx).is_empty(),
-            "today nothing is exported for an outside-span event"
+            events[0]
+                .attributes
+                .contains(&("detail".to_string(), AttrValue::Str("boot refused".into())))
         );
-        assert_eq!(
-            counter.dropped(),
-            0,
-            "and the drop is not even counted as a loss — the event vanishes \
-             before any accounting exists"
+        assert!(
+            events[0]
+                .attributes
+                .contains(&("level".to_string(), AttrValue::Str("ERROR".into())))
         );
+        assert_eq!(counter.dropped_events(), 0);
     }
 
-    /// Documents a boundedness gap, not desired behavior: a span accumulates
-    /// its events in an unbounded vector until close, so a long-lived span
-    /// under an event flood grows memory without limit and without shedding.
-    /// The export queue bounds closed spans only. When per-span event state
-    /// gains a bound, this test must flip into asserting that bound.
+    /// The loss half of the same contract: a full queue sheds the standalone
+    /// event and counts it, separately from dropped spans.
     #[test]
-    fn span_event_state_grows_unbounded_until_close() {
+    fn a_full_queue_counts_shed_standalone_events_as_losses() {
+        let (queue, _rx) = span_queue(1);
+        let counter = queue.clone();
+        let subscriber = tracing_subscriber::registry().with(OtlpLayer::new(queue));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                tracing::info!("orphaned");
+            }
+        });
+        // Capacity one: the first event queues, the next two shed.
+        assert_eq!(counter.dropped_events(), 2);
+        assert_eq!(counter.dropped(), 0, "span losses count separately");
+    }
+
+    /// The flipped boundedness-gap regression: per-span event state is capped,
+    /// the overflow is shed with per-span loss evidence, and an error event
+    /// arriving after the cap still fails the span.
+    #[test]
+    fn span_event_state_is_bounded_and_sheds_with_evidence() {
         let flood = 4096_usize;
         let spans = capture(|| {
             tracing::info_span!("long-lived").in_scope(|| {
                 for n in 0..flood {
                     tracing::info!(n, "flood");
                 }
+                tracing::error!("late failure");
             });
         });
+        let span = named(&spans, "long-lived");
+        assert_eq!(span.events.len(), MAX_SPAN_EVENTS);
+        let shed = i64::try_from(flood - MAX_SPAN_EVENTS).unwrap() + 1;
         assert_eq!(
-            named(&spans, "long-lived").events.len(),
-            flood,
-            "every event is retained in memory; nothing bounds or sheds"
+            attribute(span, DROPPED_EVENTS_ATTR),
+            Some(&AttrValue::Int(shed)),
+            "the shed count is loss evidence on the span itself"
+        );
+        assert!(
+            span.error,
+            "an error event shed past the cap still marks failure"
         );
     }
 
