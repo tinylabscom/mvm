@@ -935,3 +935,4 @@ change and bump its "Last updated" date. It is a quick index, not the source of
 truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the
 rollup. `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` move together with the
 plan checkboxes — updating one and leaving the others stale is not done.
+Trigger CI rebuild
