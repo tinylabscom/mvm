@@ -319,6 +319,52 @@ pub enum GpuRequest {
     },
 }
 
+impl GpuRequest {
+    /// The wire `op` name for this request — the snake_case tag the framed
+    /// JSON carries. The host endpoint logs this per request, and the BDD
+    /// witness asserts on it, so it must stay an exhaustive match: a new
+    /// variant that nobody named must not compile.
+    pub fn op_name(&self) -> &'static str {
+        match self {
+            GpuRequest::DriverGetVersion => "driver_get_version",
+            GpuRequest::DeviceGetCount => "device_get_count",
+            GpuRequest::DeviceGetName { .. } => "device_get_name",
+            GpuRequest::DeviceTotalMem { .. } => "device_total_mem",
+            GpuRequest::ContextCreate { .. } => "context_create",
+            GpuRequest::ContextDestroy { .. } => "context_destroy",
+            GpuRequest::Synchronize { .. } => "synchronize",
+            GpuRequest::StreamCreate { .. } => "stream_create",
+            GpuRequest::StreamDestroy { .. } => "stream_destroy",
+            GpuRequest::StreamSynchronize { .. } => "stream_synchronize",
+            GpuRequest::StreamWaitEvent { .. } => "stream_wait_event",
+            GpuRequest::EventCreate { .. } => "event_create",
+            GpuRequest::EventDestroy { .. } => "event_destroy",
+            GpuRequest::EventRecord { .. } => "event_record",
+            GpuRequest::EventQuery { .. } => "event_query",
+            GpuRequest::EventSynchronize { .. } => "event_synchronize",
+            GpuRequest::MemAlloc { .. } => "mem_alloc",
+            GpuRequest::MemFree { .. } => "mem_free",
+            GpuRequest::MemcpyHtoD { .. } => "memcpy_htod",
+            GpuRequest::MemcpyDtoH { .. } => "memcpy_dtoh",
+            GpuRequest::MemcpyHtoDAsync { .. } => "memcpy_htod_async",
+            GpuRequest::MemcpyDtoHAsync { .. } => "memcpy_dtoh_async",
+            GpuRequest::MemsetD8 { .. } => "memset_d8",
+            GpuRequest::ModuleLoad { .. } => "module_load",
+            GpuRequest::ModuleUnload { .. } => "module_unload",
+            GpuRequest::ModuleGetFunction { .. } => "module_get_function",
+            GpuRequest::LaunchKernel { .. } => "launch_kernel",
+            GpuRequest::NvmlDeviceGetCount => "nvml_device_get_count",
+            GpuRequest::NvmlSystemGetDriverVersion => "nvml_system_get_driver_version",
+            GpuRequest::NvmlDeviceGetName { .. } => "nvml_device_get_name",
+            GpuRequest::NvmlDeviceGetMemoryInfo { .. } => "nvml_device_get_memory_info",
+            GpuRequest::NvmlDeviceGetUtilizationRates { .. } => "nvml_device_get_utilization_rates",
+            GpuRequest::NvmlDeviceGetCudaComputeCapability { .. } => {
+                "nvml_device_get_cuda_compute_capability"
+            }
+        }
+    }
+}
+
 /// The host's answer to one [`GpuRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -510,6 +556,32 @@ mod tests {
             stream: Some(11),
             params: vec![vec![1, 0, 0, 0], vec![0xff; 8]],
         }
+    }
+
+    #[test]
+    fn op_name_matches_the_wire_tag_for_every_variant() {
+        // The endpoint logs op_name per request and tests assert on it, so
+        // each variant must report exactly the tag serde puts on the wire.
+        let requests = [
+            (GpuRequest::DriverGetVersion, "driver_get_version"),
+            (GpuRequest::DeviceGetCount, "device_get_count"),
+            (GpuRequest::DeviceGetName { ordinal: 0 }, "device_get_name"),
+            (
+                GpuRequest::DeviceTotalMem { ordinal: 0 },
+                "device_total_mem",
+            ),
+            (GpuRequest::NvmlDeviceGetCount, "nvml_device_get_count"),
+        ];
+        for (request, expected) in requests {
+            assert_eq!(request.op_name(), expected);
+            let json = serde_json::to_value(&request).expect("encode");
+            assert_eq!(
+                json.get("op").and_then(serde_json::Value::as_str),
+                Some(expected),
+                "op_name disagrees with the wire tag for {expected}"
+            );
+        }
+        assert_eq!(sample_request().op_name(), "launch_kernel");
     }
 
     #[test]

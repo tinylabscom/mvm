@@ -18,6 +18,10 @@ substrate_server_category = "per-VM host GPU endpoint (guest CUDA/NVML shim RPC 
 
 [dependencies]
 mvm-contract = { workspace = true }
+# For the host-helper contract probe: the workload runner resolves this
+# binary through `mvm_vmm::host::aux_bin::resolve_verified`, which asks for
+# `helper_contract::HOST_HELPER_CONTRACT_VERSION` before spawning.
+mvm-vmm = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

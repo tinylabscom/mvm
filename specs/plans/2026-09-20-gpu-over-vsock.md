@@ -104,13 +104,13 @@ that allocate, copy, load a module, and launch kernels:
   `nvmlDeviceGetMemoryInfo`, `nvmlDeviceGetUtilizationRates`,
   `nvmlDeviceGetCudaComputeCapability`.
 
-Out of v1 (named follow-ups, not silent gaps): `cuGetProcAddress`-based
-resolution (CUDA 12 cudart's full symbol path), CUDA graphs and
-contexted fork-reconnect (warm device memory handoff), peer-device access,
-the MLX backend for Apple Silicon hosts (second
-backend family behind the same endpoint and transport), and the
-paravirtual-display question (ADR-029's option A) which this plan does
-not touch.
+`cuGetProcAddress`-based resolution (CUDA 12 cudart's full symbol
+path) moved from this list into the work items below (W13). Still out of
+v1 (named follow-ups, not silent gaps): CUDA graphs and contexted
+fork-reconnect (warm device memory handoff), peer-device access, the MLX
+backend for Apple Silicon hosts (second backend family behind the same
+endpoint and transport), and the paravirtual-display question (ADR-029's
+option A) which this plan does not touch.
 
 ## Work items
 
@@ -150,6 +150,19 @@ not touch.
 - [x] W10 — Docs: ADR-053 (compute-over-vsock, amends ADR-029 decision
       1's "no GPU support today"), plan checkboxes, SPRINT.md,
       REFACTOR-STATUS.md, doc-guard-compliant wording.
+- [x] W13 — `cuGetProcAddress` in the cuda shim (#3563, merged as #3652):
+      resolver answers all implemented v1 symbols under their base names
+      and the versioned aliases the real driver serves; refuses the rest
+      with `CUDA_ERROR_NOT_FOUND`. Unit + dynamic-export tests.
+- [ ] W14 — BDD end-to-end witness (#3567, PR #3653): live-lane
+      scenarios boot a real `--gpu` VM on a GPU-less runner (stub
+      backend), run a guest probe that dlopens the shims and issues a
+      CUDA driver + NVML call chain, and assert guest answers plus
+      per-request `op=` lines in the host `gpu-endpoint.log`; the
+      negative scenario boots without `--gpu` and asserts the guest dial
+      is refused and no endpoint exists. Flushed out: the endpoint's
+      missing host-helper contract-probe answer and the NVML shim's
+      null handle for device ordinal 0.
 - [x] W11 — Streams and events (#3565): typed stream/event/async-copy wire
       operations; endpoint completion positions; deterministic stub ordering;
       native CUDA bindings; driver/runtime shim exports; compatibility,
