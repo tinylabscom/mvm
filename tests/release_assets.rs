@@ -2066,6 +2066,24 @@ fn image_pin_updates_open_evidence_bearing_prs_without_merging_them() {
     );
 }
 
+/// The lock rewrite is the xtask that re-parses what it wrote. An inline
+/// rewrite once named sections the lock does not have and failed every run
+/// before proposing anything, which is invisible until the weekly schedule
+/// fires.
+#[test]
+fn image_pin_updates_rewrite_the_lock_through_the_checked_parser() {
+    let workflow = fs::read_to_string(".github/workflows/update-image-pin.yml")
+        .expect("image pin workflow must be readable");
+    assert!(
+        workflow.contains("xtask -- repin-image-lock candidate/image-set.json"),
+        "the pin update must rewrite images.lock through xtask repin-image-lock"
+    );
+    assert!(
+        !workflow.contains("python3"),
+        "the pin update must not carry a second, untested lock writer"
+    );
+}
+
 #[test]
 fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
     let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
