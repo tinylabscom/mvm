@@ -80,7 +80,11 @@ let
           find target -name 'lib${libName}*.so' -print \
             -exec install -m0644 {} "$libdir/lib${libName}.so" \;
         fi
-        mv "$libdir/lib${libName}.so" "$libdir/${soname}"
+        # cudart's soname equals its lib name, so the rename is a no-op
+        # there — mv errors on identical source and destination.
+        if [ "$libdir/lib${libName}.so" != "$libdir/${soname}" ]; then
+          mv "$libdir/lib${libName}.so" "$libdir/${soname}"
+        fi
 
         needed="$(${pkgs.binutils}/bin/readelf -d "$libdir/${soname}" \
           | grep NEEDED || true)"
