@@ -218,7 +218,6 @@ jobs:
       - name: Pre-commit hook scoping tests
         run: bash .githooks/pre-commit.test.sh
 
-
       - name: Clippy
         run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
 
@@ -344,15 +343,6 @@ jobs:
           bash scripts/test-check-crate-readmes.sh
           bash scripts/check-crate-readmes.sh
 
-
-
-
-
-
-
-
-
-
       # Runs its own self-test first: a gate nobody has watched fail is a gate
       # nobody knows works, and this one is the relief valve for the exclusion
       # that let fabricated witness names live in specs/ for months.
@@ -360,27 +350,6 @@ jobs:
         run: |
           cargo run -p xtask -- check-declared-backing --self-test
           cargo run -p xtask -- check-declared-backing
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
@@ -406,16 +375,9 @@ jobs:
       # and the disagreement surfaces as a credential reaching a destination it
       # should not.
 
-
-
-
-
       # release.yml runs on tags, so a per-VM binary added to the registry but
       # not to the release job is invisible until a user's downloaded mvmctl
       # fails to spawn it. Resolve it here, on the PR that adds it.
-
-
-
 
       # Manifest-level sibling to the closure budgets, which resolve trees and
       # therefore cannot see a member pinning a version behind the workspace
@@ -424,8 +386,6 @@ jobs:
       # Sibling to the default-closure budget: bounds what any *feature* can
       # pull in, which is where an off-by-default tree (wasm-backend's
       # wasmtime/cranelift family) would otherwise grow unobserved.
-
-
 
       - name: Detect fuzz-crate changes
         id: fuzz_changed
@@ -455,16 +415,6 @@ jobs:
             echo "::endgroup::"
           done
           exit "$fail"
-
-
-
-
-
-
-
-
-
-
 
   lint-features:
     name: Lint feature coverage
@@ -717,7 +667,20 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, guest-image-boot, kernel, nix-flake-check]
+    needs:
+      [
+        scope,
+        test-workspace,
+        test-workspace-aarch64,
+        test-linux,
+        test-release-witness,
+        test-ebpf-telemetry,
+        bdd-conformance,
+        boot-latency,
+        guest-image-boot,
+        kernel,
+        nix-flake-check,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1215,7 +1178,7 @@ jobs:
                    runtime-overlay-x86_64.tar.gz; do
             curl -fL --retry 3 -o "$f" "$base/$f"
             jq -r --arg name "$f" '
-              .members[] | select(.target.arch == "x86_64") | .artifacts[] |
+              .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
               select(.name == $name) | "\(.sha256)  \(.name)"
             ' image-set.json > expected.txt
             test -s expected.txt
@@ -1610,7 +1573,6 @@ jobs:
               || { echo "SDK sidecar is missing $required" >&2; exit 1; }
           done
           echo "ok: the glibc SDK closure lives in the sidecar"
-
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
         if: needs.scope.outputs.nix == 'true'
