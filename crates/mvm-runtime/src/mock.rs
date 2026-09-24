@@ -72,6 +72,9 @@ pub struct MockBackend {
     /// set, so a warm-pool caller's failure-counting path is exercisable
     /// against the same hermetic double the success path uses.
     fail_spawn_standby: bool,
+    /// Test knob: make `apply_grants` fail, the way a backend does when the
+    /// control it reads back cannot be resolved for a VM it just started.
+    fail_apply_grants: bool,
 }
 
 impl MockBackend {
@@ -98,6 +101,17 @@ impl MockBackend {
     /// `spawn_standby` already fails closed with `Unsupported`).
     pub fn with_failing_spawn_standby(mut self) -> Self {
         self.fail_spawn_standby = true;
+        self
+    }
+
+    /// Test builder: make every `apply_grants` return an error.
+    ///
+    /// Without it the mock answers `apply_grants` the way a host with no
+    /// resource-control mechanism does — every dimension `Declared` — which is
+    /// a successful answer. This knob is the other case: the backend was asked
+    /// to bound the VM and could not say whether it did.
+    pub fn with_failing_apply_grants(mut self) -> Self {
+        self.fail_apply_grants = true;
         self
     }
 
@@ -223,6 +237,20 @@ impl VmBackend for MockBackend {
             },
         );
         Ok(VmId(config.name.clone()))
+    }
+
+    fn apply_grants(
+        &self,
+        id: &VmId,
+        _grants: &mvm_contract::grants::Grants,
+    ) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
+        if self.fail_apply_grants {
+            bail!(
+                "mock: forced apply_grants failure (test knob) for '{}'",
+                id.0
+            );
+        }
+        Ok(mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared())
     }
 
     fn wait(&self, _id: &VmId) -> Result<VmExitStatus> {
@@ -648,5 +676,20 @@ mod tests {
             .with_failing_spawn_standby();
         let err = b.spawn_standby(&sample_standby_spec()).unwrap_err();
         assert!(matches!(err, StandbyError::SpawnFailed(_)));
+    }
+
+    #[test]
+    fn apply_grants_reports_declared_unless_told_to_fail() {
+        let grants = mvm_contract::grants::Grants::default();
+        let id = VmId("vm-grants".into());
+        assert_eq!(
+            MockBackend::new().apply_grants(&id, &grants).unwrap(),
+            mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared()
+        );
+        let err = MockBackend::new()
+            .with_failing_apply_grants()
+            .apply_grants(&id, &grants)
+            .unwrap_err();
+        assert!(err.to_string().contains("apply_grants"), "{err:#}");
     }
 }

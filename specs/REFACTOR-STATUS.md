@@ -503,6 +503,12 @@ Last updated: 2026-09-24
       remap the mount-namespace privilege it requires. The full PR matrix and
       exact-head live Firecracker witness pass.
 
+- [x] **A failed grant application refuses the CLI boot.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A4.2, issue #3304. The CLI
+      start path stops the VM and records `plan.failed` instead of signing an
+      all-`Declared` tier into `plan.grants_enforced`, and applies the grants
+      on the backend that started the VM rather than one rebuilt from its name.
+
 - [x] **Canonical user-config and MVM child paths.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
       canonical config path and tenant parser; named helpers for every direct
@@ -3843,7 +3849,7 @@ resume` takes a `current_head` and refuses when it differs from the
     fixture
   - [~] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs.
     The CLI boot path now calls `apply_grants` (via
-    `mvm_client::enforced_grants_after_start`), records the tier per-VM,
+    `apply_admitted_grants_or_undo_launch`, fatal on failure), records the tier per-VM,
     emits `plan.grants_enforced` on the chain, warns when a requested bound
     did not happen, and surfaces the achieved tier in `machine inspect`.
     Two `dormant-controls.toml` entries keep it from going unreachable

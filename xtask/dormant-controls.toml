@@ -69,14 +69,16 @@ declaration until launch carries a typed dependency-volume gate posture and a
 production caller applies it."""
 
 [[control]]
-symbol = "enforced_grants_after_start"
-file = "crates/mvm-client/src/boot.rs"
+symbol = "apply_admitted_grants_or_undo_launch"
+file = "crates/mvm-hostd/src/plan_admission.rs"
 dormant = false
 why = """
-The seam that calls `VmBackend::apply_grants` from the CLI's own boot. The \
-backend read-back and the audit entry both existed already; the missing link \
-was this one, and the whole defect was that nothing outside the supervisor's \
-launch path — which no `mvmctl` invocation reaches — ever asked."""
+Calls `VmBackend::apply_grants` on the backend that started the VM and stops \
+that VM when the grants cannot be applied. Both launch paths go through it — \
+the shared admitted-start tail and the CLI's own boot. The CLI path used to \
+answer a failed application with an all-`Declared` tier and sign it into \
+`plan.grants_enforced`, leaving an unbounded VM running under a record of \
+enforcement. Losing a caller reopens that on whichever path lost it."""
 
 [[control]]
 symbol = "admitted_shares_for_boot"
