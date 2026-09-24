@@ -18,9 +18,13 @@ KVM with pristine userspace; bare metal reportedly works). Not a config,
 toolchain, or image-train problem — no mvm-side kernel change will fix
 it; see #3599 for the full matrix and
 `specs/notes/2026-09-23-fork-in-fresh-pid-ns-upstream-report.md` for the
-upstream report draft. The datapath kernel posture (the workload-k8s
-successor, generically named) lands in mvm-images; the mvm-side kernel
-build/boot-selection bridge lands with the kernel-variant workstream.**
+upstream report draft. The
+mvm-side kernel build/boot-selection bridge lands with the kernel-variant
+workstream. A generically-named datapath kernel posture in mvm-images was
+rejected by the image lane (PR #24 closed: guest network devices violate
+the permanent invariant); the interim kernel remains the in-repo
+`workload-k8s` variant, and the invariant-compatible durable shape is host
+networking plus the loopback/vsock egress proxy.**
 
 ## Product requirement
 
