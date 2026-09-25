@@ -27,8 +27,8 @@ pub mod toml_loader;
 // `crate::policy::{security,reversible_replacement,policies,redaction,bundle,projection}::X`
 // path keeps resolving unchanged.
 pub use mvm_contract::policy::{
-    action_budget, approval, bundle, policies, projection, redaction, reversible_replacement,
-    security,
+    action_budget, approval, bundle, policies, projection, protected_paths, redaction,
+    reversible_replacement, security,
 };
 
 pub use action_budget::ActionBudget;
@@ -45,6 +45,9 @@ pub use projection::{
 pub use projection_fs_env::{
     CanonicalEnv, CanonicalFs, FsAccess, FsEnvError, FsGrant, WasiPreopen, canonicalize_env,
     canonicalize_fs, clamp_env, clamp_fs, to_wasi_env_names, to_wasi_preopens,
+};
+pub use protected_paths::{
+    ProtectedPath, ProtectedPathSet, ProtectedPathsMode, ProtectedPathsPolicy,
 };
 pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,

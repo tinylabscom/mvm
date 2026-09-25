@@ -17,6 +17,7 @@ pub mod dns_pin;
 pub mod network_policy;
 pub mod policies;
 pub mod projection;
+pub mod protected_paths;
 pub mod redaction;
 pub mod resolver;
 pub mod reversible_replacement;

@@ -339,6 +339,18 @@ pub struct ExecutionPlan {
     /// so emitting `null` would move every existing plan's identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_budget: Option<crate::policy::action_budget::ActionBudget>,
+    /// Protected-paths policy for guest-authored output trees. Rides inline
+    /// in the signed plan so the collection gate's posture is an admitted,
+    /// attributable decision — a relaxed (`off`) policy exists only as a
+    /// signed one, never as a missing field.
+    /// Always serialized, like `stream_retention`: the point of admitting
+    /// the posture is that the signed bytes state it outright, so an absent
+    /// gate is attributable to a decision rather than to a gap in the
+    /// record. `#[serde(default)]` makes a plan without the field
+    /// deserialize as [`crate::policy::protected_paths::ProtectedPathsPolicy::default`]
+    /// — enforce, with the shipped default set.
+    #[serde(default)]
+    pub protected_paths: crate::policy::protected_paths::ProtectedPathsPolicy,
 }
 
 const fn default_sdk_uses_sidecar() -> bool {
@@ -454,6 +466,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         stream_retention: StreamRetention::Persist,
         sdk_uses_sidecar: true,
         action_budget: None,
+        protected_paths: Default::default(),
     }
 }
 
@@ -545,6 +558,42 @@ mod tests {
         let round: ExecutionPlan =
             serde_json::from_str(&serde_json::to_string(&budgeted).unwrap()).unwrap();
         assert_eq!(round.action_budget, budgeted.action_budget);
+    }
+
+    /// The protected-paths posture has to survive both directions: a plan
+    /// that says nothing is enforced with the default set, and a plan that
+    /// opts out says so in the bytes that get signed.
+    #[test]
+    fn protected_paths_defaults_to_enforce_and_states_itself_on_the_wire() {
+        use crate::policy::protected_paths::{ProtectedPathsMode, ProtectedPathsPolicy};
+
+        let plan = minimal_plan();
+        assert_eq!(plan.protected_paths, ProtectedPathsPolicy::default());
+        assert!(matches!(
+            plan.protected_paths.mode,
+            ProtectedPathsMode::Enforce
+        ));
+
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"protected_paths\":{"),
+            "the admitted posture must be in the signed bytes, not implied by absence: {json}"
+        );
+
+        // A plan predating the field still deserializes, and it enforces.
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("protected_paths");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(back.protected_paths, ProtectedPathsPolicy::default());
+
+        let mut relaxed = plan.clone();
+        relaxed.protected_paths.mode = ProtectedPathsMode::Off;
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&relaxed).unwrap()).unwrap();
+        assert!(matches!(
+            round.protected_paths.mode,
+            ProtectedPathsMode::Off
+        ));
     }
 
     #[test]

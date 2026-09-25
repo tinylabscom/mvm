@@ -471,3 +471,21 @@ witnesses = [
     "fn:action_budget_absent_preserves_existing_plan_bytes",
     "fn:action_budget_extracted_from_signed_envelope",
 ]
+
+[[claim]]
+id = "MVM-SEC-23"
+level = "build"
+witness_kinds = ["fn"]
+suite = "protected_paths"
+statement = "A signed execution plan carries a protected-paths policy — enforce over the shipped CI/build/test path set by default, off only as a signed decision — and a pure segment-aware matcher decides protected-path membership, with path traversal never matching"
+# Phase 0 scope: the signed carrier and the matcher. The collection-time
+# refusal of guest-authored trees touching a protected class lands with the
+# gate itself; read-only shares remain the supported way to expose protected
+# paths to a guest.
+witnesses = [
+    "fn:protected_paths_policy_roundtrips_through_serde",
+    "fn:default_policy_enforces_the_default_path_set",
+    "fn:matcher_respects_segment_boundaries",
+    "fn:dot_dot_traversal_never_matches",
+    "fn:protected_paths_defaults_to_enforce_and_states_itself_on_the_wire",
+]

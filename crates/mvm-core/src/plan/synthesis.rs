@@ -853,6 +853,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
         action_budget: None,
+        protected_paths: Default::default(),
         sdk_uses_sidecar: true,
     };
 
