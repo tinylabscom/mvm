@@ -57,3 +57,14 @@ On an Apple Silicon host under load (1-minute load average 17–21):
 - The next debug `cargo build` restored all five from that store and embedded
   them (binary grew by 4.9 MB) in 7.7 s, confirming the runtime and the build
   script compute the same keys.
+- A `cargo build --release --bin mvmctl` without `embed-host-bins`, against an
+  empty store, cross-compiled the five binaries in the build script (five
+  nested `cargo zigbuild` runs: 7 m 08 s, 1 m 16 s, 19 s, 5 s, 8 m 07 s) and
+  published them; the resulting `target/release/mvmctl` carries five embedded
+  ELF images. The whole build took 35 m wall, most of it the LTO release
+  compile of the workspace under that load.
+- The warning path ran for real once: an early version of the toolchain probe
+  asked `cargo zigbuild --version`, which the subcommand does not accept, so
+  the probe failed on a host that had the toolchain. The release build printed
+  the `cargo:warning=` naming the fix and finished. The probe now asks
+  `--help`.

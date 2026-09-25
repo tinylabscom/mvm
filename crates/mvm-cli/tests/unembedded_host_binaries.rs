@@ -1,7 +1,9 @@
-//! A build without `embed-host-bins` never cross-compiles the Linux host
+//! A debug build without `embed-host-bins` never cross-compiles the Linux host
 //! binaries. What it *ships* is whatever the content store could prove belongs
-//! to this tree: nothing on a cold machine, the restored set once a `just
-//! embed` has published one.
+//! to this tree: nothing on a cold machine, the restored set once a release
+//! build, a `just embed` or an `mvmctl` producing its own payload has published
+//! one. A test binary is not `mvmctl` and never builds the payload itself, so
+//! the empty arm refuses here exactly as it always has.
 //!
 //! Both states have a contract and this file asserts both, in one test rather
 //! than two that skip past each other — the empty arm must refuse and say so,

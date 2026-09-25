@@ -259,7 +259,10 @@ impl ContentStore {
                 .map_err(io::Error::other)?;
             build_embed_cache::install(&self.store_root, key, &binary.name, &output);
         }
-        EmbedCache::with_root(&self.checkout, Some(self.store_root.clone())).prune();
+        build_embed_cache::prune(
+            &self.store_root,
+            build_embed_cache::max_bytes_from(std::env::var_os("MVM_EMBED_CACHE_MAX_BYTES")),
+        );
         Ok(())
     }
 }
@@ -312,7 +315,7 @@ fn compile_notice(missing: usize, total: usize) -> String {
     };
     format!(
         "Building the Linux host binaries this binary was compiled without ({missing} of \
-         {total}; none cached for this source tree). About 3 minutes from cold, less when \
+         {total} not yet built for this source tree). A few minutes from cold, less when \
          only a few crates changed; the next `cargo build` embeds the result.{stream}"
     )
 }
@@ -725,6 +728,6 @@ mod tests {
         assert!(line.contains("Linux host binaries"), "{line}");
         assert!(line.contains("compiled without"), "{line}");
         assert!(line.contains("4 of 6"), "{line}");
-        assert!(line.contains("3 minutes"), "{line}");
+        assert!(line.contains("few minutes"), "{line}");
     }
 }
