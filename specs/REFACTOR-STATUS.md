@@ -3914,3 +3914,6 @@ resume` takes a `current_head` and refuses when it differs from the
             `image-set/v0.1.1`: guest-image-boot green on 17 of 17 merge
             runs, rollback drilled both ways by lock edit alone.
       - [ ] W8 waves 0–4 and the re-measure (gated on W7 evidence).
+            - [x] Wave 0: deletion inventory re-scanned from `main` (80
+                  files, four classes); waves re-sequenced to 0.5a/0.5b,
+                  1+2, 3, 4.
