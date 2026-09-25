@@ -723,48 +723,196 @@ fn request_reader_rejects_incomplete_headers() {
     assert_eq!(read_request_path(&mut reader).unwrap(), None);
 }
 
-#[test]
-fn install_sh_uses_baked_version_without_calling_api() {
-    let version = baked_version();
-    let release = Release::new(&version);
-    let (base, _stop) = serve_releases(&[&release]);
+/// The releases-list route install.sh queries for the newest release.
+const RELEASES_ROUTE: &str = "/repos/tinylabscom/mvm/releases?per_page=100";
 
-    let host = Host::new();
-    let status = host
-        .script("install.sh")
-        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
-        .env("MVM_TRUSTED_ARCHIVE_SHA256", release.archive_sha256())
-        .status()
-        .unwrap();
-    assert!(
-        status.success(),
-        "baked install should succeed without reaching the API"
-    );
-    assert_eq!(host.mvmctl_version(), format!("mvmctl {version}"));
+/// One entry of a GitHub releases-list response. `serde_json` writes keys in
+/// sorted order, so `assets` precedes `tag_name` here while the real API puts
+/// it after: install.sh must attribute each asset to its release by nesting,
+/// not by position.
+fn listed_release(tag: &str, draft: bool, prerelease: bool, assets: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "url": format!("https://api.github.com/repos/tinylabscom/mvm/releases/{tag}"),
+        "author": { "login": "github-actions[bot]", "id": 41898282 },
+        "tag_name": tag,
+        "name": tag,
+        "draft": draft,
+        "prerelease": prerelease,
+        "assets": assets
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "label": "", "uploader": { "login": "github-actions[bot]" } }))
+            .collect::<Vec<_>>(),
+        // A body quoting another release's fields: escaped quotes inside a
+        // string must not be read as keys.
+        "body": "Supersedes {\"tag_name\": \"v99.0.0\", \"prerelease\": false}",
+    })
 }
 
-#[test]
-fn install_sh_falls_back_to_api_and_verifies_without_an_archive_hash() {
-    let release = Release::new("v9.9.9");
-    let mut routes = release.routes();
-    routes.push((
-        "/repos/tinylabscom/mvm/releases/latest".to_string(),
-        br#"{"tag_name":"v9.9.9"}"#.to_vec(),
-    ));
-    let (base, _stop) = serve(routes);
+/// A releases list, newest-created first as GitHub orders it, in which the
+/// newest stable CLI release for this host is `v9.10.0`. Everything created
+/// after it, or ranked above it by a naive reader, must be passed over:
+///
+/// - `boot-image/v10.0.0`: another release train, carrying an archive by that name
+/// - `v9.12.0`: a draft
+/// - `v9.11.0-rc.1`: a release candidate
+/// - `v9.11.0`: stable, but still staged as a prerelease until its first-run smoke passes
+/// - `v9.10.9`: stable, but publishing no archive for this host
+/// - `v9.9.9`: a patch to an older line, created after `v9.10.0`
+fn release_list_newest_is_v9_10_0() -> serde_json::Value {
+    let archive = Release::archive_name();
+    let archive = archive.as_str();
+    let other = if host_target() == "x86_64-unknown-linux-gnu" {
+        "mvmctl-aarch64-unknown-linux-gnu.tar.gz"
+    } else {
+        "mvmctl-x86_64-unknown-linux-gnu.tar.gz"
+    };
+    serde_json::json!([
+        listed_release("boot-image/v10.0.0", false, false, &[archive]),
+        listed_release("v9.12.0", true, false, &[archive]),
+        listed_release("v9.11.0-rc.1", false, true, &[archive]),
+        listed_release("v9.11.0", false, true, &[archive]),
+        listed_release("v9.10.9", false, false, &[other]),
+        listed_release("v9.9.9", false, false, &[archive, "checksums-sha256.txt"]),
+        listed_release("v9.10.0", false, false, &[archive, "checksums-sha256.txt"]),
+        listed_release("v9.2.0", false, false, &[archive, "checksums-sha256.txt"]),
+    ])
+}
 
+/// Serve every fixture release plus a releases list, and run install.sh with
+/// no pin against it.
+fn install_resolving_from(list: String, releases: &[&Release]) -> (Host, Output) {
+    let mut routes: Vec<(String, Vec<u8>)> = releases
+        .iter()
+        .flat_map(|release| release.routes())
+        .collect();
+    routes.push((RELEASES_ROUTE.to_owned(), list.into_bytes()));
+    let (base, stop) = serve(routes);
     let host = Host::new();
     let output = host
         .installer_base(&base)
         .env("MVM_UPDATE_API_URL", &base)
         .output()
         .unwrap();
+    drop(stop);
+    (host, output)
+}
+
+#[test]
+fn install_sh_installs_the_newest_stable_cli_release_by_default() {
+    let releases: Vec<Release> = ["v9.9.9", "v9.10.0", "v9.11.0", "v9.2.0"]
+        .into_iter()
+        .map(Release::new)
+        .collect();
+    let refs: Vec<&Release> = releases.iter().collect();
+    let list = serde_json::to_string_pretty(&release_list_newest_is_v9_10_0()).unwrap();
+
+    let (host, output) = install_resolving_from(list, &refs);
+
     assert!(
         output.status.success(),
         "an API-selected archive must use the pinned external verifier: {}",
         stderr(&output)
     );
-    assert_eq!(host.mvmctl_version(), "mvmctl v9.9.9");
+    assert_eq!(
+        host.mvmctl_version(),
+        "mvmctl v9.10.0",
+        "the default must be the newest stable CLI release by version, skipping \
+         other trains, drafts, prereleases and releases without this host's archive"
+    );
+}
+
+#[test]
+fn install_sh_reads_a_compact_releases_list_the_same_way() {
+    let release = Release::new("v9.10.0");
+    let list = serde_json::to_string(&release_list_newest_is_v9_10_0()).unwrap();
+    assert!(!list.contains('\n'), "the fixture must be single-line");
+
+    let (host, output) = install_resolving_from(list, &[&release]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(host.mvmctl_version(), "mvmctl v9.10.0");
+}
+
+#[test]
+fn install_sh_installs_the_baked_release_when_the_releases_api_is_unreachable() {
+    let version = baked_version();
+    let release = Release::new(&version);
+    let (base, _stop) = serve_releases(&[&release]);
+
+    // `Host::pinned` points MVM_UPDATE_API_URL at a closed port.
+    let host = Host::new();
+    let output = host
+        .script("install.sh")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_TRUSTED_ARCHIVE_SHA256", release.archive_sha256())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "an unreachable API must fall back to the baked release: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("installing the baked release"),
+        "the fallback must be announced: {}",
+        stderr(&output)
+    );
+    assert_eq!(host.mvmctl_version(), format!("mvmctl {version}"));
+}
+
+#[test]
+fn install_sh_installs_the_baked_release_when_no_stable_release_qualifies() {
+    let version = baked_version();
+    let release = Release::new(&version);
+    let archive = Release::archive_name();
+    let list = serde_json::json!([
+        listed_release("boot-image/v10.0.0", false, false, &[archive.as_str()]),
+        listed_release("v9.11.0-rc.1", false, true, &[archive.as_str()]),
+    ])
+    .to_string();
+    let mut routes = release.routes();
+    routes.push((RELEASES_ROUTE.to_owned(), list.into_bytes()));
+    let (base, _stop) = serve(routes);
+
+    let host = Host::new();
+    let output = host
+        .script("install.sh")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_UPDATE_API_URL", &base)
+        .env("MVM_TRUSTED_ARCHIVE_SHA256", release.archive_sha256())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("no stable release publishes {archive}")),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(host.mvmctl_version(), format!("mvmctl {version}"));
+}
+
+#[test]
+fn install_sh_names_a_release_that_publishes_no_archive_for_the_host() {
+    let (base, _stop) = serve(Vec::new());
+    let host = Host::new();
+
+    let output = host
+        .installer_base(&base)
+        .env("MVM_VERSION", "v9.9.9")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains(&format!(
+            "release v9.9.9 publishes no {} (HTTP 404)",
+            Release::archive_name()
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists());
 }
 
 #[test]

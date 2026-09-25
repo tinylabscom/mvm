@@ -24,7 +24,9 @@
 # a library directory that already holds anything without the marker is refused.
 #
 # Env knobs:
-#   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: baked release
+#   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: the newest
+#                          stable CLI release, or the baked release when the
+#                          releases API cannot be reached
 #   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
@@ -97,11 +99,62 @@ detect_target() {
   esac
 }
 
+# The newest stable CLI release in a GitHub releases-list response on stdin
+# that publishes the archive named $1, as a tag. Prints nothing when none does.
+#
+# Only `v<major>.<minor>.<patch>` tags are CLI releases: the repository also
+# publishes other trains (`boot-image/v*`, `revocations`), and GitHub's own
+# "latest" marker has pointed at one of those, so it is never consulted.
+# Drafts and prereleases are skipped. A prerelease is either a release
+# candidate or a stable tag the release workflow has not yet promoted, which
+# it does only once a fresh install of that tag has booted a microVM; pin one
+# with MVM_VERSION. The newest is decided by version, not by publication
+# order, so a patch to an older line never displaces a newer release.
+#
+# No JSON tool can be assumed on a fresh host, so the response is split into
+# tokens (strings, punctuation, literals; numbers are not needed) and walked
+# by nesting depth: a release is an object at depth 2, and its assets are the
+# objects at depth 4. Key order and formatting do not matter, and a quote
+# escaped inside a string cannot end it.
+newest_cli_release() {
+  grep -oE '"([^"\\]|\\.)*"|[][{}:,]|true|false|null' \
+    | awk -v archive="$1" '
+        function flush() {
+          if (tag ~ /^v[0-9]+[.][0-9]+[.][0-9]+$/ && draft == "false" && prerelease == "false" && published) {
+            print substr(tag, 2)
+          }
+          tag = ""; draft = ""; prerelease = ""; published = 0
+        }
+        $0 == "{" || $0 == "[" {
+          depth++; kind[depth] = $0; key[depth] = ""; wantkey = ($0 == "{"); next
+        }
+        $0 == "}" || $0 == "]" {
+          if (depth == 2 && $0 == "}") flush()
+          depth--; wantkey = 0; next
+        }
+        $0 == ":" { wantkey = 0; next }
+        $0 == "," { wantkey = (kind[depth] == "{"); next }
+        {
+          token = $0
+          if (token ~ /^"/) token = substr(token, 2, length(token) - 2)
+          if (wantkey) { key[depth] = token; next }
+          if (depth == 2 && key[2] == "tag_name") tag = token
+          else if (depth == 2 && key[2] == "draft") draft = token
+          else if (depth == 2 && key[2] == "prerelease") prerelease = token
+          else if (depth == 4 && key[4] == "name" && token == archive) published = 1
+        }' \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
+    | tail -n 1 \
+    | sed 's/^/v/'
+}
+
+# The newest stable CLI release publishing this platform's archive. Fails when
+# the releases API cannot be reached; prints nothing when it answers without
+# one.
 resolve_latest_version() {
-  curl -fsSL "$API_BASE/repos/$REPO/releases/latest" \
-    | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
-    | grep . || die "could not resolve latest release tag"
+  releases="$(curl -fsSL --connect-timeout 10 --max-time 60 \
+    "$API_BASE/repos/$REPO/releases?per_page=100")" || return 1
+  printf '%s\n' "$releases" | newest_cli_release "$ARCHIVE"
 }
 
 download_archive() {
@@ -728,8 +781,22 @@ finish() {
 }
 
 TARGET="$(detect_target)"
-VERSION="${MVM_VERSION:-$DEFAULT_VERSION}"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
+
+# An explicit pin wins. Otherwise install the newest stable release; the baked
+# release is the fallback for a host that cannot reach the releases API (rate
+# limited, or behind a proxy that only admits github.com downloads).
+if [ -n "${MVM_VERSION:-}" ]; then
+  VERSION="$MVM_VERSION"
+elif VERSION="$(resolve_latest_version)"; then
+  if [ -z "$VERSION" ]; then
+    warn "no stable release publishes $ARCHIVE yet — installing the baked release $DEFAULT_VERSION"
+    VERSION="$DEFAULT_VERSION"
+  fi
+else
+  warn "could not reach $API_BASE to find the newest release — installing the baked release $DEFAULT_VERSION"
+  VERSION="$DEFAULT_VERSION"
+fi
 REL="$DL_BASE/$REPO/releases/download/$VERSION"
 
 TMP="$(mktemp -d)"
@@ -743,16 +810,10 @@ if download_archive "$REL/$ARCHIVE" "$TMP/$ARCHIVE"; then
   :
 else
   download_status="$?"
-  if [ "$download_status" -eq 44 ] && [ -z "${MVM_VERSION:-}" ]; then
-    warn "baked release $VERSION was not found — resolving the latest release"
-    VERSION="$(resolve_latest_version)"
-    REL="$DL_BASE/$REPO/releases/download/$VERSION"
-    say "Installing mvmctl $VERSION ($TARGET) to $INSTALL_DIR"
-    download_archive "$REL/$ARCHIVE" "$TMP/$ARCHIVE" \
-      || die "download failed: $REL/$ARCHIVE"
-  else
-    die "download failed: $REL/$ARCHIVE"
+  if [ "$download_status" -eq 44 ]; then
+    die "release $VERSION publishes no $ARCHIVE (HTTP 404): $REL/$ARCHIVE"
   fi
+  die "download failed: $REL/$ARCHIVE"
 fi
 
 case "$VERSION" in

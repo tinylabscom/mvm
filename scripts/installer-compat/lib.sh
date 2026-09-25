@@ -44,6 +44,25 @@ expected_version() {
   printf 'mvmctl %s\n' "${1#v}"
 }
 
+# The newest stable CLI release publishing the archive for target $1, read
+# from the releases API — the release install.sh installs when nothing is
+# pinned. Deliberately a second reader rather than install.sh's own, so a
+# fault in the installer's selection shows up as a mismatch instead of
+# agreeing with itself. Prints nothing when no release qualifies.
+newest_stable_release() {
+  newest_list="$(curl -fsSL --retry 3 --retry-delay 2 \
+    "${MVM_UPDATE_API_URL:-https://api.github.com}/repos/$REPO/releases?per_page=100")" \
+    || return 1
+  printf '%s\n' "$newest_list" | jq -r --arg archive "mvmctl-$1.tar.gz" '
+        [ .[]
+          | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+          | select((.draft | not) and (.prerelease | not))
+          | select(any(.assets[]?; .name == $archive))
+          | .tag_name ]
+        | sort_by(ltrimstr("v") | split(".") | map(tonumber))
+        | last // empty'
+}
+
 # Download the archive a release publishes for a target.
 fetch_archive() {
   fetch_tag="$1"

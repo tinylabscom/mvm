@@ -9,11 +9,21 @@ description: Install mvmctl on macOS or Linux.
 curl -fsSL https://runmvm.com/install.sh | sh
 ```
 
+The one-liner installs the newest stable `v<major>.<minor>.<patch>` release
+that publishes an archive for your platform. Release candidates, and a stable
+release whose fresh-install check has not yet passed, are published as
+prereleases and are skipped. If the releases API cannot be reached (for
+example, when it is rate limited), the installer falls back to the release
+baked into it and says so.
+
 ## Pin a Version
 
 ```bash
 curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 ```
+
+`MVM_VERSION` installs exactly that tag, prereleases included, without
+consulting the releases API.
 
 ## Where install.sh Puts Things
 
