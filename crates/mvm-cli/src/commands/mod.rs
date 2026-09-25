@@ -617,9 +617,6 @@ fn register_builder_session_starter() {}
 /// bootstrap helper.
 #[cfg(feature = "builder-vm")]
 fn declare_embedded_host_binaries() {
-    mvm_build::builder_vm_image::register_source_fingerprint_resolver(
-        crate::commands::env::builder_vm::current_builder_vm_source_fingerprint,
-    );
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
     );

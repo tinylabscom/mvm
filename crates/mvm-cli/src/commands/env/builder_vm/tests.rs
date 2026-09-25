@@ -1,59 +1,5 @@
 use super::*;
 
-#[cfg(all(test, feature = "builder-vm"))]
-mod builder_backend_attempt_order_tests {
-    use super::builder_backend_attempt_order;
-    use mvm_build::builder_backend_select::BuilderBackendChoice;
-
-    #[test]
-    fn explicit_qemu_stays_qemu() {
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Qemu, true),
-            vec![BuilderBackendChoice::Qemu]
-        );
-    }
-
-    #[test]
-    fn explicit_hvf_stays_hvf() {
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Hvf, true),
-            vec![BuilderBackendChoice::Hvf]
-        );
-    }
-
-    #[test]
-    fn auto_libkrun_never_silently_falls_back_to_qemu() {
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            vec![BuilderBackendChoice::Libkrun]
-        );
-    }
-
-    #[test]
-    fn auto_hvf_is_a_single_backend_path() {
-        let order = builder_backend_attempt_order(BuilderBackendChoice::Hvf, false);
-        assert_eq!(order, vec![BuilderBackendChoice::Hvf]);
-    }
-
-    #[test]
-    fn delegates_to_shared_policy_for_live_platform() {
-        use mvm_build::builder_backend_select::builder_attempt_order;
-        let is_linux = matches!(
-            mvm_core::platform::current(),
-            mvm_core::platform::Platform::LinuxNative
-        );
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            builder_attempt_order(
-                BuilderBackendChoice::Libkrun,
-                false,
-                is_linux,
-                mvm_build::builder_health::libkrun_marked_unavailable(),
-            )
-        );
-    }
-}
-
 #[cfg(test)]
 mod default_microvm_tests {
     use super::default_microvm::{

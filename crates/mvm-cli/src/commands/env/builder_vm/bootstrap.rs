@@ -1,24 +1,13 @@
-#[cfg(feature = "builder-vm")]
-use super::kernel::{
-    KernelSource, download_builder_kernel, resolve_kernel_source,
-    run_stage0_rootfs_with_external_kernel,
-};
-#[cfg(feature = "builder-vm")]
-use super::stage0_cache::write_builder_vm_cache_sidecars;
-#[cfg(feature = "builder-vm")]
+use super::stage0_cache::validate_builder_vm_stage0_artifacts;
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
 use super::stage0_cache::{
-    BUILDER_VM_CACHE_LOCK_SUBJECT, acquire_stage0_lock, promote_builder_vm_stage0_cache,
-    stage0_failure_reason_summary, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
-};
-use super::stage0_cache::{
-    builder_vm_source_cache_status, builder_vm_source_fingerprint,
-    validate_builder_vm_stage0_artifacts,
+    promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
+    write_builder_vm_cache_sidecars,
 };
 use super::*;
-#[cfg(test)]
-use serde::Deserialize;
-#[cfg(test)]
-use std::collections::HashMap;
 
 #[cfg(test)]
 pub(super) fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
@@ -63,125 +52,42 @@ pub(super) fn stage0_build_conf_contents(
     out
 }
 
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-struct Stage0FlakeLock {
-    nodes: HashMap<String, Stage0FlakeLockNode>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-struct Stage0FlakeLockNode {
-    locked: Option<Stage0FlakeLockSource>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-struct Stage0FlakeLockSource {
-    #[serde(rename = "type")]
-    kind: String,
-    owner: Option<String>,
-    repo: Option<String>,
-    rev: Option<String>,
-    url: Option<String>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Stage0RemoteInput {
-    Github {
-        owner: String,
-        repo: String,
-        rev: String,
-    },
-    Git {
-        url: String,
-        rev: String,
-    },
-}
-
-#[cfg(test)]
-pub(super) fn stage0_locked_input_sources(
-    builder_flake_dir: &str,
-) -> Result<Vec<(&'static str, &'static str, Stage0RemoteInput)>> {
-    let lock_path = std::path::Path::new(builder_flake_dir).join("flake.lock");
-    let body = std::fs::read_to_string(&lock_path)
-        .with_context(|| format!("reading {}", lock_path.display()))?;
-    let lock: Stage0FlakeLock =
-        serde_json::from_str(&body).with_context(|| format!("parsing {}", lock_path.display()))?;
-    let mut out = Vec::new();
-    for (node_name, input_path, guest_name) in [
-        ("nixpkgs", "nixpkgs", "nixpkgs"),
-        ("microvm", "microvm", "microvm"),
-        ("spectrum", "microvm/spectrum", "spectrum"),
-    ] {
-        let node = lock
-            .nodes
-            .get(node_name)
-            .ok_or_else(|| anyhow::anyhow!("flake.lock missing node {node_name}"))?;
-        let locked = node
-            .locked
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("flake.lock node {node_name} has no locked source"))?;
-        let source =
-            match locked.kind.as_str() {
-                "github" => Stage0RemoteInput::Github {
-                    owner: locked.owner.clone().ok_or_else(|| {
-                        anyhow::anyhow!("flake.lock node {node_name} missing owner")
-                    })?,
-                    repo: locked.repo.clone().ok_or_else(|| {
-                        anyhow::anyhow!("flake.lock node {node_name} missing repo")
-                    })?,
-                    rev: locked.rev.clone().ok_or_else(|| {
-                        anyhow::anyhow!("flake.lock node {node_name} missing rev")
-                    })?,
-                },
-                "git" => Stage0RemoteInput::Git {
-                    url: locked.url.clone().ok_or_else(|| {
-                        anyhow::anyhow!("flake.lock node {node_name} missing url")
-                    })?,
-                    rev: locked.rev.clone().ok_or_else(|| {
-                        anyhow::anyhow!("flake.lock node {node_name} missing rev")
-                    })?,
-                },
-                other => {
-                    anyhow::bail!("unsupported flake.lock source type {other} for node {node_name}")
-                }
-            };
-        out.push((input_path, guest_name, source));
-    }
-    Ok(out)
-}
-
 /// Prepare the builder VM image for the images the caller selected.
 ///
 /// With a local image checkout selected, the builder VM is the checkout
 /// pair's `builder-vm` target, built once through the shared local-image-set
 /// build and installed from the local image cache. With the selector unset,
-/// the in-tree Stage 0 build or the published prebuilt prepares the tool
-/// builder directly.
+/// it is the builder image the image lock pins, fetched and verified. A local
+/// build asked for without a checkout is refused rather than answered with
+/// the fetched image, which is exactly what the caller asked not to have.
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = selected_local_checkout()? {
         return bootstrap_builder_vm_image_from_local_pair(&checkout);
+    }
+    use mvm_build::boot_image_select::{BootImageAcquisition, resolve_env_override};
+    if resolve_env_override() == Some(BootImageAcquisition::Build) {
+        return Err(
+            mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into(),
+        );
     }
     bootstrap_tool_builder_vm_image()
 }
 
 /// The local image checkout the selector names, if that is the selected
 /// source. A configured path that does not resolve is an error here, never a
-/// quiet fall-through to the in-tree flake.
+/// quiet fall-through to the released set.
 pub(crate) fn selected_local_checkout()
 -> Result<Option<mvm_build::image_source::LocalImageCheckout>> {
     use mvm_build::image_source::{ImageSource, resolve_current_source};
     Ok(match resolve_current_source()? {
         ImageSource::LocalCheckout(checkout) => Some(checkout),
-        ImageSource::Released | ImageSource::InTree { .. } => None,
+        ImageSource::Released => None,
     })
 }
 
 /// Prepare the builder-VM image the local image-set build itself runs in:
-/// the in-tree Stage 0 build or the published prebuilt.
+/// the published builder image the image lock pins.
 ///
 /// Exempt from the image source selector: an image-set build runs inside
 /// this builder, so routing it through the pair's `builder-vm` target would
@@ -243,84 +149,11 @@ fn bootstrap_builder_vm_image_with(
 fn bootstrap_tool_builder_vm_image_in_process() -> Result<()> {
     let arch = builder_vm_host_arch();
     let out_dir = format!("{}/builder-vm/{arch}", mvm_core::config::mvm_cache_dir());
-    let out_dir_path = std::path::Path::new(&out_dir);
-    let builder_flake = find_builder_vm_flake();
-    let acquisition = mvm_build::boot_image_select::resolve(None, builder_flake.is_ok()).choice;
-    let source_fingerprint = match acquisition {
-        mvm_build::boot_image_select::BootImageAcquisition::Build => builder_flake
-            .as_ref()
-            .ok()
-            .map(|flake_dir| builder_vm_source_fingerprint(flake_dir))
-            .transpose()?,
-        mvm_build::boot_image_select::BootImageAcquisition::Fetch => None,
-    };
-    let cache_ready = match source_fingerprint.as_deref() {
-        Some(fingerprint) => {
-            let status = builder_vm_source_cache_status(out_dir_path, fingerprint);
-            ui::progress(&format!(
-                "Builder VM source cache decision: {}",
-                status.reason_code()
-            ));
-            status.is_ready()
-        }
-        None => validate_builder_vm_stage0_artifacts(out_dir_path).is_ok(),
-    };
-
-    match resolve_builder_vm_bootstrap_action(builder_flake, cache_ready, acquisition)? {
-        BuilderVmBootstrapAction::UseCached => {
-            ui::info(&format!("Builder VM image already cached at {out_dir}."));
-            Ok(())
-        }
-        BuilderVmBootstrapAction::BuildFromSource { flake_dir } => {
-            #[cfg(feature = "builder-vm")]
-            let source_fingerprint = source_fingerprint.ok_or_else(|| {
-                anyhow::anyhow!("builder VM source fingerprint was not computed for {flake_dir}")
-            })?;
-            ui::info(&format!(
-                "Builder VM image not in cache; building locally from {flake_dir}..."
-            ));
-
-            // The nix-seed root-dir Stage 0 is the only bootstrap
-            // path. The dev-image Stage 0 path
-            // (bootstrap_builder_vm_image_via_dev_image_stage0) has been
-            // removed; `nix/images/builder/flake.nix` is deleted.
-            #[cfg(feature = "builder-vm")]
-            {
-                // One live status line for the whole bootstrap, at every
-                // verbosity. The builder runner nests its own line under it
-                // carrying the in-guest nix progress, and `-v` interleaves the
-                // raw build log above it rather than replacing it.
-                let verbose = mvm_runtime::ui::is_verbose();
-                let phase = mvm_runtime::ui::activity::start(
-                    "Preparing the builder VM (first run in this checkout; \
-                     a cold Stage 0 build can take tens of minutes)",
-                );
-                let built = bootstrap_builder_vm_image_via_root_dir_stage0(
-                    &flake_dir,
-                    &out_dir,
-                    &source_fingerprint,
-                    verbose,
-                )
-                .context("building the source-checkout builder VM image via root-dir Stage 0");
-                if built.is_ok() {
-                    phase.finish();
-                }
-                built
-            }
-
-            #[cfg(not(feature = "builder-vm"))]
-            {
-                let _ = (&flake_dir, &out_dir, &source_fingerprint, arch);
-                anyhow::bail!(
-                    "Stage 0 needs the `builder-vm` cargo feature to be enabled \
-                     for this `mvmctl` build."
-                )
-            }
-        }
-        BuilderVmBootstrapAction::DownloadPublished => {
-            perform_builder_vm_download_published(arch, &out_dir)
-        }
+    if validate_builder_vm_stage0_artifacts(std::path::Path::new(&out_dir)).is_ok() {
+        ui::info(&format!("Builder VM image already cached at {out_dir}."));
+        return Ok(());
     }
+    perform_builder_vm_download_published(arch, &out_dir)
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
@@ -386,95 +219,27 @@ pub(super) fn builder_vm_host_arch() -> &'static str {
     }
 }
 
-/// The only call site that can invoke the published-prebuilt
-/// download path. Gated behind `release-artifact-bootstrap`. Contributor
-/// builds (the default) hit the `cfg(not(...))` arm and bail structurally
-/// — even if the resolver routed here, the function refuses to touch the
-/// network. End-user-binary release builds opt in at compile time.
+/// Fetch the builder image the image lock pins into `out_dir`.
 ///
-/// Extracted from [`bootstrap_builder_vm_image`] specifically so the
-/// fail-closed shape is unit-testable.
-pub(super) fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()> {
-    #[cfg(feature = "release-artifact-bootstrap")]
-    {
-        // Prefer a signed, content-addressed builder pack over the plain
-        // checksum download when opted in. The pack is an accelerator, never a
-        // hard dependency: no compatible verified pack (or any error placing
-        // one) falls through to the download below.
-        #[cfg(feature = "builder-vm")]
-        if attested_builder_pack::attested_builder_pack_selected() {
-            match attested_builder_pack::attempt_attested_builder_pack(arch, out_dir, true) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(error) => ui::warn(&format!(
-                    "Attested builder pack unavailable ({error:#}); falling back to download."
-                )),
-            }
+/// A release binary built with `release-artifact-bootstrap` first tries a
+/// signed builder pack from its own release; the pack is an accelerator, so
+/// having none (or failing to place one) falls through to the signed image
+/// set, which every build can reach.
+fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()> {
+    #[cfg(all(feature = "release-artifact-bootstrap", feature = "builder-vm"))]
+    if attested_builder_pack::attested_builder_pack_selected() {
+        match attested_builder_pack::attempt_attested_builder_pack(arch, out_dir, true) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => ui::warn(&format!(
+                "Attested builder pack unavailable ({error:#}); falling back to download."
+            )),
         }
-        ui::info(&format!(
-            "Builder VM image not in cache; downloading published prebuilt for v{}...",
-            env!("CARGO_PKG_VERSION")
-        ));
-        std::fs::create_dir_all(out_dir)
-            .with_context(|| format!("creating builder-vm cache dir {out_dir}"))?;
-        download_builder_vm_image(arch, out_dir).context("downloading the builder VM image")
     }
-    #[cfg(not(feature = "release-artifact-bootstrap"))]
-    {
-        let _ = (arch, out_dir);
-        // Report which of the two situations this actually is. The message
-        // used to assert the in-repo flake was missing without ever looking
-        // for one, so a checkout that *had* the flake — and had simply been
-        // routed here by `MVM_BOOT_IMAGE=fetch` — sent the reader hunting for
-        // a file sitting in front of them. Two Linux baseline runs were lost
-        // to that before anyone checked whether the file existed.
-        if let Ok(flake_dir) = super::find_builder_vm_flake() {
-            anyhow::bail!(
-                "Builder VM image is missing and a fetch was requested, but this \
-                 `mvmctl` was built without the `release-artifact-bootstrap` \
-                 feature, so it cannot pull a published prebuilt. The in-repo \
-                 builder VM flake IS present at {flake_dir}/flake.nix — unset \
-                 `MVM_BOOT_IMAGE` (or set it to `build`) to build from it, \
-                 which is what a source checkout is expected to do."
-            );
-        }
-        anyhow::bail!(
-            "Builder VM image is missing and no in-repo builder VM flake \
-             was found. This `mvmctl` binary was built without the \
-             `release-artifact-bootstrap` feature, so it cannot pull a \
-             published prebuilt from GitHub releases (per Plan 77 W4 and \
-             the AGENTS.md / CLAUDE.md invariant). \
-             Run from a source checkout that has \
-             `nix/images/builder-vm/flake.nix`, or rebuild `mvmctl` with \
-             `--features release-artifact-bootstrap` (release-cut binaries only)."
-        );
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(super) enum BuilderVmBootstrapAction {
-    UseCached,
-    BuildFromSource { flake_dir: String },
-    DownloadPublished,
-}
-
-pub(super) fn resolve_builder_vm_bootstrap_action(
-    builder_flake: Result<String>,
-    cache_ready: bool,
-    acquisition: mvm_build::boot_image_select::BootImageAcquisition,
-) -> Result<BuilderVmBootstrapAction> {
-    if cache_ready {
-        return Ok(BuilderVmBootstrapAction::UseCached);
-    }
-
-    match acquisition {
-        mvm_build::boot_image_select::BootImageAcquisition::Fetch => {
-            Ok(BuilderVmBootstrapAction::DownloadPublished)
-        }
-        mvm_build::boot_image_select::BootImageAcquisition::Build => builder_flake
-            .map(|flake_dir| BuilderVmBootstrapAction::BuildFromSource { flake_dir })
-            .context("a local builder VM image build requires the in-repo builder VM flake"),
-    }
+    ui::info("Builder VM image not in cache; downloading the builder image the image lock pins...");
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("creating builder-vm cache dir {out_dir}"))?;
+    download_builder_vm_image(arch, out_dir).context("downloading the builder VM image")
 }
 
 /// Attested builder-image pack materializer: given a locally-verified builder
@@ -493,7 +258,8 @@ pub(super) fn resolve_builder_vm_bootstrap_action(
 ///
 /// Gated on `all(release-artifact-bootstrap, builder-vm)` (plus `test`): the only
 /// caller is the published-download arm, and it also needs the `builder-vm`
-/// sidecar writers. A source checkout never reaches here.
+/// sidecar writers. A contributor build running from its source checkout never
+/// reaches here.
 #[cfg(any(
     all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
     test
@@ -551,11 +317,11 @@ pub(in crate::commands) mod attested_builder_pack {
     }
 
     /// Whether the attested-pack path should be attempted ahead of the plain
-    /// download. Requires the opt-in flag AND an installed binary: a source
-    /// checkout (`find_builder_vm_flake().is_ok()`) always builds the builder
-    /// image locally and must never take a published-artifact shortcut.
+    /// download. Requires the opt-in flag AND an installed binary: a
+    /// contributor build running from its source checkout takes the signed
+    /// image set, never a published-pack shortcut.
     pub(in crate::commands) fn attested_builder_pack_selected() -> bool {
-        builder_pack_requested() && super::find_builder_vm_flake().is_err()
+        builder_pack_requested() && !super::is_mvm_source_checkout()
     }
 
     /// Local verification context for host builder packs. `trust` is the
@@ -937,230 +703,3 @@ pub(in crate::commands) mod attested_builder_pack {
         Ok(())
     }
 }
-#[cfg(feature = "builder-vm")]
-fn bootstrap_builder_vm_image_via_root_dir_stage0(
-    builder_flake_dir: &str,
-    out_dir: &str,
-    source_fingerprint: &str,
-    verbose: bool,
-) -> Result<()> {
-    let _stage0_guard = acquire_stage0_lock(out_dir, BUILDER_VM_CACHE_LOCK_SUBJECT)?;
-    // A caller that queued behind another bootstrap usually wanted the very
-    // image that bootstrap just produced.
-    if builder_vm_source_cache_status(std::path::Path::new(out_dir), source_fingerprint).is_ready()
-    {
-        ui::info(&format!("Builder VM image already cached at {out_dir}."));
-        return Ok(());
-    }
-    let removed = sweep_stage0_staging_siblings(std::path::Path::new(out_dir))?;
-    if removed > 0 {
-        ui::info(&format!(
-            "Removed {removed} incomplete Stage 0 builder-image director{} from an earlier interruption.",
-            if removed == 1 { "y" } else { "ies" }
-        ));
-    }
-
-    // Time each host-visible Stage 0 step and print a one-line
-    // `[mvm] <step> … <secs>s` so perceived speed matches the actual
-    // per-step wall-clock.
-    // The seed is the official Nix release tarball + the embedded
-    // `stage0-init` PID 1 — one userland (busybox), no Alpine/apk/pgp.
-    let fetch_started = std::time::Instant::now();
-    mvm_runtime::ui::activity::set_current_detail("fetching the Stage 0 bootstrap assets");
-    let stage0_assets = mvm_build::stage0::assets_for_host_arch();
-    let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
-        .context("preparing Stage 0 bootstrap assets")?;
-    ui::timed_step("Fetching Stage 0 bootstrap assets", fetch_started.elapsed());
-    // One VendorBlobFetched audit entry per vendored blob (covers both
-    // fresh fetch and cache revalidation), so every supply-chain trust
-    // decision in the no-prebuilt-download path is auditable. The emit
-    // lives here (the host caller) so `mvm-build` stays audit-free.
-    for report in &vendor_reports {
-        mvm_core::policy::audit::emit(
-            mvm_core::policy::audit::LocalAuditKind::VendorBlobFetched,
-            None,
-            Some(&report.audit_detail()),
-        );
-    }
-
-    // Workspace root = three dirs above the flake.nix
-    // (nix/images/builder-vm/flake.nix → repo root).
-    let workspace_root = std::path::Path::new(builder_flake_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake_dir}"))?
-        .to_path_buf();
-
-    // Materialize the verified guest seed under a stable per-host location.
-    // The selected Stage 0 backend turns it into its block-root boot shape.
-    let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
-    let materialize_started = std::time::Instant::now();
-    mvm_runtime::ui::activity::set_current_detail("materializing the Stage 0 root");
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let boot_binaries = crate::host_binaries::extract::ensure_boot_host_binaries(
-        std::path::Path::new(&host_bins_cache),
-    )?;
-    mvm_build::stage0::materialize_root_dir(&root_dir, &boot_binaries.stage0_init)
-        .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
-    ui::timed_step(
-        "Materializing Stage 0 root dir",
-        materialize_started.elapsed(),
-    );
-
-    let out_dir_path = std::path::Path::new(out_dir);
-    let staging_dir = unique_builder_vm_stage0_staging_dir(out_dir_path)?;
-    std::fs::create_dir_all(&staging_dir)
-        .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
-
-    let started = std::time::Instant::now();
-    let fingerprint_prefix = stage0_fingerprint_prefix(source_fingerprint);
-    mvm_core::audit_emit!(
-        Stage0Boot,
-        "seed=root-dir fingerprint_prefix={fingerprint_prefix} flavor={flavor}",
-        flavor = STAGE0_FLAVOR_CURRENT,
-    );
-
-    // Extract the embedded host-vm binaries so the Stage 0 nix build
-    // can install them from /mvm-bins instead of building them with
-    // the guest's nix. Same cache dir the steady-state job path uses.
-    // Kernel acquisition override (MVM_KERNEL_SOURCE / --kernel-source).
-    // `download` (and `auto` when a publish exists) boots the builder VM
-    // on a published, hash-verified kernel — build only the rootfs and
-    // pair the kernel in, skipping the in-image kernel compile. Unset or
-    // `compile` → the normal `default` build (kernel compiled in-image;
-    // also the cheaper single-boot path, so `mvmctl bootstrap --kernel-source
-    // compile` deliberately stays on it).
-    let external_kernel: Option<std::path::PathBuf> = match resolve_kernel_source() {
-        Some(KernelSource::Download) => {
-            ui::info("Kernel source: download — fetching the published builder kernel.");
-            Some(download_builder_kernel(builder_vm_host_arch())?)
-        }
-        Some(KernelSource::Auto) => match download_builder_kernel(builder_vm_host_arch()) {
-            Ok(p) => {
-                ui::info("Kernel source: auto — using the published builder kernel.");
-                Some(p)
-            }
-            Err(e) => {
-                ui::warn(&format!(
-                    "no published builder kernel ({e}); compiling it in-image"
-                ));
-                None
-            }
-        },
-        Some(KernelSource::Compile) | None => None,
-    };
-
-    let result = if let Some(kernel) = &external_kernel {
-        run_stage0_rootfs_with_external_kernel(
-            &staging_dir,
-            &workspace_root,
-            &root_dir,
-            &boot_binaries.dir,
-            kernel,
-            source_fingerprint,
-            verbose,
-        )
-    } else {
-        run_stage0_root_dir(
-            &staging_dir,
-            &workspace_root,
-            &root_dir,
-            "/init",
-            &boot_binaries.dir,
-            source_fingerprint,
-            verbose,
-        )
-    };
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(()) => {
-            promote_builder_vm_stage0_cache(&staging_dir, out_dir_path, source_fingerprint)
-                .context("promoting Stage 0 artifacts into the builder VM cache")?;
-            mvm_core::audit_emit!(
-                Stage0CachePromoted,
-                "cache={cache} fingerprint_prefix={fingerprint_prefix} duration_ms={duration_ms} flavor={flavor}",
-                cache = out_dir_path.display(),
-                flavor = STAGE0_FLAVOR_CURRENT,
-            );
-            Ok(())
-        }
-        Err((stage, e)) => {
-            let _ = std::fs::remove_dir_all(&staging_dir);
-            let reason = stage0_failure_reason_summary(&e);
-            mvm_core::audit_emit!(
-                Stage0Failed,
-                "stage={stage} duration_ms={duration_ms} reason={reason}"
-            );
-            Err(e)
-        }
-    }
-}
-
-/// Boot the Stage 0 VM from the supplied host seed, carrying
-/// `workspace_root` and `staging_dir` over raw transport disks. On
-/// clean exit, write the cache-validation sidecars next to the
-/// emitted artifacts so the outer caller can promote them into the
-/// per-arch builder VM cache.
-#[cfg(feature = "builder-vm")]
-fn run_stage0_root_dir(
-    staging_dir: &std::path::Path,
-    workspace_root: &std::path::Path,
-    guest_root_dir: &std::path::Path,
-    entry_path: &str,
-    host_bin_dir: &std::path::Path,
-    source_fingerprint: &str,
-    verbose: bool,
-) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select as bbs;
-
-    // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
-    // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
-    // the HVF auto-detect default on macOS-26+, since HVF Stage 0 is still a gap.
-    // That preserves the "Stage 0 is libkrun even on HVF-default hosts"
-    // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
-    // output to host stderr.
-    //
-    // Auto-fallback: an auto-detected libkrun that fails to create its Stage 0
-    // VM on Linux (rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently retries
-    // on qemu; a genuine build error surfaces unchanged. Explicit
-    // `--builder`/`MVM_BUILDER_BACKEND` opts out.
-    let selected = bbs::resolve_choice();
-    let explicit = bbs::resolve_env_override().is_some();
-    bbs::run_with_builder_fallback(selected, explicit, |choice| {
-        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
-            guest_root_dir,
-            entry_path,
-            workspace_root,
-            staging_dir,
-            host_bin_dir,
-        )
-    })
-    .map_err(|e| {
-        (
-            Stage0FailureStage::Build,
-            anyhow::anyhow!("Stage 0 root-dir build: {e}"),
-        )
-    })?;
-
-    // Refuse to promote a rootfs the steady-state VM can't boot: walk the
-    // freshly-built ext4 and confirm the `init=` target is present.
-    verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-
-    write_builder_vm_cache_sidecars(staging_dir, source_fingerprint)
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-
-    Ok(())
-}
-
-/// Which Stage 0 bootstrap variant this build runs.
-///
-/// The `flavor=` field on `Stage0Boot` / `Stage0CachePromoted` audit
-/// detail strings carries this value so a future per-variant identifier
-/// (e.g. an experimental seed image alongside the nix-tarball seed) only
-/// needs to flip this single constant — not every emit site. Today
-/// there is one variant, so the value is the literal `"current"`.
-#[cfg(feature = "builder-vm")]
-pub(super) const STAGE0_FLAVOR_CURRENT: &str = "current";

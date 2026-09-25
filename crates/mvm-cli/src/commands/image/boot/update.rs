@@ -62,9 +62,9 @@ fn refuse_in_source_checkout(force: bool) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "refusing to replace the boot image from a source checkout: the local build is \
-         authoritative here, and a prebuilt would silently disagree with the working tree. \
-         Pass --force if that is what you want."
+        "refusing to replace the boot image while a local image checkout is selected: the \
+         local build is authoritative here, and a prebuilt would silently disagree with the \
+         checkout. Pass --force if that is what you want."
     )
 }
 

@@ -23,7 +23,7 @@ const COLD_SOURCE_RUNTIME_NOTICE: &str = "Preparing the MVM guest runtime from l
      cached afterward. Run `mvmctl bootstrap` to prewarm; use -v for Cargo output…";
 
 pub fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
-    mvm_build::image_source::in_tree_overlay_checkout_root()
+    mvm_build::image_source::guest_runtime_source_checkout()
 }
 
 pub fn runtime_overlay_acquire_mode() -> RuntimeOverlayAcquireMode {

@@ -1,12 +1,11 @@
 //! What the builder image reads from an mvm tree.
 //!
-//! Two cache keys describe a builder image built from mvm source: the Stage 0
-//! fingerprint of the in-tree builder flake, and the local image cache key of a
-//! builder image built from a paired image checkout. Both must cover every
-//! mvm source the image's evaluation reads, and both read the same ones: the
+//! The local image cache key of a builder image built from a paired image
+//! checkout must cover every mvm source the image's evaluation reads: the
 //! pair's builder evaluation calls `nix/flake.nix`'s outputs for mkGuest, the
-//! guest recipes and the host-binaries manifest, exactly as the in-tree flake
-//! does. One list, so the two keys cannot disagree about it.
+//! guest recipes and the host-binaries manifest. This is that list, and the key
+//! falls back to the whole checkout when the image checkout reads anything
+//! outside it.
 
 /// The Nix sources, relative to the workspace root, that the builder-vm flake
 /// imports from outside its own directory: the shared library (mkGuest, the

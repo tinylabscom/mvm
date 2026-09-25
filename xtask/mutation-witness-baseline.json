@@ -816,22 +816,17 @@
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "delete ! in extract_release_archive",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "delete ! in run_nix_build",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
+      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace && with || in extract_release_archive",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
+      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace && with || in local_source_cache_is_fresh",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
+      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
     },
     {
       "file": "crates/mvm-cli/src/commands/image/pull_core.rs",

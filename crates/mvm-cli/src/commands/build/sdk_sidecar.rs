@@ -1,17 +1,17 @@
 //! `mvmctl build sdk-sidecar build` — explicitly build and cache the
-//! checkout's guest-facing host-services cdylib through the Stage 0 builder VM.
+//! guest-facing host-services sidecar images from the selected `mvm-images`
+//! checkout.
 
-#[cfg(feature = "builder-vm")]
-use anyhow::Context;
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
+#[cfg(feature = "builder-vm")]
 use crate::ui;
-use mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root;
+#[cfg(feature = "builder-vm")]
 use mvm_contract::guest_libc::GuestLibc;
+#[cfg(feature = "builder-vm")]
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
-use mvm_fs::sdk_sidecar::SdkSidecarResolver;
 
 use super::Cli;
 
@@ -23,20 +23,14 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Cmd {
-    /// Build from this checkout and populate the version-matched cache.
-    Build(BuildArgs),
-}
-
-#[derive(ClapArgs, Debug, Clone)]
-struct BuildArgs {
-    /// Rebuild even when the cache already matches this checkout.
-    #[arg(long)]
-    force: bool,
+    /// Build both libc variants from the selected mvm-images checkout and
+    /// populate the version-matched cache.
+    Build,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.cmd {
-        Cmd::Build(build) => run_build(build),
+        Cmd::Build => run_build(),
     }
 }
 
@@ -74,113 +68,54 @@ fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -
     Ok(())
 }
 
-fn run_build(args: BuildArgs) -> Result<()> {
-    // A selected checkout is the sidecars' source: both libc variants build
-    // from the pair. `--force` is an in-tree concept; the pair answers from
-    // its content-addressed cache.
+fn run_build() -> Result<()> {
     #[cfg(feature = "builder-vm")]
-    if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
-        return build_pair_sidecars(&checkout);
-    }
-    let workspace_root = runtime_overlay_source_checkout_root().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SDK sidecar source build requires a source checkout with nix/images/runtime-overlay/flake.nix, or {} naming an mvm-images checkout",
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-        )
-    })?;
-
-    #[cfg(feature = "builder-vm")]
-    if mvm_build::builder_vm_bootstrap::maybe_reexec_builder_vm_sdk_sidecar_helper(args.force)? {
-        return Ok(());
-    }
-
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let version = env!("CARGO_PKG_VERSION");
-    let arch = GuestArch::host();
-
-    // Both variants, every time. Which one a workload needs is a property of
-    // the image it boots, not of this command, and a host that caches only one
-    // silently makes `--host-service` unusable for every guest carrying the
-    // other libc — the failure landing inside the guest at `dlopen` rather than
-    // here. The second build shares the first's closure, so it is far cheaper
-    // than the first.
-    for libc in SIDECAR_LIBC_VARIANTS {
-        build_one_variant(
-            &workspace_root,
-            &cache_root,
-            version,
-            arch,
-            libc,
-            args.force,
-        )?;
-    }
-    Ok(())
-}
-
-/// The sidecar variants a source build populates.
-const SIDECAR_LIBC_VARIANTS: [GuestLibc; 2] = [GuestLibc::Glibc, GuestLibc::Musl];
-
-fn build_one_variant(
-    workspace_root: &std::path::Path,
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: GuestArch,
-    libc: GuestLibc,
-    force: bool,
-) -> Result<()> {
-    if !force {
-        let resolver = SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string());
-        if let Ok(artifact) = resolver.resolve(&arch.to_string(), libc)
-            && mvm_build::sdk_sidecar::cached_sidecar_provenance(
-                cache_root,
-                version,
-                arch,
-                libc,
-                workspace_root,
-            )? == mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource
-        {
-            announce_cached_sidecar(&artifact);
-            return Ok(());
-        }
-    }
-
-    #[cfg(feature = "builder-vm")]
-    {
-        let artifact = crate::commands::env::builder_vm::build_sdk_sidecar_from_checkout(
-            workspace_root,
-            cache_root,
-            version,
-            arch,
-            libc,
-            mvm_runtime::ui::is_verbose(),
-        )
-        .with_context(|| {
-            format!(
-                "building {libc} SDK sidecar {version} for {arch} from {}",
-                workspace_root.display()
-            )
-        })?;
-        ui::success(&format!(
-            "SDK sidecar {} ({}) for {} cached at {}",
-            artifact.version,
-            artifact.libc,
-            artifact.arch,
-            artifact.image.display()
-        ));
-        Ok(())
-    }
+    return build_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref());
 
     #[cfg(not(feature = "builder-vm"))]
-    anyhow::bail!(
-        "SDK sidecar source build requires the `builder-vm` feature; rebuild the binary with that feature enabled"
-    )
+    {
+        if mvm_build::image_source::configured_images_dir().is_some() {
+            anyhow::bail!(
+                "{} names an image checkout, but building the SDK sidecar from it requires \
+                 the `builder-vm` feature; rebuild the binary with that feature enabled",
+                mvm_build::image_source::MVM_IMAGES_DIR_ENV,
+            );
+        }
+        Err(sidecar_needs_a_checkout())
+    }
 }
 
-fn announce_cached_sidecar(artifact: &mvm_fs::sdk_sidecar::SdkSidecarArtifact) {
-    ui::success(&format!(
-        "SDK sidecar {} for {} already matches this checkout at {}",
-        artifact.version,
-        artifact.arch,
-        artifact.image.display()
-    ));
+/// Build both libc variants from the selected checkout. Without one there is
+/// nothing to build from: the sidecars are image-set members, and image
+/// construction lives in `mvm-images`.
+#[cfg(feature = "builder-vm")]
+fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
+    match checkout {
+        Some(checkout) => build_pair_sidecars(checkout),
+        None => Err(sidecar_needs_a_checkout()),
+    }
+}
+
+fn sidecar_needs_a_checkout() -> anyhow::Error {
+    mvm_build::image_source::ImageConstructionRefused::new("the SDK sidecar").into()
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sidecar_build_without_an_image_checkout_is_refused() {
+        let err = build_from(None).expect_err("nothing can build the sidecar");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("the SDK sidecar is built from an mvm-images checkout"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("image construction lives in mvm-images"),
+            "{rendered}"
+        );
+    }
 }

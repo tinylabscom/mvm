@@ -2,53 +2,28 @@
 use super::*;
 
 /// Which custom kernel `mvmctl kernel build` realizes. Each maps to a
-/// flake attr on `nix/images/builder-vm` and a cache subdir.
+/// variant of the `mvm-images` kernel flake and a cache subdir.
 #[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelVariant {
-    /// Builder-VM kernel — shared base + virtio-fs / overlay / netfilter
-    /// / nix-sandbox infra (`nix/images/builder-vm/kernel`).
+    /// Builder-VM kernel — shared base + overlay / netfilter / nix-sandbox
+    /// infra.
     Builder,
-    /// Workload-microVM kernel — the shared base alone (`workload-kernel`).
+    /// Workload-microVM kernel — the shared base plus dm-verity.
     Workload,
     /// Workload-microVM kernel for in-guest orchestrators (rootless
-    /// Kubernetes guests): the base + dm-verity delta plus
-    /// cgroup/namespace/netfilter/bridge plumbing (`workload-k8s-kernel`).
+    /// Kubernetes guests). The `mvm-images` kernel canon deliberately does
+    /// not define it, so there is nothing to build it from; a request is
+    /// refused with the reason.
     WorkloadK8s,
     /// Generic rootless-container floor (user/mount/PID/IPC/UTS namespaces,
-    /// cgroup v2, PTYs, no network namespace). Defined only in the mvm-images
-    /// kernel canon; the in-repo flake has no such variant, so a build from
-    /// there fails at evaluation naming the missing attr. Used as the
-    /// control when bisecting the in-guest-datapath delta.
+    /// cgroup v2, PTYs, no network namespace). Used as the control when
+    /// bisecting the in-guest-datapath delta.
     Rootless,
 }
 
 #[cfg(feature = "builder-vm")]
 impl KernelVariant {
-    /// Flake attr under `packages.<arch>-linux`.
-    fn attr(self) -> &'static str {
-        match self {
-            Self::Builder => "builder-kernel",
-            Self::Workload => "workload-kernel",
-            Self::WorkloadK8s => "workload-k8s-kernel",
-            Self::Rootless => "rootless-kernel",
-        }
-    }
-
-    /// Flake attr for the *resolved `.config`* of this kernel. The names are
-    /// historically irregular (the builder's predates the workload split), so
-    /// they're spelled out rather than derived from `attr()`. Stage 0 realises
-    /// this (a cached build dep of the kernel) and copies it out so the host
-    /// can report the `=y` symbol count without a CI round-trip.
-    fn config_attr(self) -> &'static str {
-        match self {
-            Self::Builder => "kernel-configfile",
-            Self::Workload => "workload-kernel-configfile",
-            Self::WorkloadK8s => "workload-k8s-kernel-configfile",
-            Self::Rootless => "rootless-kernel-configfile",
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::Builder => "builder",
@@ -60,18 +35,15 @@ impl KernelVariant {
 }
 
 /// A resolved `kernel build` source: the host directory the Stage 0 guest
-/// sees at `/work`, the flake attrs to build, and the in-guest flake-base
-/// override (when the source is not the in-repo builder-vm flake).
+/// sees at `/work`, the flake it builds there, and the flake attrs to build.
 #[cfg(feature = "builder-vm")]
 #[derive(Debug)]
 struct KernelFlakeSource {
-    /// Host directory mounted at `/work` in the Stage 0 guest. For the
-    /// in-repo source this is the mvm workspace; for an mvm-images source
-    /// it is the checkout's `kernel/` dir, which is the flake root there.
+    /// Host directory mounted at `/work` in the Stage 0 guest: the image
+    /// checkout's `kernel/` dir, which is the flake root there.
     work_dir: std::path::PathBuf,
-    /// `MVM_STAGE0_FLAKE` base (`...#packages`); `None` keeps the guest's
-    /// default `path:/work/nix/images/builder-vm#packages`.
-    flake_base: Option<String>,
+    /// `MVM_STAGE0_FLAKE` base (`...#packages`) naming the staged flake.
+    flake_base: String,
     /// Attr under `packages.<arch>-linux` realizing the kernel image.
     build_attr: String,
     /// Attr under `packages.<arch>-linux` realizing the resolved `.config`.
@@ -86,10 +58,9 @@ impl KernelFlakeSource {
     /// `WorkloadK8s` deliberately has no mapping: the in-guest-orchestrator
     /// kernel needs an in-guest datapath (bridge/veth/netfilter), and the
     /// mvm-images canon refuses guest network devices as a permanent
-    /// invariant — the variant is not defined there. Build it from the
-    /// in-repo flake; the durable consumer shape per the invariant is
-    /// host networking inside the guest plus the loopback/vsock egress
-    /// proxy, which needs no datapath kernel.
+    /// invariant. The durable consumer shape per that invariant is host
+    /// networking inside the guest plus the loopback/vsock egress proxy,
+    /// which needs no datapath kernel.
     fn for_images_checkout(variant: KernelVariant, kernel_dir: std::path::PathBuf) -> Result<Self> {
         let (build_attr, config_attr) = match variant {
             KernelVariant::Builder => ("builder-vmlinux", "builder-configfile"),
@@ -97,106 +68,55 @@ impl KernelFlakeSource {
             KernelVariant::WorkloadK8s => {
                 anyhow::bail!(
                     "the in-guest-orchestrator kernel is not defined in the mvm-images \
-                     kernel canon (guest network devices violate its permanent invariant); \
-                     build --which workload-k8s without MVM_IMAGES_DIR so the in-repo \
-                     flake provides it, or use --which rootless for the NIC-less floor"
+                     kernel canon (guest network devices violate its permanent invariant), \
+                     and image construction lives in mvm-images, so there is no source to \
+                     build it from; use --which rootless for the NIC-less floor"
                 )
             }
             KernelVariant::Rootless => ("rootless-vmlinux", "rootless-configfile"),
         };
         Ok(Self {
             work_dir: kernel_dir,
-            flake_base: Some("path:/work#packages".to_string()),
+            flake_base: "path:/work#packages".to_string(),
             build_attr: build_attr.to_string(),
             config_attr: config_attr.to_string(),
         })
     }
 }
 
-/// How the selected image checkout was chosen. An explicit `MVM_IMAGES_DIR`
-/// is a demand for that source; a discovered sibling is only a default, so a
-/// variant the checkout cannot build falls back instead of refusing.
-#[cfg(feature = "builder-vm")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CheckoutSelection {
-    Configured,
-    Discovered,
-}
-
 /// Resolve what `kernel build` compiles from, through the same image-source
 /// precedence every other image consumer uses: a configured `MVM_IMAGES_DIR`
 /// (strict — an invalid one is an error, never a fallback), then a sibling
-/// `mvm-images` checkout, then the in-repo flake.
+/// `mvm-images` checkout. Without either there is nothing to compile from.
 #[cfg(feature = "builder-vm")]
 fn resolve_kernel_flake_source(variant: KernelVariant) -> Result<KernelFlakeSource> {
-    let selection = if mvm_build::image_source::configured_images_dir().is_some() {
-        CheckoutSelection::Configured
-    } else {
-        CheckoutSelection::Discovered
-    };
     let source = mvm_build::image_source::resolve_current_source()?;
-    kernel_flake_source_for(variant, &source, selection)
+    kernel_flake_source_for(variant, &source)
 }
 
 /// Map a selected image source onto the kernel flake to build. A local
 /// checkout's `kernel/` flake is its kernel canon (`kernel/flake.nix` is a
-/// checkout marker, so a valid checkout always carries it).
+/// checkout marker, so a valid checkout always carries it). The released set
+/// carries built kernels, not their sources, so a compile without a checkout
+/// is refused.
 #[cfg(feature = "builder-vm")]
 fn kernel_flake_source_for(
     variant: KernelVariant,
     source: &mvm_build::image_source::ImageSource,
-    selection: CheckoutSelection,
 ) -> Result<KernelFlakeSource> {
-    use mvm_build::image_source::ImageSource;
+    use mvm_build::image_source::{ImageConstructionRefused, ImageSource};
     match source {
         ImageSource::LocalCheckout(checkout) => {
-            if variant == KernelVariant::WorkloadK8s && selection == CheckoutSelection::Discovered {
-                ui::info(&format!(
-                    "the mvm-images checkout {} does not define the workload-k8s kernel; \
-                     using the in-repo kernel flake",
-                    checkout.root().display()
-                ));
-                return in_repo_kernel_flake_source(variant);
-            }
             ui::info(&format!(
                 "kernel source: mvm-images checkout {} (kernel flake)",
                 checkout.root().display()
             ));
             KernelFlakeSource::for_images_checkout(variant, checkout.root().join("kernel"))
         }
-        ImageSource::InTree { .. } | ImageSource::Released => in_repo_kernel_flake_source(variant),
+        ImageSource::Released => {
+            Err(ImageConstructionRefused::new(format!("the {} kernel", variant.label())).into())
+        }
     }
-}
-
-/// The in-repo builder-vm flake, staged from the mvm workspace root.
-#[cfg(feature = "builder-vm")]
-fn in_repo_kernel_flake_source(variant: KernelVariant) -> Result<KernelFlakeSource> {
-    let builder_flake_dir = std::path::PathBuf::from(find_builder_vm_flake().map_err(|_| {
-        anyhow::anyhow!(
-            "`mvmctl kernel build --source compile` needs an mvm source checkout \
-             (nix/images/builder-vm/flake.nix) or an mvm-images checkout (named by \
-             MVM_IMAGES_DIR, or a sibling mvm-images next to the mvm checkout). From \
-             an installed binary, fetch a published kernel with `--source download` \
-             instead."
-        )
-    })?);
-    let work_dir = builder_flake_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot derive workspace root from {}",
-                builder_flake_dir.display()
-            )
-        })?
-        .to_path_buf();
-    Ok(KernelFlakeSource {
-        work_dir,
-        flake_base: None,
-        build_attr: variant.attr().to_string(),
-        config_attr: variant.config_attr().to_string(),
-    })
 }
 
 /// Where a kernel comes from during builder bootstrap or workload-kernel
@@ -228,79 +148,6 @@ pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
             None
         }
     }
-}
-
-/// Download + SHA-256-verify the published *builder* kernel for `arch`
-/// into the per-arch kernel cache, returning its path.
-#[cfg(feature = "builder-vm")]
-pub(super) fn download_builder_kernel(arch: &str) -> Result<std::path::PathBuf> {
-    let dest = mvm_build::kernel_fetch::cached_kernel_path(
-        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
-        arch,
-        "builder",
-    );
-    crate::update::download_kernel(arch, "builder", &dest)?;
-    Ok(dest)
-}
-
-/// Boot Stage 0 to build the builder rootfs *only* (`stage0-rootfs`
-/// attr, kernel-less), then pair `external_kernel` as the image's
-/// `vmlinux` and write the cache sidecars. This is the
-/// `--kernel-source download` path: the builder VM boots on a published
-/// kernel without compiling one inside the `default` image.
-#[cfg(feature = "builder-vm")]
-pub(super) fn run_stage0_rootfs_with_external_kernel(
-    staging_dir: &std::path::Path,
-    workspace_root: &std::path::Path,
-    guest_root_dir: &std::path::Path,
-    host_bin_dir: &std::path::Path,
-    external_kernel: &std::path::Path,
-    source_fingerprint: &str,
-    verbose: bool,
-) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select as bbs;
-
-    std::fs::write(
-        staging_dir.join("stage0-build.conf"),
-        "MVM_STAGE0_BUILD_ATTR=stage0-rootfs\nMVM_STAGE0_OUTPUT_MODE=rootfs\n",
-    )
-    .map_err(|e| {
-        (
-            Stage0FailureStage::Build,
-            anyhow::anyhow!("writing stage0-build.conf: {e}"),
-        )
-    })?;
-
-    let selected = bbs::resolve_choice();
-    let explicit = bbs::resolve_env_override().is_some();
-    bbs::run_with_builder_fallback(selected, explicit, |choice| {
-        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
-            guest_root_dir,
-            "/init",
-            workspace_root,
-            staging_dir,
-            host_bin_dir,
-        )
-    })
-    .map_err(|e| {
-        (
-            Stage0FailureStage::Build,
-            anyhow::anyhow!("Stage 0 rootfs build: {e}"),
-        )
-    })?;
-
-    std::fs::copy(external_kernel, staging_dir.join("vmlinux")).map_err(|e| {
-        (
-            Stage0FailureStage::Build,
-            anyhow::anyhow!("pairing kernel {}: {e}", external_kernel.display()),
-        )
-    })?;
-
-    verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    write_builder_vm_cache_sidecars(staging_dir, source_fingerprint)
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    Ok(())
 }
 
 #[cfg(feature = "builder-vm")]
@@ -345,16 +192,14 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::create_dir_all(&staging_dir)
         .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
 
-    let mut request_builder =
+    let request =
         super::stage0_artifact::Stage0ArtifactBuild::builder(&source.work_dir, &staging_dir)
             .build_attr(&source.build_attr)
             .output_mode("kernel")
             .config_attr(&source.config_attr)
-            .verbose(verbose);
-    if let Some(flake_base) = source.flake_base.as_deref() {
-        request_builder = request_builder.flake_base(flake_base);
-    }
-    let request = request_builder.build()?;
+            .flake_base(&source.flake_base)
+            .verbose(verbose)
+            .build()?;
 
     // Live at every verbosity: the builder runner nests the in-guest nix
     // progress under this line, and `-v` adds the raw build log above it.
@@ -597,7 +442,7 @@ mod tests {
                     .expect("canon variant maps");
             assert_eq!(source.build_attr, build, "{variant:?}");
             assert_eq!(source.config_attr, config, "{variant:?}");
-            assert_eq!(source.flake_base.as_deref(), Some("path:/work#packages"));
+            assert_eq!(source.flake_base, "path:/work#packages");
             assert_eq!(source.work_dir, std::path::PathBuf::from("/k"));
         }
     }
@@ -634,20 +479,7 @@ mod tests {
         assert_eq!(source.work_dir, canonical_root.join("kernel"));
         assert_eq!(source.build_attr, "workload-vmlinux");
         assert_eq!(source.config_attr, "workload-configfile");
-        assert_eq!(source.flake_base.as_deref(), Some("path:/work#packages"));
-    }
-
-    fn assert_in_repo_source(source: &KernelFlakeSource, variant: KernelVariant) {
-        assert_eq!(source.flake_base, None, "{variant:?}");
-        assert_eq!(source.build_attr, variant.attr(), "{variant:?}");
-        assert_eq!(source.config_attr, variant.config_attr(), "{variant:?}");
-        assert!(
-            source
-                .work_dir
-                .join("nix/images/builder-vm/flake.nix")
-                .is_file(),
-            "{variant:?}"
-        );
+        assert_eq!(source.flake_base, "path:/work#packages");
     }
 
     fn opened_checkout(dir: &std::path::Path) -> mvm_build::image_source::ImageSource {
@@ -658,65 +490,54 @@ mod tests {
     }
 
     #[test]
-    fn a_discovered_checkout_builds_from_its_kernel_flake() {
+    fn a_selected_checkout_builds_from_its_kernel_flake() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = opened_checkout(dir.path());
 
-        let flake = kernel_flake_source_for(
-            KernelVariant::Workload,
-            &source,
-            CheckoutSelection::Discovered,
-        )
-        .expect("a discovered checkout serves the workload kernel");
+        let flake = kernel_flake_source_for(KernelVariant::Workload, &source)
+            .expect("a selected checkout serves the workload kernel");
         let canonical_root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
         assert_eq!(flake.work_dir, canonical_root.join("kernel"));
         assert_eq!(flake.build_attr, "workload-vmlinux");
-        assert_eq!(flake.flake_base.as_deref(), Some("path:/work#packages"));
+        assert_eq!(flake.flake_base, "path:/work#packages");
     }
 
     #[test]
-    fn a_discovered_checkout_falls_back_to_the_in_repo_flake_for_workload_k8s() {
+    fn a_selected_checkout_refuses_workload_k8s() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = opened_checkout(dir.path());
 
-        // A sibling checkout is only a default: a variant its canon does not
-        // define must not turn a working in-repo build into a refusal.
-        let flake = kernel_flake_source_for(
-            KernelVariant::WorkloadK8s,
-            &source,
-            CheckoutSelection::Discovered,
-        )
-        .expect("the in-repo flake provides workload-k8s");
-        assert_in_repo_source(&flake, KernelVariant::WorkloadK8s);
-    }
-
-    #[test]
-    fn a_configured_checkout_refuses_workload_k8s() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = opened_checkout(dir.path());
-
-        // An explicit MVM_IMAGES_DIR names the source to build from; building
-        // the kernel from somewhere else would silently ignore it.
-        let error = kernel_flake_source_for(
-            KernelVariant::WorkloadK8s,
-            &source,
-            CheckoutSelection::Configured,
-        )
-        .expect_err("a configured checkout is a demand, not a default");
+        let error = kernel_flake_source_for(KernelVariant::WorkloadK8s, &source)
+            .expect_err("the orchestrator kernel has no source anywhere");
         assert!(
             error.to_string().contains("not defined in the mvm-images"),
             "{error:#}"
         );
     }
 
+    /// Without an image checkout a kernel compile has no source: the released
+    /// set carries built kernels only. The refusal names where the sources
+    /// live instead of pointing at a flake this repository no longer has.
     #[test]
-    fn the_in_tree_source_uses_the_in_repo_flake() {
-        let root = std::path::PathBuf::from("/unused");
-        let source = mvm_build::image_source::ImageSource::InTree { root };
-        for variant in [KernelVariant::Workload, KernelVariant::WorkloadK8s] {
-            let flake = kernel_flake_source_for(variant, &source, CheckoutSelection::Discovered)
-                .expect("in-repo source resolves in a source checkout");
-            assert_in_repo_source(&flake, variant);
+    fn a_compile_without_an_image_checkout_is_refused() {
+        let source = mvm_build::image_source::ImageSource::Released;
+        for variant in [
+            KernelVariant::Builder,
+            KernelVariant::Workload,
+            KernelVariant::WorkloadK8s,
+            KernelVariant::Rootless,
+        ] {
+            let error = kernel_flake_source_for(variant, &source)
+                .expect_err("the released set has no kernel sources");
+            let message = error.to_string();
+            assert!(
+                message.contains("image construction lives in mvm-images"),
+                "{variant:?}: {message}"
+            );
+            assert!(
+                message.contains(&format!("the {} kernel", variant.label())),
+                "{variant:?}: {message}"
+            );
         }
     }
 

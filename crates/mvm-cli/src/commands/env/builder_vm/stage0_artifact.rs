@@ -9,11 +9,10 @@ pub(super) struct Stage0ArtifactBuild<'a> {
     build_attr: &'a str,
     output_mode: &'a str,
     config_attr: Option<&'a str>,
-    /// Override for the in-guest flake ref base (`MVM_STAGE0_FLAKE`), without
-    /// the trailing `.<arch>-linux.<attr>` segment. `None` keeps the default
-    /// in-repo builder-vm flake. Set when the build resolves from an
-    /// mvm-images checkout whose kernel flake is staged at `/work`.
-    flake_base: Option<&'a str>,
+    /// The in-guest flake ref base (`MVM_STAGE0_FLAKE`), without the trailing
+    /// `.<arch>-linux.<attr>` segment: the flake staged at `/work`. Required,
+    /// because the guest has no image flake of its own to fall back on.
+    flake_base: &'a str,
     verbose: bool,
 }
 
@@ -100,9 +99,7 @@ impl<'a> Stage0ArtifactBuild<'a> {
         if let Some(config_attr) = self.config_attr {
             conf.push_str(&format!("MVM_STAGE0_CONFIG_ATTR={config_attr}\n"));
         }
-        if let Some(flake_base) = self.flake_base {
-            conf.push_str(&format!("MVM_STAGE0_FLAKE={flake_base}\n"));
-        }
+        conf.push_str(&format!("MVM_STAGE0_FLAKE={}\n", self.flake_base));
         conf
     }
 }
@@ -154,9 +151,10 @@ impl<'a> Stage0ArtifactBuildBuilder<'a> {
         {
             anyhow::bail!("Stage 0 config attribute contains invalid characters: {config_attr:?}");
         }
-        if let Some(flake_base) = self.flake_base
-            && !valid_flake_base(flake_base)
-        {
+        let flake_base = self
+            .flake_base
+            .ok_or_else(|| anyhow::anyhow!("Stage 0 flake base is required"))?;
+        if !valid_flake_base(flake_base) {
             anyhow::bail!("Stage 0 flake base contains invalid characters: {flake_base:?}");
         }
         Ok(Stage0ArtifactBuild {
@@ -165,7 +163,7 @@ impl<'a> Stage0ArtifactBuildBuilder<'a> {
             build_attr,
             output_mode,
             config_attr: self.config_attr,
-            flake_base: self.flake_base,
+            flake_base,
             verbose: self.verbose,
         })
     }
@@ -232,15 +230,15 @@ mod tests {
     }
 
     #[test]
-    fn builder_omits_flake_base_by_default() {
+    fn builder_requires_a_flake_base() {
         let root = std::path::Path::new("/work");
         let out = std::path::Path::new("/out");
-        let build = Stage0ArtifactBuild::builder(root, out)
-            .build_attr("workload-kernel")
+        let error = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("workload-vmlinux")
             .output_mode("kernel")
             .build()
-            .expect("default build");
-        assert!(!build.render_conf().contains("MVM_STAGE0_FLAKE"));
+            .expect_err("the guest has no flake of its own to fall back on");
+        assert!(error.to_string().contains("flake base"), "{error}");
     }
 
     #[test]
@@ -248,8 +246,9 @@ mod tests {
         let root = std::path::Path::new("/work");
         let out = std::path::Path::new("/out");
         let error = Stage0ArtifactBuild::builder(root, out)
-            .build_attr("sdk-sidecar-image\nMVM_STAGE0_OUTPUT_MODE=image")
-            .output_mode("sdk-sidecar")
+            .build_attr("workload-vmlinux\nMVM_STAGE0_OUTPUT_MODE=image")
+            .output_mode("kernel")
+            .flake_base("path:/work#packages")
             .build()
             .expect_err("a newline must not enter stage0-build.conf");
         assert!(error.to_string().contains("invalid characters"), "{error}");
@@ -261,14 +260,16 @@ mod tests {
             std::path::Path::new("/work"),
             std::path::Path::new("/out"),
         )
-        .build_attr("sdk-sidecar-image")
-        .output_mode("sdk-sidecar")
+        .build_attr("workload-vmlinux")
+        .output_mode("kernel")
+        .flake_base("path:/work#packages")
         .verbose(true)
         .build()
         .expect("valid request");
         assert_eq!(
             build.render_conf(),
-            "MVM_STAGE0_BUILD_ATTR=sdk-sidecar-image\nMVM_STAGE0_OUTPUT_MODE=sdk-sidecar\n"
+            "MVM_STAGE0_BUILD_ATTR=workload-vmlinux\nMVM_STAGE0_OUTPUT_MODE=kernel\n\
+             MVM_STAGE0_FLAKE=path:/work#packages\n"
         );
     }
 }
