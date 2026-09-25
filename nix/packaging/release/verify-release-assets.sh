@@ -102,24 +102,23 @@ require_signed_manifest "$COMBINED" "combined checksums manifest"
 
 for target in $TARGETS; do
   tarball="$ASSETS_DIR/mvmctl-${target}.tar.gz"
-  sha="$tarball.sha256"
   bundle="$tarball.bundle"
 
   [ -f "$tarball" ] || { fail "[$target] tarball missing: $(basename "$tarball")"; continue; }
-  [ -f "$sha" ]     || fail "[$target] checksum file missing: $(basename "$sha")"
   [ -f "$bundle" ]  || fail "[$target] cosign signature bundle missing: $(basename "$bundle")"
 
-  # The .sha256 file records the SHA over the tarball — recompute and compare.
-  if [ -f "$sha" ]; then
-    want=$(awk '{print $1}' "$sha")
-    got=$(sha256_of "$tarball")
-    [ "$want" = "$got" ] || fail "[$target] sha256 mismatch: recorded=$want actual=$got"
-  fi
-
-  # The combined manifest must cover this tarball (download-path integrity).
+  # The signed combined manifest is the digest the installer and `mvmctl update`
+  # compare against, so it is the one checked here. The release publishes no
+  # per-archive `.sha256`; requiring one failed every release without guarding
+  # anything a user downloads.
   if [ -f "$COMBINED" ]; then
-    grep -q "mvmctl-${target}.tar.gz" "$COMBINED" \
-      || fail "[$target] not listed in checksums-sha256.txt"
+    want=$(awk -v name="mvmctl-${target}.tar.gz" '$2 == name || $2 == "*" name {print $1}' "$COMBINED")
+    if [ -z "$want" ]; then
+      fail "[$target] not listed in checksums-sha256.txt"
+    else
+      got=$(sha256_of "$tarball")
+      [ "$want" = "$got" ] || fail "[$target] sha256 mismatch against checksums-sha256.txt: recorded=$want actual=$got"
+    fi
   fi
 
   if [ "$DO_COSIGN" = 1 ] && [ -f "$bundle" ]; then

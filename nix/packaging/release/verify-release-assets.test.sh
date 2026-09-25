@@ -33,7 +33,6 @@ build_valid_fixture() {
     mkdir -p "$pkg"
     for b in $(bins_for "$t"); do printf '#!/bin/sh\n' > "$pkg/$b"; chmod +x "$pkg/$b"; done
     ( cd "$dir" && tar czf "mvmctl-$t.tar.gz" "mvmctl-$t" && rm -rf "mvmctl-$t" )
-    sha256_of "$dir/mvmctl-$t.tar.gz" > "$dir/mvmctl-$t.tar.gz.sha256"
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
   done
@@ -67,10 +66,12 @@ rm -f "$d/checksums-sha256.txt.bundle"
 if run "$d"; then bad "unsigned combined manifest must fail"; else ok "unsigned combined manifest fails closed"; fi
 rm -rf "$d"
 
-# 3. An archive whose bytes no longer match its .sha256 → fail closed.
+# 3. An archive whose bytes no longer match the signed manifest → fail closed.
 d="$(build_valid_fixture)"
-echo "0000000000000000000000000000000000000000000000000000000000000000" \
-  > "$d/mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256"
+t=x86_64-unknown-linux-gnu
+grep -v "mvmctl-$t.tar.gz" "$d/checksums-sha256.txt" > "$d/.c.tmp"
+echo "0000000000000000000000000000000000000000000000000000000000000000  mvmctl-$t.tar.gz" >> "$d/.c.tmp"
+mv "$d/.c.tmp" "$d/checksums-sha256.txt"
 if run "$d"; then bad "a drifted archive digest must fail"; else ok "a drifted archive digest fails closed"; fi
 rm -rf "$d"
 
@@ -98,7 +99,6 @@ d="$(build_valid_fixture)"
 t=x86_64-unknown-linux-gnu
 ( cd "$d" && tar xzf "mvmctl-$t.tar.gz" && rm -f "mvmctl-$t/mvm-network-endpoint" \
   && tar czf "mvmctl-$t.tar.gz" "mvmctl-$t" && rm -rf "mvmctl-$t" )
-sha256_of "$d/mvmctl-$t.tar.gz" > "$d/mvmctl-$t.tar.gz.sha256"
 grep -v "mvmctl-$t.tar.gz" "$d/checksums-sha256.txt" > "$d/.c.tmp"
 echo "$(sha256_of "$d/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$d/.c.tmp"
 mv "$d/.c.tmp" "$d/checksums-sha256.txt"
