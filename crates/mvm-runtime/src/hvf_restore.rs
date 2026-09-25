@@ -56,18 +56,20 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
         &self,
         target_vm: &str,
         rootfs_src: &Path,
-        _memory: &Path,
+        memory: &Path,
         _machine_id: &Path,
-        _config_src: Option<&Path>,
+        config_src: Option<&Path>,
         content: &[ContentBlob],
     ) -> Result<()> {
-        let content_dir = rootfs_src
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("checkpoint rootfs path has no content directory"))?;
         let state_dir = mvm_core::config::vm_state_dir(target_vm);
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("creating {}", state_dir.display()))?;
-        clone_content_into(content_dir, &state_dir)?;
+        stage_restore_state_dir(
+            &RestoreSources {
+                config_src,
+                rootfs: rootfs_src,
+                memory,
+            },
+            &state_dir,
+        )?;
         restore_hvf_vm(&HvfRestoreRequest {
             vm_name: target_vm,
             state_dir: &state_dir,
@@ -85,6 +87,52 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
     fn verifies_on_load(&self) -> &'static [&'static str] {
         VERIFIED_ON_LOAD
     }
+}
+
+/// Where a same-identity restore reads the checkpoint from.
+///
+/// `rootfs` and `memory` are not necessarily in the checkpoint's content dir: a
+/// chunked blob is materialized into a scratch dir first, and only those two
+/// files are there. Everything else the restore needs — the launch config, the
+/// device frame, the verity sidecars, the device anchors — stays in the content
+/// dir, which is the directory `config_src` names.
+struct RestoreSources<'a> {
+    config_src: Option<&'a Path>,
+    rootfs: &'a Path,
+    memory: &'a Path,
+}
+
+impl RestoreSources<'_> {
+    /// The checkpoint's content dir. A checkpoint that carries a launch config
+    /// names it; one captured before configs were persisted stores whole blobs,
+    /// so its rootfs sits in the content dir itself.
+    fn content_dir(&self) -> Result<&Path> {
+        self.config_src
+            .and_then(Path::parent)
+            .or_else(|| self.rootfs.parent())
+            .ok_or_else(|| anyhow::anyhow!("checkpoint rootfs path has no content directory"))
+    }
+}
+
+/// Build the target's state dir from a checkpoint: every file in the content
+/// dir, then the rootfs and memory blobs wherever they were materialized.
+fn stage_restore_state_dir(sources: &RestoreSources<'_>, state_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating {}", state_dir.display()))?;
+    let content_dir = sources.content_dir()?;
+    clone_content_into(content_dir, state_dir)?;
+    for blob in [sources.rootfs, sources.memory] {
+        if blob.parent() == Some(content_dir) {
+            // A whole blob: already cloned with the content dir.
+            continue;
+        }
+        let name = blob
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint blob {} has no name", blob.display()))?;
+        crate::base::cow::clone_rootfs_for_instance(blob, &state_dir.join(name))
+            .with_context(|| format!("cloning checkpoint blob {}", name.to_string_lossy()))?;
+    }
+    Ok(())
 }
 
 /// Copy-on-write clone every file in a checkpoint's content dir into `dst`.
@@ -155,5 +203,72 @@ mod tests {
             rendered.contains("launch config"),
             "expected the missing launch-config refusal, got: {rendered}"
         );
+    }
+
+    /// A chunked checkpoint's rootfs and memory are materialized into a
+    /// scratch dir that holds nothing else. The state dir must still get the
+    /// launch config, the device frame and every other file from the content
+    /// dir, or the restore cannot find its launch config.
+    #[test]
+    fn a_chunked_checkpoint_stages_the_content_dir_and_the_materialized_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = tmp.path().join("content");
+        let scratch = tmp.path().join(".restore-scratch");
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(content.join("supervisor-config.json"), b"{}").unwrap();
+        std::fs::write(content.join("memory.bin.hvf-frame"), b"frame").unwrap();
+        std::fs::write(content.join("device-anchors.json"), b"[]").unwrap();
+        std::fs::write(content.join("rootfs.ext4.chunks.json"), b"{}").unwrap();
+        std::fs::write(scratch.join("rootfs.ext4"), b"root").unwrap();
+        std::fs::write(scratch.join("memory.bin"), b"ram").unwrap();
+
+        stage_restore_state_dir(
+            &RestoreSources {
+                config_src: Some(&content.join("supervisor-config.json")),
+                rootfs: &scratch.join("rootfs.ext4"),
+                memory: &scratch.join("memory.bin"),
+            },
+            &state,
+        )
+        .unwrap();
+
+        for name in [
+            "supervisor-config.json",
+            "memory.bin.hvf-frame",
+            "device-anchors.json",
+        ] {
+            assert!(state.join(name).is_file(), "{name} was not staged");
+        }
+        assert_eq!(std::fs::read(state.join("rootfs.ext4")).unwrap(), b"root");
+        assert_eq!(std::fs::read(state.join("memory.bin")).unwrap(), b"ram");
+    }
+
+    /// A checkpoint captured before launch configs were persisted stores whole
+    /// blobs and names no config: the rootfs's own directory is the content dir.
+    #[test]
+    fn a_whole_blob_checkpoint_without_a_config_stages_its_content_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = tmp.path().join("content");
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join("rootfs.ext4"), b"root").unwrap();
+        std::fs::write(content.join("memory.bin"), b"ram").unwrap();
+        std::fs::write(content.join("memory.bin.hvf-frame"), b"frame").unwrap();
+
+        stage_restore_state_dir(
+            &RestoreSources {
+                config_src: None,
+                rootfs: &content.join("rootfs.ext4"),
+                memory: &content.join("memory.bin"),
+            },
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(state.join("rootfs.ext4")).unwrap(), b"root");
+        assert_eq!(std::fs::read(state.join("memory.bin")).unwrap(), b"ram");
+        assert!(state.join("memory.bin.hvf-frame").is_file());
     }
 }
