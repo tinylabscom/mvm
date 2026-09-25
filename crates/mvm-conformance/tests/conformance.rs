@@ -262,6 +262,7 @@ fn probe_caps() -> RuntimeCaps {
         dir_share: dir_share_supported(),
         wall_clock_enforced: wall_clock_enforced(),
         warm_claim: std::env::var_os("MVM_BDD_WARM_CLAIM").is_some(),
+        destructive_lab_opted_in: std::env::var_os("MVM_BDD_DESTRUCTIVE_LAB").is_some(),
     }
 }
 

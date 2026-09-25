@@ -1,0 +1,45 @@
+# Digest pins for the DestructiveLabOnly CVE-2026-80521 containment scenario.
+#
+# Nothing here is vendored into the repository. The lab-staging script
+# (scripts/stage-cve-2026-80521-lab.sh) fetches the exploit source by commit and
+# the vulnerable kernel by version at scenario time, verifies each against the
+# digest below, and refuses to proceed on a mismatch. The scenario re-verifies
+# the staged artifact against `exploit.artifact_sha256` before delivering it
+# into the guest.
+#
+# Updating a pin is a deliberate, reviewable edit: a new exploit revision or a
+# new kernel build changes the digest, and the change is what a reviewer sees.
+
+[cve]
+id = "CVE-2026-80521"
+subsystem = "AF_UNIX SCM_RIGHTS garbage collection"
+class = "use-after-free -> local privilege escalation / container escape"
+disclosure = "Depthfirst, 2026-09-22"
+
+[exploit]
+# The public proof-of-concept, pinned by commit. Fetched as the GitHub codeload
+# tarball for this exact commit and verified against `source_tarball_sha256`.
+source = "https://github.com/Markakd/Container_escape"
+commit = "271a3e88aa47f8e9a3024ccb8d6acc34882e48cf"
+source_tarball_url = "https://codeload.github.com/Markakd/Container_escape/tar.gz/271a3e88aa47f8e9a3024ccb8d6acc34882e48cf"
+source_tarball_sha256 = "291ece1b9632016c1fd4a4f29eba1764acfa2012fa3c417b29f38fb3d73d4965"
+# Relative path, inside the fetched tree, of the CVE-2026-80521 proof-of-concept.
+poc_dir = "pocs/CVE-2026-80521"
+# The guest-delivered exploit artifact the staging script produces from the
+# pinned source (`make` -> a static x86-64 binary). Set this after a first
+# staging run: it is the sha256 the scenario re-verifies before delivery, so a
+# tampered or mis-built binary is refused rather than run. Left empty until the
+# lab has produced a byte-stable build; see the suite README.
+artifact_sha256 = ""
+
+[kernel]
+# The kernel the public PoC is written against. It is target-specific: the
+# exploit carries offsets and symbol assumptions for this exact build.
+target_distro = "Ubuntu 26.04"
+target_version = "7.0.0-31-generic"
+# The bootable vmlinux the scenario boots the victim guest on, once staged into
+# the lab and its digest recorded here. Empty until staged; see the README and
+# the "Known limit" note there — MVM's Firecracker workload path boots an
+# uncompressed vmlinux, and extracting a bootable one from the target distro
+# kernel is the operator step this pin gates.
+vmlinux_sha256 = ""
