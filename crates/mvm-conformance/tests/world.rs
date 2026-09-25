@@ -215,6 +215,20 @@ pub struct CliWorld {
     /// at. Held for the scenario's lifetime: the accept loop runs on a clone
     /// and ends when this drops.
     pub peer_listener: Option<std::net::TcpListener>,
+    /// The host surface (watched files, processes, listeners) recorded before
+    /// the `DestructiveLabOnly` CVE-containment detonation, so a later step can
+    /// prove a guest-kernel compromise perturbed none of it.
+    pub cve_host_before: Option<mvm_conformance::containment::HostObservation>,
+    /// The bystander sibling guest's name and its recorded rootfs content
+    /// digest, re-read after the detonation to prove tenant isolation held.
+    pub cve_sibling: Option<(String, String)>,
+    /// The victim guest's machine name, for teardown and residue checks.
+    pub cve_victim_name: Option<String>,
+    /// The staged, pin-verified exploit artifact delivered into the victim.
+    pub cve_exploit: Option<PathBuf>,
+    /// The victim launch's captured output — the guest-side compromise canary
+    /// (a candidate observation) plus the CLI's diagnostics.
+    pub cve_victim_launch: Option<LaunchRecord>,
     /// Hermetic command search path whose encryption probes report that the
     /// scenario-local mount cache is backed by encrypted storage.
     pub encrypted_volume_probe_path: Option<std::ffi::OsString>,

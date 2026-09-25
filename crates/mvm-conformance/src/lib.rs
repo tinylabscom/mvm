@@ -9,6 +9,9 @@
 //! shipped crate.
 
 pub mod claims;
+/// Pure host-evidence primitives for the `DestructiveLabOnly` CVE-containment
+/// scenario (`features/suites/s37_cve_containment/`).
+pub mod containment;
 pub mod doc_examples;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
@@ -131,6 +134,22 @@ pub const UNENFORCEABLE_WALL_CLOCK_TAG: &str = "unenforceable_wall_clock";
 /// silently omitted it.
 pub const WARM_CLAIM_TAG: &str = "warm_claim";
 
+/// Cucumber tag for a scenario at the `DestructiveLabOnly` risk ceiling: it
+/// deliberately runs a real, public exploit inside a guest to witness that a
+/// guest-kernel compromise does not cross the host boundary.
+///
+/// This is the strictest gate in the suite and the only one that guards a
+/// scenario which *intends harm to its own guest*. It is not a capability the
+/// host either has or lacks; it is a standing risk ceiling the operator must
+/// consciously raise, with `MVM_BDD_DESTRUCTIVE_LAB=1`, on a throwaway lab
+/// host. A scenario carrying it also carries `@live` and `@firecracker`, so it
+/// still needs the live opt-in and a bootable Firecracker — but the extra
+/// ceiling is deliberately a *separate* opt-in from `MVM_BDD_LIVE`, so that no
+/// ordinary live lane (including the merge-queue `@ci_live` selection, which
+/// never carries this tag) can reach it. It runs only where a human named this
+/// exact variable, which is nowhere in CI.
+pub const DESTRUCTIVE_LAB_ONLY_TAG: &str = "destructive_lab_only";
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -185,6 +204,14 @@ pub struct RuntimeCaps {
     /// and then consumes a standby, which is slow, so it stays out of runs that
     /// did not request it.
     pub warm_claim: bool,
+    /// The operator raised the `DestructiveLabOnly` risk ceiling
+    /// (`MVM_BDD_DESTRUCTIVE_LAB`), consenting to run a real exploit inside a
+    /// throwaway guest.
+    ///
+    /// Read by [`DESTRUCTIVE_LAB_ONLY_TAG`]. A separate opt-in from
+    /// `live_opted_in` on purpose: it must be impossible for any lane that only
+    /// set `MVM_BDD_LIVE` to reach a scenario that detonates an exploit.
+    pub destructive_lab_opted_in: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -240,6 +267,11 @@ pub enum ScenarioGate {
     /// Tagged [`WARM_CLAIM_TAG`] on a host whose standby claim does not
     /// complete its handshake.
     NeedsWarmClaim,
+    /// Tagged [`DESTRUCTIVE_LAB_ONLY_TAG`] on a host that did not raise the
+    /// risk ceiling (`MVM_BDD_DESTRUCTIVE_LAB` unset). This guards the only
+    /// scenario that runs a real exploit against its own guest, so the opt-in
+    /// is separate from `@live` and absent everywhere in CI.
+    NeedsDestructiveLabOptIn,
     /// The lane selected one tag with `MVM_BDD_ONLY_TAG`, and this scenario
     /// does not carry it.
     OutsideSelectedTag,
@@ -267,6 +299,7 @@ impl ScenarioGate {
             Self::NeedsNode => "needs-node",
             Self::NeedsUnenforceableWallClock => "needs-unenforceable-wall-clock",
             Self::NeedsWarmClaim => "needs-warm-claim",
+            Self::NeedsDestructiveLabOptIn => "needs-destructive-lab-opt-in",
             Self::OutsideSelectedTag => "outside-selected-tag",
         }
     }
@@ -289,6 +322,13 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(FIRECRACKER_TAG) && !caps.firecracker_bootable {
         return ScenarioGate::NeedsFirecracker;
+    }
+    // The strictest ceiling: a scenario that detonates a real exploit inside a
+    // guest. Checked after the live/firecracker arms so a host missing those
+    // gets the more basic reason first, but with its own opt-in so no ordinary
+    // live lane can reach it.
+    if tagged(DESTRUCTIVE_LAB_ONLY_TAG) && !caps.destructive_lab_opted_in {
+        return ScenarioGate::NeedsDestructiveLabOptIn;
     }
     if tagged(BUNDLE_TAG) && !caps.bundle_fixture {
         return ScenarioGate::NeedsBundleFixture;
@@ -381,6 +421,12 @@ impl ScenarioGate {
                  the post-restore identity handshake; where it does not (#3039) the \
                  claim is rejected and the launch cold-boots instead, so warm \
                  claiming goes unexercised here",
+            ),
+            Self::NeedsDestructiveLabOptIn => Some(
+                "need MVM_BDD_DESTRUCTIVE_LAB=1 on a throwaway lab host: this \
+                 scenario detonates a real exploit inside a guest and is gated by \
+                 a risk ceiling separate from MVM_BDD_LIVE, so no ordinary live \
+                 lane can reach it",
             ),
             Self::NeedsMemorySnapshot => Some(
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
@@ -772,6 +818,7 @@ mod tests {
         workload_kernel: false,
         wall_clock_enforced: false,
         warm_claim: false,
+        destructive_lab_opted_in: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
@@ -787,7 +834,74 @@ mod tests {
         workload_kernel: true,
         wall_clock_enforced: true,
         warm_claim: true,
+        destructive_lab_opted_in: true,
     };
+
+    /// The `DestructiveLabOnly` ceiling skips unless the operator raised it,
+    /// even on a fully live, Firecracker-bootable host.
+    #[test]
+    fn destructive_lab_scenario_needs_its_own_opt_in() {
+        assert_eq!(
+            scenario_gate(
+                &tags(&["live", "firecracker", "destructive_lab_only"]),
+                RuntimeCaps {
+                    destructive_lab_opted_in: false,
+                    ..ALL
+                },
+            ),
+            ScenarioGate::NeedsDestructiveLabOptIn,
+            "a live, Firecracker-bootable host that did not raise the risk \
+             ceiling must still skip"
+        );
+        assert!(
+            scenario_should_run(&tags(&["live", "firecracker", "destructive_lab_only"]), ALL),
+            "a host that raised the ceiling and can boot Firecracker runs it"
+        );
+    }
+
+    /// Missing `@live` reports the more basic reason before the destructive
+    /// opt-in, so an operator on a laptop is told to opt into live first.
+    #[test]
+    fn destructive_lab_reports_live_opt_in_first_when_both_absent() {
+        assert_eq!(
+            scenario_gate(
+                &tags(&["live", "firecracker", "destructive_lab_only"]),
+                RuntimeCaps {
+                    live_opted_in: false,
+                    destructive_lab_opted_in: false,
+                    ..ALL
+                },
+            ),
+            ScenarioGate::NeedsLiveOptIn,
+        );
+    }
+
+    /// The `@ci_live` merge-queue selection never carries the destructive tag,
+    /// so it can never select a detonation scenario even with the ceiling
+    /// somehow raised.
+    #[test]
+    fn ci_live_selection_never_reaches_a_destructive_scenario() {
+        assert_eq!(
+            scenario_gate_for_selection(
+                &tags(&["live", "firecracker", "destructive_lab_only"]),
+                ALL,
+                Some("ci_live"),
+            ),
+            ScenarioGate::OutsideSelectedTag,
+        );
+    }
+
+    /// The gate is opt-in, so an untagged scenario is unaffected by the ceiling.
+    #[test]
+    fn an_untagged_scenario_ignores_the_destructive_lab_ceiling() {
+        assert!(scenario_should_run(
+            &tags(&["live"]),
+            RuntimeCaps {
+                destructive_lab_opted_in: false,
+                ..ALL
+            },
+        ));
+    }
 
     /// The warm-claim gate skips where the claim cannot complete, and runs
     /// where it can.
@@ -1064,6 +1178,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
     }
@@ -1086,6 +1201,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -1110,6 +1226,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -1129,6 +1246,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         // Both present → runs.
@@ -1155,6 +1273,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1170,6 +1289,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1185,6 +1305,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1200,6 +1321,7 @@ mod tests {
                 workload_kernel: true,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
@@ -1215,6 +1337,7 @@ mod tests {
                 workload_kernel: true,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ];
         let shapes = [
@@ -1256,6 +1379,7 @@ mod tests {
             workload_kernel: false,
             wall_clock_enforced: false,
             warm_claim: false,
+            destructive_lab_opted_in: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
@@ -1271,6 +1395,7 @@ mod tests {
             workload_kernel: false,
             wall_clock_enforced: false,
             warm_claim: false,
+            destructive_lab_opted_in: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
@@ -1286,6 +1411,7 @@ mod tests {
             workload_kernel: false,
             wall_clock_enforced: false,
             warm_claim: false,
+            destructive_lab_opted_in: false,
         };
 
         assert_eq!(
@@ -1345,6 +1471,7 @@ mod tests {
                     workload_kernel: false,
                     wall_clock_enforced: false,
                     warm_claim: false,
+                    destructive_lab_opted_in: false,
                 },
                 Some(CI_LIVE_TAG),
             ),
