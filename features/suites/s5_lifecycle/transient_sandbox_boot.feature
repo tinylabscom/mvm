@@ -81,6 +81,20 @@ Feature: Transient sandbox boot
     And the output contains "mvm-bdd-cleanup-marker"
     And the isolated mvm home does not contain directory "vms/bdd-transient-cleanup"
 
+  # The cached default development image is shared by every launch that names
+  # it and is hashed at admission, so a launch must leave its bytes exactly as
+  # it found them. The first run populates the cache when it is empty; the
+  # second is the witness.
+  @live @firecracker
+  Scenario: a transient run leaves the cached default development rootfs byte-identical
+    When I run mvmctl in an isolated live home with "run --no-detect -- /bin/true"
+    Then the command exits with code 0
+    And the cached default development rootfs digest is recorded
+    When I run mvmctl in an isolated live home with "run --no-detect -- /bin/true"
+    Then the command exits with code 0
+    And the cached default development rootfs digest is unchanged
+    And the last admitted plan names the cached default development rootfs digest
+
   # Opt-in (`MVM_BDD_WARM_CLAIM`), and the only scenario that exercises a warm
   # claim end to end. It was gated while a forked child could not answer the
   # post-restore identity handshake; that is fixed on HVF and Firecracker, and

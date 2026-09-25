@@ -270,6 +270,9 @@ pub struct CliWorld {
     /// Home selected by the most recent live CLI step. This is the shared
     /// artifact-warm home when the live runner provides one.
     pub last_live_home: Option<PathBuf>,
+    /// SHA-256 of the cached default development rootfs, captured between two
+    /// live launches so the later launch can be shown not to have rewritten it.
+    pub cached_dev_rootfs_digest: Option<String>,
     /// Transient request directories present before a live warm-claim journey.
     /// The final assertion compares against this baseline so unrelated stale
     /// state in a shared runner home cannot hide or falsely fail the cleanup.
@@ -544,6 +547,7 @@ impl fmt::Debug for CliWorld {
                 &self.kernel_reacquisition_must_fail,
             )
             .field("warm_residency", &self.warm_residency)
+            .field("cached_dev_rootfs_digest", &self.cached_dev_rootfs_digest)
             .field("kernel_pins", &self.kernel_pins)
             .field("kernel_upstream", &self.kernel_upstream)
             .field("kernel_advisory", &self.kernel_advisory)

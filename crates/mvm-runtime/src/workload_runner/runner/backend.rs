@@ -3,14 +3,35 @@
 use super::*;
 use std::time::Instant;
 
-/// Whether the host may repair the rootfs immediately before launch.
+/// Refuse a rootfs whose ext4 journal still needs replay, without touching it.
 ///
-/// A dm-verity sidecar authenticates the rootfs bytes as they existed when the
-/// sidecar was generated. Running e2fsck after that point changes authenticated
-/// filesystem metadata and makes every subsequent verity read fail closed.
-#[cfg(any(target_os = "linux", test))]
-fn should_repair_rootfs_before_start(config: &VmStartConfig) -> bool {
-    config.verity_path.is_none()
+/// The rootfs is attached to the guest read-only, so the guest kernel cannot
+/// replay a dirty journal and would fail the mount. The host must not replay it
+/// either: the image was hashed when the launch was admitted and is shared by
+/// every launch that names it (the cached default image, a template revision),
+/// so repairing it here rewrites bytes the signed plan already recorded and
+/// changes the shared image under every later launch. A dirty journal is a
+/// defect in whatever produced the image, and it is reported as one before boot.
+///
+/// An image that cannot be read is left to the VMM, whose own open reports it.
+fn refuse_rootfs_needing_journal_replay(rootfs_path: &str) -> Result<()> {
+    use mvm_fs::ext4::journal_state::{JournalState, read_journal_state};
+
+    if rootfs_path.is_empty() {
+        return Ok(());
+    }
+    match read_journal_state(std::path::Path::new(rootfs_path)) {
+        Ok(JournalState::NeedsRecovery) => anyhow::bail!(
+            "refusing to boot {rootfs_path}: its ext4 journal needs replay, and the guest \
+             mounts the rootfs from a read-only device. mvm does not repair an admitted \
+             image in place; rebuild or re-fetch the image"
+        ),
+        Ok(JournalState::Clean | JournalState::NotExt4) => Ok(()),
+        Err(e) => {
+            tracing::debug!(error = %e, rootfs = %rootfs_path, "could not read the rootfs superblock");
+            Ok(())
+        }
+    }
 }
 
 impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
@@ -126,14 +147,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         // already boots from.
         ClaimGuards::new(&self.spawner)
             .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
-        #[cfg(target_os = "linux")]
-        if should_repair_rootfs_before_start(config)
-            && let Err(e) = mvm_build::builderd_host::repair_ext4_filesystem(std::path::Path::new(
-                &config.rootfs_path,
-            ))
-        {
-            tracing::warn!(error = %e, rootfs = %config.rootfs_path, "failed to repair workload rootfs; continuing, but the read-only guest mount may fail if the journal is dirty");
-        }
+        refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
         crate::base::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
@@ -272,28 +286,64 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
 #[cfg(test)]
 mod tests {
-    use super::should_repair_rootfs_before_start;
-    use mvm_core::vm_backend::VmStartConfig;
+    use super::refuse_rootfs_needing_journal_replay;
 
-    #[test]
-    fn unsealed_rootfs_is_repaired_before_start() {
-        let config = VmStartConfig {
-            rootfs_path: "/images/rootfs.ext4".into(),
-            ..Default::default()
-        };
-
-        assert!(should_repair_rootfs_before_start(&config));
+    /// A formatted ext4 image, with the journal-recovery flag set on request.
+    fn ext4_image(dir: &std::path::Path, needs_recovery: bool) -> String {
+        let path = dir.join("rootfs.ext4");
+        let mut image = std::fs::File::create_new(&path).unwrap();
+        let size = 8 * 1024 * 1024;
+        image.set_len(size).unwrap();
+        mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, size).unwrap();
+        drop(image);
+        if needs_recovery {
+            let mut bytes = std::fs::read(&path).unwrap();
+            // s_feature_incompat, EXT4_FEATURE_INCOMPAT_RECOVER.
+            bytes[1024 + 0x60] |= 0x4;
+            std::fs::write(&path, bytes).unwrap();
+        }
+        path.display().to_string()
     }
 
     #[test]
-    fn verity_sealed_rootfs_remains_byte_for_byte_immutable() {
-        let config = VmStartConfig {
-            rootfs_path: "/images/rootfs.ext4".into(),
-            verity_path: Some("/images/rootfs.verity".into()),
-            roothash: Some("a".repeat(64)),
-            ..Default::default()
-        };
+    fn a_clean_rootfs_is_admitted_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = ext4_image(dir.path(), false);
+        let before = std::fs::read(&rootfs).unwrap();
 
-        assert!(!should_repair_rootfs_before_start(&config));
+        refuse_rootfs_needing_journal_replay(&rootfs).expect("a clean journal boots");
+
+        assert_eq!(std::fs::read(&rootfs).unwrap(), before);
+    }
+
+    #[test]
+    fn a_rootfs_needing_journal_replay_is_refused_by_name_and_left_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = ext4_image(dir.path(), true);
+        let before = std::fs::read(&rootfs).unwrap();
+
+        let err = refuse_rootfs_needing_journal_replay(&rootfs)
+            .expect_err("a dirty journal cannot be mounted from a read-only device");
+
+        let message = err.to_string();
+        assert!(message.contains(&rootfs), "names the image: {message}");
+        assert!(message.contains("journal needs replay"), "{message}");
+        assert_eq!(
+            std::fs::read(&rootfs).unwrap(),
+            before,
+            "the refusal must not repair the image it refuses"
+        );
+    }
+
+    #[test]
+    fn a_diskless_boot_or_an_unreadable_image_is_left_to_the_vmm() {
+        refuse_rootfs_needing_journal_replay("").expect("an initramfs-only boot has no rootfs");
+        refuse_rootfs_needing_journal_replay("/nonexistent/rootfs.ext4")
+            .expect("the VMM's own open reports a missing image");
+        let dir = tempfile::tempdir().unwrap();
+        let not_ext4 = dir.path().join("rootfs.img");
+        std::fs::write(&not_ext4, b"rootfs").unwrap();
+        refuse_rootfs_needing_journal_replay(&not_ext4.display().to_string())
+            .expect("a non-ext4 image carries no journal to replay");
     }
 }
