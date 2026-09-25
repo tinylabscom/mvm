@@ -94,6 +94,42 @@ run the gates, push, open a PR and take it through the merge queue.
 - Nothing else is outstanding: W5d merged as #3521, and #3511 (W5c) was closed
   because W5d carried its commits to main.
 
+## Coordination with the builder-image plan
+
+`specs/plans/2026-09-24-builder-image-without-host-bins.md` (another session,
+branches `feat/builder-boot-payload`, `feat/builder-key-narrowing`) stops baking
+mvm's Rust host binaries into the builder image and supplies them at boot from
+mvmctl's own payload. Three agreed interfaces, as of 2026-09-25:
+
+- **Cache key.** The builder image key becomes the resolved Nix inputs,
+  including the mvm source closure the image actually compiles, rather than
+  either repository's identity. Dropping the mvm commit from the key supersedes
+  the extraction plan's "cache keys include both repository commits" item, which
+  W5d implemented in its coarse form. `drvPath` keying is the intended end
+  state. Note #3524: `ensure_builder_vm_image` does not consult the fingerprint
+  at all yet, so a better key does not reach every builder path.
+- **`builder_boot_abi`.** A new field in the image set's `[compatibility]`
+  section: 1 means the host binaries arrive in the boot payload, 0 is the
+  legacy baked image. The mvm side — the field, its validation, the
+  `images.lock` plumbing, and a CLI that accepts both — belongs to that plan.
+  This side owns emitting it from the release assembly and from
+  `scripts/emit-local-manifest.py`, and dropping `MVM_HOST_BIN_DIR` from
+  mvm-images' `images/builder-vm/image.nix` once a payload-supplying mvmctl is
+  the pinned consumer. Those are two separate PRs in mvm-images, because the
+  pin advance is its own change. The agreed transition rule: a missing field
+  means ABI 0 **only** for a release producer, and a local set without it is
+  refused by name. `compatibility` is required on local sets too, so a blanket
+  default would let a local set built from a no-longer-baking flake declare the
+  legacy ABI against bytes that cannot satisfy it. The emitter therefore always
+  writes the field — 0 while the flake still bakes, 1 in the same PR that drops
+  `MVM_HOST_BIN_DIR` — so the release default only ever covers sets published
+  before the field existed.
+- **W8.** Stage 0 stays a from-seed source build for contributors after
+  `nix/images/builder-vm` is deleted. ADR-030 item 4 names that directory and
+  "the in-repo flakes" explicitly, so W8 carries an explicit item amending it to
+  the paired mvm-images checkout selected by `MVM_IMAGES_DIR`, leaving the
+  no-silent-substitution and `source: fetched` rules unchanged.
+
 ## Traps this session hit
 
 - **Do not stack a PR on another open PR in this repo.** The merge queue put
