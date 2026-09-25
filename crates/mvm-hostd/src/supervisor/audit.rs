@@ -333,6 +333,7 @@ pub(crate) mod tests {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
+            action_budget: None,
             ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,

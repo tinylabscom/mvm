@@ -55,6 +55,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-09` | `build` | Every published bundle is content-addressed and re-verified | `fn:read_and_verify_bundle`, `fn:verify_plan_bundle` |
 
+## cumulative_ledger
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-22` | `build` | A signed execution plan may carry cumulative per-VM action budgets over host-observable seams; absent keeps existing plan bytes identical, present rides signed so a launcher cannot widen a checked ceiling | `fn:action_budget_defaults_to_no_limits`, `fn:action_budget_roundtrips_each_dimension_through_serde`, `fn:action_budget_absent_preserves_existing_plan_bytes`, `fn:action_budget_extracted_from_signed_envelope` |
+
 ## egress_substitution
 
 | ID | Level | Statement | Witnesses |

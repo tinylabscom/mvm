@@ -231,6 +231,7 @@ impl PlanFixture {
             extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),
             stream_retention: self.stream_retention,
+            action_budget: None,
             sdk_uses_sidecar: self.sdk_uses_sidecar,
         }
     }
