@@ -1145,7 +1145,7 @@ fn stage_locked_builder_vm_image(
 ) -> Result<String> {
     std::fs::create_dir_all(staging)
         .with_context(|| format!("creating builder VM staging dir {}", staging.display()))?;
-    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
     let target = mvm_core::image_set::MemberTarget::Arch(arch);
     for (asset, cache_name) in [
         (format!("builder-vm-vmlinux-{arch}"), "vmlinux"),
@@ -1493,15 +1493,35 @@ pub(super) struct BuilderVmArtifactNames {
     )
 ))]
 pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
+    let [kernel, rootfs, cmdline] = builder_vm_boot_assets(arch);
     BuilderVmArtifactNames {
-        kernel: format!("builder-vm-vmlinux-{arch}"),
-        rootfs: format!("builder-vm-rootfs-{arch}.ext4"),
-        cmdline: format!("builder-vm-{arch}.cmdline.txt"),
+        kernel,
+        rootfs,
+        cmdline,
         #[cfg(test)]
         manifest: format!("builder-vm-{arch}.manifest.json"),
         #[cfg(test)]
         checksums: format!("builder-vm-{arch}-checksums-sha256.txt"),
     }
+}
+
+/// The release assets the builder VM boots from for `arch`: kernel, rootfs,
+/// and kernel command line. The published-pack fetch names them through here
+/// too, so its asset names cannot drift from the checksum-pinned fetch's.
+#[cfg(any(
+    all(
+        feature = "release-artifact-bootstrap",
+        feature = "builder-vm",
+        feature = "manifest-verify"
+    ),
+    test
+))]
+pub(super) fn builder_vm_boot_assets(arch: &str) -> [String; 3] {
+    [
+        format!("builder-vm-vmlinux-{arch}"),
+        format!("builder-vm-rootfs-{arch}.ext4"),
+        format!("builder-vm-{arch}.cmdline.txt"),
+    ]
 }
 
 #[cfg(test)]

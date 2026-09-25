@@ -676,7 +676,7 @@ fn download_default_microvm_image(
         "x86_64"
     };
     let guest_arch = arch.parse().context("parse host architecture")?;
-    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
     let tag = mvm_core::image_set::image_train_lock()
         .image_set
         .release_tag

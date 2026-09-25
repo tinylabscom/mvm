@@ -145,15 +145,16 @@ pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 pub(crate) use shell_job::ShellJobBuilder;
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
-#[cfg(any(
-    all(
-        feature = "release-artifact-bootstrap",
-        feature = "builder-vm",
-        feature = "manifest-verify"
-    ),
-    test
-))]
+#[cfg(test)]
 use stage0_cache::builder_vm_artifact_names;
+#[cfg(all(
+    feature = "manifest-verify",
+    any(
+        all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+        test
+    )
+))]
+use stage0_cache::builder_vm_boot_assets;
 #[cfg(feature = "release-artifact-bootstrap")]
 use stage0_cache::download_builder_vm_image;
 pub(in crate::commands) use stage0_cache::{

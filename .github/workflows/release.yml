@@ -288,12 +288,13 @@ jobs:
   # over the rootfs, mounts the runtime overlay at /sysroot/mvm/runtime, and
   # switch_roots. A source checkout builds one locally
   # (`resolve_or_build_local_initramfs`); an installed binary calls
-  # `download_initramfs`, which fetches `initramfs-<arch>.tar.gz` from this
-  # release. That download has never once succeeded, because nothing published
-  # the file — so every installed mvmctl has been unable to boot the sealed path
-  # its own rootfs is built for.
+  # `download_initramfs`, which acquires `initramfs-<arch>.tar.gz` as a member
+  # of the signed image set its lock pins. Clients that predate the image set
+  # fetch it from this release instead, under `v{version}`, and nothing
+  # published it for them either — so they have been unable to boot the sealed
+  # path their own rootfs is built for.
   #
-  # This train, not `boot-image/v*`: `release_base_url` builds `{base}/v{version}`,
+  # This train, not `boot-image/v*`: those clients build `{base}/v{version}`,
   # and the initramfs bundles this workspace's guest agent, so it versions with
   # the CLI rather than with the image.
   initramfs-image:

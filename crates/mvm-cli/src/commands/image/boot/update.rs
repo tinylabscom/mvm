@@ -93,8 +93,7 @@ fn fetch_into(dir: &Path, tag: &str) -> Result<()> {
         bail!("refusing unlocked image set {tag}; this build pins {locked}");
     }
     let arch = mvm_core::arch::GuestArch::host();
-    crate::commands::env::published_image_set::PublishedImageSet::acquire()?
-        .fetch_default_workload(arch, dir)
+    crate::commands::env::artifact_verify::acquire_image_set()?.fetch_default_workload(arch, dir)
 }
 
 /// A scratch directory beside the live entry, removed on drop unless it was
