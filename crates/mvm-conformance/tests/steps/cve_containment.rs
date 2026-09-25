@@ -49,7 +49,11 @@ fn pin(section: &str, key: &str) -> Option<String> {
 fn run_mvmctl(argv: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let home = e2e_home();
     let mut cmd = std::process::Command::new(mvmctl_path());
-    cmd.env("MVM_HOME", &home).env("MVM_E2E_HOME", &home);
+    // Move HOME with MVM_HOME so the child never reads the developer's real
+    // cache (enforced by `check-test-home-isolation`).
+    cmd.env("MVM_HOME", &home)
+        .env("MVM_E2E_HOME", &home)
+        .env("HOME", &home);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
