@@ -380,11 +380,31 @@ fn main() -> Result<()> {
             // itself is opt-in because it costs hours.
             let write = args.iter().any(|a| a == "--write-baseline");
             let run = args.iter().any(|a| a == "--run");
-            let mode = match (write, run) {
-                (true, true) => check_mutation_witnesses::Mode::RewriteBaseline,
-                (true, false) => check_mutation_witnesses::Mode::RepinSurface,
-                (false, true) => check_mutation_witnesses::Mode::Run,
-                (false, false) => check_mutation_witnesses::Mode::PinOnly,
+            // `--verify-outcomes <dir>` judges the output a run left behind,
+            // so a shard its timeout stopped still gets a verdict naming the
+            // files it never reached.
+            let verify = args
+                .iter()
+                .position(|a| a == "--verify-outcomes")
+                .map(|i| {
+                    args.get(i + 1).map(PathBuf::from).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--verify-outcomes needs the directory a --run wrote its \
+                             cargo-mutants output to"
+                        )
+                    })
+                })
+                .transpose()?;
+            let mode = match (write, run, verify) {
+                (false, false, Some(dir)) => check_mutation_witnesses::Mode::VerifyOutcomes(dir),
+                (_, _, Some(_)) => anyhow::bail!(
+                    "--verify-outcomes judges a finished run's output; it cannot be combined \
+                     with --run or --write-baseline"
+                ),
+                (true, true, None) => check_mutation_witnesses::Mode::RewriteBaseline,
+                (true, false, None) => check_mutation_witnesses::Mode::RepinSurface,
+                (false, true, None) => check_mutation_witnesses::Mode::Run,
+                (false, false, None) => check_mutation_witnesses::Mode::PinOnly,
             };
             // `--package <name>` shards a `--run` so each CI job finishes
             // inside the six-hour job cap; unset means the whole surface. A
@@ -651,7 +671,7 @@ fn main() -> Result<()> {
                 "  check-dormant-controls                 Security-relevant controls declare whether they have a production caller; the dormant list may only shrink"
             );
             println!(
-                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --write-baseline re-pins (add --run to also re-record misses)"
+                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --verify-outcomes <dir> judges a run's output and names unmeasured files; --write-baseline re-pins (add --run to also re-record misses)"
             );
             println!(
                 "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"

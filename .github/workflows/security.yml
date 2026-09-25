@@ -534,6 +534,10 @@ jobs:
     # `security-lane-watch.yml` counts `cancelled` for that reason, and
     # before it did, a shard that never finished was the one kind of red
     # this whole lane could not report.
+    #
+    # The mutation step carries a shorter timeout of its own, so a shard
+    # that runs long stops with time left for the step that names the files
+    # it never reached. This one stays as the backstop.
     timeout-minutes: 330
     # BLOCKING, and sharded per package.
     #
@@ -617,13 +621,31 @@ jobs:
           restore-keys: cargo-mutation-${{ matrix.package }}-
 
       - name: Install cargo-mutants and nextest
-        run: cargo install --locked cargo-mutants cargo-nextest
+        # The mutator is pinned in Cargo.toml's [workspace.metadata.mvm.toolchain].
+        # `--locked` alone pins the dependency tree of whatever release is
+        # newest, not the tool, and the baseline's accepted misses are matched
+        # on the description text that release renders. The gate refuses a
+        # mutator other than the pin, so this read and that check agree.
+        run: |
+          set -euo pipefail
+          CARGO_MUTANTS_VERSION=$(awk '/^\[workspace\.metadata\.mvm\.toolchain\]/ { t = 1; next }
+            /^\[/ { t = 0 }
+            t && $1 == "cargo-mutants" { gsub(/"/, "", $3); print $3 }' Cargo.toml)
+          if [ -z "$CARGO_MUTANTS_VERSION" ]; then
+            echo "::error::no cargo-mutants pin in [workspace.metadata.mvm.toolchain]" >&2
+            exit 1
+          fi
+          cargo install --locked "cargo-mutants@${CARGO_MUTANTS_VERSION}" cargo-nextest
 
       - name: Install mvm-cli embedded-host toolchain
         if: matrix.package == 'mvm-cli'
         uses: ./.github/actions/install-zigbuild
 
       - name: Mutate this package's claim surface and ratchet survivors
+        # Stopped short of the job's own timeout so the accounting step below
+        # still runs: a shard cut off here leaves its unreached files with no
+        # output at all, and only that step names them.
+        timeout-minutes: 315
         # `--run` mutates the claim-enforcement surface and runs the suite
         # against each mutant — plan verification that no longer verifies, a
         # seccomp filter that no longer filters, the host signer. That is
@@ -657,6 +679,22 @@ jobs:
             exit 1
           fi
           cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
+
+      - name: Account for every surface file this shard owns
+        # The step above judges only what it measured, and a shard stopped by
+        # its timeout judges nothing: files run in path order, so what goes
+        # missing is an alphabetical tail, and the uploaded output simply has
+        # no directory for it. Read on its own, that output lists survivors for
+        # the files the shard reached and says nothing about the rest, which
+        # reads as clean. This re-derives the shard's file set from the pinned
+        # surface and fails on each file with no finished result under the
+        # pinned mutator, by name, separately from any survivor.
+        if: always()
+        timeout-minutes: 10
+        run: |
+          cargo run -p xtask -- check-mutation-witnesses \
+            --verify-outcomes "$RUNNER_TEMP/mutants-out/mvm-mutation-witnesses" \
+            --package '${{ matrix.package }}'
 
       - name: Keep the mutation output of a shard that did not finish
         # A shard killed by the timeout above has still measured most of its

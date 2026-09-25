@@ -27,15 +27,26 @@
 //!   on existing accepted misses. Cheap: a witness moving should not
 //!   cost a mutation run. Add `--run` to also re-record the misses,
 //!   which discards those reasons and so is a deliberate reset.
+//! - `--verify-outcomes <dir>` — judge the cargo-mutants output a run left
+//!   in `<dir>` without mutating anything. Every surface file the shard
+//!   owns must have a finished result there, so a run that stopped part-way
+//!   fails on the files it never reached instead of reading as clean.
 
 use crate::claims_ledger::{self, Witness};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where the pinned surface and accepted misses live.
 const BASELINE_REL: &str = "xtask/mutation-witness-baseline.json";
+
+/// The key under `[workspace.metadata.mvm.toolchain]` holding the exact
+/// cargo-mutants version the baseline was recorded with.
+const MUTATOR_PIN_KEY: &str = "cargo-mutants";
+
+/// Where CI workflows live, each scanned for a cargo-mutants install.
+const WORKFLOWS_REL: &str = ".github/workflows";
 
 /// Per-mutant test timeout, as a multiple of the package's own measured
 /// baseline. A mutant that hangs is a caught mutant as far as this gate
@@ -56,7 +67,7 @@ const MUTANT_TIMEOUT_MULTIPLIER: u32 = 5;
 /// reporting scheduler noise as caught mutants.
 const MUTANT_MINIMUM_TIMEOUT_SECS: u32 = 60;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Resolve the surface and compare against the committed pin.
     /// Milliseconds; needs no cargo-mutants.
@@ -71,6 +82,11 @@ pub enum Mode {
     /// run. Hours, and it forgets previously stated reasons, so it is
     /// the rare deliberate reset rather than the routine fix.
     RewriteBaseline,
+    /// Judge the cargo-mutants output a `--run` left in this directory,
+    /// without mutating anything. What a shard stopped by its timeout still
+    /// has: a verdict on the files it reached and the names of those it did
+    /// not.
+    VerifyOutcomes(PathBuf),
 }
 
 /// A file carrying at least one claim witness.
@@ -197,6 +213,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
     }
 
     let baseline_path = workspace.join(BASELINE_REL);
+    let pinned = pinned_mutator_version(workspace)?;
 
     if matches!(mode, Mode::RepinSurface | Mode::RewriteBaseline) {
         // Re-pinning keeps the stated reasons; a full rewrite discards
@@ -204,10 +221,11 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
-            seed_accepted(&run_mutants_over(
-                workspace,
-                &for_shard(workspace, &scoped, shard),
-            )?)
+            let surface = for_shard(workspace, &scoped, shard);
+            let out_root = run_mutants_over(workspace, &surface, &pinned)?;
+            seed_accepted(&observed_misses(&collect_evidence(
+                &out_root, &surface, &pinned,
+            )))
         } else {
             previous
                 .as_ref()
@@ -243,6 +261,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
     errors.extend(check_shard_matrix(workspace, &baseline.surface));
     errors.extend(diff_surface(&baseline.surface, &resolved));
     errors.extend(diff_uncovered(&baseline.uncovered_claims, &uncovered));
+    errors.extend(check_mutator_installs_pinned(workspace, &pinned)?);
 
     for u in &uncovered {
         eprintln!(
@@ -251,7 +270,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         );
     }
 
-    if mode == Mode::Run {
+    if matches!(mode, Mode::Run | Mode::VerifyOutcomes(_)) {
         // The committed surface, not the freshly resolved one: resolution
         // cannot know about scopes, and running the unscoped surface would
         // report every out-of-claim mutant as a new miss.
@@ -270,18 +289,33 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
                 baseline.surface.len()
             );
         }
-        let observed = run_mutants_over(workspace, &surface)?;
-        // The accepted set narrows with the surface, or every other
-        // package's entries would be reported as "now caught" by a shard
-        // that never looked at them.
-        let paths: BTreeSet<&str> = surface.iter().map(|s| s.path.as_str()).collect();
-        let accepted: Vec<AcceptedMiss> = baseline
-            .accepted_misses
-            .iter()
-            .filter(|a| paths.contains(a.file.as_str()))
-            .cloned()
-            .collect();
-        let verdict = ratchet(&accepted, &observed);
+        // One judgement for both modes: a finished run is read back from
+        // the directory it just wrote, exactly as a stopped one is read from
+        // what it left behind.
+        let out_root = match &mode {
+            Mode::VerifyOutcomes(dir) => dir.clone(),
+            _ => run_mutants_over(workspace, &surface, &pinned)?,
+        };
+        let verdict = judge_shard(
+            &baseline.accepted_misses,
+            &collect_evidence(&out_root, &surface, &pinned),
+        );
+        for u in &verdict.unmeasured {
+            errors.push(format!(
+                "unmeasured surface file {}: {} — its witnesses were not mutation-tested \
+                 by this run, which is not the same as clean",
+                u.file, u.reason
+            ));
+        }
+        if !verdict.unmeasured.is_empty() {
+            errors.push(format!(
+                "{} of {} surface files in this shard have no finished result under \
+                 cargo-mutants {pinned}; any survivors reported cover only the files that were \
+                 measured",
+                verdict.unmeasured.len(),
+                surface.len()
+            ));
+        }
         for m in &verdict.new_misses {
             errors.push(format!(
                 "new surviving mutant in {}: {} — a claim witness does not detect this change",
@@ -922,6 +956,88 @@ pub fn ratchet(accepted: &[AcceptedMiss], observed: &[Miss]) -> Verdict {
     }
 }
 
+/// What one surface file's cargo-mutants output directory proves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileEvidence {
+    /// The run for this file finished under the pinned mutator and tested
+    /// at least one mutant; these are its survivors.
+    Measured(Vec<Miss>),
+    /// No finished result. `misses` holds any survivors the run reported
+    /// before it stopped: they are real, but they are not the whole file.
+    Unmeasured { reason: String, misses: Vec<Miss> },
+}
+
+/// A surface file with no finished mutation result, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmeasuredFile {
+    pub file: String,
+    pub reason: String,
+}
+
+/// The ratchet over one shard, plus the files it has no result for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ShardVerdict {
+    pub new_misses: Vec<Miss>,
+    pub now_caught: Vec<AcceptedMiss>,
+    pub unmeasured: Vec<UnmeasuredFile>,
+}
+
+/// Judge a shard from the evidence for every file it owns.
+///
+/// The accepted set narrows to the shard's files, or every other package's
+/// entries would read as "now caught" by a shard that never looked at them.
+/// It narrows again for "now caught": an accepted miss in a file with no
+/// finished result was not re-observed, so its absence proves nothing. The
+/// survivors an unfinished file did report still count as observed, so a
+/// new hole found before a timeout is not lost with the rest of the file.
+pub fn judge_shard(accepted: &[AcceptedMiss], evidence: &[(String, FileEvidence)]) -> ShardVerdict {
+    let shard_files: BTreeSet<&str> = evidence.iter().map(|(file, _)| file.as_str()).collect();
+    let measured: BTreeSet<&str> = evidence
+        .iter()
+        .filter(|(_, e)| matches!(e, FileEvidence::Measured(_)))
+        .map(|(file, _)| file.as_str())
+        .collect();
+    let accepted: Vec<AcceptedMiss> = accepted
+        .iter()
+        .filter(|a| shard_files.contains(a.file.as_str()))
+        .cloned()
+        .collect();
+    let verdict = ratchet(&accepted, &observed_misses(evidence));
+    ShardVerdict {
+        new_misses: verdict.new_misses,
+        now_caught: verdict
+            .now_caught
+            .into_iter()
+            .filter(|a| measured.contains(a.file.as_str()))
+            .collect(),
+        unmeasured: evidence
+            .iter()
+            .filter_map(|(file, e)| match e {
+                FileEvidence::Measured(_) => None,
+                FileEvidence::Unmeasured { reason, .. } => Some(UnmeasuredFile {
+                    file: file.clone(),
+                    reason: reason.clone(),
+                }),
+            })
+            .collect(),
+    }
+}
+
+/// Every survivor the evidence reports, finished files or not.
+fn observed_misses(evidence: &[(String, FileEvidence)]) -> Vec<Miss> {
+    let mut all: Vec<Miss> = evidence
+        .iter()
+        .flat_map(|(_, e)| match e {
+            FileEvidence::Measured(misses) | FileEvidence::Unmeasured { misses, .. } => {
+                misses.iter().cloned()
+            }
+        })
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
 fn seed_accepted(misses: &[Miss]) -> Vec<AcceptedMiss> {
     misses
         .iter()
@@ -980,20 +1096,31 @@ pub fn parse_missed(report: &str) -> Vec<Miss> {
     out
 }
 
-/// Run cargo-mutants once per surface file and collect the misses.
+/// Run cargo-mutants once per surface file, returning the directory the
+/// per-file output landed in.
 ///
 /// Scoped per file with `-p <package> --file <path>`: the package scope
 /// keeps each invocation from re-testing the whole workspace, and it is
 /// the stricter question — the owning crate's own tests must catch the
 /// tampering.
-fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Miss>> {
-    ensure_cargo_mutants()?;
+///
+/// Each file's previous output is removed before anything runs, so the
+/// directory only ever holds this run's evidence. Left in place, output
+/// from an earlier run would stand in for a file this one never reached.
+fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile], pinned: &str) -> Result<PathBuf> {
+    ensure_cargo_mutants(pinned)?;
     let out_root = std::env::temp_dir().join("mvm-mutation-witnesses");
     std::fs::create_dir_all(&out_root)
         .with_context(|| format!("creating {}", out_root.display()))?;
+    for file in surface {
+        let stale = file_output_dir(&out_root, &file.path);
+        if stale.exists() {
+            std::fs::remove_dir_all(&stale)
+                .with_context(|| format!("clearing earlier output at {}", stale.display()))?;
+        }
+    }
     let isolation = MutationIsolation::establish(&out_root)?;
 
-    let mut all = Vec::new();
     for (i, file) in surface.iter().enumerate() {
         eprintln!(
             "[{}/{}] mutating {} (package {}, claims {:?})",
@@ -1003,12 +1130,120 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
             file.package,
             file.claims
         );
-        let out_dir = out_root.join(file.path.replace('/', "_"));
-        all.extend(run_mutants_for_file(workspace, file, &out_dir, &isolation)?);
+        let out_dir = file_output_dir(&out_root, &file.path);
+        run_mutants_for_file(workspace, file, &out_dir, &isolation, pinned)?;
     }
-    all.sort();
-    all.dedup();
-    Ok(all)
+    Ok(out_root)
+}
+
+/// Where one surface file's cargo-mutants output lives under a run's root.
+/// The run and every later reading of its output go through this, so the
+/// two cannot disagree about where a file's evidence is.
+fn file_output_dir(out_root: &Path, path: &str) -> PathBuf {
+    out_root.join(path.replace('/', "_"))
+}
+
+/// The evidence for every file in `surface`, in surface order.
+pub fn collect_evidence(
+    out_root: &Path,
+    surface: &[SurfaceFile],
+    pinned: &str,
+) -> Vec<(String, FileEvidence)> {
+    surface
+        .iter()
+        .map(|file| {
+            let dir = file_output_dir(out_root, &file.path);
+            (
+                file.path.clone(),
+                read_file_evidence(&dir, &file.path, pinned),
+            )
+        })
+        .collect()
+}
+
+/// Read what one file's cargo-mutants output directory proves.
+///
+/// Anything short of a finished run under the pinned mutator is
+/// unmeasured, and says which way it fell short: a shard stopped by its
+/// timeout leaves no directory at all for the files it never reached, a
+/// partial `outcomes.json` for the file it was in, and neither may be read
+/// as clean.
+pub fn read_file_evidence(out_dir: &Path, path: &str, pinned: &str) -> FileEvidence {
+    let report = out_dir.join("mutants.out");
+    let unmeasured =
+        |reason: String, misses: Vec<Miss>| FileEvidence::Unmeasured { reason, misses };
+    if !report.is_dir() {
+        return unmeasured(
+            format!(
+                "no cargo-mutants output at {} — the run never reached this file",
+                report.display()
+            ),
+            Vec::new(),
+        );
+    }
+    let missed = report.join("missed.txt");
+    let misses = match std::fs::read_to_string(&missed) {
+        Ok(text) => parse_missed(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return unmeasured(format!("reading {}: {e}", missed.display()), Vec::new());
+        }
+    };
+    let outcomes_path = report.join("outcomes.json");
+    let outcomes = match std::fs::read_to_string(&outcomes_path) {
+        Ok(text) => text,
+        // cargo-mutants writes `outcomes.json` after its first scenario, so
+        // a directory without one stopped before the baseline finished, or
+        // found nothing to mutate. Either way it is the harness that failed
+        // rather than a witness: check the file has anything mutable in it
+        // before looking for missing tests.
+        Err(e) => {
+            return unmeasured(
+                format!(
+                    "cargo-mutants left no readable {} ({e}), so the run for this file did \
+                     not complete — a harness failure, not a witness gap",
+                    outcomes_path.display()
+                ),
+                misses,
+            );
+        }
+    };
+    if let Err(reason) = ensure_recorded_by(&outcomes, pinned) {
+        return unmeasured(reason, misses);
+    }
+    match ensure_mutants_actually_ran(&outcomes, path) {
+        Ok(_) => FileEvidence::Measured(misses),
+        // The error leads with the path for callers that print it alone;
+        // the verdict already names the file.
+        Err(e) => {
+            let text = format!("{e:#}");
+            let reason = text.strip_prefix(&format!("{path}: ")).unwrap_or(&text);
+            unmeasured(reason.to_string(), misses)
+        }
+    }
+}
+
+/// Refuse evidence recorded by a mutator other than the pinned one.
+///
+/// Accepted misses are matched on the description text cargo-mutants
+/// renders, and a release that attributes a mutant to a different
+/// enclosing function renames it. A survivor recorded under another version
+/// can therefore look new when it is accepted, or accepted when it is new.
+fn ensure_recorded_by(outcomes_json: &str, pinned: &str) -> std::result::Result<(), String> {
+    let v: serde_json::Value = serde_json::from_str(outcomes_json).map_err(|e| {
+        format!("outcomes.json does not parse ({e}), so the run did not finish writing it")
+    })?;
+    match v.get("cargo_mutants_version").and_then(|s| s.as_str()) {
+        Some(version) if version == pinned => Ok(()),
+        Some(version) => Err(format!(
+            "recorded by cargo-mutants {version}, but the pin is {pinned}; mutant descriptions \
+             are only comparable to the baseline under the pinned version"
+        )),
+        None => Err(format!(
+            "outcomes.json names no cargo_mutants_version, so it cannot be shown to come from \
+             the pinned cargo-mutants {pinned}"
+        )),
+    }
 }
 
 /// The state roots a mutation run is confined to.
@@ -1087,7 +1322,8 @@ fn run_mutants_for_file(
     file: &SurfaceFile,
     out_dir: &Path,
     isolation: &MutationIsolation,
-) -> Result<Vec<Miss>> {
+    pinned: &str,
+) -> Result<()> {
     let mut cmd = std::process::Command::new("cargo");
     cmd.current_dir(workspace)
         .arg("mutants")
@@ -1121,50 +1357,18 @@ fn run_mutants_for_file(
 
     // Exit status is deliberately not the signal: cargo-mutants exits
     // nonzero merely because mutants survived, which is the case this
-    // gate exists to report. The report files are the signal, and their
-    // absence means the run genuinely failed.
-    let missed = out_dir.join("mutants.out").join("missed.txt");
-    let caught = out_dir.join("mutants.out").join("caught.txt");
-    if !missed.exists() && !caught.exists() {
-        bail!(
-            "cargo mutants produced no report for {} (exit {:?}); expected {} or {}",
+    // gate exists to report. The output directory is the signal, read the
+    // same way here as by `--verify-outcomes`. A file the run could not
+    // measure stops the shard: the next one would most likely fail the same
+    // way, and hours spent confirming that are hours not spent on the fix.
+    match read_file_evidence(out_dir, &file.path, pinned) {
+        FileEvidence::Measured(_) => Ok(()),
+        FileEvidence::Unmeasured { reason, .. } => bail!(
+            "cargo mutants did not measure {} (exit {:?}): {reason}",
             file.path,
-            status.code(),
-            missed.display(),
-            caught.display()
-        );
+            status.code()
+        ),
     }
-    // Both report files exist and are empty when the baseline failed, so
-    // their presence proves nothing. The counts do.
-    let outcomes_path = out_dir.join("mutants.out").join("outcomes.json");
-    if !outcomes_path.exists() {
-        // A partial run: cargo-mutants left the report files but no outcomes.
-        // Say which surface file and what it exited with, because the bare
-        // read error names only a path under a temp directory and reads as a
-        // missing file rather than as a run that did not finish. That cost a
-        // maintainer a search for absent tests when the coverage was fine and
-        // the harness was not.
-        bail!(
-            "cargo mutants wrote no outcomes for {} (exit {:?}); {} is missing \
-             while the report files are present, so the run did not complete. \
-             This is a harness failure, not a witness gap — check whether the \
-             surface file has anything mutable in it before looking for \
-             missing tests.",
-            file.path,
-            status.code(),
-            outcomes_path.display(),
-        );
-    }
-    let outcomes = std::fs::read_to_string(&outcomes_path)
-        .with_context(|| format!("reading {}", outcomes_path.display()))?;
-    ensure_mutants_actually_ran(&outcomes, &file.path)?;
-
-    let report = if missed.exists() {
-        std::fs::read_to_string(&missed).with_context(|| format!("reading {}", missed.display()))?
-    } else {
-        String::new()
-    };
-    Ok(parse_missed(&report))
 }
 
 /// Reject a run that never tested a mutant.
@@ -1235,21 +1439,146 @@ fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
              aborted before mutating anything, or `--file` matched no code."
         );
     }
+    // `total_mutants` counts mutants tested *so far*: cargo-mutants rewrites
+    // the file after every scenario and stamps `end_time` only when the lab
+    // finishes. A run stopped part-way through this file has a real total and
+    // no end.
+    if v.get("end_time").is_none_or(serde_json::Value::is_null) {
+        bail!(
+            "{path}: cargo-mutants stopped after testing {total} mutants and never \
+             recorded finishing (no `end_time`), so it was interrupted part-way through \
+             this file. Its survivors so far are real, but the file is unmeasured, not clean."
+        );
+    }
     Ok(total)
 }
 
-fn ensure_cargo_mutants() -> Result<()> {
-    let ok = std::process::Command::new("cargo")
+/// Refuse to mutate with anything but the pinned cargo-mutants.
+fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
+    let install = format!("`cargo install --locked cargo-mutants@{pinned}`");
+    let output = std::process::Command::new("cargo")
         .args(["mutants", "--version"])
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        bail!("cargo-mutants is not installed — `cargo install cargo-mutants --locked`");
+        .output();
+    let stdout = match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => bail!("cargo-mutants is not installed — {install}"),
+    };
+    match installed_mutator_version(&stdout) {
+        Some(found) if found == pinned => Ok(()),
+        Some(found) => bail!(
+            "cargo-mutants {found} is installed, but [workspace.metadata.mvm.toolchain] pins \
+             {pinned}; the baseline's accepted misses are matched on the descriptions the \
+             pinned version renders — {install}"
+        ),
+        None => bail!(
+            "could not read a version from `cargo mutants --version` ({:?}) — {install}",
+            stdout.trim()
+        ),
     }
-    Ok(())
+}
+
+/// The version from `cargo mutants --version`, which prints
+/// `cargo-mutants 27.1.0`.
+pub fn installed_mutator_version(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("cargo-mutants "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// The cargo-mutants version pinned in the root `Cargo.toml`.
+pub fn pinned_mutator_version(workspace: &Path) -> Result<String> {
+    let manifest = workspace.join("Cargo.toml");
+    let raw = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("reading {}", manifest.display()))?;
+    let doc: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", manifest.display()))?;
+    doc.get("workspace")
+        .and_then(|w| w.get("metadata"))
+        .and_then(|m| m.get("mvm"))
+        .and_then(|m| m.get("toolchain"))
+        .and_then(|t| t.get(MUTATOR_PIN_KEY))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .with_context(|| {
+            format!(
+                "{} has no `{MUTATOR_PIN_KEY}` pin under [workspace.metadata.mvm.toolchain]; \
+                 the mutation baseline is only meaningful against one exact mutator version",
+                manifest.display()
+            )
+        })
+}
+
+/// Every workflow that installs cargo-mutants must install the pinned one.
+pub fn check_mutator_installs_pinned(workspace: &Path, pinned: &str) -> Result<Vec<String>> {
+    let dir = workspace.join(WORKFLOWS_REL);
+    let mut errors = Vec::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .collect();
+    entries.sort();
+    for path in entries {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let name = format!(
+            "{WORKFLOWS_REL}/{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+        );
+        errors.extend(
+            unpinned_mutator_installs(&text, pinned)
+                .into_iter()
+                .map(|e| format!("{name}: {e}")),
+        );
+    }
+    Ok(errors)
+}
+
+/// The `cargo install` lines in one workflow that name cargo-mutants
+/// without the pin.
+///
+/// A version is required on every such line. A literal must equal the pin;
+/// a variable is accepted, because the lane reads it from the same manifest
+/// entry and the run refuses any other installed version.
+pub fn unpinned_mutator_installs(workflow: &str, pinned: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (i, line) in workflow.lines().enumerate() {
+        if !line.contains("cargo install") {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let word = word.trim_matches(|c| c == '"' || c == '\'');
+            let Some(rest) = word.strip_prefix("cargo-mutants") else {
+                continue;
+            };
+            match rest.strip_prefix('@') {
+                None if rest.is_empty() => errors.push(format!(
+                    "line {}: installs cargo-mutants unpinned; install `cargo-mutants@{pinned}`",
+                    i + 1
+                )),
+                None => {}
+                Some(version) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+                    if version != pinned {
+                        errors.push(format!(
+                            "line {}: installs cargo-mutants@{version}, but \
+                             [workspace.metadata.mvm.toolchain] pins {pinned}",
+                            i + 1
+                        ));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    errors
 }
 
 // ---------------------------------------------------------------------
@@ -2218,7 +2547,8 @@ mod baseline_guard_tests {
   "missed": 0,
   "caught": 17,
   "timeout": 0,
-  "unviable": 0
+  "unviable": 0,
+  "end_time": "2026-09-24T05:29:14.1841255Z"
 }"#;
 
     /// Verbatim shape observed running this gate's own surface over
@@ -2330,11 +2660,314 @@ mod baseline_guard_tests {
   "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
   "total_mutants": 33,
   "missed": 2,
-  "caught": 31
+  "caught": 31,
+  "end_time": "2026-09-24T05:29:14.1841255Z"
 }"#;
         assert_eq!(
             ensure_mutants_actually_ran(json, "crates/x/src/y.rs").unwrap(),
             33
+        );
+    }
+
+    /// cargo-mutants rewrites `outcomes.json` after every mutant, so a run
+    /// stopped part-way through a file leaves a healthy baseline and a real
+    /// running total. Only the missing `end_time` says it never finished.
+    #[test]
+    fn a_run_interrupted_part_way_through_a_file_is_unmeasured() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
+  "total_mutants": 12,
+  "missed": 0,
+  "caught": 12,
+  "end_time": null
+}"#;
+        let err = ensure_mutants_actually_ran(json, "crates/x/src/y.rs")
+            .expect_err("a run that never finished is not a clean file");
+        let msg = err.to_string();
+        assert!(msg.contains("end_time"), "{msg}");
+        assert!(msg.contains("unmeasured"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    const PIN: &str = "27.1.0";
+
+    fn surface_file(path: &str) -> SurfaceFile {
+        SurfaceFile {
+            path: path.to_string(),
+            package: "mvm-cli".to_string(),
+            claims: vec![20],
+            scope: None,
+            features: Vec::new(),
+        }
+    }
+
+    /// The shape cargo-mutants writes, trimmed to the fields the gate reads.
+    fn outcomes(version: &str, finished: bool, tested: u64) -> String {
+        let end = if finished {
+            r#""2026-09-24T05:29:14.1841255Z""#
+        } else {
+            "null"
+        };
+        format!(
+            r#"{{
+  "outcomes": [{{"scenario": "Baseline", "summary": "Success"}}],
+  "total_mutants": {tested},
+  "missed": 0,
+  "caught": {tested},
+  "start_time": "2026-09-24T04:44:12.7668693Z",
+  "end_time": {end},
+  "cargo_mutants_version": "{version}"
+}}"#
+        )
+    }
+
+    /// Lay out one file's output exactly where a run puts it.
+    fn write_output(root: &Path, path: &str, outcomes_json: &str, missed: &str) {
+        let report = file_output_dir(root, path).join("mutants.out");
+        std::fs::create_dir_all(&report).unwrap();
+        std::fs::write(report.join("outcomes.json"), outcomes_json).unwrap();
+        std::fs::write(report.join("missed.txt"), missed).unwrap();
+        std::fs::write(report.join("caught.txt"), "").unwrap();
+    }
+
+    const SHARD: [&str; 3] = [
+        "crates/mvm-cli/src/commands/env/artifact_verify.rs",
+        "crates/mvm-cli/src/commands/vm/audit_chain.rs",
+        "crates/mvm-cli/src/update.rs",
+    ];
+
+    fn shard() -> Vec<SurfaceFile> {
+        SHARD.iter().map(|p| surface_file(p)).collect()
+    }
+
+    fn judge(root: &Path, accepted: &[AcceptedMiss]) -> ShardVerdict {
+        judge_shard(accepted, &collect_evidence(root, &shard(), PIN))
+    }
+
+    /// A shard its timeout stopped leaves no directory at all for the files
+    /// it never reached. Those must fail by name, as unmeasured rather than
+    /// as survivors, while the files it did reach are judged normally.
+    #[test]
+    fn a_truncated_shard_fails_its_unreached_tail_as_unmeasured() {
+        let root = tempfile::tempdir().unwrap();
+        write_output(root.path(), SHARD[0], &outcomes(PIN, true, 17), "");
+        write_output(root.path(), SHARD[1], &outcomes(PIN, true, 9), "");
+
+        let verdict = judge(root.path(), &[]);
+        assert_eq!(
+            verdict
+                .unmeasured
+                .iter()
+                .map(|u| u.file.as_str())
+                .collect::<Vec<_>>(),
+            vec![SHARD[2]]
+        );
+        assert!(
+            verdict.unmeasured[0].reason.contains("never reached"),
+            "{}",
+            verdict.unmeasured[0].reason
+        );
+        assert!(verdict.new_misses.is_empty(), "{:?}", verdict.new_misses);
+    }
+
+    /// The healthy case must stay green: every file finished under the pin,
+    /// and the only survivor is an accepted one.
+    #[test]
+    fn a_complete_shard_passes() {
+        let root = tempfile::tempdir().unwrap();
+        write_output(root.path(), SHARD[0], &outcomes(PIN, true, 5), "");
+        write_output(root.path(), SHARD[1], &outcomes(PIN, true, 5), "");
+        write_output(
+            root.path(),
+            SHARD[2],
+            &outcomes(PIN, true, 5),
+            "crates/mvm-cli/src/update.rs:88:9: replace < with <= in install_announcement\n",
+        );
+        let accepted = [AcceptedMiss {
+            file: SHARD[2].to_string(),
+            mutant: "replace < with <= in install_announcement".to_string(),
+            reason: "equivalent".to_string(),
+        }];
+        assert_eq!(judge(root.path(), &accepted), ShardVerdict::default());
+    }
+
+    /// The file a shard was in when it stopped has a partial report: its
+    /// survivors so far are real and must still count, but the file is
+    /// unmeasured.
+    #[test]
+    fn the_file_a_shard_stopped_in_is_unmeasured_but_its_survivors_count() {
+        let root = tempfile::tempdir().unwrap();
+        write_output(root.path(), SHARD[0], &outcomes(PIN, true, 17), "");
+        write_output(root.path(), SHARD[1], &outcomes(PIN, true, 9), "");
+        write_output(
+            root.path(),
+            SHARD[2],
+            &outcomes(PIN, false, 4),
+            "crates/mvm-cli/src/update.rs:12:5: replace verify -> bool with true\n",
+        );
+
+        let verdict = judge(root.path(), &[]);
+        assert_eq!(verdict.unmeasured.len(), 1);
+        assert_eq!(verdict.unmeasured[0].file, SHARD[2]);
+        assert!(
+            verdict.unmeasured[0].reason.contains("end_time"),
+            "{}",
+            verdict.unmeasured[0].reason
+        );
+        assert_eq!(
+            verdict.new_misses,
+            vec![Miss {
+                file: SHARD[2].to_string(),
+                mutant: "replace verify -> bool with true".to_string(),
+            }]
+        );
+    }
+
+    /// An accepted miss in a file the shard never measured was not
+    /// re-observed, so its absence is not evidence that it is now caught.
+    #[test]
+    fn an_accepted_miss_in_an_unmeasured_file_is_not_reported_as_caught() {
+        let root = tempfile::tempdir().unwrap();
+        write_output(root.path(), SHARD[0], &outcomes(PIN, true, 17), "");
+        write_output(root.path(), SHARD[1], &outcomes(PIN, true, 9), "");
+        let accepted = [AcceptedMiss {
+            file: SHARD[2].to_string(),
+            mutant: "replace < with <= in install_announcement".to_string(),
+            reason: "equivalent".to_string(),
+        }];
+        let verdict = judge(root.path(), &accepted);
+        assert!(verdict.now_caught.is_empty(), "{:?}", verdict.now_caught);
+        assert_eq!(verdict.unmeasured.len(), 1);
+    }
+
+    /// Output recorded by another cargo-mutants release renders descriptions
+    /// the baseline cannot be compared against.
+    #[test]
+    fn output_from_another_mutator_version_is_unmeasured() {
+        let root = tempfile::tempdir().unwrap();
+        for path in SHARD {
+            write_output(root.path(), path, &outcomes(PIN, true, 5), "");
+        }
+        write_output(root.path(), SHARD[1], &outcomes("27.2.0", true, 5), "");
+        let verdict = judge(root.path(), &[]);
+        assert_eq!(verdict.unmeasured.len(), 1);
+        let reason = &verdict.unmeasured[0].reason;
+        assert!(
+            reason.contains("27.2.0") && reason.contains(PIN),
+            "{reason}"
+        );
+    }
+
+    /// Verbatim from the 2026-09-22 nightly: the mvm-cli shard's first file,
+    /// where the baseline failed and the run stopped before mutating.
+    #[test]
+    fn a_failed_baseline_on_disk_is_unmeasured() {
+        let root = tempfile::tempdir().unwrap();
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Failure", "log_path": "log/baseline.log"}],
+  "total_mutants": 0, "missed": 0, "caught": 0, "timeout": 0, "unviable": 0, "success": 0,
+  "start_time": "2026-09-22T05:27:34.397291115Z",
+  "end_time": "2026-09-22T05:31:08.35826663Z",
+  "cargo_mutants_version": "27.1.0"
+}"#;
+        write_output(root.path(), SHARD[0], json, "");
+        let evidence = read_file_evidence(&file_output_dir(root.path(), SHARD[0]), SHARD[0], PIN);
+        let FileEvidence::Unmeasured { reason, .. } = evidence else {
+            panic!("a failed baseline measured nothing: {evidence:?}");
+        };
+        assert!(reason.contains("Failure"), "{reason}");
+    }
+
+    #[test]
+    fn a_directory_with_no_outcomes_is_unmeasured() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = file_output_dir(root.path(), SHARD[0]);
+        std::fs::create_dir_all(dir.join("mutants.out")).unwrap();
+        assert!(matches!(
+            read_file_evidence(&dir, SHARD[0], PIN),
+            FileEvidence::Unmeasured { .. }
+        ));
+    }
+
+    #[test]
+    fn the_installed_mutator_version_is_read_from_its_version_line() {
+        assert_eq!(
+            installed_mutator_version("cargo-mutants 27.1.0\n"),
+            Some("27.1.0")
+        );
+        assert_eq!(installed_mutator_version("something else\n"), None);
+        assert_eq!(installed_mutator_version("cargo-mutants \n"), None);
+    }
+
+    #[test]
+    fn the_mutator_pin_is_read_from_workspace_toolchain_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.metadata.mvm.toolchain]\nrust = \"1.91.1\"\ncargo-mutants = \"27.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(pinned_mutator_version(dir.path()).unwrap(), "27.1.0");
+
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.metadata.mvm.toolchain]\nrust = \"1.91.1\"\n",
+        )
+        .unwrap();
+        let err = pinned_mutator_version(dir.path()).expect_err("no pin is an error");
+        assert!(err.to_string().contains("cargo-mutants"), "{err}");
+    }
+
+    /// The workspace itself carries the pin, so the lane and the gate have
+    /// one version to agree on.
+    #[test]
+    fn the_workspace_pins_an_exact_mutator_version() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let pinned = pinned_mutator_version(&workspace).unwrap();
+        assert!(
+            pinned.split('.').count() == 3 && pinned.split('.').all(|p| p.parse::<u32>().is_ok()),
+            "the cargo-mutants pin must be an exact X.Y.Z version, got {pinned:?}"
+        );
+        assert_eq!(
+            check_mutator_installs_pinned(&workspace, &pinned).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_unpinned_mutator_install_is_reported() {
+        let errors = unpinned_mutator_installs(
+            "        run: cargo install --locked cargo-mutants cargo-nextest\n",
+            PIN,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("unpinned"), "{errors:?}");
+    }
+
+    #[test]
+    fn a_literal_mutator_version_must_match_the_pin() {
+        assert!(
+            unpinned_mutator_installs("cargo install --locked cargo-mutants@27.1.0\n", PIN)
+                .is_empty()
+        );
+        let errors =
+            unpinned_mutator_installs("cargo install --locked cargo-mutants@27.0.0\n", PIN);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("27.0.0"), "{errors:?}");
+    }
+
+    #[test]
+    fn a_mutator_version_read_from_the_manifest_is_accepted() {
+        assert!(
+            unpinned_mutator_installs(
+                r#"cargo install --locked "cargo-mutants@${CARGO_MUTANTS_VERSION}" cargo-nextest"#,
+                PIN
+            )
+            .is_empty()
         );
     }
 }

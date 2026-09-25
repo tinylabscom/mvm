@@ -737,6 +737,17 @@ cargo-zigbuild = "0.23.0"
 # into one actionable line. This is a known-good floor, not a bisected minimum.
 nextest-min = "0.9.143"
 
+# The mutator behind `check-mutation-witnesses --run`. An exact pin, not a
+# floor: accepted misses in xtask/mutation-witness-baseline.json are matched
+# on cargo-mutants' own description text, and a release that attributes a
+# mutant to a different enclosing function renames it. Unpinned, one upstream
+# release can turn a baselined equivalent mutant into a "new" survivor, or
+# make a real one look already accepted. Bump deliberately, together with any
+# baseline descriptions the new version renders differently. The nightly lane
+# installs this version, and the gate refuses both a different installed
+# mutator and outcomes recorded by one.
+cargo-mutants = "27.1.0"
+
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the
 # local builder/Stage 0 VM is always same-arch as the host). Plan 164.

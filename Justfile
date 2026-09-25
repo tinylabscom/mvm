@@ -672,7 +672,9 @@ mutation-surface:
 
 # Mutate the claim surface and ratchet survivors against the baseline.
 # HOURS: this is the nightly lane's command, not an inner-loop check.
-# Needs `cargo install cargo-mutants cargo-nextest`.
+# Needs cargo-nextest and the exact cargo-mutants pinned under
+# [workspace.metadata.mvm.toolchain] in Cargo.toml — the run refuses any other,
+# because accepted misses are matched on the text that version renders.
 #
 # No isolation wrapper here on purpose. `--run` executes security code with
 # its check removed, so it must not reach a real mvm state root — and that
