@@ -9,7 +9,7 @@ static ACTIVE_STAGE0_BUILDS: std::sync::atomic::AtomicUsize =
 /// exactly what was interrupted without probing another process's lock.
 #[cfg(any(feature = "builder-vm", test))]
 pub(super) struct Stage0LockGuard {
-    _lock: mvm_core::atomic_io::FileLock,
+    _lock: std::fs::File,
 }
 
 #[cfg(any(feature = "builder-vm", test))]
@@ -88,48 +88,73 @@ pub(super) fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
     truncated
 }
 
-/// RAII advisory lock at
-/// `~/.mvm/cache/builder-vm/stage0.lock` (one directory above the
-/// per-arch cache). `try_acquire` is non-blocking, so a concurrent
-/// invocation bails fast with a clear message instead of silently
-/// queuing for minutes behind a libkrun-builder VM that's already
-/// busy holding the shared `nix-store-<arch>.img` volume.
+/// RAII advisory lock at `<cache parent>/stage0.lock` (for the builder image,
+/// `~/.mvm/cache/builder-vm/stage0.lock`), naming what it guards as `what`.
+///
+/// A second caller wants the same artifact the holder is producing, so it
+/// queues behind a live holder with a status line naming it, rather than
+/// failing and asking for a retry. A holder that died released its `flock`
+/// with it, so a crashed build never needs its lock file deleted. Callers
+/// re-check their cache after this returns: the holder they waited on may
+/// have produced exactly what they came for.
 ///
 /// `out_dir` is the per-arch cache dir (e.g. `.../builder-vm/aarch64`);
-/// the lock anchor is its sibling `stage0` (so `FileLock::try_acquire`
-/// produces `stage0.lock`).
+/// the lock file is its sibling `stage0.lock`.
 #[cfg(any(feature = "builder-vm", test))]
-pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<Stage0LockGuard> {
-    let lock = lock_builder_vm_cache(std::path::Path::new(out_dir))?;
+pub(super) fn acquire_stage0_lock(out_dir: &str, what: &str) -> Result<Stage0LockGuard> {
+    acquire_stage0_lock_within(out_dir, what, stage0_lock_wait())
+}
+
+/// [`acquire_stage0_lock`] with an explicit wait budget, so tests can drive
+/// both the queueing and the refusal without the production hour.
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) fn acquire_stage0_lock_within(
+    out_dir: &str,
+    what: &str,
+    wait: mvm_build::builder_vm_runtime::LockWait,
+) -> Result<Stage0LockGuard> {
+    let lock = lock_builder_vm_cache(std::path::Path::new(out_dir), what, wait)?;
     ACTIVE_STAGE0_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Ok(Stage0LockGuard { _lock: lock })
+}
+
+/// What the per-arch builder VM cache lock guards, as a waiting line names it.
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
+pub(super) const BUILDER_VM_CACHE_LOCK_SUBJECT: &str = "the builder VM image";
+
+/// How long a Stage 0 caller queues. `mvm-build`'s own test build flips its
+/// default to fail-fast, but that flip does not reach this crate's tests, so
+/// the same choice is made here: a test never waits out the production hour.
+#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
+fn stage0_lock_wait() -> mvm_build::builder_vm_runtime::LockWait {
+    if cfg!(test) {
+        mvm_build::builder_vm_runtime::LockWait::none()
+    } else {
+        mvm_build::builder_vm_runtime::LockWait::from_env()
+    }
 }
 
 /// The advisory lock every writer of a per-arch builder VM cache holds. A
 /// published-image fetch takes it without [`acquire_stage0_lock`]'s in-process
 /// count, so an interrupted download is not reported as an interrupted build.
 #[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
-fn lock_builder_vm_cache(out_dir: &std::path::Path) -> Result<mvm_core::atomic_io::FileLock> {
-    use mvm_core::atomic_io::FileLock;
-
+fn lock_builder_vm_cache(
+    out_dir: &std::path::Path,
+    what: &str,
+    wait: mvm_build::builder_vm_runtime::LockWait,
+) -> Result<std::fs::File> {
     let parent = out_dir.parent().ok_or_else(|| {
         anyhow::anyhow!("builder VM cache path has no parent: {}", out_dir.display())
     })?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating builder-vm cache parent {}", parent.display()))?;
-    let lock_anchor = parent.join("stage0");
-
-    match FileLock::try_acquire(&lock_anchor) {
-        Ok(Some(guard)) => Ok(guard),
-        Ok(None) => anyhow::bail!(
-            "another caller of Stage 0 is already bootstrapping the \
-             builder VM image on this host (lock held at {}.lock). Wait for it to finish, or — \
-             only if you are sure no other invocation is running, e.g. after a crash — delete the \
-             lock file and retry.",
-            lock_anchor.display()
-        ),
-        Err(e) => Err(e.context("acquiring Stage 0 advisory lock")),
-    }
+    let subject = mvm_build::builder_vm_runtime::LockSubject {
+        what,
+        remedy: "or stop the process holding it if it is stuck — a holder that exits for \
+                 any reason, a crash included, releases the lock by itself",
+    };
+    mvm_build::builder_vm_runtime::acquire_lock_waiting(&parent.join("stage0.lock"), &subject, wait)
+        .context("acquiring the Stage 0 lock")
 }
 
 /// Remove incomplete Stage 0 directories belonging to one final cache
@@ -1064,7 +1089,8 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     refuse_foreign_builder_vm_arch(arch)?;
     let arch = arch.parse::<mvm_core::arch::GuestArch>()?;
     let cache_dir = std::path::Path::new(cache_dir);
-    let _lock = lock_builder_vm_cache(cache_dir)?;
+    let _lock =
+        lock_builder_vm_cache(cache_dir, BUILDER_VM_CACHE_LOCK_SUBJECT, stage0_lock_wait())?;
     sweep_stage0_staging_siblings(cache_dir)?;
     let staging = unique_builder_vm_stage0_staging_dir(cache_dir)?;
     let outcome = stage_locked_builder_vm_image(arch, &staging).and_then(|tag| {
@@ -1152,7 +1178,8 @@ pub(super) fn fetch_builder_vm_image(
 ) -> Result<()> {
     refuse_foreign_builder_vm_arch(arch)?;
     let names = builder_vm_artifact_names(arch);
-    let _lock = lock_builder_vm_cache(cache_dir)?;
+    let _lock =
+        lock_builder_vm_cache(cache_dir, BUILDER_VM_CACHE_LOCK_SUBJECT, stage0_lock_wait())?;
     sweep_stage0_staging_siblings(cache_dir)?;
 
     let files = names.cache_files();

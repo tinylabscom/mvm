@@ -548,10 +548,7 @@ pub fn resolve_or_build_guest_binaries(
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
-    let _build_lock = mvm_core::util::atomic_io::FileLock::acquire(&layout.dir.join("build"))
-        .map_err(|e| GuestAgentBuildError::BuildFailed {
-            reason: format!("acquire guest runtime build lock: {e:#}"),
-        })?;
+    let _build_lock = acquire_guest_build_lock(&layout.dir, "the guest runtime build")?;
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
@@ -649,10 +646,7 @@ pub fn resolve_or_build_runtime_overlay_guest_binaries(
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
-    let _build_lock = mvm_core::util::atomic_io::FileLock::acquire(&layout.dir.join("build"))
-        .map_err(|e| GuestAgentBuildError::BuildFailed {
-            reason: format!("acquire runtime overlay guest build lock: {e:#}"),
-        })?;
+    let _build_lock = acquire_guest_build_lock(&layout.dir, "the runtime overlay guest build")?;
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
@@ -885,6 +879,28 @@ fn zigbuild_cache_dir(target_dir: &Path) -> PathBuf {
 
 fn zig_global_cache_dir(target_dir: &Path) -> PathBuf {
     scoped_tool_cache_dir("zig", target_dir)
+}
+
+/// Serialize builds of one cache entry across processes. Another `mvmctl`
+/// compiling the same entry is producing exactly what this one needs, so the
+/// caller queues behind it with a status line naming it, then re-checks the
+/// entry before building anything itself.
+fn acquire_guest_build_lock(
+    layout_dir: &Path,
+    what: &str,
+) -> Result<std::fs::File, GuestAgentBuildError> {
+    let subject = crate::builder_vm_runtime::LockSubject {
+        what,
+        remedy: "or stop the process holding it if it is stuck",
+    };
+    crate::builder_vm_runtime::acquire_lock_waiting(
+        &layout_dir.join("build.lock"),
+        &subject,
+        crate::builder_vm_runtime::LockWait::from_env(),
+    )
+    .map_err(|e| GuestAgentBuildError::BuildFailed {
+        reason: format!("acquire {what} lock: {e}"),
+    })
 }
 
 fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {

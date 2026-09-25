@@ -102,21 +102,19 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             {
                 return Ok(());
             }
-            mvm_runtime::ui::notice(COLD_SOURCE_RUNTIME_NOTICE);
-            let started = std::time::Instant::now();
-            let spinner = mvm_runtime::ui::spinner("Compiling guest runtime from local sources…");
-            let result = mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
+            // Status goes to stderr: stdout belongs to the workload's own output.
+            mvm_runtime::ui::activity::println_above(&format!(
+                "[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"
+            ));
+            let phase =
+                mvm_runtime::ui::activity::start("Compiling the guest runtime from local sources");
+            mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
                 oci_cache_root,
                 &cache_key,
                 arch,
                 &workspace_root,
-            );
-            spinner.finish_and_clear();
-            result?;
-            mvm_runtime::ui::notice(&format!(
-                "Guest runtime ready ({:.1}s; cached for this checkout).",
-                started.elapsed().as_secs_f64()
-            ));
+            )?;
+            phase.finish();
             return Ok(());
         }
         mvm_build::guest_agent_build::GuestBinarySource::EmbeddedVersion { cache_key } => {
@@ -135,8 +133,8 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
         )
     })?;
 
-    mvm_runtime::ui::notice(
-        "Preparing published guest runtime (first use; downloaded and cached afterward)…",
+    let phase = mvm_runtime::ui::activity::start(
+        "Preparing the published guest runtime (first use; downloaded and cached afterward)",
     );
     acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
         cache_root,
@@ -144,6 +142,7 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
         arch,
         source_checkout_root: None,
     })?;
+    phase.finish();
     if mvm_build::guest_agent_build::cached_guest_binaries(oci_cache_root, version, arch).is_none()
     {
         anyhow::bail!(

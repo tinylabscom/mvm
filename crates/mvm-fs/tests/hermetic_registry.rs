@@ -777,6 +777,56 @@ async fn fetch_and_unpack_layer_streams_and_caches_blob() {
 }
 
 #[tokio::test]
+async fn a_progress_counter_sees_every_body_byte_of_both_fetch_paths() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = gzip_tar_layer(&[("hello.txt", b"world")]);
+    let layer_digest = reg
+        .register_blob("library/test", LAYER_MEDIA, &layer_bytes)
+        .await;
+    let layer = LayerDescriptor {
+        digest: layer_digest,
+        size: layer_bytes.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let fetcher = OciLayerFetcher::with_config(
+        client_config_for(&reg),
+        LayerFetchOptions::builder()
+            .progress(std::sync::Arc::clone(&progress))
+            .build(),
+    );
+    let image = reg.image_ref("library/test", "v1");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+
+    fetcher
+        .fetch_and_unpack_layer(
+            &image,
+            &layer,
+            &tmp.path().join("layer.tar.gz"),
+            &unpacked,
+            &UnpackOptions::default(),
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .expect("fetch and unpack");
+    let size = layer_bytes.len() as u64;
+    assert_eq!(progress.load(std::sync::atomic::Ordering::Relaxed), size);
+
+    let mut sink = Vec::new();
+    fetcher
+        .fetch_layer(&image, &layer, &mut sink)
+        .await
+        .expect("fetch");
+    assert_eq!(
+        progress.load(std::sync::atomic::Ordering::Relaxed),
+        2 * size,
+        "the counter accumulates across fetches"
+    );
+}
+
+#[tokio::test]
 async fn verify_and_unpack_layer_file_streams_cache_hit() {
     let reg = HermeticRegistry::start().await;
     let layer_bytes = gzip_tar_layer(&[("cached.txt", b"from-cache")]);

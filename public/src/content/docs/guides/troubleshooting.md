@@ -34,8 +34,18 @@ is not a reset: `env uninstall` removes `mvmctl` itself.
 
 The shared Nix store image is locked to one writer at a time. A second
 `mvmctl machine build` now queues instead of failing, waiting up to
-`MVM_BUILDER_LOCK_WAIT_SECS` (default `3600`). The wait message names the
-process that holds the lock.
+`MVM_BUILDER_LOCK_WAIT_SECS` (default `3600`). The same applies to the Stage 0
+locks (the builder image, the workload kernel, the SDK sidecar) and the guest
+runtime build locks: a second `mvmctl` that needs the artifact another one is
+producing waits for it, then reuses it. The status line names the holder:
+
+```text
+[mvm] waiting for the builder VM image — held by pid 4242 (`mvmctl machine build --flake .`) since 14:02:11…
+```
+
+There is never a lock file to delete. The locks are `flock(2)` locks, which
+the kernel releases when the holding process exits, crash included; the next
+waiter takes the lock over on its own.
 
 **Fix**: wait, or reduce the wait budget:
 

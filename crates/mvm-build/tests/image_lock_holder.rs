@@ -160,3 +160,108 @@ fn store_image_lock_survives_holder_starter_exit() {
         "sidecar must be unlocked after helper exits"
     );
 }
+
+#[test]
+fn a_waiter_reclaims_the_lock_when_its_holder_dies() {
+    // The holder is a separate process that never releases the lock on its
+    // own. Killing it is the crash case: the waiter must pick the lock up by
+    // itself, with no lock file for anyone to delete.
+    let scratch = tempfile::TempDir::new().expect("tempdir");
+    let lock_path = scratch.path().join("stage0.lock");
+    std::fs::write(&lock_path, b"").expect("create lock file");
+    let mut holder = spawn_holder(&lock_path);
+    assert!(!try_lock(&lock_path), "the helper must hold the lock");
+
+    let killer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        holder.kill().expect("kill the holder");
+        holder.wait().expect("reap the holder");
+    });
+
+    let subject = mvm_build::builder_vm_runtime::LockSubject {
+        what: "the test lock",
+        remedy: "or give up",
+    };
+    let started = Instant::now();
+    let acquired = mvm_build::builder_vm_runtime::acquire_lock_waiting(
+        &lock_path,
+        &subject,
+        mvm_build::builder_vm_runtime::LockWait::of(Duration::from_secs(30)),
+    )
+    .expect("a dead holder's lock must be reclaimed by the waiter");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "the waiter must have queued behind the live holder first"
+    );
+    killer.join().expect("killer thread");
+    drop(acquired);
+}
+
+/// Set on the child process [`lock_wait_status_goes_to_stderr_and_stdout_stays_clean`]
+/// spawns, naming the lock the child should wait on.
+const WAIT_CHILD_ENV: &str = "MVM_TEST_LOCK_WAIT_CHILD";
+
+/// The waiting half of the stdout/stderr split test, run in a child process
+/// so its output streams can be captured. A no-op in an ordinary test run.
+#[test]
+fn lock_wait_child_waits_on_the_named_lock() {
+    let Some(lock_path) = std::env::var_os(WAIT_CHILD_ENV) else {
+        return;
+    };
+    let subject = mvm_build::builder_vm_runtime::LockSubject {
+        what: "the test lock",
+        remedy: "or give up",
+    };
+    let held = mvm_build::builder_vm_runtime::acquire_lock_waiting(
+        Path::new(&lock_path),
+        &subject,
+        mvm_build::builder_vm_runtime::LockWait::of(Duration::from_secs(30)),
+    )
+    .expect("the child must get the lock once its holder dies");
+    drop(held);
+}
+
+#[test]
+fn lock_wait_status_goes_to_stderr_and_stdout_stays_clean() {
+    // A command that prints JSON on stdout can block on a lock; the waiting
+    // line must not end up inside the JSON a caller parses.
+    let scratch = tempfile::TempDir::new().expect("tempdir");
+    let lock_path = scratch.path().join("stage0.lock");
+    std::fs::write(&lock_path, b"").expect("create lock file");
+    let mut holder = spawn_holder(&lock_path);
+
+    let child = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "lock_wait_child_waits_on_the_named_lock",
+            "--nocapture",
+        ])
+        .env(WAIT_CHILD_ENV, &lock_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the waiting child");
+
+    // Long enough for the wait to be announced, which happens at two seconds.
+    std::thread::sleep(Duration::from_millis(3500));
+    holder.kill().expect("kill the holder");
+    holder.wait().expect("reap the holder");
+
+    let output = child.wait_with_output().expect("wait for the child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "child failed: {stderr}");
+    assert!(
+        stderr.contains("[mvm] waiting for the test lock — held by"),
+        "the wait must be announced on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("— done in"),
+        "an announced wait ends with a done line: {stderr}"
+    );
+    assert!(
+        !stdout.contains("[mvm]") && !stdout.contains("waiting for"),
+        "status must never reach stdout: {stdout}"
+    );
+}
