@@ -35,7 +35,9 @@ if [ "${1:-}" = "--check" ]; then
   CHECK=1
   shift
 fi
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
+fi
 REQUESTED="$1"
 INSTALLER="${2:-$(cd "$(dirname "$0")/.." && pwd -P)/install.sh}"
 
