@@ -647,7 +647,12 @@ SUITE_STARTED=""
 # the lane differently, and the launch still runs — it cold-boots instead of
 # claiming a standby. The skip stays counted and its reason names the tracking
 # issue, so the coverage that was not taken is visible rather than absent.
-ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim"
+#
+# `needs-destructive-lab-opt-in` is a declared risk ceiling, not a capability:
+# the scenario it guards detonates a real exploit inside a guest and runs only
+# on a throwaway lab host that opts in with MVM_BDD_DESTRUCTIVE_LAB=1. A release
+# runner must never be that host, so opting this lane in would be the failure.
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim,needs-destructive-lab-opt-in"
 
 # `needs-firecracker` is deliberately intolerable above, and stays that way on
 # the lane that runs Firecracker. On macOS there is no `/dev/kvm` and no
