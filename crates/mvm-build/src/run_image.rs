@@ -229,7 +229,7 @@ fn take_lock_with_wait(
         "another run is materializing this image; waiting for it"
     );
     let waiting = mvm_vmm::host::ui::activity::start(format!(
-        "waiting for another mvmctl materializing the same image ({})",
+        "waiting for another process materializing the same image ({})",
         path.display()
     ));
     on_wait();

@@ -891,7 +891,7 @@ fn acquire_guest_build_lock(
 ) -> Result<std::fs::File, GuestAgentBuildError> {
     let subject = crate::builder_vm_runtime::LockSubject {
         what,
-        remedy: "or stop the other mvmctl if it is stuck",
+        remedy: "or stop the process holding it if it is stuck",
     };
     crate::builder_vm_runtime::acquire_lock_waiting(
         &layout_dir.join("build.lock"),

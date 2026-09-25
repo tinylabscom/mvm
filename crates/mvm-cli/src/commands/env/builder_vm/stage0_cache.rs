@@ -150,7 +150,7 @@ fn lock_builder_vm_cache(
         .with_context(|| format!("creating builder-vm cache parent {}", parent.display()))?;
     let subject = mvm_build::builder_vm_runtime::LockSubject {
         what,
-        remedy: "or stop the other mvmctl if it is stuck — a holder that exits for \
+        remedy: "or stop the process holding it if it is stuck — a holder that exits for \
                  any reason, a crash included, releases the lock by itself",
     };
     mvm_build::builder_vm_runtime::acquire_lock_waiting(&parent.join("stage0.lock"), &subject, wait)
