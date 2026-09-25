@@ -333,6 +333,8 @@ fn pull_image_ref(
         .build()
         .context("build Tokio runtime for OCI pull")?;
 
+    let pull = mvm_runtime::ui::activity::start(format!("Pulling {supplied_reference}"));
+    pull.set_detail("resolving the manifest");
     let manifest_fetcher = OciManifestFetcher::with_auth(registry_auth.auth);
     let manifest = runtime
         .block_on(
@@ -368,8 +370,18 @@ fn pull_image_ref(
         &image_ref,
         &manifest.bytes,
     )?;
-    let layer_fetcher =
-        OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
+    let received = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total: u64 = layers.iter().map(|layer| layer.size).sum();
+    let tracked = std::sync::Arc::clone(&received);
+    pull.track(move || {
+        pull_progress_detail(tracked.load(std::sync::atomic::Ordering::Relaxed), total)
+    });
+    let layer_fetcher = OciLayerFetcher::from_manifest_fetcher(
+        &manifest_fetcher,
+        LayerFetchOptions::builder()
+            .progress(std::sync::Arc::clone(&received))
+            .build(),
+    );
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
     // Another run of this image may be injecting into or copying from the
     // tree this is about to remove. Released before materializing, which
@@ -386,6 +398,7 @@ fn pull_image_ref(
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
     let mut owners = mvm_fs::ownership::OwnerTable::new();
+    let mut completed_bytes = 0u64;
     for layer in &layers {
         let report = fetch_or_unpack_layer(
             cache_root,
@@ -397,6 +410,10 @@ fn pull_image_ref(
             &prior_layer_paths,
         )
         .with_context(|| format!("layer {}", layer.digest))?;
+        // A layer answered from the blob cache moved no bytes; count it as
+        // done so the progress still reaches the total.
+        completed_bytes = completed_bytes.saturating_add(layer.size);
+        received.fetch_max(completed_bytes, std::sync::atomic::Ordering::Relaxed);
         owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
@@ -407,6 +424,7 @@ fn pull_image_ref(
         });
     }
 
+    pull.finish();
     let runtime_tag = oci_runtime_tag(cache_root);
     let rootfs_path = super::materialize::oci_rootfs_rel(&manifest.digest, &runtime_tag, prod)?;
     let rootfs_abs = cache_root.join(&rootfs_path);
@@ -501,6 +519,21 @@ fn pull_image_ref(
     };
     super::cache::upsert_cached_image(cache_root, cached.clone())?;
     Ok((cached, trust, registry_auth.source))
+}
+
+/// `12.3 MiB of 45.6 MiB (27%)` — the pull line's detail while layers stream.
+fn pull_progress_detail(received: u64, total: u64) -> String {
+    use mvm_core::domain::pool::format_bytes;
+    if total == 0 {
+        return format_bytes(received);
+    }
+    let received = received.min(total);
+    let percent = received.saturating_mul(100) / total;
+    format!(
+        "{} of {} ({percent}%)",
+        format_bytes(received),
+        format_bytes(total)
+    )
 }
 
 /// Everything a fresh pull hands to the materializer.
@@ -679,6 +712,21 @@ fn is_gzip_layer(media_type: &str) -> bool {
 mod tests {
     use super::super::oci_types::OciCacheIndex;
     use super::*;
+
+    #[test]
+    fn pull_progress_reads_as_bytes_of_total_with_a_percentage() {
+        assert_eq!(
+            pull_progress_detail(12 * 1024 * 1024, 48 * 1024 * 1024),
+            "12.0 MiB of 48.0 MiB (25%)"
+        );
+        // A retry or a cache-hit catch-up can overshoot; never show >100%.
+        assert_eq!(
+            pull_progress_detail(50 * 1024 * 1024, 48 * 1024 * 1024),
+            "48.0 MiB of 48.0 MiB (100%)"
+        );
+        // A manifest that declared no sizes still shows what arrived.
+        assert_eq!(pull_progress_detail(2048, 0), "2.0 KiB");
+    }
 
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
         CachedOciImage {

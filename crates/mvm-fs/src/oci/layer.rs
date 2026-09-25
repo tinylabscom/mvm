@@ -81,6 +81,10 @@ pub struct LayerFetchOptions {
     pub max_retries: u32,
     /// First retry delay; doubles per attempt. Default 100 ms.
     pub initial_backoff: Duration,
+    /// Bumped by every body byte received, across layers and retries, so a
+    /// caller can show download progress while a fetch runs. `None` by
+    /// default: nothing is counted that nobody reads.
+    pub progress: Option<Arc<AtomicU64>>,
 }
 
 impl LayerFetchOptions {
@@ -130,6 +134,13 @@ impl LayerFetchOptionsBuilder {
         self
     }
 
+    /// Count received body bytes into `progress`.
+    #[must_use]
+    pub fn progress(mut self, progress: Arc<AtomicU64>) -> Self {
+        self.inner.progress = Some(progress);
+        self
+    }
+
     /// Finish.
     #[must_use]
     pub fn build(self) -> LayerFetchOptions {
@@ -143,6 +154,7 @@ impl Default for LayerFetchOptions {
             max_size: 2 * 1024 * 1024 * 1024,
             max_retries: 3,
             initial_backoff: Duration::from_millis(100),
+            progress: None,
         }
     }
 }
@@ -392,6 +404,13 @@ impl OciLayerFetcher {
         }
     }
 
+    /// Add `len` received bytes to the caller's progress counter, if any.
+    fn record_progress(&self, len: u64) {
+        if let Some(progress) = &self.options.progress {
+            progress.fetch_add(len, Ordering::Relaxed);
+        }
+    }
+
     async fn fetch_layer_once(
         &self,
         reference: &ImageReference,
@@ -424,6 +443,7 @@ impl OciLayerFetcher {
                 .write_all(&chunk)
                 .await
                 .map_err(|e| OciError::Registry(format!("write fetched blob chunk: {e}")))?;
+            self.record_progress(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
         }
 
         capped_writer
@@ -591,6 +611,7 @@ impl OciLayerFetcher {
                             return Ok(());
                         }
                         count.fetch_add(len, Ordering::SeqCst);
+                        self.record_progress(len);
                     }
                     None => return Ok(()),
                 }

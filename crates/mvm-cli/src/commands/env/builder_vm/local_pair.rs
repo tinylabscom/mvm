@@ -68,7 +68,13 @@ pub(crate) fn ensure_pair_built(
     let cache = LocalImageCache::open_default();
     let arch = GuestArch::host();
     let target_label = target.to_string();
-    build_target_for_pair(
+    // Answered from the local image cache when the pair is unchanged, which is
+    // quick enough never to be announced; a changed pair builds in a builder
+    // VM, whose own line nests under this one.
+    let phase = mvm_runtime::ui::activity::start(format!(
+        "Preparing {target_label} from the local image checkout"
+    ));
+    let built = build_target_for_pair(
         checkout,
         &mvm_root,
         target,
@@ -86,7 +92,9 @@ pub(crate) fn ensure_pair_built(
             builder.run(job).map_err(|error| format!("{error:#}"))
         },
     )
-    .with_context(|| format!("building {target_label} from the local image checkout"))
+    .with_context(|| format!("building {target_label} from the local image checkout"))?;
+    phase.finish();
+    Ok(built)
 }
 
 /// Resolve the workload kernel from the pair's requested generic profile. The

@@ -39,7 +39,11 @@ pub(super) fn run_in_guest(
     use crate::commands::vm::phase_timing::SubPhase;
     use std::io::Write as _;
 
+    // Ended before any output or console attach below: an interactive
+    // console puts the terminal in raw mode, and no live line may outlast that.
+    let phase = mvm_runtime::ui::activity::start("Waiting for the guest agent (up to 30s)");
     if !wait_for_agent_timed(vm_name, 30, sub) {
+        drop(phase);
         emit_guest_console_diagnostic(vm_name);
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
@@ -52,6 +56,7 @@ pub(super) fn run_in_guest(
         vm_name,
         &mvm_core::config::vm_state_dir(vm_name),
     )?;
+    phase.finish();
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
     let wrapper = build_guest_wrapper(req);
