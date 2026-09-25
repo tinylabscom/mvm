@@ -2,6 +2,8 @@ use std::io::{self, BufRead, IsTerminal as _, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub mod activity;
+
 // ---------------------------------------------------------------------------
 // Verbosity
 // ---------------------------------------------------------------------------
@@ -413,86 +415,53 @@ impl Drop for EchoGuard {
 }
 
 // ---------------------------------------------------------------------------
+// Durations
+// ---------------------------------------------------------------------------
+
+/// `1h02m`, `4m12s`, `9s` — compact enough for a status line.
+pub fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m{s:02}s"),
+        (h, m, _) => format!("{h}h{m:02}m"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Spinners
 // ---------------------------------------------------------------------------
 
-struct SpinnerInner {
-    message: Mutex<String>,
-    stop: AtomicBool,
-    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    active: bool,
-}
-
+/// A terminal-only live line. Rendered by the shared [`activity`] board, so a
+/// spinner nested inside a phase activity replaces its line rather than
+/// fighting it for the cursor; off a terminal it draws nothing.
 #[derive(Clone)]
 pub struct Spinner {
-    inner: Arc<SpinnerInner>,
+    inner: Arc<Mutex<Option<activity::Activity>>>,
 }
 
 impl Spinner {
     pub fn set_message(&self, msg: impl Into<String>) {
-        if let Ok(mut current) = self.inner.message.lock() {
-            *current = msg.into();
+        if let Ok(current) = self.inner.lock()
+            && let Some(activity) = current.as_ref()
+        {
+            activity.set_label(msg);
         }
     }
 
     pub fn finish_and_clear(&self) {
-        self.inner.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut handle) = self.inner.handle.lock()
-            && let Some(join) = handle.take()
-        {
-            let _ = join.join();
-        }
-        if self.inner.active {
-            let _ = clear_spinner_line();
+        if let Ok(mut current) = self.inner.lock() {
+            current.take();
         }
     }
-}
-
-fn clear_spinner_line() -> io::Result<()> {
-    let mut stderr = io::stderr().lock();
-    write!(stderr, "\r\x1b[2K")?;
-    stderr.flush()
 }
 
 /// Create and start a spinner with the given message.
-/// Call `.finish_with_message()` or `.finish_and_clear()` when done.
+/// Call `.finish_and_clear()` when done; dropping the last clone also clears it.
 pub fn spinner(msg: &str) -> Spinner {
-    let active = io::stderr().is_terminal();
-    let inner = Arc::new(SpinnerInner {
-        message: Mutex::new(msg.to_string()),
-        stop: AtomicBool::new(false),
-        handle: Mutex::new(None),
-        active,
-    });
-    if active {
-        let thread_inner = Arc::clone(&inner);
-        let handle = std::thread::spawn(move || {
-            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut frame = 0usize;
-            while !thread_inner.stop.load(Ordering::Relaxed) {
-                let msg = thread_inner
-                    .message
-                    .lock()
-                    .map(|s| s.clone())
-                    .unwrap_or_default();
-                let glyph =
-                    style_text(Stream::Stderr, FRAMES[frame % FRAMES.len()], &[Style::Cyan]);
-                let mut stderr = io::stderr().lock();
-                if write!(stderr, "\r\x1b[2K{glyph} {msg}").is_err() {
-                    break;
-                }
-                if stderr.flush().is_err() {
-                    break;
-                }
-                frame += 1;
-                std::thread::sleep(std::time::Duration::from_millis(80));
-            }
-        });
-        if let Ok(mut slot) = inner.handle.lock() {
-            *slot = Some(handle);
-        }
+    Spinner {
+        inner: Arc::new(Mutex::new(Some(activity::start_terminal_only(msg)))),
     }
-    Spinner { inner }
 }
 
 #[cfg(test)]
@@ -555,17 +524,19 @@ mod tests {
 
     #[test]
     fn spinner_set_message_and_finish_are_safe_without_active_tty() {
-        let spinner = Spinner {
-            inner: Arc::new(SpinnerInner {
-                message: Mutex::new("start".to_string()),
-                stop: AtomicBool::new(false),
-                handle: Mutex::new(None),
-                active: false,
-            }),
-        };
+        let spinner = spinner("start");
         spinner.set_message("next");
-        assert_eq!(spinner.inner.message.lock().unwrap().as_str(), "next");
         spinner.finish_and_clear();
-        assert!(spinner.inner.stop.load(Ordering::Relaxed));
+        assert!(spinner.inner.lock().unwrap().is_none());
+        // A second finish is harmless.
+        spinner.finish_and_clear();
+    }
+
+    #[test]
+    fn durations_format_compactly() {
+        use std::time::Duration;
+        assert_eq!(format_elapsed(Duration::from_secs(9)), "9s");
+        assert_eq!(format_elapsed(Duration::from_secs(252)), "4m12s");
+        assert_eq!(format_elapsed(Duration::from_secs(3720)), "1h02m");
     }
 }
