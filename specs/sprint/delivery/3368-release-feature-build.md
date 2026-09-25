@@ -20,6 +20,13 @@ the documented-surface lanes — failed. CI's only release-feature check compile
 `release-artifact-bootstrap` alone, which does not reach that code. The run was
 cancelled before any job could publish.
 
-The two items are now gated on `any(test, feature = "manifest-verify")`, and
-`ci.yml`'s "release artifact acquisition contract" step also compiles
-`release-artifact-bootstrap,manifest-verify,builder-vm`.
+The two items are now gated on exactly the predicate their callers compile
+under — `release-artifact-bootstrap` + `builder-vm` + `manifest-verify`, or
+tests — and the two fields only tests read stay `cfg(test)`. A first attempt
+gated them on `manifest-verify` alone, which the BDD lane's `user` build then
+rejected as dead code: that feature compiles the names without the
+attested-builder-pack module that reads them. Checked with `-D warnings`
+across no features, `manifest-verify`, `release-artifact-bootstrap`,
+`builder-vm,manifest-verify`, the full combination, `mvmctl --features user`,
+and the release workflow's feature set. `ci.yml`'s "release artifact
+acquisition contract" step also compiles the full combination now.
