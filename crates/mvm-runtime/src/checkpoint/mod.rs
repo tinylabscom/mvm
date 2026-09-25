@@ -650,11 +650,16 @@ pub fn fork_vm_full(
     // check is what the restorer starts the child's VMM under. Without this the
     // check would decide only what may be *recorded* for the child, and a child
     // admitted to 1.5 cores would restore with no quota at all.
+    let content = content_with_load_memory_digest(
+        &parent.content,
+        &store.content_dir(&parent.id),
+        &params.dest_dir.join(mvm_core::checkpoint::MEMORY_BLOB),
+    )?;
     restore.restore(&RestoredChild {
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
         cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),
-        content: &parent.content,
+        content: &content,
     })?;
 
     let child = CheckpointMeta::builder(
@@ -706,6 +711,38 @@ fn reseed_forked_identity_drive(child_vm_name: &str, child_dir: &Path) -> Result
                 drive.display()
             )
         })
+}
+
+/// Hand a load-verifying backend the whole-file digest of the memory blob.
+///
+/// A chunked blob's [`ContentBlob::sha256`] is its chunk-index content-address,
+/// not the digest of the reassembled bytes. A backend that verifies the saved
+/// RAM on load hashes the materialized file, so comparing that against the
+/// index address always mismatches. The materialization already verified those
+/// bytes against the chain-bound index, so substitute the whole-file digest of
+/// the verified material for the memory blob; every other entry is untouched.
+/// A whole (unchunked) memory blob already records its own digest and is left
+/// alone.
+fn content_with_load_memory_digest(
+    content: &[ContentBlob],
+    content_dir: &Path,
+    materialized_memory: &Path,
+) -> Result<Vec<ContentBlob>> {
+    content
+        .iter()
+        .map(|blob| {
+            if blob.name == mvm_core::checkpoint::MEMORY_BLOB
+                && chunks::is_chunked_blob(content_dir, blob)
+            {
+                Ok(ContentBlob {
+                    name: blob.name.clone(),
+                    sha256: sha256_file_hex(materialized_memory)?,
+                })
+            } else {
+                Ok(blob.clone())
+            }
+        })
+        .collect()
 }
 
 /// Ensure a cloned checkpoint keeps the complete dm-verity binding and the
@@ -1224,13 +1261,14 @@ pub fn restore_checkpoint(
     let stored_config = dir.join(SUPERVISOR_CONFIG_FILE_NAME);
     let config_src = stored_config.is_file().then_some(stored_config.as_path());
 
+    let content = content_with_load_memory_digest(&meta.content, &dir, &memory)?;
     restore.restore(
         &params.target_vm,
         &rootfs,
         &memory,
         &dir.join("machine-id"),
         config_src,
-        &meta.content,
+        &content,
     )
 }
 
@@ -3261,6 +3299,52 @@ mod tests {
             parent_identity_bytes.as_slice(),
             "a fork must mint its own identity, never boot on the parent's captured drive"
         );
+    }
+
+    /// A chunked memory blob records its chunk-index content-address in the
+    /// manifest, not the digest of the reassembled bytes. A backend verifies
+    /// the saved RAM on load by hashing the materialized file, so the restore
+    /// must hand it the whole-file digest of the verified material. Before this
+    /// fix a same-identity HVF restore compared the loaded bytes against the
+    /// index address and failed every time it reached memory verification.
+    #[test]
+    fn restore_content_carries_the_memory_whole_file_digest_not_the_index_address() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "mem-digest");
+        let dir = store.content_dir(&meta.id);
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let memory = materialized_source(&store, &meta, "memory.bin", &scratch).unwrap();
+
+        let recorded = meta
+            .content
+            .iter()
+            .find(|b| b.name == "memory.bin")
+            .unwrap()
+            .sha256
+            .clone();
+        let whole_file = sha256_file_hex(&memory).unwrap();
+        assert_ne!(
+            recorded, whole_file,
+            "the recorded content-address is the chunk index address, not the bytes"
+        );
+
+        let corrected = content_with_load_memory_digest(&meta.content, &dir, &memory).unwrap();
+        let corrected_mem = corrected.iter().find(|b| b.name == "memory.bin").unwrap();
+        assert_eq!(
+            corrected_mem.sha256, whole_file,
+            "restore must hand the backend the whole-file digest of the materialized RAM"
+        );
+        for blob in &corrected {
+            if blob.name != "memory.bin" {
+                let original = meta.content.iter().find(|b| b.name == blob.name).unwrap();
+                assert_eq!(
+                    blob.sha256, original.sha256,
+                    "only the memory blob's digest is substituted"
+                );
+            }
+        }
     }
 
     #[test]
