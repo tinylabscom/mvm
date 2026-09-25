@@ -4,6 +4,15 @@ Last updated: 2026-09-24
 
 ## In progress
 
+- [ ] **`machine run` is never silent.**
+      `specs/plans/2026-09-24-machine-run-never-silent.md`. A shared stderr
+      status board (live TTY line, deferred `[mvm]` phase lines, plain
+      heartbeats), in-guest nix progress condensed from the builder console,
+      OCI byte progress, and lock waits that name and queue behind a live
+      holder instead of failing. Open: kernel cache re-check after a Stage 0
+      wait, tracing writer routing, remaining silent short locks, the triple
+      guest-binary build, and a live HVF cold-run check.
+
 - [x] **Base-image CVE gate — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. Rootfs OS inventory
       (mvm-fs), OSV scan + CycloneDX/cve.json sidecars (mvm-build),
