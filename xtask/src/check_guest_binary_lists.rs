@@ -1,17 +1,15 @@
 //! `xtask check-guest-binary-lists`
 //!
 //! CI lint — the guest runtime binaries baked into an OCI `run --image` rootfs
-//! are named in four hand-maintained lists that must stay in lockstep:
+//! are named in three hand-maintained lists that must stay in lockstep:
 //!
 //! - `crates/mvm-build/src/guest_agent_build.rs` — the `cargo zigbuild --bin`
 //!   invocation that actually builds them (the authoritative list).
 //! - `crates/mvm-build/src/oci_runtime_inject.rs` — the `MvmRuntimeBinaries`
 //!   struct whose field docs name each bin.
 //! - `nix/images/runtime-overlay/flake.nix` — files staged for publication.
-//! - `.github/workflows/release-boot-image.yml` — files archived by the release
-//!   train.
 //!
-//! The check asserts those four sets are identical to each other AND that every
+//! The check asserts those three sets are identical to each other AND that every
 //! name is a real `[[bin]]` of `mvm-agentd`. A drift — a
 //! renamed bin, a list left behind, or a name that no longer maps to a bin —
 //! fails here instead of silently shipping a rootfs missing (or misnaming) a
@@ -35,7 +33,6 @@ const CLI_BUILD_RS: &str = "crates/mvm-cli/build.rs";
 const OCI_INJECT: &str = "crates/mvm-build/src/oci_runtime_inject.rs";
 const RUNTIME_OVERLAY_FLAKE: &str = "nix/images/runtime-overlay/flake.nix";
 const RUNTIME_OVERLAY_RS: &str = "crates/mvm-build/src/runtime_overlay.rs";
-const RELEASE_BOOT_IMAGE_WORKFLOW: &str = ".github/workflows/release-boot-image.yml";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
@@ -56,15 +53,6 @@ pub fn run(workspace: &Path) -> Result<()> {
                 RUNTIME_OVERLAY_FLAKE,
                 "mkdir -p $out/guest-runtime",
                 "chmod 0555 $out/guest-runtime/*",
-            )?,
-        ),
-        (
-            "release-boot-image.yml guest-runtime archive loop",
-            extract_between(
-                workspace,
-                RELEASE_BOOT_IMAGE_WORKFLOW,
-                "for bin in \\",
-                "cp -L \"$STORE_PATH/guest-runtime/$bin\"",
             )?,
         ),
     ];
@@ -117,7 +105,8 @@ pub fn run(workspace: &Path) -> Result<()> {
     let overlay = check_overlay_parity(workspace, &universe)?;
 
     eprintln!(
-        "check-guest-binary-lists: 4 artifact lists agree on {} guest binaries; overlay lists agree on {overlay}; mvm-cli embeds none",
+        "check-guest-binary-lists: {} artifact lists agree on {} guest binaries; overlay lists agree on {overlay}; mvm-cli embeds none",
+        lists.len(),
         canonical.len()
     );
     Ok(())
@@ -450,16 +439,6 @@ name = "mvm-oci-entrypoint"
                 RUNTIME_OVERLAY_FLAKE,
                 "mkdir -p $out/guest-runtime",
                 "chmod 0555 $out/guest-runtime/*",
-            )
-            .unwrap(),
-            expected
-        );
-        assert_eq!(
-            extract_between(
-                &root,
-                RELEASE_BOOT_IMAGE_WORKFLOW,
-                "for bin in \\",
-                "cp -L \"$STORE_PATH/guest-runtime/$bin\"",
             )
             .unwrap(),
             expected

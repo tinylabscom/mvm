@@ -522,13 +522,9 @@ struct BuilderVmSourceCacheProvenance {
     acquired_at: Option<String>,
 }
 
-/// Provenance `source_kind` the attested builder-pack materializer records.
-/// The name predates the pack path, which reuses the Stage 0 sidecar format;
-/// it is on-disk state, so it keeps its name.
-#[cfg(any(
-    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-    test
-))]
+/// Provenance `source_kind` of a Stage 0 cache. It is on-disk state, so it
+/// keeps its name.
+#[cfg(test)]
 pub(super) const STAGE0_SOURCE_KIND: &str = "source_checkout_stage0";
 /// Provenance `source_kind` for a cache installed from a local image pair's
 /// `builder-vm` target; the fingerprint names both checkout identities.
@@ -630,10 +626,7 @@ pub(super) fn write_local_pair_cache_sidecars(
 /// manifest, and provenance — that the readiness check reads back to decide a
 /// hit. The order matters only in that the digest manifest must be written
 /// after the artifacts are final.
-#[cfg(any(
-    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-    test
-))]
+#[cfg(test)]
 pub(super) fn write_builder_vm_cache_sidecars(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -643,10 +636,7 @@ pub(super) fn write_builder_vm_cache_sidecars(
     write_cache_provenance(dir, source_fingerprint, STAGE0_SOURCE_KIND)
 }
 
-#[cfg(any(
-    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-    test
-))]
+#[cfg(test)]
 pub(super) fn promote_builder_vm_stage0_cache(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,
@@ -1186,17 +1176,9 @@ pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
     }
 }
 
-/// The release assets the builder VM boots from for `arch`: kernel, rootfs,
-/// and kernel command line. The published-pack fetch names them through here
-/// too, so its asset names cannot drift from the checksum-pinned fetch's.
-#[cfg(any(
-    all(
-        feature = "release-artifact-bootstrap",
-        feature = "builder-vm",
-        feature = "manifest-verify"
-    ),
-    test
-))]
+/// The assets the builder VM boots from for `arch`: kernel, rootfs, and
+/// kernel command line.
+#[cfg(test)]
 pub(super) fn builder_vm_boot_assets(arch: &str) -> [String; 3] {
     [
         format!("builder-vm-vmlinux-{arch}"),

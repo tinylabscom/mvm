@@ -131,15 +131,13 @@ pub(crate) fn boot_image_release() -> Result<(String, String)> {
     Ok((tag.to_string(), version.to_string()))
 }
 
-/// Asset and checksum-manifest names for a kernel variant on the boot image
-/// release.
+/// Asset and checksum-manifest names for a kernel variant in the image set.
 ///
-/// The two release trains name the same bytes differently: `kernel-build.yml`
-/// publishes `vmlinux-<arch>-<variant>`, while `release-boot-image.yml`
-/// publishes the kernel *inside* the image it belongs to. The workload kernel
-/// is `nix/images/default-tenant`'s, whose flake states it is "the single
-/// shared definition in `nix/images/kernel/`, identical to the one builder-vm
-/// builds" — so the mapping is a rename, not a substitution.
+/// The image set publishes each kernel *inside* the image it belongs to, so a
+/// variant maps to the image that carries it: the workload kernel is the
+/// default tenant's, the builder kernel the builder VM's. mvm-images builds
+/// both from one shared kernel definition, so the mapping is a rename, not a
+/// substitution.
 fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String)> {
     let image = match variant {
         "workload" => "default-microvm",

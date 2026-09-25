@@ -372,15 +372,6 @@ e2e:
 e2e-docs:
     ./scripts/e2e-documented-surface.sh
 
-# The release lane fetches the signed builder image; this proves a checkout can
-# still build one from nothing. Needs an empty MVM_E2E_HOME, Linux with KVM, and
-# the time a cold Stage 0 takes — Extended CI runs it nightly.
-#
-
-# Bootstrap the builder image from source against a cold home
-e2e-source-bootstrap:
-    ./scripts/e2e-source-bootstrap.sh
-
 # What a new user gets: install a release into a throwaway HOME under /tmp with
 # this checkout's install.sh — builder bootstrap included — then run the
 # README's `machine run --image alpine` with stdin closed and require its output
@@ -843,25 +834,6 @@ deploy-guard:
 # Print workspace version
 @version:
     echo {{ version }}
-
-# Release the boot image train (`boot-image/v*`)
-# This creates and pushes a tag for the boot image release, which triggers
-# the release-boot-image.yml workflow to build and publish all microVM assets.
-# Usage: just release-image <version>
-#   version: The version tag (e.g., 1.2.3) - creates boot-image/v1.2.3
-release-image VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    V="{{ VERSION }}"
-    TAG="boot-image/v$V"
-    git fetch origin main --tags
-    if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "ERROR: tag $TAG already exists." >&2
-    exit 1
-    fi
-    git tag "$TAG" origin/main
-    git push origin "$TAG"
-    echo "==> Pushed tag $TAG from origin/main — the boot-image release pipeline will build + publish."
 
 # ── Documentation ────────────────────────────────────────────────────────
 

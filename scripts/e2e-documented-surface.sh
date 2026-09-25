@@ -403,11 +403,10 @@ echo "==> warming artifacts in $E2E_HOME"
 # only after compiling first; acquiring it here keeps the sidecar step to the
 # sidecar.
 #
-# A cold *source* bootstrap — Stage 0, and the unembedded command handing the
-# whole build to its helper — is not this lane's to prove. Doing it here made a
-# 313-scenario release gate wait on 37 minutes of image preparation that no
-# scenario examines, and on a bad day on a Stage 0 that hung for two hours.
-# `scripts/e2e-source-bootstrap.sh` witnesses that path on its own, nightly.
+# Building the builder image is not this lane's to prove: images are built in
+# mvm-images. Doing a cold Stage 0 here made a 313-scenario release gate wait on
+# 37 minutes of image preparation that no scenario examines, and on a bad day on
+# a Stage 0 that hung for two hours.
 e2e_phase builder-image
 if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo

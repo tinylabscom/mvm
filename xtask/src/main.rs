@@ -752,7 +752,7 @@ fn main() -> Result<()> {
                 "  check-release-evidence [lane...]        CI gate — fail unless each lane's evidence covers the current tree"
             );
             eprintln!(
-                "  release-boot-image <tag|validate>       Print and validate the boot-image line embedded in the CLI"
+                "  release-boot-image tag                  Print the image-set tag embedded in the CLI"
             );
             eprintln!(
                 "  repin-image-lock <image-set.json>       Advance images.lock to a verified image-set root"

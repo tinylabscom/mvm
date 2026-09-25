@@ -62,17 +62,6 @@ cp target/release/mvm-network-endpoint /tmp/mvm-network-endpoint
 cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel,embed-host-bins
 cp target/release/mvmctl /tmp/mvmctl-release-helper
 
-# The source-checkout bootstrap path would rebuild the builder VM image from
-# scratch under TCG. Hide the in-repo flake so mvmctl downloads the published
-# image instead.
-mv nix/images/builder-vm nix/images/builder-vm.hidden
-restore_builder_flake() {
-    if [ -d nix/images/builder-vm.hidden ] && [ ! -e nix/images/builder-vm ]; then
-        mv nix/images/builder-vm.hidden nix/images/builder-vm
-    fi
-}
-trap restore_builder_flake EXIT
-
 export MVM_HOME=/work/.mvm-local-smoke
 export MVM_KERNEL_SOURCE=auto
 rm -rf "$MVM_HOME"

@@ -1658,65 +1658,17 @@ fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
     );
 }
 
-/// Both closure gates, and the direction of each. A change that deleted the SDK
-/// cdylib outright would satisfy every no-glibc assertion and look like a
-/// footprint win, so the positive gate is what makes the split meaningful.
-///
-/// The overlay-facing gates run as a CI step rather than a flake `check`: the
-/// runtime-overlay flake reaches the workspace through a path outside its own
-/// flake root, so `closureInfo` against its sources cannot be instantiated under
-/// a pure `nix flake check`. Querying the closure of the artifacts CI has
-/// already built is equally build-backed and does not rebuild them.
+/// The rootfs no-glibc gate anchors its grep on the glibc store path. A bare
+/// `-glibc` pattern would fire on any derivation whose *name* happens to
+/// contain the string. The overlay and SDK-sidecar closure gates live with the
+/// images that carry them, in mvm-images.
 #[test]
-fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
+fn the_rootfs_closure_gate_pins_glibc_out_by_store_path() {
     let root = fs::read_to_string(nix_dir().join("flake.nix")).expect("root flake must be present");
-    let ci = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".github")
-            .join("workflows")
-            .join("ci.yml"),
-    )
-    .expect("ci.yml must be present");
-
-    // Hash-anchored matches only: a bare `-glibc` pattern would fire on any
-    // derivation whose *name* happens to contain the string.
     assert!(
         root.contains(r"'/nix/store/[a-z0-9]+-glibc(-|$)'"),
         "the rootfs no-glibc gate must anchor its grep on the glibc store path"
     );
-    assert!(
-        ci.contains(r"glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'"),
-        "the overlay/sidecar gates must anchor their grep on the glibc store path"
-    );
-
-    // The negative direction must close over the executables actually staged
-    // into the overlay; an empty root-path set would make it vacuously green.
-    for staged in ["guest", "runner", "egressClient", "addonDns", "exitReport"] {
-        assert!(
-            ci.contains(staged),
-            "the overlay no-glibc closure must include the staged {staged} binary"
-        );
-    }
-    assert!(
-        ci.contains("nix path-info -r"),
-        "the gates must query a realized closure, not a bare evaluation"
-    );
-
-    // And the positive direction, plus the files the sidecar has to ship.
-    assert!(
-        ci.contains("sdk-sidecar.passthru.hostsvc"),
-        "the positive gate must query the SDK cdylib's own closure"
-    );
-    assert!(
-        ci.contains("no longer depends on glibc"),
-        "the positive gate must fail when the cdylib stops depending on glibc"
-    );
-    for required in ["libmvm_host_services.so", "libc.so.6", "libgcc_s.so.1"] {
-        assert!(
-            ci.contains(required),
-            "the sidecar gate must assert {required} is shipped"
-        );
-    }
 }
 
 /// The guest mounts the sidecar from the device the host names on the cmdline.
@@ -2124,38 +2076,6 @@ fn ci_builds_the_guest_rootfs_package_budget() {
     assert!(
         content.contains("./nix#checks.x86_64-linux.guest-rootfs-package-budget"),
         "CI must realize the rootfs package-count budget, not only eval it"
-    );
-}
-
-#[test]
-fn ci_counts_the_kernel_in_the_guest_footprint() {
-    let path = repo_dir().join(".github/workflows/ci.yml");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-
-    assert!(
-        content.contains("--kernel \"$image_path/vmlinux\""),
-        "the 50 MB CI ledger must include the workload kernel"
-    );
-}
-
-#[test]
-fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
-    let flake_path = nix_dir().join("images/default-tenant/flake.nix");
-    let flake = fs::read_to_string(&flake_path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", flake_path.display()));
-    let ci_path = repo_dir().join(".github/workflows/ci.yml");
-    let ci = fs::read_to_string(&ci_path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", ci_path.display()));
-
-    assert!(
-        flake.contains("rootfsPkg.passthru.rootfsClosureInfo")
-            && flake.contains("$out/rootfs-closure-paths"),
-        "the default tenant must export its realized rootfs closure inventory"
-    );
-    assert!(
-        ci.contains("--closure-paths \"$image_path/rootfs-closure-paths\""),
-        "the footprint CI gate must consume the exported closure inventory"
     );
 }
 

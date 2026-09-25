@@ -435,8 +435,6 @@ uncovered = [
     "mvmctl ops config set dev_vm_cpus 8",
     "mvmctl ops config set dev_vm_mem_gib 16",
     "mvmctl ops metrics --json",
-    "mvmctl pack download builder",
-    "mvmctl pack update builder",
     "mvmctl persistent-builder start --workspace .",
     "mvmctl persistent-builder status",
     "mvmctl persistent-builder stop",
