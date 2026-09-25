@@ -485,6 +485,149 @@ fn local_oversize_does_not_spend_a_sequence_or_invalidate_the_connection() {
 }
 
 #[test]
+fn unknown_sealed_frame_versions_and_algorithms_are_refused_terminally() {
+    use crate::net::session::SealedFrame;
+    for mutate in [
+        (|frame: &mut SealedFrame| frame.version = frame.version.wrapping_add(1))
+            as fn(&mut SealedFrame),
+        |frame: &mut SealedFrame| frame.sig_alg = frame.sig_alg.wrapping_add(1),
+    ] {
+        let (mut receiver, mut sender) = pair();
+        let mut frame = sender
+            .session
+            .as_mut()
+            .unwrap()
+            .seal(&record().encode().unwrap())
+            .unwrap();
+        mutate(&mut frame);
+        let mut bytes = Vec::new();
+        write_sealed_frame(&mut bytes, &frame).unwrap();
+        let error = receiver.receive(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(error, TelemetryError::Rejected);
+        assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        assert_eq!(
+            receiver.receive(&mut Cursor::new([])),
+            Err(TelemetryError::Closed)
+        );
+    }
+}
+
+#[test]
+fn an_unknown_handshake_version_cannot_authenticate_a_pinned_host() {
+    use crate::net::session::write_json_frame;
+
+    let (mut guest, mut peer) = sockets();
+    let host_key = SigningKey::from_bytes(&[7; 32]);
+    let anchor = host_key.verifying_key();
+    let fake_host = thread::spawn(move || {
+        write_json_frame(
+            &mut peer,
+            &SessionHello {
+                version: PROTOCOL_VERSION_AUTHENTICATED.wrapping_add(1),
+                session_id: format!("{SESSION_PREFIX}secret-sentinel"),
+                challenge: vec![1; 32],
+                host_pubkey: host_key.verifying_key().to_bytes().to_vec(),
+                host_ephemeral_pubkey: vec![3; 32],
+            },
+            65536,
+        )
+        .unwrap();
+    });
+    let error = TelemetrySender::connect(&mut guest, SigningKey::from_bytes(&[9; 32]), &anchor)
+        .err()
+        .expect("a version the guest does not speak cannot authenticate, even signed");
+    fake_host.join().unwrap();
+    assert_eq!(error, TelemetryError::Authentication);
+    assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+}
+
+#[test]
+fn an_oversize_decrypted_record_is_refused_without_quoting_payload() {
+    let (mut receiver, mut sender) = pair();
+    // Small enough to pass the sealed-frame ceiling, too large as a record.
+    let plaintext = b"secret-sentinel".repeat(MAX_RECORD_BYTES / 15 + 1);
+    assert!(plaintext.len() > MAX_RECORD_BYTES);
+    let frame = sender.session.as_mut().unwrap().seal(&plaintext).unwrap();
+    let mut bytes = Vec::new();
+    write_sealed_frame(&mut bytes, &frame).unwrap();
+    let error = receiver.receive(&mut Cursor::new(bytes)).unwrap_err();
+    assert_eq!(error, TelemetryError::Rejected);
+    assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+    assert_eq!(
+        receiver.receive(&mut Cursor::new([])),
+        Err(TelemetryError::Closed)
+    );
+}
+
+#[test]
+fn malformed_frame_bytes_under_an_honest_length_prefix_are_refused_terminally() {
+    let (_, mut sender) = pair();
+    let mut valid = Vec::new();
+    sender
+        .session
+        .as_mut()
+        .unwrap()
+        .seal(&record().encode().unwrap())
+        .unwrap()
+        .encode(&mut valid)
+        .unwrap();
+    let truncated = valid[..valid.len() - 1].to_vec();
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    for body in [vec![0xFF; 64], truncated, trailing] {
+        let (mut receiver, _) = pair();
+        let mut input = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+        input.extend(body);
+        let error = receiver.receive(&mut Cursor::new(input)).unwrap_err();
+        assert_eq!(error, TelemetryError::Rejected);
+        assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        assert_eq!(
+            receiver.receive(&mut Cursor::new([])),
+            Err(TelemetryError::Closed)
+        );
+    }
+}
+
+#[test]
+fn forged_identity_fields_inside_an_authenticated_frame_are_refused_without_quoting() {
+    let base = serde_json::to_value(record()).unwrap();
+    for (path, forged) in [
+        ("/producer", serde_json::json!(0)),
+        ("/sequence", serde_json::json!(0)),
+        ("/epoch", serde_json::json!(vec![0; 16])),
+        ("/format", serde_json::json!("mvm.telemetry.v99")),
+        ("/body/kind", serde_json::json!("secret-sentinel")),
+        (
+            "/body",
+            serde_json::json!({
+                "kind": "span_close",
+                "context": "00-00000000000000000000000000000000-0101010101010101-01",
+                "outcome": "ok",
+            }),
+        ),
+    ] {
+        let (mut receiver, mut sender) = pair();
+        let mut value = base.clone();
+        *value.pointer_mut(path).unwrap() = forged;
+        let frame = sender
+            .session
+            .as_mut()
+            .unwrap()
+            .seal(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        let mut bytes = Vec::new();
+        write_sealed_frame(&mut bytes, &frame).unwrap();
+        let error = receiver.receive(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(error, TelemetryError::Rejected, "{path}");
+        assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        assert_eq!(
+            receiver.receive(&mut Cursor::new([])),
+            Err(TelemetryError::Closed)
+        );
+    }
+}
+
+#[test]
 fn unauthenticated_handshake_payloads_are_refused_without_quoting_input() {
     use crate::net::session::{read_json_frame, write_json_frame};
 
