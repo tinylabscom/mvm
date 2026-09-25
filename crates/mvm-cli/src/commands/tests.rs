@@ -2390,9 +2390,25 @@ fn mcp_stdio_command_parses() {
         cli.command,
         Commands::Ops(ops::group::Args {
             action: ops::group::OpsCmd::Mcp(ops::mcp::Args {
-                transport: ops::mcp::Transport::Stdio
+                transport: ops::mcp::Transport::Stdio { machine: None }
             })
         })
+    ));
+}
+
+#[test]
+fn mcp_stdio_machine_binds_the_drive_catalog() {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "mcp", "stdio", "--machine", "agent-vm"])
+        .expect("the drive-bound MCP consumer must parse");
+    assert!(matches!(
+        cli.command,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Mcp(ops::mcp::Args {
+                transport: ops::mcp::Transport::Stdio {
+                    machine: Some(ref machine)
+                }
+            })
+        }) if machine == "agent-vm"
     ));
 }
 

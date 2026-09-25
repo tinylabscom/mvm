@@ -377,16 +377,16 @@ Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
       and a real dispatch arm. Re-bless an intended change with
       `MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol tool_surface_matches_the_pinned_contract`
       and review the fixture diff as a contract change.
-- [ ] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
+- [x] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
       `mvm.drive.files.{read,write,list}` over the same ABI.
-- [ ] Gate advertisement on the grant: a tool the plan does not grant is not
+- [x] Gate advertisement on the grant: a tool the plan does not grant is not
       listed, rather than listed and refused.
-- [ ] Adopt a fail-closed classification table — a tool with no explicit risk
+- [x] Adopt a fail-closed classification table — a tool with no explicit risk
       classification is denied, not defaulted. An adjacent computer-use sandbox
       project generates its whole tool surface from a contract crate with a
       pinned contract version and denies anything unclassified; that part is
       worth copying.
-- [ ] Witness: `mcp_tool_absent_when_grant_absent`,
+- [x] Witness: `mcp_tool_absent_when_grant_absent`,
       `mcp_unclassified_tool_is_denied`.
 
 ## WS4 — Close the loose ends the claim rests on

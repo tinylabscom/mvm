@@ -17,6 +17,7 @@ pub mod admission;
 pub mod audit;
 pub mod boot;
 pub mod connect;
+pub mod drive;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;

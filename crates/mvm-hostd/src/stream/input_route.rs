@@ -232,6 +232,19 @@ pub struct InputRoute {
 }
 
 impl InputRoute {
+    fn from_session(
+        session: InputSession,
+        transport: Box<dyn InputTransport>,
+        wire_seq: WireSequence,
+    ) -> Self {
+        Self {
+            session,
+            transport,
+            pending: Pending::default(),
+            wire_seq,
+        }
+    }
+
     /// Take the input lease on `vm` under `admitted`, point it at `transport`,
     /// and number its deliveries out of `wire_seq`.
     ///
@@ -249,12 +262,38 @@ impl InputRoute {
         transport: Box<dyn InputTransport>,
         wire_seq: WireSequence,
     ) -> Result<Self, InputRefusal> {
-        Ok(Self {
-            session: InputGate::open(vm, admitted)?,
+        Ok(Self::from_session(
+            InputGate::open(vm, admitted)?,
             transport,
-            pending: Pending::default(),
             wire_seq,
-        })
+        ))
+    }
+
+    /// Open the same ordered delivery route under an admitted drive grant.
+    pub(crate) fn open_drive(
+        vm: &str,
+        admitted: &AdmittedPlan,
+        transport: Box<dyn InputTransport>,
+        wire_seq: WireSequence,
+    ) -> Result<Self, InputRefusal> {
+        Ok(Self::from_session(
+            InputGate::open_drive(vm, admitted)?,
+            transport,
+            wire_seq,
+        ))
+    }
+
+    /// Open the route for a persisted drive authority re-verified by the host.
+    pub(crate) fn open_drive_authority(
+        authority: &crate::drive::DriveAuthority,
+        transport: Box<dyn InputTransport>,
+        wire_seq: WireSequence,
+    ) -> Result<Self, InputRefusal> {
+        Ok(Self::from_session(
+            InputGate::open_drive_authority(authority)?,
+            transport,
+            wire_seq,
+        ))
     }
 
     /// The lease holder id the gate minted for this route's session.
