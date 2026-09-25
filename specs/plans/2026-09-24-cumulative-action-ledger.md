@@ -1,5 +1,8 @@
 # Plan: Cumulative action ledger — per-run budgets beyond AI tokens
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Status
 
 **Not started.** Drafted 2026-09-24 from the sandbox-hardening grade card
