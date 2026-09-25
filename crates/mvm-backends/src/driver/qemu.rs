@@ -16,7 +16,6 @@
 //! the same NIC-less posture the other runner drivers boot.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -92,7 +91,7 @@ fn bounded_qemu_command(
     spec: &VmmSpec,
     state_dir: &Path,
 ) -> mvm_core::spawn_scope::BoundCommand {
-    let mut launch = Command::new(qemu_bin);
+    let mut launch = mvm_core::env_hygiene::helper_command(qemu_bin);
     launch.args(argv);
     mvm_core::spawn_scope::bind_spawn(
         launch,

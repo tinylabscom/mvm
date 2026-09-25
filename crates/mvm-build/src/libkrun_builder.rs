@@ -2245,7 +2245,7 @@ fn spawn_supervisor_in_background(
         ))
     })?;
 
-    let mut command = Command::new(supervisor_path);
+    let mut command = mvm_core::env_hygiene::helper_command(supervisor_path);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout_log))

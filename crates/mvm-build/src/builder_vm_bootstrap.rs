@@ -207,7 +207,7 @@ fn builder_vm_helper_command(
     command: BuilderVmHelperCommand,
 ) -> Result<Command, BuilderVmError> {
     host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
-    let mut cmd = Command::new(helper);
+    let mut cmd = mvm_core::env_hygiene::helper_command(helper);
     cmd.current_dir(workspace_root).args(command.args());
     if command == BuilderVmHelperCommand::Bootstrap {
         // Marks the child as a bootstrap so it never spawns one of its own.

@@ -30,6 +30,9 @@ pub(crate) mod digest_shape;
 /// Real on-disk footprint of a path — the one measurement behind every
 /// "how much would this reclaim" counter in the CLI.
 pub mod disk_usage;
+/// The denylist for environment variables that change what a process loads or
+/// runs, applied to guest env passthrough and to every host helper spawn.
+pub mod env_hygiene;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.

@@ -9,7 +9,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 
@@ -114,7 +114,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
 
     let supervisor = resolve_supervisor_path_verified()?;
-    let mut child = Command::new(&supervisor)
+    let mut child = mvm_core::env_hygiene::helper_command(&supervisor)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

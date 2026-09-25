@@ -73,6 +73,9 @@ pub(in crate::commands) struct Args {
     /// carried by `--launch-plan`.
     #[arg(short, long)]
     pub env: Vec<String>,
+    /// Internal (not a CLI flag): `run --allow-env`.
+    #[arg(skip)]
+    pub allow_env: Vec<String>,
     /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -364,6 +367,9 @@ pub(in crate::commands) struct RunArgs {
     /// Inject an environment variable (KEY=VALUE, repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
+    /// Re-admit a denied env variable by exact name. Repeatable.
+    #[arg(long = "allow-env", value_name = "NAME")]
+    pub allow_env: Vec<String>,
     /// Set a per-command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -508,6 +514,7 @@ impl Default for RunArgs {
             profile: RunProfile::Standard,
             mounts: Vec::new(),
             env: Vec::new(),
+            allow_env: Vec::new(),
             timeout: None,
             receipt: None,
             caller_commitment: None,
@@ -579,6 +586,7 @@ impl RunArgs {
             mounts: self.mounts,
             assets: self.assets,
             env: self.env,
+            allow_env: self.allow_env,
             timeout: self.timeout,
             launch_plan: self.launch_plan,
             argv: self.argv,
@@ -1236,6 +1244,7 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
+    check_run_env(&args.allow_env, &env_pairs, env_args::launch_env(&target))?;
     let selected_backend = crate::exec::select_exec_backend(
         image_ref.is_some(),
         &network_policy,
@@ -1389,7 +1398,9 @@ struct RunReceiptSignature {
     signature_base64: String,
 }
 
+pub(in crate::commands) mod env_args;
 mod preflight;
+use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;
 use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
@@ -1508,21 +1519,6 @@ impl ReceiptOutcome {
             stderr_bytes: output.stderr.len(),
         }
     }
-}
-
-fn parse_env_pair(kv: &str) -> Result<(String, String)> {
-    let (k, v) = kv
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("--env '{kv}': expected KEY=VALUE"))?;
-    if k.is_empty() {
-        anyhow::bail!("--env '{kv}': KEY must not be empty");
-    }
-    if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        || k.starts_with(|c: char| c.is_ascii_digit())
-    {
-        anyhow::bail!("--env '{kv}': KEY must match [A-Za-z_][A-Za-z0-9_]* (got '{k}')");
-    }
-    Ok((k.to_string(), v.to_string()))
 }
 
 fn oci_vsock_proxy_env_for_capabilities(
@@ -2222,6 +2218,10 @@ mod tests {
         );
         assert_eq!(parsed.run.mounts, expected.run.mounts, "--mount default");
         assert_eq!(parsed.run.env, expected.run.env, "--env default");
+        assert_eq!(
+            parsed.run.allow_env, expected.run.allow_env,
+            "--allow-env default"
+        );
         assert_eq!(parsed.run.argv, expected.run.argv, "trailing argv");
         assert_eq!(parsed.sdk.mode, expected.sdk.mode, "--mode default");
         assert_eq!(parsed.sdk.dev, expected.sdk.dev, "--dev default");

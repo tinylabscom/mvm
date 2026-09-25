@@ -6,7 +6,8 @@
 //! types they read.
 
 use super::{
-    ReceiptCommand, ReceiptInput, ReceiptMount, ReceiptOutcome, RunArgs, parse_env_pair, sha256_hex,
+    ReceiptCommand, ReceiptInput, ReceiptMount, ReceiptOutcome, RunArgs, check_run_env,
+    parse_env_pair, sha256_hex,
 };
 use anyhow::{Context, Result};
 use mvm_core::util::parse_human_size;
@@ -109,9 +110,12 @@ impl RunPreflightSummary {
         backend_override: Option<&str>,
     ) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
-        for kv in &args.env {
-            parse_env_pair(kv)?;
-        }
+        let env = args
+            .env
+            .iter()
+            .map(|kv| parse_env_pair(kv))
+            .collect::<Result<Vec<_>>>()?;
+        check_run_env(&args.allow_env, &env, None)?;
         // Force mount parsing now so dry-run rejects the same malformed or
         // disallowed host-share specs as an actual run, without resolving an
         // image or touching the VM runtime.

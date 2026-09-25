@@ -483,7 +483,10 @@ fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
     #[cfg(target_os = "linux")]
     {
         let args = fc_linux_signal_args(pid, signal);
-        match std::process::Command::new("sudo").args(&args).output() {
+        match mvm_core::env_hygiene::helper_command("sudo")
+            .args(&args)
+            .output()
+        {
             Ok(output) if output.status.success() => {}
             Ok(_) | Err(_) => tracing::warn!(
                 "Firecracker stop signal {signal:?} to pid {pid} did not report success \

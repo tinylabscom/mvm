@@ -27,7 +27,7 @@
 //! by polling for the UDS path to appear.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -524,7 +524,7 @@ pub(crate) fn spawn_detached_with_config(
     what: &str,
 ) -> Result<std::process::Child> {
     use std::io::Write;
-    let mut cmd = Command::new(bin);
+    let mut cmd = mvm_core::env_hygiene::helper_command(bin);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

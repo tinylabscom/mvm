@@ -151,6 +151,10 @@ pub const GATES: &[Gate] = &[
         crate::check_single_exec_secs_writer::run,
     ),
     (
+        "check-helper-env-hygiene",
+        crate::check_helper_env_hygiene::run,
+    ),
+    (
         "check-single-host-predicate",
         crate::check_single_host_predicate::run,
     ),

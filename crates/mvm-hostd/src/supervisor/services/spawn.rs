@@ -276,7 +276,7 @@ impl SubprocessSpawner for ProcessSpawner {
             );
         }
 
-        let mut command = Command::new(&request.binary);
+        let mut command = Command::from(mvm_core::env_hygiene::helper_command(&request.binary));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
