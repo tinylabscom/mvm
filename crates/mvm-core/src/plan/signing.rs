@@ -237,6 +237,7 @@ pub mod test_support {
             network_mode: Default::default(),
             stream_retention: Default::default(),
             action_budget: None,
+            protected_paths: Default::default(),
             ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,

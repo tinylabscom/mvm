@@ -100,13 +100,13 @@ that is the supported pattern for letting an agent *see* CI config.
 
 ### Phase 0 — Contract and claim scaffolding
 
-- [ ] `ProtectedPathsPolicy` + `ProtectedPathSet` matcher in
+- [x] `ProtectedPathsPolicy` + `ProtectedPathSet` matcher in
   `mvm-contract/src/policy/` (own module); serde roundtrip, default-set, and
   matcher unit tests (segment boundaries, `..` traversal, exact-file vs
   `/**` glob, case handling).
-- [ ] Additive signed-plan field on `ExecutionPlan` (precedent style);
+- [x] Additive signed-plan field on `ExecutionPlan` (precedent style);
   plan-bytes/schema-stability test.
-- [ ] Claim **MVM-SEC-23** row in `model/claims.toml` (level `build`,
+- [x] Claim **MVM-SEC-23** row in `model/claims.toml` (level `build`,
   suite `s38_protected_paths`), suite skeleton
   `features/suites/s38_protected_paths/`; `xtask check-conformance` and
   `check-claim-catalog` green.
