@@ -112,14 +112,14 @@ signed into the plan, so "no budget on this run" is attributable the same way
 
 ### Phase 0 — Contract and claim scaffolding
 
-- [ ] `ActionBudget` type + `Default` in `mvm-contract/src/policy/` (own
+- [x] `ActionBudget` type + `Default` in `mvm-contract/src/policy/` (own
   module), re-exported host-side; serde roundtrip and default-value tests.
-- [ ] Additive signed-plan field on `ExecutionPlan` with doc-comment precedent
+- [x] Additive signed-plan field on `ExecutionPlan` with doc-comment precedent
   style; plan-bytes/schema-stability test (existing plan fixtures unchanged).
-- [ ] `secrets_from_signed_json`-style extractor: add
+- [x] `secrets_from_signed_json`-style extractor: add
   `action_budget_from_signed_json` next to `secrets_from_signed_json`
   (`signing.rs:84`).
-- [ ] Claim **MVM-SEC-22** row in `model/claims.toml` (level `build`,
+- [x] Claim **MVM-SEC-22** row in `model/claims.toml` (level `build`,
   suite `s37_cumulative_ledger`), suite skeleton
   `features/suites/s37_cumulative_ledger/`; `xtask check-conformance` and
   `check-claim-catalog` green.
