@@ -168,6 +168,10 @@ docs commit went out as #3581). Under the
       (delegating to the entrypoint uid) — on a kernel without cgroups the
       mount skips quietly, so sealed guests boot identically.
 
+      **Parked (2026-09-25), low priority:** the template's start script is
+      fixed (`unshare -Urmpf`) and its image builds; no pod has run yet. See the
+      plan's W4 progress list.
+
       **Blocker #3599 reopened (2026-09-24):** the 2026-09-23 "upstream
       kernel bug under virtualization" root cause was a reproducer artifact.
       Every probe ran `unshare -Urmp` without `--fork`, so the namespace's
