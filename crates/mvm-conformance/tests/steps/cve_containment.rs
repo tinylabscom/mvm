@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use cucumber::{given, then, when};
+use mvm_conformance::IsolatedHome;
 use mvm_conformance::containment::{self, HostObservation};
 use sha2::{Digest, Sha256};
 
@@ -47,13 +48,12 @@ fn pin(section: &str, key: &str) -> Option<String> {
 
 /// Run `mvmctl` in the lab home, capturing its output.
 fn run_mvmctl(argv: &[&str], extra_env: &[(&str, &str)]) -> Output {
-    let home = e2e_home();
-    let mut cmd = std::process::Command::new(mvmctl_path());
-    // Move HOME with MVM_HOME so the child never reads the developer's real
-    // cache (enforced by `check-test-home-isolation`).
-    cmd.env("MVM_HOME", &home)
-        .env("MVM_E2E_HOME", &home)
-        .env("HOME", &home);
+    let mut cmd = crate::steps::cli::mvmctl_command();
+    // `isolated_home` moves HOME *and* MVM_HOME to the lab home and forwards the
+    // toolchain root — the sanctioned helper. A raw `.env("HOME", …)` is
+    // rejected by `isolate_home_tests::no_step_sets_home_without_the_isolation_helper`
+    // and hides the Rust toolchain from a compiling child.
+    cmd.isolated_home(e2e_home());
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
