@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: none
 
-**Status: IN PROGRESS**
+**Status: COMPLETE**
 **Opened:** 2026-09-24
 
 ## Why
@@ -80,7 +80,7 @@ also stays (ADR-030's contributor invariant). It happens inside the one command.
       keeping the library-embedder refusals and the bootstrap-active marker.
 - [x] **W5 — progress output** (Decision 4), with a test that the message is
       emitted before the compile starts.
-- [ ] **W6 — CI and docs.** Release-profile CI builds that neither boot a VM
+- [x] **W6 — CI and docs.** Release-profile CI builds that neither boot a VM
       nor carry zig set `MVM_EMBED=0` or rely on the warning path; `CLAUDE.md`,
       the `embed-host-bins` comments in both `Cargo.toml`s, the Justfile
       `embed` recipes and `public/src/content/docs/contributing/development.md`

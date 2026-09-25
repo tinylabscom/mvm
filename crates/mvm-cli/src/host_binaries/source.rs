@@ -394,10 +394,7 @@ pub(crate) fn current_choice() -> PayloadChoice {
         !EMBEDDED.is_empty(),
         source_builds,
         source_builds.then(compiled_checkout).flatten(),
-        build_embed_cache::cache_root_from(
-            std::env::var_os("MVM_EMBED_CACHE_DIR"),
-            std::env::var_os("HOME"),
-        ),
+        build_embed_cache::store_root(),
     )
 }
 

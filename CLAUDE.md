@@ -44,32 +44,40 @@ binaries (`mvm-host-vm-init`, `mvm-builderd`) as static
 `aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
 See Plan 115 / ADR-004.
 
-That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
-the only work `build.rs` still does. Run it when you are about to boot a VM:
+That cross-compile is the only work `build.rs` still does, and it runs in
+exactly two cases: a **release-profile** build (`cargo build --release`, or any
+profile inheriting from `release`), and a build with the `embed-host-bins`
+feature. `MVM_EMBED=0` opts a release build out. A debug build — which is what
+`cargo check`, clippy and nextest use — never cross-compiles.
+
+When a release build finds the pinned toolchain missing it does not fail: it
+prints a `cargo:warning=` naming `just toolchain-embed` and ships the unembedded
+table. The explicit feature keeps failing hard, because it was asked for by
+name.
+
+Every build **restores** the payload from the content store at
+`~/.cache/mvm/embed` when the store holds bytes keyed to this tree — the key is
+the dependency closure + `Cargo.lock` + pinned toolchain, and each entry carries
+the SHA-256 it was published with, so a changed entry is refused rather than
+embedded. That is why a debug `cargo build` usually carries the payload too.
+
+An `mvmctl` that still has no payload builds it **in-process** the first time it
+needs a builder VM: from the source checkout it was compiled from, into that
+same store, with the same `cargo zigbuild` the build script runs
+(`host_binaries::source`). It prints one line on stderr first saying what it is
+building and roughly how long it takes; `-v` streams the compiler output. It
+never compiles a second `mvmctl`. The next plain `cargo build` restores those
+bytes and embeds them without compiling. Only `mvmctl` does this — a test binary
+or other consumer of `mvm-cli` gets the refusal from `host_binaries::extract`
+instead — and only in a source checkout: an official release binary always
+carries its payload.
+
+`just embed` remains for building every host binary in one go:
 
 ```sh
 just embed                    # build and invoke ./target/debug/mvmctl
 just embed --release          # build and invoke ./target/release/mvmctl
 ```
-
-A plain `cargo build` never cross-compiles, but it does **restore** the payload
-from the content store at `~/.cache/mvm/embed` when the store holds bytes keyed
-to this tree — the same key (dependency closure + `Cargo.lock` + pinned
-toolchain) the embedding arm trusts when it skips a rebuild. That matters
-because both variants write the same `target/<profile>/mvmctl`: the last cargo
-invocation owns the file, and a cached zero-compile build is enough to swap it.
-Restoring means one `just embed` sticks. On a miss (fresh clone, an edit to the
-payload's own sources, `MVM_EMBED_NO_CACHE=1`) the arm writes the empty table as
-before — it compiles nothing, so a payload it cannot prove is one it does not
-ship.
-
-Bare `just embed` builds the **debug** profile; use `just embed --release` for a
-release binary, or the release one is left untouched. Without a payload `mvmctl`
-runs every host-side verb but cannot bootstrap a builder VM —
-`host_binaries::extract` refuses with the profile-correct rebuild rather than
-extracting an empty directory. The tag-push release workflow always turns the
-feature on, so a downloaded binary is self-sufficient; `just release-build`
-carries it too.
 
 On macOS the recipe also replaces any globally configured compiler-cache
 wrapper with `scripts/rustc-macos-loader.sh` for this explicit build. Cargo
@@ -83,11 +91,8 @@ the library exists. Cargo may replay warning text cached by compilation units
 built before this repair; a new warning has a new `dyld[PID]` and indicates the
 current strip step still failed.
 
-Without embedding, `mvmctl` runs every host-side verb but cannot bootstrap a
-builder VM. Rebuild and invoke the same profile: a bare `mvmctl` that resolves
-to `target/release/mvmctl` is not repaired by a debug-only `just embed`. The
-tag-push release workflow always turns the feature on, so a downloaded binary
-is self-sufficient.
+The tag-push release workflow always turns the feature on, so a downloaded
+binary is self-sufficient.
 
 After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
 the source sidecar explicitly:
@@ -100,9 +105,10 @@ The command is complete only after both glibc and musl variants report that
 they were cached successfully. A builder-egress endpoint exiting on SIGTERM is
 normal one-shot teardown, not a failed sidecar build.
 
-Provision it with one command — it installs the exact pinned zig (from the
-`ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus
-the musl rust targets:
+Provision the toolchain with one command — it installs the exact pinned zig
+(from the `ziglang` PyPI package, read out of
+`[workspace.metadata.mvm.toolchain]`), the musl rust targets, and the pinned
+cargo-zigbuild:
 
 ```sh
 just toolchain-embed
@@ -110,9 +116,9 @@ just toolchain-embed
 
 Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
 incompatible with the pinned `cargo-zigbuild` and fail with a cryptic
-`CacheCheckFailed`. `build.rs` auto-detects the `ziglang`-installed zig and, if
-the pinned zig is missing, errors with the exact fix. Override the zig binary
-with `MVM_EMBED_ZIG=/path/to/zig` if needed.
+`CacheCheckFailed`. The build script and `mvmctl` both auto-detect the
+`ziglang`-installed zig and, if the pinned zig is missing, name the exact fix.
+Override the zig binary with `MVM_EMBED_ZIG=/path/to/zig` if needed.
 
 End-users running a downloaded mvmctl don't need any of this — the
 binaries are already embedded.

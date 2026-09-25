@@ -98,11 +98,20 @@ pub(crate) fn cache_root_from(
     Some(PathBuf::from(home).join(".cache/mvm/embed"))
 }
 
-/// `cache_root_from` against this process's environment.
+/// `cache_root_from` against this process's environment, unless
+/// `MVM_EMBED_NO_CACHE` switches the store off for this build.
 pub(crate) fn cache_root() -> Option<PathBuf> {
     if std::env::var_os("MVM_EMBED_NO_CACHE").is_some_and(|v| !v.is_empty()) {
         return None;
     }
+    store_root()
+}
+
+/// Where the store lives, whether or not a build may use it.
+///
+/// `mvmctl` producing its payload at run time always goes through the store,
+/// because the store is where the next build finds what it produced.
+pub(crate) fn store_root() -> Option<PathBuf> {
     cache_root_from(
         std::env::var_os("MVM_EMBED_CACHE_DIR"),
         std::env::var_os("HOME"),

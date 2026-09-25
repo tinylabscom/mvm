@@ -1,8 +1,16 @@
 # Refactor status
 
-Last updated: 2026-09-24
+Last updated: 2026-09-25
 
 ## In progress
+
+- [x] **One `mvmctl`, one command: the host payload without a second binary.**
+      `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
+      build shared between `build.rs` and `mvmctl`; release builds embed by
+      default (`MVM_EMBED=0` opts out, a missing toolchain warns); a
+      payload-less `mvmctl` builds the set in-process into the content store
+      with a status line first; the second-`mvmctl` bootstrap-helper compile
+      deleted.
 
 - [x] **Base-image CVE gate — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. Rootfs OS inventory
