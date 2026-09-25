@@ -12,7 +12,7 @@ authors.workspace = true
 # aarch64-unknown-linux-musl by crates/mvm-cli/build.rs and embedded.
 # Linux-gated in source (stub main() elsewhere) so non-Linux workspace
 # builds stay green. Bin names are load-bearing: build.rs +
-# host_binaries/manifest.rs + nix/lib/mvm-host-binaries.nix all key on them.
+# src/host_payload_manifest.rs + nix/lib/mvm-host-binaries.nix all key on them.
 [[bin]]
 name = "mvm-host-vm-init"
 path = "src/bin/mvm-host-vm-init.rs"
@@ -42,7 +42,7 @@ path = "src/bin/stage0-init.rs"
 # listener over the typed `builderd_protocol`; `#[path]`-includes the
 # daemon modules so it cross-compiles to static aarch64-musl without the
 # full mvm-build lib, same as the other builder bins. Embedded into the
-# builder/dev VM rootfs at /sbin/mvm-builderd via host_binaries/manifest.rs
+# builder/dev VM rootfs at /sbin/mvm-builderd via src/host_payload_manifest.rs
 # + nix/lib/mvm-host-binaries.nix (the name is load-bearing for build.rs).
 [[bin]]
 name = "mvm-builderd"

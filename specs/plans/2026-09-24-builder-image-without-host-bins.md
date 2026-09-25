@@ -629,13 +629,20 @@ the Stage 0 flake reference follows W8's re-pointing.
         `HOST_BINARIES` is now `mvm-host-vm-init` and `mvm-builderd`;
         `mvm-egress-proxy` is retired. Delivery note:
         `specs/sprint/delivery/builder-key-baked-bins-only.md`.
-- [ ] **W1 — payload assembly.** In `mvm-build`, next to
+- [x] **W1 — payload assembly.** In `mvm-build`, next to
       `rootfs_inject::build_newc_cpio`, add a deterministic payload builder
       that takes the extracted host-bin directory and returns bytes plus a
       digest. Use a builder struct, not positional arguments. Tests:
       byte-identical output across runs and input orders, the `MANIFEST`
       matches the bytes, a tampered input file is refused because extraction
       verification fails, and golden-digest stability.
+      - Done: `mvm_build::builder_boot::payload` (`BuilderBootPayload::builder()`),
+        the payload digest is the SHA-256 of `MANIFEST`, so the guest can
+        recompute it from unpacked files; `host_binaries::extract::builder_boot_payload`
+        holds each member to the compiled-in digest. The payload manifest moved
+        from `mvm-cli` to `crates/mvm-build/src/host_payload_manifest.rs` so
+        `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone and the
+        sync gate's fourth mirror with it.
 - [ ] **W2 — stage 1 in `mvm-host-vm-init`.** Detection, payload-digest check,
       root mount, ABI check, tmpfs copy, `pivot_to_root` reuse, and re-exec.
       Stage 2 tolerates pre-mounted pseudo-filesystems and resolves siblings

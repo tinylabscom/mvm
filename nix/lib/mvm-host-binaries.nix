@@ -1,7 +1,7 @@
 # Single source of truth (Nix view) for the mvm-internal Linux
 # binaries that mvmctl embeds and bakes into the builder/dev VM
 # rootfs via extraFiles. The Rust mirror at
-# crates/mvm-cli/src/host_binaries/manifest.rs must agree on the
+# crates/mvm-build/src/host_payload_manifest.rs must agree on the
 # name set and install paths; CI enforces parity (see
 # xtask/src/check_mvm_host_binaries_sync.rs).
 #

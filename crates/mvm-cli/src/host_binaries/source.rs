@@ -41,6 +41,17 @@ enum PayloadBytes {
 }
 
 impl PayloadBinary {
+    /// A compiled-in binary with the digest it claims, which a test may make
+    /// disagree with its bytes.
+    #[cfg(test)]
+    pub(crate) fn compiled_in(name: &str, sha256_hex: &str, bytes: &'static [u8]) -> Self {
+        Self {
+            name: name.to_string(),
+            sha256_hex: sha256_hex.to_string(),
+            bytes: PayloadBytes::CompiledIn(bytes),
+        }
+    }
+
     /// The binary's bytes. A stored binary is read on each call; callers
     /// extract once and verify what they wrote.
     pub(crate) fn contents(&self) -> io::Result<Cow<'static, [u8]>> {

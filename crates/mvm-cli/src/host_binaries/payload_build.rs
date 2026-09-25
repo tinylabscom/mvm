@@ -20,7 +20,7 @@ pub(crate) mod build_embed_cache;
 
 use super::embed_toolchain::{Pin, resolve_pinned_zig, strip_glibc, try_rustup_cargo_and_rustc};
 
-/// One binary in the payload, as `manifest.rs` declares it.
+/// One binary in the payload, as the payload manifest declares it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmbeddedSourceBinary {
     pub package: String,
@@ -29,7 +29,7 @@ pub(crate) struct EmbeddedSourceBinary {
 }
 
 /// The payload manifest, relative to the workspace root.
-pub(crate) const MANIFEST_PATH: &str = "crates/mvm-cli/src/host_binaries/manifest.rs";
+pub(crate) const MANIFEST_PATH: &str = "crates/mvm-build/src/host_payload_manifest.rs";
 
 /// Every binary in the payload, read from the manifest in `workspace_root`.
 pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceBinary>, String> {
@@ -41,7 +41,7 @@ pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceB
 
 /// Every binary in the payload, in the order the table lists them.
 ///
-/// Read out of the *text* of `crates/mvm-cli/src/host_binaries/manifest.rs`,
+/// Read out of the *text* of `crates/mvm-build/src/host_payload_manifest.rs`,
 /// because a build script cannot depend on the crate it is building. The order
 /// is part of the payload's identity — extraction hashes the table in order —
 /// so both callers must read the same text the same way.
@@ -71,7 +71,7 @@ fn parse_bootstrap_support_binaries(src: &str) -> Result<Vec<EmbeddedSourceBinar
     let features = read_quoted_field_block(src, section, "features:")?;
     if packages.len() != names.len() || packages.len() != features.len() {
         return Err(format!(
-            "{section} in manifest.rs has {} packages, {} names and {} feature lists; \
+            "{section} in the payload manifest has {} packages, {} names and {} feature lists; \
              every entry needs all three",
             packages.len(),
             names.len(),
@@ -93,7 +93,7 @@ fn parse_bootstrap_support_binaries(src: &str) -> Result<Vec<EmbeddedSourceBinar
 fn read_manifest_section<'a>(src: &'a str, name: &str) -> Result<&'a str, String> {
     let start = src
         .find(name)
-        .ok_or_else(|| format!("manifest.rs declares no {name}"))?;
+        .ok_or_else(|| format!("the payload manifest declares no {name}"))?;
     let rest = &src[start..];
     let end = rest.find("];").map(|i| i + 2).unwrap_or(rest.len());
     Ok(&rest[..end])
@@ -695,7 +695,10 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary
             BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, SEED_BINARIES,
         };
 
-        let parsed = parse_embedded_manifest(include_str!("manifest.rs")).unwrap();
+        let parsed = parse_embedded_manifest(include_str!(
+            "../../../mvm-build/src/host_payload_manifest.rs"
+        ))
+        .unwrap();
         let compiled: Vec<EmbeddedSourceBinary> = HOST_BINARIES
             .iter()
             .map(|bin| bin.name)
