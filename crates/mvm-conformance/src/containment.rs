@@ -17,6 +17,7 @@
 //! the numbers mean, and that is the part a regression would silently break.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// A snapshot of the host surface a guest-kernel compromise would perturb if it
 /// crossed the boundary.
@@ -138,6 +139,207 @@ pub fn digest_matches_pin(pinned_hex: &str, observed_hex: &str) -> bool {
     pinned_hex.trim().eq_ignore_ascii_case(observed_hex.trim())
 }
 
+// --- Victim boot mode ---------------------------------------------------------
+
+/// The prefix of the guest's own compromise-report lines. Only the PoC prints
+/// these; the detonation initramfs's scaffolding reports boot and exit under
+/// the distinct [`BOOT_MARKER_PREFIX`] / [`EXIT_MARKER_PREFIX`] prefixes, so
+/// scaffolding can never masquerade as the exploit's verdict.
+pub const CANARY_PREFIX: &str = "CVE-CANARY:";
+
+/// The prefix of the line the detonation initramfs prints before running the
+/// exploit, carrying the booted kernel's `uname -r` — the transcript proof
+/// that the kernel the pin named is the kernel that actually booted.
+pub const BOOT_MARKER_PREFIX: &str = "CVE-LAB-BOOT:";
+
+/// The prefix of the line the detonation initramfs prints after the exploit
+/// exits, carrying its exit code. Its presence, not its value, ends the
+/// host-side wait: a guest that reaches it ran the PoC to completion.
+pub const EXIT_MARKER_PREFIX: &str = "CVE-LAB-EXIT:";
+
+/// How the victim guest boots, decided by the suite's kernel pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VictimBoot {
+    /// No kernel is pinned: the admitted `machine run` path boots MVM's own
+    /// workload kernel. The run witnesses containment of the delivered exploit
+    /// on a kernel the PoC does not target, so a missing in-guest canary is
+    /// expected and never fails the scenario.
+    Admitted,
+    /// `kernel.vmlinux_sha256` is pinned: the victim boots that exact kernel
+    /// through the low-level Firecracker driver — NIC-less, agentless, and
+    /// deliberately outside admission — from a staged initramfs that runs the
+    /// exploit. Booting the PoC's exact target kernel makes the in-guest
+    /// canary load-bearing: its absence is a witnessed non-compromise, and
+    /// the scenario fails (see [`require_witnessed_compromise`]).
+    TargetKernel {
+        /// The staged vmlinux, digest-verified against the pin.
+        kernel: PathBuf,
+        /// The staged detonation initramfs carrying the exploit.
+        initramfs: PathBuf,
+    },
+}
+
+impl VictimBoot {
+    /// Whether this boot mode runs the PoC's exact target kernel.
+    #[must_use]
+    pub fn is_target_kernel(&self) -> bool {
+        matches!(self, Self::TargetKernel { .. })
+    }
+
+    /// What the "no admitted egress" assertion rests on in this boot mode,
+    /// printed into the transcript so the evidence basis is never implicit.
+    ///
+    /// The two modes genuinely differ: the admitted boot has a NIC-less guest
+    /// whose only path off the box is the brokered vsock egress endpoint, so
+    /// the audit chain's refusals are the evidence; the low-level boot wires
+    /// no vsock channels at all, so the device model itself is the evidence —
+    /// there is no egress endpoint for the guest to dial, admitted or not.
+    /// The audit classification still runs in both modes: an `egress.admitted`
+    /// line recorded during the detonation window is a failure regardless of
+    /// how the victim booted.
+    #[must_use]
+    pub fn egress_evidence(&self) -> &'static str {
+        match self {
+            Self::Admitted => {
+                "audit chain: the admission egress broker records every refusal, and \
+                 any admission is a containment failure"
+            }
+            Self::TargetKernel { .. } => {
+                "device model: the low-level boot attaches no NIC and wires no vsock \
+                 egress channel, so the guest has no path off the host at all"
+            }
+        }
+    }
+}
+
+/// A staged kernel the operator pointed the scenario at, its digest already
+/// computed by the caller (file IO stays in the cucumber step).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelCandidate {
+    /// Path to the staged vmlinux.
+    pub path: PathBuf,
+    /// Its observed sha256, lowercase hex.
+    pub sha256: String,
+}
+
+/// Decide the victim boot mode from the suite's kernel pin and the operator's
+/// staged artifacts.
+///
+/// The pin is the switch: an empty `vmlinux_sha256` keeps the admitted boot
+/// (the staged-kernel variables are transcript context, never boot inputs); a
+/// set one demands both staged artifacts and a kernel whose observed digest
+/// matches the pin. A mismatch refuses the boot: detonating on an unreviewed
+/// kernel would witness nothing about the pinned one.
+pub fn resolve_victim_boot(
+    vmlinux_pin: &str,
+    kernel: Option<KernelCandidate>,
+    initramfs: Option<PathBuf>,
+) -> Result<VictimBoot, String> {
+    if vmlinux_pin.trim().is_empty() {
+        return Ok(VictimBoot::Admitted);
+    }
+    let kernel = kernel.ok_or_else(|| {
+        "pins.toml kernel.vmlinux_sha256 is pinned but MVM_BDD_CVE_KERNEL is unset. \
+         Stage the target kernel with scripts/stage-cve-2026-80521-lab.sh and export \
+         the produced vmlinux path. See features/suites/s37_cve_containment/README.md."
+            .to_string()
+    })?;
+    if !digest_matches_pin(vmlinux_pin, &kernel.sha256) {
+        return Err(format!(
+            "staged kernel digest does not match the pin.\n  pinned:   {}\n  observed: {}\n\
+             Refusing to boot a kernel that is not the reviewed one.",
+            vmlinux_pin.trim(),
+            kernel.sha256
+        ));
+    }
+    let initramfs = initramfs.ok_or_else(|| {
+        "pins.toml kernel.vmlinux_sha256 is pinned but MVM_BDD_CVE_INITRAMFS is unset. \
+         The low-level boot has no admitted image machinery; the staging script \
+         builds the detonation initramfs that carries the exploit. See \
+         features/suites/s37_cve_containment/README.md."
+            .to_string()
+    })?;
+    Ok(VictimBoot::TargetKernel {
+        kernel: kernel.path,
+        initramfs,
+    })
+}
+
+/// The guest's own compromise-report lines (the canary), verbatim and trimmed.
+#[must_use]
+pub fn canary_lines(guest_output: &str) -> Vec<&str> {
+    guest_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains(CANARY_PREFIX))
+        .collect()
+}
+
+/// The boot-marker line the detonation initramfs printed, verbatim and trimmed.
+#[must_use]
+pub fn boot_marker_line(guest_output: &str) -> Option<&str> {
+    guest_output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains(BOOT_MARKER_PREFIX))
+}
+
+/// Enforce the witness contract of the pinned-kernel boot. Detonating the PoC
+/// on its exact target kernel and *not* observing the compromise canary is a
+/// failed experiment, not a pass: either the staged kernel was not actually
+/// vulnerable or the delivery broke, and in both cases the containment
+/// assertions measured nothing.
+///
+/// The admitted boot keeps the canary a candidate observation only: there the
+/// PoC runs on a kernel it does not target, so a missing canary says nothing.
+pub fn require_witnessed_compromise(boot: &VictimBoot, guest_output: &str) -> Result<(), String> {
+    if boot.is_target_kernel() && canary_lines(guest_output).is_empty() {
+        return Err(
+            "the vulnerable target kernel booted, but the exploit's compromise canary \
+             never appeared on the guest console. A witnessed non-compromise on the \
+             exact target kernel is a failed experiment: the containment assertions \
+             measured nothing. Check the console log for a PoC crash, a kernel oops, \
+             or a mismatched staged kernel."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The exit code the detonation initramfs recorded for the exploit, when the
+/// run reached the exit marker.
+#[must_use]
+pub fn exit_marker_code(guest_output: &str) -> Option<i32> {
+    let line = guest_output
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains(EXIT_MARKER_PREFIX))?;
+    line.rsplit("rc=").next()?.trim().parse().ok()
+}
+
+/// Check that the boot marker names the pinned target kernel release. The
+/// kernel's digest already proved its bytes; this proves those bytes are what
+/// booted — a pin recorded against the wrong staged file fails here.
+pub fn require_booted_kernel_matches_pin(
+    guest_output: &str,
+    target_version: &str,
+) -> Result<(), String> {
+    let marker = boot_marker_line(guest_output).ok_or_else(|| {
+        format!(
+            "the detonation initramfs printed no {BOOT_MARKER_PREFIX} line; cannot \
+             confirm the booted kernel is the pinned target ({target_version})"
+        )
+    })?;
+    if !marker.contains(target_version) {
+        return Err(format!(
+            "the booted kernel does not match the pinned target.\n  pinned target: {target_version}\n  boot marker:   {marker}\n\
+             The staged vmlinux matched the pin's digest, so the pin was recorded \
+             against the wrong kernel build."
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +429,164 @@ mod tests {
             "  291ECE1B9632016C1FD4A4F29EBA1764ACFA2012FA3C417B29F38FB3D73D4965\n"
         ));
         assert!(!digest_matches_pin("aa", "bb"));
+    }
+
+    // --- Victim boot mode ---------------------------------------------------
+
+    fn candidate(sha: &str) -> KernelCandidate {
+        KernelCandidate {
+            path: PathBuf::from("/lab/vmlinux"),
+            sha256: sha.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_empty_kernel_pin_keeps_the_admitted_boot() {
+        for pin in ["", "   ", "\n"] {
+            let boot = resolve_victim_boot(pin, None, None).expect("empty pin admits");
+            assert_eq!(boot, VictimBoot::Admitted);
+            assert!(!boot.is_target_kernel());
+        }
+    }
+
+    #[test]
+    fn an_empty_kernel_pin_ignores_staged_kernel_env_vars() {
+        // The admitted path cannot honor a kernel path; the staged artifacts
+        // are transcript context there, not a boot input.
+        let boot = resolve_victim_boot(
+            "",
+            Some(candidate("aa")),
+            Some(PathBuf::from("/lab/initrd")),
+        )
+        .expect("empty pin admits");
+        assert_eq!(boot, VictimBoot::Admitted);
+    }
+
+    #[test]
+    fn a_pinned_kernel_without_a_staged_vmlinux_fails_fast_with_staging_instructions() {
+        let err = resolve_victim_boot("aa", None, Some(PathBuf::from("/lab/initrd")))
+            .expect_err("a pinned kernel demands MVM_BDD_CVE_KERNEL");
+        assert!(err.contains("MVM_BDD_CVE_KERNEL"), "got: {err}");
+        assert!(err.contains("stage-cve-2026-80521-lab.sh"), "got: {err}");
+    }
+
+    #[test]
+    fn a_pinned_kernel_with_a_digest_mismatch_is_refused() {
+        let err = resolve_victim_boot(
+            "aa",
+            Some(candidate("bb")),
+            Some(PathBuf::from("/lab/initrd")),
+        )
+        .expect_err("a mismatched staged kernel must not boot");
+        assert!(err.contains("does not match the pin"), "got: {err}");
+    }
+
+    #[test]
+    fn a_pinned_kernel_without_a_staged_initramfs_fails_fast() {
+        let err = resolve_victim_boot("aa", Some(candidate("aa")), None)
+            .expect_err("a pinned kernel demands MVM_BDD_CVE_INITRAMFS");
+        assert!(err.contains("MVM_BDD_CVE_INITRAMFS"), "got: {err}");
+    }
+
+    #[test]
+    fn a_pinned_kernel_with_verified_staged_artifacts_selects_the_target_kernel_boot() {
+        let boot = resolve_victim_boot(
+            "  AA \n",
+            Some(candidate("aa")),
+            Some(PathBuf::from("/lab/initrd.cpio.gz")),
+        )
+        .expect("verified staged artifacts select the target-kernel boot");
+        assert_eq!(
+            boot,
+            VictimBoot::TargetKernel {
+                kernel: PathBuf::from("/lab/vmlinux"),
+                initramfs: PathBuf::from("/lab/initrd.cpio.gz"),
+            }
+        );
+        assert!(boot.is_target_kernel());
+    }
+
+    #[test]
+    fn each_boot_mode_states_its_egress_evidence_basis() {
+        assert!(
+            VictimBoot::Admitted
+                .egress_evidence()
+                .contains("audit chain")
+        );
+        let target = VictimBoot::TargetKernel {
+            kernel: PathBuf::from("/lab/vmlinux"),
+            initramfs: PathBuf::from("/lab/initrd"),
+        };
+        let basis = target.egress_evidence();
+        assert!(basis.contains("no NIC"), "got: {basis}");
+        assert!(basis.contains("no vsock egress channel"), "got: {basis}");
+    }
+
+    // --- Canary witness contract -----------------------------------------------
+
+    #[test]
+    fn canary_lines_picks_out_only_the_exploits_own_report() {
+        let output = "kernel boot noise\n\
+                      CVE-LAB-BOOT: kernel=7.0.0-31-generic\n\
+                      CVE-CANARY: uid=0, escaped\n\
+                      CVE-LAB-EXIT: rc=0\n";
+        assert_eq!(canary_lines(output), vec!["CVE-CANARY: uid=0, escaped"]);
+        assert!(canary_lines("no canary here\nCVE-LAB-EXIT: rc=1\n").is_empty());
+    }
+
+    #[test]
+    fn the_admitted_boot_treats_a_missing_canary_as_a_candidate_observation() {
+        require_witnessed_compromise(&VictimBoot::Admitted, "no canary here\n")
+            .expect("the admitted boot never fails on a missing canary");
+    }
+
+    #[test]
+    fn the_target_kernel_boot_fails_when_the_canary_never_appears() {
+        let boot = VictimBoot::TargetKernel {
+            kernel: PathBuf::from("/lab/vmlinux"),
+            initramfs: PathBuf::from("/lab/initrd"),
+        };
+        let err = require_witnessed_compromise(
+            &boot,
+            "CVE-LAB-BOOT: kernel=7.0.0-31-generic\nCVE-LAB-EXIT: rc=1\n",
+        )
+        .expect_err("a witnessed non-compromise on the target kernel is a failed experiment");
+        assert!(err.contains("failed experiment"), "got: {err}");
+        require_witnessed_compromise(&boot, "CVE-CANARY: uid=0\n")
+            .expect("a printed canary satisfies the witness contract");
+    }
+
+    #[test]
+    fn the_exit_marker_reports_the_exploits_exit_code() {
+        assert_eq!(
+            exit_marker_code("CVE-LAB-EXIT: rc=0\n"),
+            Some(0),
+            "a completed run reports its code"
+        );
+        assert_eq!(exit_marker_code("CVE-LAB-EXIT: rc=137\n"), Some(137));
+        assert_eq!(
+            exit_marker_code("no marker\n"),
+            None,
+            "a run that never reached the marker reports nothing"
+        );
+        assert_eq!(exit_marker_code("CVE-LAB-EXIT: rc=abc\n"), None);
+    }
+
+    #[test]
+    fn the_boot_marker_must_name_the_pinned_target_kernel() {
+        let output = "CVE-LAB-BOOT: kernel=7.0.0-31-generic arch=x86_64\n";
+        require_booted_kernel_matches_pin(output, "7.0.0-31-generic")
+            .expect("the booted kernel matches the pin");
+
+        let err = require_booted_kernel_matches_pin("no marker here\n", "7.0.0-31-generic")
+            .expect_err("a missing boot marker cannot confirm the target kernel");
+        assert!(err.contains("CVE-LAB-BOOT"), "got: {err}");
+
+        let err = require_booted_kernel_matches_pin(
+            "CVE-LAB-BOOT: kernel=6.8.0-139-generic arch=x86_64\n",
+            "7.0.0-31-generic",
+        )
+        .expect_err("a different booted kernel fails against the pin");
+        assert!(err.contains("does not match"), "got: {err}");
     }
 }

@@ -9,10 +9,23 @@
 //! Firecracker opt-ins, which is nowhere in CI (see `scenario_gate`).
 //!
 //! The privileged, unrepeatable work — booting guests, delivering and running
-//! the exploit through admission, reading `/proc` — lives here. The decision
-//! logic (what the host evidence means) lives in the crate library's
-//! `containment` module, where the workspace test run exercises it without a
-//! VM.
+//! the exploit, reading `/proc` — lives here. The decision logic (what the host
+//! evidence means) lives in the crate library's `containment` module, where the
+//! workspace test run exercises it without a VM.
+//!
+//! Two boot modes, selected by the suite's `kernel.vmlinux_sha256` pin:
+//!
+//! * Pin empty — the admitted `mvmctl machine run` path boots the victim on
+//!   MVM's own workload kernel and runs the exploit as the admitted image. The
+//!   PoC does not target that kernel, so the guest canary is a candidate
+//!   observation only.
+//! * Pin set — the victim boots the pinned, digest-verified target kernel
+//!   through the low-level Firecracker driver (`FcDriver::boot`), NIC-less and
+//!   agentless, from the staged detonation initramfs. This boot deliberately
+//!   bypasses admission — that is what the destructive-lab ceiling exists to
+//!   fence — and the guest canary becomes load-bearing: booting the PoC's exact
+//!   target kernel and not seeing the compromise report is a failed experiment,
+//!   not a pass.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +33,7 @@ use std::process::Output;
 
 use cucumber::{given, then, when};
 use mvm_conformance::IsolatedHome;
-use mvm_conformance::containment::{self, HostObservation};
+use mvm_conformance::containment::{self, HostObservation, VictimBoot};
 use sha2::{Digest, Sha256};
 
 use crate::steps::cli::mvmctl_path;
@@ -29,12 +42,19 @@ use crate::world::CliWorld;
 
 const SIBLING_NAME: &str = "mvm-cve-bystander";
 const VICTIM_NAME: &str = "mvm-cve-victim";
-const CANARY_PREFIX: &str = "CVE-CANARY:";
+
+/// How long the target-kernel detonation gets to print its exit marker before
+/// the victim is torn down. The guest serves no agent and dials no host
+/// channel, so the wait reconciles against the durable console log rather than
+/// blocking on a guest event that can never arrive.
+const DETONATION_TIMEOUT_SECS: u64 = 300;
+/// Cadence of the console-log / VMM-liveness reconciliation poll.
+const DETONATION_POLL_MS: u64 = 250;
 
 /// Read a `pins.toml` value under `[section] key`, from the suite directory.
 ///
 /// A tiny hand parser rather than pulling the whole TOML into a typed struct:
-/// only two string values are read, and keeping the reader here means the pin
+/// only a few string values are read, and keeping the reader here means the pin
 /// file is documentation the scenario also enforces, not a schema to maintain.
 fn pin(section: &str, key: &str) -> Option<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -297,30 +317,73 @@ fn stage_exploit(world: &mut CliWorld) {
 
 // --- When -------------------------------------------------------------------
 
-#[when("a sealed victim guest runs the exploit through admission")]
+/// Resolve the operator-supplied staged kernel into a digest-checked candidate.
+/// Env access and file IO live here; the decision itself is
+/// [`containment::resolve_victim_boot`].
+fn staged_kernel_candidate() -> Option<containment::KernelCandidate> {
+    let path = std::env::var_os("MVM_BDD_CVE_KERNEL").map(PathBuf::from)?;
+    assert!(
+        path.is_file(),
+        "MVM_BDD_CVE_KERNEL does not name a readable file: {}",
+        path.display()
+    );
+    let sha256 = file_digest(&path);
+    Some(containment::KernelCandidate { path, sha256 })
+}
+
+/// The operator-supplied detonation initramfs, when staged.
+fn staged_initramfs() -> Option<PathBuf> {
+    let path = std::env::var_os("MVM_BDD_CVE_INITRAMFS").map(PathBuf::from)?;
+    assert!(
+        path.is_file(),
+        "MVM_BDD_CVE_INITRAMFS does not name a readable file: {}",
+        path.display()
+    );
+    Some(path)
+}
+
+#[when("a sealed victim guest runs the staged exploit")]
 fn run_victim(world: &mut CliWorld) {
     let exploit = world
         .cve_exploit
         .clone()
         .expect("a Given step must stage the exploit before the victim runs");
-    let image = exploit.to_string_lossy().into_owned();
+
+    let vmlinux_pin = pin("kernel", "vmlinux_sha256").unwrap_or_default();
+    let boot = containment::resolve_victim_boot(
+        &vmlinux_pin,
+        staged_kernel_candidate(),
+        staged_initramfs(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!(
+        "[cve-containment] victim boot mode: {}",
+        if boot.is_target_kernel() {
+            "target kernel (low-level Firecracker driver)"
+        } else {
+            "admitted (mvmctl machine run)"
+        }
+    );
 
     let _ = run_mvmctl(&["machine", "stop", VICTIM_NAME, "--yes"], &[]);
     let _ = run_mvmctl(&["machine", "rm", VICTIM_NAME, "--yes"], &[]);
 
-    // The victim is the admitted `machine run` path: the exploit rides in the
-    // image the plan admits — delivery is through admission by construction,
-    // there is no host-to-guest side channel to smuggle it in on. The admitted
-    // CLI boots MVM's own workload kernel; it has no flag to boot an arbitrary
-    // distro vmlinux, which is exactly the "Known limit" the suite README
-    // records. `MVM_BDD_CVE_KERNEL`, when set, is transcript context (which
-    // kernel the operator intended), not a boot input this path can honor.
-    if let Some(target) = std::env::var_os("MVM_BDD_CVE_KERNEL") {
-        eprintln!(
-            "[cve-containment] operator-noted target kernel: {}",
-            PathBuf::from(target).display()
-        );
+    match &boot {
+        VictimBoot::Admitted => run_victim_admitted(world, &exploit),
+        VictimBoot::TargetKernel { kernel, initramfs } => {
+            run_victim_target_kernel(world, kernel, initramfs);
+        }
     }
+    world.cve_victim_boot = Some(boot);
+}
+
+/// The admitted victim boot: the exploit rides in the image the plan admits —
+/// delivery is through admission by construction, there is no host-to-guest
+/// side channel to smuggle it in on. The admitted CLI boots MVM's own workload
+/// kernel; it has no flag to boot an arbitrary distro vmlinux, which is what
+/// the `kernel.vmlinux_sha256` pin gates.
+fn run_victim_admitted(world: &mut CliWorld, exploit: &Path) {
+    let image = exploit.to_string_lossy().into_owned();
     let out = run_mvmctl(
         &[
             "machine",
@@ -342,6 +405,97 @@ fn run_victim(world: &mut CliWorld) {
     });
 }
 
+/// The pinned-kernel victim boot: the low-level Firecracker driver boots the
+/// staged, digest-verified target kernel on a staged initramfs that runs the
+/// exploit, with no NIC, no vsock channels, and no admission machinery — the
+/// guest's only observable output is its serial console, captured by the
+/// driver under the victim's state dir.
+///
+/// This boot bypasses admission on purpose: the admitted path cannot boot an
+/// arbitrary kernel, and the destructive-lab risk ceiling is what fences the
+/// consequence. Which assertions still bind this mode, and on what evidence,
+/// is scoped in the suite README.
+fn run_victim_target_kernel(world: &mut CliWorld, kernel: &Path, initramfs: &Path) {
+    use mvm_runtime::driver::{ConsoleCapture, FcDriver, KernelImage, VmmDriver, VmmSpec};
+
+    // The driver resolves its state dir from the process MVM_HOME; hold it on
+    // the lab home so the victim's state lands next to the sibling's and the
+    // residue check observes the same tree the driver wrote.
+    if world.mvm_home_guard.is_none() {
+        world.mvm_home_guard = Some(crate::world::MvmHomeGuard::new(&e2e_home()));
+    }
+    let state_dir = mvm_core::config::vm_state_dir_at(e2e_home(), VICTIM_NAME);
+
+    let spec = VmmSpec {
+        name: VICTIM_NAME.to_string(),
+        kernel: KernelImage::Path(kernel.to_path_buf()),
+        initramfs: Some(initramfs.to_path_buf()),
+        // Full kernel log rather than the driver's `quiet` default: a PoC
+        // oops or panic on the console is itself transcript evidence.
+        cmdline: "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string(),
+        vcpus: 2,
+        cpu_grant: None,
+        memory_mib: 1024,
+        mem_initial_mib: None,
+        // No block devices and no vsock channels: the guest's whole reachable
+        // world is its initramfs, and its only host-visible channel is the
+        // write-only console capture.
+        blocks: vec![],
+        vsock: vec![],
+        console: ConsoleCapture {
+            log_path: state_dir.join("console.log"),
+        },
+        shares: vec![],
+        trusted_builder: false,
+        builder_egress_endpoint: None,
+        plan_binding: None,
+    };
+    eprintln!(
+        "[cve-containment] booting victim on pinned target kernel {} (initramfs {})",
+        kernel.display(),
+        initramfs.display()
+    );
+    let driver = FcDriver::new();
+    let started = std::time::Instant::now();
+    let vm = driver.boot(&spec).unwrap_or_else(|e| {
+        let console = state_dir.join("console.log");
+        let log = std::fs::read_to_string(&console).unwrap_or_default();
+        panic!("the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}");
+    });
+
+    // Wait out the detonation. The guest serves no agent and dials no host
+    // channel, so no completion event exists to block on; reconcile against
+    // the console log's exit marker and the VMM's liveness at a bounded
+    // cadence, then tear the guest down whether or not it finished.
+    let console_log = state_dir.join("console.log");
+    let deadline = started + std::time::Duration::from_secs(DETONATION_TIMEOUT_SECS);
+    loop {
+        let log = std::fs::read_to_string(&console_log).unwrap_or_default();
+        let finished = log.contains(containment::EXIT_MARKER_PREFIX);
+        let alive = matches!(vm.status(), Ok(mvm_core::vm_backend::VmStatus::Running));
+        if finished || !alive || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(DETONATION_POLL_MS));
+    }
+    // A detonated guest is never left running: a kill failure is a lab
+    // emergency, not a soft error.
+    if let Err(e) = vm.kill() {
+        panic!("failed to stop the detonated victim guest '{VICTIM_NAME}': {e:#}");
+    }
+
+    let stdout = std::fs::read_to_string(&console_log).unwrap_or_default();
+    let stderr = std::fs::read_to_string(state_dir.join("firecracker.log")).unwrap_or_default();
+    world.cve_victim_name = Some(VICTIM_NAME.to_string());
+    world.cve_victim_launch = Some(crate::world::LaunchRecord {
+        exit_code: containment::exit_marker_code(&stdout).unwrap_or(-1),
+        stdout,
+        stderr,
+        dispatch_window_ms: None,
+        wall: started.elapsed(),
+    });
+}
+
 // --- Then -------------------------------------------------------------------
 
 #[then("the guest-side compromise report is recorded as a candidate observation")]
@@ -351,19 +505,45 @@ fn canary_candidate_observation(world: &mut CliWorld) {
         .as_ref()
         .expect("the victim must have run");
     let combined = format!("{}\n{}", launch.stdout, launch.stderr);
-    // A candidate observation, not an assertion: the verdict comes from host
-    // evidence. We only surface what the guest claimed, so the transcript
-    // records whether the in-guest PoC reported code execution on this kernel.
-    let verdict = combined
-        .lines()
-        .find(|l| l.contains(CANARY_PREFIX))
-        .map(str::trim)
-        .unwrap_or("CVE-CANARY: (no guest canary observed)");
-    eprintln!("[cve-containment] guest candidate observation: {verdict}");
+    // The guest's claim is always surfaced, prominently — whether the in-guest
+    // PoC reported code execution is the point of the run. What it *means*
+    // depends on the boot mode, and the verdict still comes from host evidence.
+    let canaries = containment::canary_lines(&combined);
+    if canaries.is_empty() {
+        eprintln!("[cve-containment] guest candidate observation: (no guest canary observed)");
+    } else {
+        for line in &canaries {
+            eprintln!("[cve-containment] guest compromise report: {line}");
+        }
+    }
+
+    let Some(boot) = &world.cve_victim_boot else {
+        return;
+    };
+    if !boot.is_target_kernel() {
+        return;
+    }
+    // The pinned-kernel witness contract: prove the booted kernel is the pinned
+    // target (the initramfs's boot marker carries its `uname -r`), then fail —
+    // not pass — when a detonation on the exact target kernel produced no
+    // compromise canary.
+    let target = pin("kernel", "target_version").unwrap_or_default();
+    assert!(
+        !target.trim().is_empty(),
+        "pins.toml kernel.target_version is empty; the boot-marker check would \
+         pass vacuously. Record the PoC's target kernel version in the pin."
+    );
+    containment::require_booted_kernel_matches_pin(&combined, &target)
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("[cve-containment] booted kernel confirmed as the pinned target: {target}");
+    containment::require_witnessed_compromise(boot, &combined).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!(
+        "[cve-containment] witness contract met: the exploit reported compromise on the pinned target kernel"
+    );
 }
 
 #[then("no outbound connection was admitted from the victim guest")]
-fn no_egress_admitted(_world: &mut CliWorld) {
+fn no_egress_admitted(world: &mut CliWorld) {
     let verdict = containment::classify_egress(&audit_lines());
     assert!(
         verdict.contained(),
@@ -371,14 +551,19 @@ fn no_egress_admitted(_world: &mut CliWorld) {
          victim guest:\n{}",
         verdict.admitted.join("\n")
     );
+    let basis = world
+        .cve_victim_boot
+        .as_ref()
+        .map_or(VictimBoot::Admitted, Clone::clone);
     eprintln!(
-        "[cve-containment] egress contained: {} refusal(s), 0 admitted",
-        verdict.refusals
+        "[cve-containment] egress contained: {} refusal(s), 0 admitted (evidence basis: {})",
+        verdict.refusals,
+        basis.egress_evidence()
     );
 }
 
 #[then("the audit chain verifies intact")]
-fn audit_verifies_intact(_world: &mut CliWorld) {
+fn audit_verifies_intact(world: &mut CliWorld) {
     let out = run_mvmctl(&["trust", "audit", "verify"], &[]);
     assert!(
         out.status.success(),
@@ -386,6 +571,17 @@ fn audit_verifies_intact(_world: &mut CliWorld) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    if world
+        .cve_victim_boot
+        .as_ref()
+        .is_some_and(VictimBoot::is_target_kernel)
+    {
+        eprintln!(
+            "[cve-containment] note: the victim booted outside admission by design, so the \
+             chain records no admission of it; this assertion is that the host's audit \
+             chain itself survived the detonation intact"
+        );
+    }
 }
 
 #[then("the host surface is unchanged")]
@@ -424,6 +620,25 @@ fn teardown_no_residue(world: &mut CliWorld) {
         let _ = run_mvmctl(&["machine", "stop", name, "--yes"], &[]);
         let _ = run_mvmctl(&["machine", "rm", name, "--yes"], &[]);
     }
+    if world
+        .cve_victim_boot
+        .as_ref()
+        .is_some_and(VictimBoot::is_target_kernel)
+    {
+        // The low-level victim boot has no machine-registry entry for
+        // `machine rm` to sweep; its state dir is the driver's own, removed
+        // here once the guest is dead (the When step killed it and fails the
+        // scenario otherwise).
+        let dir = mvm_core::config::vm_state_dir_at(e2e_home(), VICTIM_NAME);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap_or_else(|e| {
+                panic!(
+                    "remove the victim's driver state dir {}: {e}",
+                    dir.display()
+                )
+            });
+        }
+    }
     for name in [SIBLING_NAME, VICTIM_NAME] {
         assert!(
             machine_dir(name).is_none(),
@@ -432,4 +647,5 @@ fn teardown_no_residue(world: &mut CliWorld) {
     }
     world.cve_sibling = None;
     world.cve_victim_name = None;
+    world.cve_victim_boot = None;
 }

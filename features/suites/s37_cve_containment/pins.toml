@@ -37,9 +37,11 @@ artifact_sha256 = ""
 # exploit carries offsets and symbol assumptions for this exact build.
 target_distro = "Ubuntu 26.04"
 target_version = "7.0.0-31-generic"
-# The bootable vmlinux the scenario boots the victim guest on, once staged into
-# the lab and its digest recorded here. Empty until staged; see the README and
-# the "Known limit" note there — MVM's Firecracker workload path boots an
-# uncompressed vmlinux, and extracting a bootable one from the target distro
-# kernel is the operator step this pin gates.
+# The bootable vmlinux the scenario boots the victim guest on through the
+# low-level Firecracker path (see the suite README's "Boot modes"). The
+# staging script produces it from the target distro's linux-image .deb with
+# scripts/extract-vmlinux and prints the digest to record here. Empty keeps
+# the admitted boot on MVM's own kernel; set, the scenario requires
+# MVM_BDD_CVE_KERNEL + MVM_BDD_CVE_INITRAMFS and re-verifies this digest
+# before boot.
 vmlinux_sha256 = ""

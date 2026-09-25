@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# extract-vmlinux — extract the uncompressed ELF vmlinux from a compressed
+# kernel image (a distro vmlinuz / bzImage) and write it to stdout.
+#
+#   scripts/extract-vmlinux <kernel-image> > vmlinux
+#
+# Firecracker's x86_64 boot loader needs an uncompressed ELF vmlinux, but a
+# distro kernel package ships a bzImage: a small self-decompressing wrapper
+# around the real, compressed vmlinux payload. This script locates the
+# embedded payload by scanning for each supported compressor's magic bytes and
+# trial-decompressing from every candidate offset; the first stream that
+# decompresses to an ELF wins. Already-ELF input is passed through unchanged.
+#
+# This is the same algorithm the kernel source tree's own scripts/extract-vmlinux
+# implements (the Nix kernel build runs that one), rewritten standalone so a bare
+# lab host with no kernel-tree checkout can stage a distro kernel. It is not the
+# runtime path: the Firecracker driver extracts a gzipped bzImage itself at boot
+# (mvm-vmm's fc_kernel), but only gzip — a staging tool must cover every
+# compressor a distro might pick, which is why this one scans them all.
+#
+# Needs: perl (the byte-magic scan; binary-safe and present on any minimal
+# install), od, tail, and whichever decompressor matches the image's
+# compression (gzip, zstd, xz, lz4, bzip2, lzma, lzop). A decompressor that is
+# not installed is simply skipped; the script fails loudly if no payload
+# decodes to an ELF.
+set -euo pipefail
+
+img="${1:-}"
+if [[ -z "$img" || ! -r "$img" ]]; then
+  echo "usage: extract-vmlinux <kernel-image> > vmlinux" >&2
+  exit 64
+fi
+
+is_elf() { # is_elf <file>
+  [[ $(head -c4 "$1" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]]
+}
+
+if is_elf "$img"; then
+  cat "$img"
+  exit 0
+fi
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+# Every 0-based offset in $img where the hex-encoded byte magic occurs.
+magic_offsets() { # magic_offsets <hex> <file>
+  perl -e '
+    my ($hex, $file) = @ARGV;
+    my $magic = pack("H*", $hex);
+    open my $fh, "<:raw", $file or die "open $file: $!";
+    local $/;
+    my $data = <$fh>;
+    my $pos = 0;
+    while (($pos = index($data, $magic, $pos)) >= 0) {
+      print "$pos\n";
+      $pos++;
+    }
+  ' "$1" "$2"
+}
+
+try_payload() { # try_payload <hex byte magic> <decompressor> [args...]
+  local hex="$1"
+  shift
+  command -v "$1" >/dev/null 2>&1 || return 1
+  local offsets off
+  offsets="$(magic_offsets "$hex" "$img")"
+  [[ -n "$offsets" ]] || return 1
+  for off in $offsets; do
+    # `tail -c +N` is 1-based, so +off+1 starts at 0-based offset `off`. A
+    # decompressor may exit non-zero on trailing garbage after the payload
+    # while still emitting the full stream — the ELF check, not the exit
+    # status, is the verdict.
+    tail -c "+$((off + 1))" "$img" | "$@" >"$tmp" 2>/dev/null || true
+    if [[ -s "$tmp" ]] && is_elf "$tmp"; then
+      cat "$tmp"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Compressed-vmlinux magics, in the order distro kernels most often use.
+try_payload 1f8b08 gzip -dc && exit 0     # CONFIG_KERNEL_GZIP
+try_payload 28b52ffd zstd -dc && exit 0   # CONFIG_KERNEL_ZSTD
+try_payload fd377a585a00 xz -dc && exit 0 # CONFIG_KERNEL_XZ
+try_payload 02214c18 lz4 -dc && exit 0    # CONFIG_KERNEL_LZ4
+try_payload 425a68 bzip2 -dc && exit 0    # CONFIG_KERNEL_BZIP2
+try_payload 5d0000 lzma -dc && exit 0     # CONFIG_KERNEL_LZMA
+try_payload 894c5a4f lzop -dc && exit 0   # CONFIG_KERNEL_LZO
+
+echo "error: no compressed payload in $img decompressed to an ELF vmlinux" >&2
+echo "  (tried gzip, zstd, xz, lz4, bzip2, lzma, lzo — install the matching" >&2
+echo "   decompressor, or the kernel uses a compression this script cannot read)" >&2
+exit 1
