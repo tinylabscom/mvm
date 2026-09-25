@@ -536,14 +536,12 @@ mod tests {
     /// Every builder job — a flake build's fetches and a dependency install's
     /// alike — leaves the builder through its vsock egress client and is
     /// decided here, on the builder endpoint's gate. That gate is built by the
-    /// endpoint's own `build_egress_gate` from `trusted_build_egress`, exactly
-    /// as the builder spawns it. A reachable destination is relayed and the
-    /// open audited; cloud metadata is refused and the refusal audited,
+    /// endpoint's own `build_egress_gate` from the builder's egress policy,
+    /// exactly as the builder spawns it. A reachable destination is relayed and
+    /// the open audited; cloud metadata is refused and the refusal audited,
     /// because mandatory-deny holds even under an open build policy.
     #[test]
     fn builder_egress_relays_an_admitted_flow_and_audits_a_refused_one() {
-        use mvm_contract::policy::network_policy::NetworkPolicy;
-
         const METADATA: &str = "169.254.169.254:80";
         // Characters no signature or digest encoding produces, so its absence
         // from the chain means something.
@@ -552,7 +550,7 @@ mod tests {
         let audit_path = dir.path().join("audit.jsonl");
         let (recorder, audit_key) = recorder_at(&audit_path);
         let gate = crate::supervisor::network_endpoint::build_egress_gate(
-            &NetworkPolicy::trusted_build_egress(),
+            &mvm_build::builder_vm_transport::builder_egress_policy(),
         );
         let addr = tcp_echo_server();
         let (mut guest, mut guest_session, host) =

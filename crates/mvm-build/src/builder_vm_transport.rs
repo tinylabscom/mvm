@@ -174,6 +174,13 @@ pub fn builder_uses_vsock_egress(image: &BuilderVmImage) -> bool {
     matches!(image, BuilderVmImage::Rootfs { .. })
 }
 
+/// The egress policy the builder's endpoint decides every builder job under:
+/// flake fetches and dependency installs alike. Builder infrastructure only;
+/// no workload launch path may use it.
+pub fn builder_egress_policy() -> mvm_core::policy::network_policy::NetworkPolicy {
+    mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress()
+}
+
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BuilderEndpointTransport {
@@ -250,7 +257,7 @@ impl BuilderVsockEgressEndpoint {
             "secrets": [],
             "transport": transport,
             "redaction": mvm_core::policy::RedactionPolicy::default(),
-            "network_policy": mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress(),
+            "network_policy": builder_egress_policy(),
             // One authenticated session, same as every other tier. The guest's
             // egress client speaks nothing else.
             "egress_mode": "flow_mux",
