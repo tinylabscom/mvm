@@ -107,7 +107,7 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/payload_build.rs");
     println!("cargo:rerun-if-changed=src/workspace_graph.rs");
-    println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
+    println!("cargo:rerun-if-changed=../mvm-build/src/host_payload_manifest.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
@@ -336,7 +336,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root
-            .join("crates/mvm-cli/src/host_binaries/manifest.rs")
+            .join("crates/mvm-build/src/host_payload_manifest.rs")
             .display()
     );
     // The embedded binaries' bytes are the authoritative builder-VM
@@ -363,7 +363,7 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
     embed_toolchain::read_pinned_toolchain(root, &arch)
 }
 
-/// Every binary that gets cross-compiled and embedded, from `manifest.rs`.
+/// Every binary that gets cross-compiled and embedded, from the payload manifest.
 fn read_embedded_manifest(workspace_root: &Path) -> Vec<EmbeddedSourceBinary> {
     payload_build::read_manifest(workspace_root).unwrap_or_else(|reason| panic!("{reason}"))
 }

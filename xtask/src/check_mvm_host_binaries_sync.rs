@@ -1,7 +1,7 @@
 //! `xtask check-mvm-host-binaries-sync`
 //!
 //! CI lint — asserts the Rust manifest at
-//! `crates/mvm-cli/src/host_binaries/manifest.rs` and the Nix
+//! `crates/mvm-build/src/host_payload_manifest.rs` and the Nix
 //! attrset at `nix/lib/mvm-host-binaries.nix` agree on the set of
 //! entries and their install paths. Adding or renaming a binary
 //! requires updating both files in the same PR.
@@ -13,12 +13,6 @@
 //! image build fail on a missing path — and that build only runs on tags
 //! and the nightly cron, so the gap is invisible on the PR that opens
 //! it.
-//!
-//! A fourth mirror is `BUILDER_HOST_BINARIES` in
-//! `crates/mvm-build/src/image_source/build.rs`: the names a local builder
-//! image build copies out of the image checkout's host-binary script. A name
-//! left there after it leaves the manifest makes every local image build
-//! refuse on a binary nothing builds any more.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -27,8 +21,7 @@ use std::path::Path;
 const PINNED_RUST_ZIGBUILD: &str =
     r#"RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild"#;
 const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
-const IMAGE_SOURCE_BUILD: &str = "crates/mvm-build/src/image_source/build.rs";
-const BUILDER_HOST_BINARIES_DECL: &str = "pub const BUILDER_HOST_BINARIES";
+const RUST_MANIFEST: &str = "crates/mvm-build/src/host_payload_manifest.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let rust_entries = parse_rust_manifest(workspace)?;
@@ -37,24 +30,11 @@ pub fn run(workspace: &Path) -> Result<()> {
     if rust_entries != nix_entries {
         bail!(
             "drift between manifests:\n  Rust: {:#?}\n  Nix:  {:#?}\n\n\
-             Fix: ensure crates/mvm-cli/src/host_binaries/manifest.rs and \
+             Fix: ensure crates/mvm-build/src/host_payload_manifest.rs and \
              nix/lib/mvm-host-binaries.nix list the same entries with the \
              same install_path.",
             rust_entries,
             nix_entries
-        );
-    }
-
-    let image_source_path = workspace.join(IMAGE_SOURCE_BUILD);
-    let image_source = std::fs::read_to_string(&image_source_path)
-        .with_context(|| format!("read {}", image_source_path.display()))?;
-    let builder_list = builder_host_binaries(&image_source)?;
-    let manifest_names: Vec<String> = rust_entries.keys().cloned().collect();
-    if builder_list != manifest_names {
-        bail!(
-            "{IMAGE_SOURCE_BUILD}: BUILDER_HOST_BINARIES lists {builder_list:?}, the manifest \
-             lists {manifest_names:?}. A local builder image build copies exactly these names \
-             out of the image checkout's host-binary build, so the two must name the same set."
         );
     }
 
@@ -180,9 +160,9 @@ fn split_zigbuild_steps(src: &str) -> Vec<String> {
 }
 
 /// Parse `name:` / `install_path:` field pairs from the Rust struct literal
-/// in `crates/mvm-cli/src/host_binaries/manifest.rs`.
+/// in the Rust payload manifest.
 fn parse_rust_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
-    let path = root.join("crates/mvm-cli/src/host_binaries/manifest.rs");
+    let path = root.join(RUST_MANIFEST);
     let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
 
     let mut out = BTreeMap::new();
@@ -228,26 +208,6 @@ fn parse_nix_attrset(root: &Path) -> Result<BTreeMap<String, String>> {
     }
 
     Ok(out)
-}
-
-/// The names in the `BUILDER_HOST_BINARIES` array literal, sorted.
-fn builder_host_binaries(source: &str) -> Result<Vec<String>> {
-    let start = source.find(BUILDER_HOST_BINARIES_DECL).with_context(|| {
-        format!("{IMAGE_SOURCE_BUILD} no longer declares BUILDER_HOST_BINARIES")
-    })?;
-    let decl = &source[start..];
-    let body = decl
-        .find('=')
-        .and_then(|eq| decl[eq..].find("];").map(|end| &decl[eq..eq + end]))
-        .with_context(|| format!("{IMAGE_SOURCE_BUILD}: BUILDER_HOST_BINARIES is not an array"))?;
-    let mut names: Vec<String> = body
-        .split('"')
-        .skip(1)
-        .step_by(2)
-        .map(str::to_string)
-        .collect();
-    names.sort();
-    Ok(names)
 }
 
 /// Extract the first double-quoted string on `line` that appears after
@@ -305,33 +265,6 @@ mod tests {
             entries.get("mvm-builderd").map(String::as_str),
             Some("/sbin/mvm-builderd")
         );
-    }
-
-    #[test]
-    fn builder_host_binaries_reads_the_array_literal() {
-        let src = r#"
-/// doc
-pub const BUILDER_HOST_BINARIES: [&str; 2] = ["mvm-host-vm-init", "mvm-builderd"];
-const OTHER: [&str; 1] = ["not-this"];
-"#;
-        assert_eq!(
-            builder_host_binaries(src).unwrap(),
-            ["mvm-builderd", "mvm-host-vm-init"]
-        );
-        let wrapped = "pub const BUILDER_HOST_BINARIES: [&str; 3] =\n    [\"a\", \"b\", \"c\"];";
-        assert_eq!(builder_host_binaries(wrapped).unwrap(), ["a", "b", "c"]);
-        assert!(builder_host_binaries("const NOTHING: u8 = 0;").is_err());
-    }
-
-    #[test]
-    fn builder_host_binaries_match_the_manifest() {
-        let root = workspace_root();
-        let src = std::fs::read_to_string(root.join(IMAGE_SOURCE_BUILD)).unwrap();
-        let rust: Vec<String> = parse_rust_manifest(&root)
-            .expect("rust")
-            .into_keys()
-            .collect();
-        assert_eq!(builder_host_binaries(&src).unwrap(), rust);
     }
 
     #[test]

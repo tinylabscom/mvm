@@ -16,6 +16,10 @@ pub mod base_image_scan;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
+/// The builder boot contract: the payload of mvm's own builder binaries every
+/// builder boot carries beside its image, the image's boot ABI, and the one
+/// kernel command line every builder backend boots with.
+pub mod builder_boot;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
 mod builder_egress_process;
@@ -69,6 +73,8 @@ pub mod guest_elf;
 /// Which libc a materialized guest rootfs carries, observed while the tree is
 /// still a directory the host can read.
 pub mod guest_libc;
+/// Which of this crate's binaries `mvmctl` embeds as its Linux host payload.
+pub mod host_payload_manifest;
 pub mod image_source;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
