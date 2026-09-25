@@ -86,6 +86,7 @@ jobs:
           # two assets on every re-publish so consumers always fetch the latest.
           gh release view revocations --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
             || gh release create revocations --repo "${GITHUB_REPOSITORY}" \
+                 --latest=false \
                  --title "Pack revocations" --notes "Signed pack revocation list."
           gh release upload revocations \
             pack-revocations.json pack-revocations.json.bundle \

@@ -205,6 +205,8 @@ jobs:
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
                      scripts/installer-compat/*.sh \
+                     scripts/smoke-fresh-install.sh \
+                     scripts/pin-installer-default.sh \
                      .githooks/pre-commit \
                      .githooks/pre-commit.test.sh
 

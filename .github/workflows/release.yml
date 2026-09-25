@@ -775,16 +775,18 @@ jobs:
           mapfile -t assets < <(printf '%s\n' "${assets[@]}" | sort -u)
 
           RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
-          # A semver prerelease tag (`v0.18.0-rc.1`) must not become GitHub's
-          # "Latest" release. `mvmctl update` resolves
-          # `/repos/<repo>/releases/latest` to decide what to upgrade to, so
-          # publishing a release candidate as latest would pull every stable
-          # user onto it on their next update — without them asking for a
-          # prerelease and without a way to tell they had been moved onto one.
-          prerelease=()
+          # Every tag publishes as a prerelease. `mvmctl update` follows
+          # `/repos/<repo>/releases/latest` and install.sh the newest
+          # non-prerelease, so whatever is published as a full release reaches
+          # every user who did not ask for anything newer. A release candidate
+          # (`v0.18.0-rc.1`) stays a prerelease. A stable tag is only staged as
+          # one: `promote-release` makes it a full release once a fresh install
+          # of it has booted a microVM on each backend, and not before.
+          prerelease=(--prerelease)
           if [[ "${TAG_NAME#v}" == *-* ]]; then
-            prerelease=(--prerelease)
             echo "::notice::${TAG_NAME} carries a prerelease segment — publishing it as a prerelease, not as latest"
+          else
+            echo "::notice::${TAG_NAME} is staged as a prerelease until its first-run smoke passes"
           fi
           # A dry run publishes to a throwaway draft under a scratch tag and
           # deletes it in the next step. This is the same `gh release create`
@@ -813,24 +815,6 @@ jobs:
             --generate-notes \
             --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"
-
-      # The release event emitted by GITHUB_TOKEN does not start workers.yml.
-      # Dispatch the site explicitly after a stable release exists so the
-      # vanity installer bakes a version whose assets are already downloadable.
-      - name: Publish the installer with the stable release default
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [[ "${TAG_NAME#v}" == *-* ]]; then
-            echo "::notice::${TAG_NAME} is a prerelease — leaving the stable installer default unchanged"
-            exit 0
-          fi
-          gh workflow run workers.yml \
-            --ref "${TAG_NAME}" \
-            -f install_version="${TAG_NAME}"
 
       # Always, even if the publish failed: `gh release create` can create the
       # release and then fail uploading an asset, which is how the duplicate
@@ -967,3 +951,95 @@ jobs:
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"
+
+  # What a new user gets from the release just published: its own install.sh,
+  # pinned to the tag, installing into a throwaway HOME — builder bootstrap
+  # included — and then the README's first command, `machine run --image
+  # alpine`, with stdin closed and a time budget. `verify-release` proves the
+  # asset set is complete and signed; nothing before this proves a user can
+  # run it. v0.17.0 is a published, signed release that cannot start a
+  # microVM on a fresh host.
+  #
+  # After publication rather than before, because the first run downloads
+  # the workload kernels `kernel-build.yml` attaches once the release exists,
+  # and `verify-release` is what waits for them. The release is still a
+  # prerelease at this point, so no user reaches it by default until
+  # `promote-release`.
+  #
+  # Both backends a new user boots: HVF on the self-hosted Apple Silicon
+  # runner `e2e-docs` uses (no hosted macOS runner can boot a guest), and
+  # Firecracker on a hosted Linux runner with KVM.
+  first-run-smoke:
+    name: First run after a fresh install (${{ matrix.lane }})
+    needs: [verify-release]
+    if: ${{ github.event_name == 'push' && needs.verify-release.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: macOS, HVF
+            runner: [self-hosted, macOS, ARM64, m1]
+            artifact: first-run-macos-hvf
+          - lane: Linux, Firecracker
+            runner: ubuntu-latest
+            artifact: first-run-linux-firecracker
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      # What `install/linux.md` asks of a user: write access to /dev/kvm.
+      - name: Grant /dev/kvm access for the job
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — a first run cannot boot here." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Install the tag as a new user and run the first command
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
+        run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/first-run
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The only step that makes a release reach users who did not ask for it:
+  # GitHub's latest marker (`mvmctl update`), install.sh's default (the newest
+  # full release), and the installer runmvm.com serves, whose baked fallback
+  # names this tag. A release candidate passes the smoke and stays a
+  # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
+  promote-release:
+    name: Promote the release once a fresh install boots
+    needs: [first-run-smoke]
+    if: ${{ github.event_name == 'push' && needs.first-run-smoke.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The release event emitted by GITHUB_TOKEN does not start workers.yml,
+      # so the site is dispatched explicitly, after the release is promoted.
+      - name: Mark a stable tag as the latest release and publish its installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${TAG_NAME#v}" == *-* ]]; then
+            echo "::notice::${TAG_NAME} is a release candidate — it stays a prerelease and the installer default is unchanged"
+            exit 0
+          fi
+          gh release edit "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --prerelease=false --latest
+          gh workflow run workers.yml --repo "${GITHUB_REPOSITORY}" \
+            --ref "${TAG_NAME}" \
+            -f install_version="${TAG_NAME}"

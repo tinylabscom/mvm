@@ -1268,14 +1268,20 @@ fn workers_deploys_website_updates_merged_to_main() {
 fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
     let workflow = website_deploy_workflow();
     let installer = fs::read_to_string("install.sh").expect("read install.sh");
+    let pin = fs::read_to_string("scripts/pin-installer-default.sh").expect("read the pin script");
 
     assert!(
-        workflow.contains("gh release download \"${INSTALL_VERSION}\"")
-            && workflow.contains("--pattern 'checksums-sha256.txt*'")
-            && workflow.contains("checksums-sha256.txt.bundle")
-            && workflow.contains("cosign verify-blob")
-            && workflow.contains("release.yml@refs/tags/${INSTALL_VERSION}"),
-        "the stable-site deployment must authenticate the published release's checksum manifest under the exact release-workflow tag identity"
+        workflow.contains(
+            r#"run: sh scripts/pin-installer-default.sh "${INSTALL_VERSION}" install.sh"#
+        ) && workflow.contains("sigstore/cosign-installer"),
+        "the stable-site deployment must bake the installer through the pin script, with cosign available to it"
+    );
+    assert!(
+        pin.contains("--pattern 'checksums-sha256.txt*'")
+            && pin.contains("checksums-sha256.txt.bundle")
+            && pin.contains("cosign verify-blob")
+            && pin.contains("release.yml@refs/tags/$TAG"),
+        "the pin must authenticate the published release's checksum manifest under the exact release-workflow tag identity"
     );
 
     for (target, variable) in [
@@ -1297,10 +1303,62 @@ fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
             "install.sh must carry the {target} trust-anchor sentinel"
         );
         assert!(
-            workflow.contains(target) && workflow.contains(variable),
-            "workers.yml must bake the {target} archive hash into {variable}"
+            pin.contains(&format!("{target}:{variable}")),
+            "the pin script must bake the {target} archive hash into {variable}"
         );
     }
+}
+
+/// The installer's offline fallback has one writer.
+///
+/// `_release-prep` used to set `DEFAULT_VERSION` to the version it was
+/// preparing — a tag that did not exist yet — while leaving the previous
+/// release's archive hashes beside it, so a fresh install falling back to it
+/// either found no release or refused the archive as a hash mismatch. The pin
+/// script writes the version and its hashes together, from a promoted
+/// release's signed manifest, and nothing else touches those lines.
+#[test]
+fn the_installer_default_is_written_only_by_the_pin_script() {
+    let justfile = justfile();
+    let prep = justfile
+        .find("_release-prep VERSION:")
+        .expect("the shared release prep recipe must exist");
+    let body = &justfile[prep..];
+    let body = &body[..body.find("\nrelease-tag").unwrap_or(body.len())];
+    assert!(
+        body.contains("./scripts/pin-installer-default.sh --newest install.sh"),
+        "the release PR must pin the newest promoted release, not the one it prepares"
+    );
+
+    // A `sed` naming the pinned variables is a writer unless it only prints
+    // (`sed -n ... /p`), which is how the compat lanes read the default.
+    let writes_the_pin = |text: &str| {
+        text.lines().any(|line| {
+            line.contains("sed")
+                && !line.contains("sed -n")
+                && (line.contains("DEFAULT_VERSION") || line.contains("DEFAULT_ARCHIVE_SHA256"))
+        })
+    };
+    let mut files = vec![Path::new("Justfile").to_path_buf()];
+    for dir in [".github/workflows", "scripts", "scripts/installer-compat"] {
+        files.extend(
+            fs::read_dir(dir)
+                .expect("read dir")
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file()),
+        );
+    }
+    let writers: Vec<String> = files
+        .iter()
+        .filter(|path| !path.ends_with("pin-installer-default.sh"))
+        .filter(|path| writes_the_pin(&fs::read_to_string(path).unwrap_or_default()))
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        writers.is_empty(),
+        "only scripts/pin-installer-default.sh may rewrite the installer default, found: {writers:?}"
+    );
 }
 
 #[test]
@@ -1601,52 +1659,129 @@ fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
     );
 }
 
-/// A release candidate must not be published as GitHub's "Latest" release.
+/// No tag is published as GitHub's "Latest" release by the step that creates
+/// it.
 ///
-/// `mvmctl update` resolves `/repos/<repo>/releases/latest` to decide what
-/// version to move a user to. `gh release create` marks a release latest unless
-/// told otherwise, so without an explicit `--prerelease` a `v0.18.0-rc.1` tag
-/// silently becomes the upgrade target for every stable installation — the one
-/// class of user who did not opt into a prerelease.
-///
-/// The guard is asserted rather than a bare flag, because always passing
-/// `--prerelease` would break every stable release instead.
+/// `mvmctl update` resolves `/repos/<repo>/releases/latest` and install.sh
+/// installs the newest non-prerelease, so a release published as a full one
+/// reaches every user who did not ask for anything newer. A release candidate
+/// must never; a stable tag must not until a fresh install of it has booted a
+/// microVM. `gh release create` marks a release latest unless told otherwise,
+/// so the create step passes `--prerelease` for every tag, and only
+/// `promote-release` undoes it.
 #[test]
-fn a_prerelease_tag_is_not_published_as_the_latest_release() {
+fn every_tag_is_published_as_a_prerelease_until_it_is_promoted() {
     let workflow = release_workflow();
+    let release = job_block(&workflow, "release");
 
-    assert!(
-        workflow.contains("prerelease=(--prerelease)"),
-        "release.yml must be able to publish a release as a prerelease, or an \
-         rc tag becomes the upgrade target for every stable install"
-    );
-    assert!(
-        workflow.contains(r#"if [[ "${TAG_NAME#v}" == *-* ]]; then"#),
-        "the prerelease flag must be gated on the tag carrying a semver \
-         prerelease segment, so a stable tag still publishes as latest"
-    );
-
-    // `publish_tag` defaults to `TAG_NAME` and differs only on a dry run, so a
-    // real tag push still publishes under the pushed tag — asserted just below.
-    let create = workflow
+    let create = release
         .find("gh release create \"${publish_tag}\"")
         .expect("release.yml must create the release under a computed tag");
     assert!(
-        workflow.contains("publish_tag=\"${TAG_NAME}\""),
+        release.contains("publish_tag=\"${TAG_NAME}\""),
         "the computed tag must default to the pushed tag, or a real release \
          publishes under something other than the tag that triggered it"
     );
-    let guard = workflow
-        .find("prerelease=(--prerelease)")
-        .expect("checked above");
+    let staged = release
+        .find("          prerelease=(--prerelease)\n")
+        .expect("every tag must be staged as a prerelease, unconditionally");
     assert!(
-        guard < create,
+        staged < create,
         "the prerelease decision must be made before the release is created"
     );
     assert!(
-        workflow[create..].contains(r#""${prerelease[@]}""#),
+        !release[..create].contains("prerelease=()\n          if [[ \"${TAG_NAME#v}\""),
+        "a stable tag must not be exempted from staging: it would reach every \
+         user before its first-run smoke ran"
+    );
+    assert!(
+        release[create..].contains(r#""${prerelease[@]}""#),
         "`gh release create` must expand the prerelease array, or deciding it \
          changes nothing about what gets published"
+    );
+    assert!(
+        !release.contains("--latest") && !release.contains("workers.yml"),
+        "the release job must neither mark a release latest nor publish the \
+         installer default; only promote-release may"
+    );
+}
+
+/// A fresh install of the published tag must boot a microVM on each backend
+/// before the tag is promoted.
+///
+/// `verify-release` proves the asset set is complete and signed, and nothing
+/// before this proved a user could run it: v0.17.0 is a published, signed
+/// release whose first `machine run` cannot start a microVM on a fresh host.
+#[test]
+fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
+    let workflow = release_workflow();
+
+    let smoke = job_block(&workflow, "first-run-smoke");
+    assert!(
+        smoke.contains("    needs: [verify-release]\n"),
+        "the smoke must wait for verify-release, which waits for the kernels a \
+         first run downloads"
+    );
+    assert!(
+        smoke.contains("github.event_name == 'push' && needs.verify-release.result == 'success'"),
+        "the smoke runs for a pushed tag whose asset set verified"
+    );
+    assert!(
+        smoke.contains(r#"run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}""#)
+            && smoke.contains("TAG_NAME: ${{ github.ref_name }}"),
+        "the smoke must install exactly the tag being released"
+    );
+    let e2e = fs::read_to_string(".github/workflows/e2e-docs.yml").expect("e2e-docs workflow");
+    let macos_runner = "runs-on: [self-hosted, macOS, ARM64, m1]";
+    assert!(
+        e2e.contains(macos_runner),
+        "e2e-docs.yml no longer names the Apple Silicon runner this test expects"
+    );
+    assert!(
+        smoke.contains("runner: [self-hosted, macOS, ARM64, m1]"),
+        "the macOS lane must run on the self-hosted runner that boots guests — \
+         no hosted macOS runner can"
+    );
+    assert!(
+        smoke.contains("runner: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        "the Linux lane must boot through KVM on a hosted runner"
+    );
+    assert!(
+        smoke.contains("fail-fast: false"),
+        "one backend's failure must not hide the other's transcript"
+    );
+    let upload = smoke
+        .find("uses: actions/upload-artifact@")
+        .expect("the smoke must upload its transcript");
+    assert!(
+        smoke[..upload].contains("if: always()"),
+        "the transcript matters most when the smoke fails"
+    );
+
+    let promote = job_block(&workflow, "promote-release");
+    assert!(
+        promote.contains("    needs: [first-run-smoke]\n")
+            && promote.contains("needs.first-run-smoke.result == 'success'"),
+        "promotion must require every first-run lane to pass"
+    );
+    assert!(
+        promote.contains("if [[ \"${TAG_NAME#v}\" == *-* ]]; then"),
+        "a release candidate must stay a prerelease after its smoke passes"
+    );
+    let edit = promote
+        .find("gh release edit \"${TAG_NAME}\"")
+        .expect("promotion must edit the pushed tag's release");
+    assert!(
+        promote[edit..].contains("--prerelease=false --latest"),
+        "promotion must make the tag a full release and GitHub's latest"
+    );
+    let dispatch = promote
+        .find("gh workflow run workers.yml")
+        .expect("promotion must publish the installer default");
+    assert!(
+        edit < dispatch && promote[dispatch..].contains("-f install_version=\"${TAG_NAME}\""),
+        "the site must bake the tag only after it is promoted: its baking \
+         script refuses a prerelease"
     );
 }
 
@@ -2108,4 +2243,44 @@ fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
             "WebLinux downloader must resolve {field} from images.lock"
         );
     }
+}
+
+/// Only a CLI release may become GitHub's "Latest".
+///
+/// `mvmctl update` follows that marker, and `gh release create` sets it on
+/// every non-prerelease it creates unless told otherwise — so the boot image
+/// train took it (`boot-image/v0.1.5` was "Latest" while the newest CLI release
+/// was v0.17.0), and an update would have gone looking for an mvmctl archive
+/// on a release that has none.
+#[test]
+fn only_a_cli_release_can_become_the_latest_release() {
+    let boot_image = boot_image_workflow();
+    let create = boot_image
+        .find("gh release create \"${TAG_NAME}\"")
+        .expect("the boot image train creates its release");
+    assert!(
+        boot_image[create..create + 200].contains("--latest=false"),
+        "a boot image release must never be marked latest"
+    );
+    let revocations =
+        fs::read_to_string(".github/workflows/revocations.yml").expect("revocations workflow");
+    let create = revocations
+        .find("gh release create revocations")
+        .expect("the revocations channel creates its release");
+    assert!(
+        revocations[create..create + 200].contains("--latest=false"),
+        "the revocations release must never be marked latest"
+    );
+}
+
+/// `just smoke-fresh-install` runs the same script the release gate runs, so a
+/// maintainer can reproduce a red first-run lane locally.
+#[test]
+fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {
+    assert!(
+        justfile().contains(
+            "smoke-fresh-install VERSION=\"\":\n    ./scripts/smoke-fresh-install.sh {{ VERSION }}\n"
+        ),
+        "the recipe must run the release gate's script with an optional version"
+    );
 }

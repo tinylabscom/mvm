@@ -375,6 +375,18 @@ e2e-docs:
 e2e-source-bootstrap:
     ./scripts/e2e-source-bootstrap.sh
 
+# What a new user gets: install a release into a throwaway HOME under /tmp with
+# this checkout's install.sh — builder bootstrap included — then run the
+# README's `machine run --image alpine` with stdin closed and require its output
+# within a time budget. The release workflow runs the same script before it
+# promotes a tag. Omit VERSION to test whatever the one-liner installs today.
+# Boots a real microVM; never touches your own ~/.mvm or ~/.local.
+#
+
+# Install a release as a new user would and run the first command
+smoke-fresh-install VERSION="":
+    ./scripts/smoke-fresh-install.sh {{ VERSION }}
+
 # Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
 # suite creates, so it never touches a machine you made.
 #
@@ -742,14 +754,15 @@ _release-prep VERSION:
         -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
         -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
     rm Cargo.toml.bak
-    # Stable release PRs also advance the installer's checked-in default. A
-    # prerelease must remain opt-in, matching GitHub's releases/latest
-    # behavior and the installer's historical contract.
-    if [[ "$V" != *-* ]]; then
-        sed -i.bak -E "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"v$V\"/" install.sh
-        rm install.sh.bak
-        grep -qxF "DEFAULT_VERSION=\"v$V\"" install.sh
+    # The installer's checked-in fallback follows the newest *promoted*
+    # release, with the archive hashes its signed manifest carries — never the
+    # version this PR prepares: that tag does not exist yet, has no hashes, and
+    # has not passed the first-run smoke that promotes it. Left as it is, with
+    # a warning, when that release cannot be authenticated.
+    if ./scripts/pin-installer-default.sh --newest install.sh; then
         git add install.sh
+    else
+        echo "WARN: install.sh's offline fallback is unchanged — see the reason above." >&2
     fi
     cargo update -w
     # The runtime overlay, SDK sidecar and initramfs take their VERSION from
