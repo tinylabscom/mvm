@@ -14,16 +14,22 @@ For generated code, third-party code, model tool calls, and CI jobs, start with
 
 `mvmctl run` supports four profile intents:
 
-| Profile | Default use | Host shares | Environment injection |
-| --- | --- | --- | --- |
-| `restrictive` | Generated or untrusted code. | Not allowed. | Not allowed. |
-| `standard` | Normal local one-shot runs. | Read-only. | Explicit `--env KEY=VAL` allowed. |
-| `dev` | Local iteration against a project tree. | Read-only here; writable only on a *persistent* machine. | Explicit `--env KEY=VAL` allowed. |
-| `permissive` | Last-resort local debugging. | Same as `dev`, plus `MVM_ACK_PERMISSIVE_RUN=1`. | Explicit `--env KEY=VAL` allowed. |
+| Profile | Default use | Host directories | Disk images | Environment injection |
+| --- | --- | --- | --- | --- |
+| `restrictive` | Generated or untrusted code. | Not allowed. | Not allowed. | Not allowed. |
+| `standard` | Normal local one-shot runs. | Read-only. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
+| `dev` | Local iteration against a project tree. | Read-only here; writable only on a *persistent* machine. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
+| `permissive` | Last-resort local debugging. | Same as `dev`, plus `MVM_ACK_PERMISSIVE_RUN=1`. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
 
-A one-shot run's host shares are **read-only under every profile** — the
-writable grant applies only when the machine is persistent. Guest mount paths
-must be under `/data` or `/work`.
+A one-shot run's host **directory** shares are **read-only under every
+profile** — the writable directory grant applies only when the machine is
+persistent, and only under `dev` or `permissive`. A **disk image**
+(`HOST.img:/GUEST:SIZE:rw`) is different: the guest writes into its own ext4
+image file, never into the host filesystem, so every profile that accepts
+`--mount` accepts it writable, `standard` and `--prod` included. Keeping state
+therefore does not require `--profile dev`, which would also give the guest the
+dev shell agent and the DevOnly verbs. Guest mount paths must be under `/data`
+or `/work`, whatever the profile.
 
 The default is `standard`. Use `restrictive` when the workload does not need
 host files or host-provided environment values:
@@ -63,15 +69,20 @@ mvmctl run --mount HOST:GUEST:ro -- command
 
 Rules:
 
-- the mode must be `ro` — a transient run refuses `:rw` under every profile;
+- a directory's mode must be `ro` — a transient run refuses `:rw` on a
+  directory under every profile. A sized disk image
+  (`HOST.img:GUEST:SIZE:rw`) may be writable under any profile that accepts
+  `--mount`;
 - `GUEST` must be under `/data` or `/work`; every other root is refused, and
   `/mnt/*` is refused specifically so a share cannot shadow the runtime's own
   config and secrets drives;
 - `restrictive` rejects host directory shares;
-- `standard` accepts read-only host shares.
+- `standard` accepts read-only host directories and read-only or writable
+  disk images.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
-context. Use `mvmctl machine cp` or a managed volume when changes must persist.
+context. Use a writable disk image, `mvmctl machine cp`, or a managed volume
+when changes must persist.
 
 :::note[Hidden verbs]
 `machine cp`, `machine fs`, `machine volume`, `machine wait`, `machine
@@ -114,7 +125,8 @@ caught before a workload starts.
 
 There is **no per-launch seccomp selector**. Every plan `mvmctl` synthesises
 hardcodes the `standard` tier, and `--profile` carries no seccomp field — a
-profile governs `--env`, host shares, writable-share eligibility, the dev
+profile governs `--env`, host shares, writable-directory and writable-disk
+eligibility, the dev
 guest profile, and whether an acknowledgement is required, and nothing else.
 
 The tier is still recorded in the signed admission profile, so an audit can

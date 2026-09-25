@@ -27,6 +27,7 @@ pub(crate) mod phase_timing;
 pub(super) mod plan_persist;
 pub(in crate::commands) mod prepare;
 pub(super) mod proc;
+mod profile;
 pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;

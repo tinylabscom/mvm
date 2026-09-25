@@ -347,8 +347,11 @@ Inside the guest, the files appear at the mount paths:
 
 **Every mount is read-only unless you write `:rw`** — writing from a
 (potentially untrusted) guest to a host path is an explicit grant, not a
-default. `:rw` needs `--profile dev` or `--profile permissive`; a *transient*
-run's share is read-only under every profile.
+default. A writable disk image is accepted under every profile that allows
+volumes, the default `standard` included, because the guest writes into its own
+image file rather than a host directory. `:rw` on a host directory needs
+`--profile dev` or `--profile permissive`, and a *transient* run's directory
+share is read-only under every profile.
 
 The three-part form `host:guest:SIZE` selects an **empty disk image**: the host
 path is a file mvm creates and attaches as virtio-blk, sized in MB. Add `:rw`
