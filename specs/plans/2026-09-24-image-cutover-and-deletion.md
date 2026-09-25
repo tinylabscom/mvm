@@ -426,6 +426,14 @@ need an owner in `mvm-images` first.
       root; pair and source builds keep the version equality. Lands after
       Wave 4 and before the re-measure release, which is the first CLI
       release it serves. Found 2026-09-25 while sequencing the re-measure.
+      *Resolved 2026-09-25:* a member acquired from the set is identified
+      by the pinned root, not the CLI version. It is cached under
+      `image-set/<root-sha256>/` beside a provenance record naming the root,
+      role, target and the member's own `VERSION`, and the resolver expects
+      that recorded version; an entry from another root is not consulted.
+      Compatibility is the signed root's declared range, checked at
+      acquisition. Pair and source builds keep exact equality with the CLI
+      version.
 - [ ] **Re-measure.** Record release duration, release storage, download
       volume, and failure rate against the pre-W8 baseline; the release
       gate must be at least 25 minutes faster per the parent plan, and

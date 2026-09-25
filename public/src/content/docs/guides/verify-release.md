@@ -163,7 +163,7 @@ shasum -a 256 --check checksums-sha256.txt
 ```
 
 When `mvmctl build runtime-overlay build --source download` installs this
-payload into `~/.mvm/cache/runtime-overlay/<version>/<arch>/`, it runs the same
+payload into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, it runs the same
 chain, then verifies the extracted inner files against the embedded
 `checksums-sha256.txt`, and later required-overlay boots recheck those cached
 file hashes before attach. A drifted cache entry is refused.
@@ -205,9 +205,9 @@ If you must roll back a release:
    re-running `mvmctl build runtime-overlay build --source download` with the
    older `mvmctl` (it fetches from the image set that release pins) or by
    restoring the older cached artifact under
-   `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
-3. Restart affected VMs so they boot with the downgraded, version-matched
-   overlay.
+   `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, where
+   `<root-sha256>` is the digest of the image set that release pins.
+3. Restart affected VMs so they boot with the downgraded release's overlay.
 
 Do not expect a running VM to switch runtime versions in place. Rollback takes
 effect on restart, the same way rollout does.

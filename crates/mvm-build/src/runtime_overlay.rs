@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use mvm_fs::overlay::{
     CHECKSUM_MANIFEST_FILE, LOCAL_BUILD_EPOCH_FILE, OverlayError, compute_file_sha256,
-    read_roothash_file, verify_overlay_dir_integrity,
+    verify_overlay_dir_integrity,
 };
 pub use mvm_fs::overlay::{
     RuntimeOverlayArtifact, RuntimeOverlayArtifactNames, RuntimeOverlayLayout,
@@ -38,6 +38,8 @@ pub use mvm_fs::overlay::{
 };
 
 use crate::guest_agent_build::RuntimeOverlayGuestBinaries;
+use crate::published_image_set::{MemberVersion, PublishedImageSet, SetMemberCache};
+use mvm_core::image_set::{ImageSetRole, MemberTarget};
 
 /// Failure building, downloading, installing, or resolving the runtime
 /// overlay artifact.
@@ -156,6 +158,11 @@ pub enum RuntimeOverlayError {
     /// returns.
     #[error(transparent)]
     ImageSetMember(Box<crate::published_image_set::ImageSetMemberError>),
+
+    /// No usable member of the pinned image set is installed in the cache, or
+    /// the one delivered carries a `VERSION` that cannot name a cache entry.
+    #[error(transparent)]
+    ImageSetCache(#[from] crate::published_image_set::SetMemberCacheError),
 }
 
 impl From<crate::published_image_set::ImageSetMemberError> for RuntimeOverlayError {
@@ -212,6 +219,44 @@ fn seed_from_default_cache(
                 .map(|_| ())
         },
     )
+}
+
+/// Resolve `arch`'s overlay installed from the image set `set`, a pure cache
+/// read.
+///
+/// The entry's resolver expects the `VERSION` recorded when the member was
+/// installed from its digest-verified bytes, not the running CLI's version:
+/// the member belongs to the pinned root, and a CLI version bump does not
+/// change which root is pinned. Every other check the resolver makes applies
+/// unchanged.
+pub fn resolve_image_set_runtime_overlay(
+    cache_root: &Path,
+    set: &SetMemberCache,
+    arch: GuestArch,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let version = set.installed_version(
+        cache_root,
+        ImageSetRole::RuntimeOverlay,
+        MemberTarget::Arch(arch),
+    )?;
+    Ok(
+        RuntimeOverlayResolver::new(set.cache_root(cache_root), version.into())
+            .resolve(&arch.to_string())?,
+    )
+}
+
+/// Resolve the overlay a boot of this host would attach, from cache alone:
+/// the entry matching `resolver`'s version (seeded from the default cache on a
+/// miss), and otherwise the one installed from the image set this build pins.
+/// A miss in both surfaces the version-matched resolve error.
+pub fn resolve_cached_runtime_overlay(
+    resolver: &RuntimeOverlayResolver,
+    arch: GuestArch,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    resolve_or_seed_from_default_cache(resolver, arch).or_else(|version_matched| {
+        resolve_image_set_runtime_overlay(resolver.cache_root(), &SetMemberCache::locked(), arch)
+            .map_err(|_| version_matched)
+    })
 }
 
 pub fn build_runtime_overlay_from_guest_binaries(
@@ -365,7 +410,7 @@ pub fn resolve_or_build_local_runtime_overlay(
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
     let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
-        return resolve_or_seed_from_default_cache(&resolver, arch);
+        return resolve_cached_runtime_overlay(&resolver, arch);
     };
     let expected_fingerprint =
         crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace_root)
@@ -693,30 +738,31 @@ pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
 /// Download the runtime overlay tarball for `arch` as a member of the image
 /// set this build pins, safely extract it, re-verify each inner artifact
-/// against the archive's embedded `checksums-sha256.txt`, and install into
-/// `cache_root` under the canonical layout
-/// `<cache_root>/runtime-overlay/<version>/<arch>/`.
+/// against the archive's embedded `checksums-sha256.txt`, and install it as a
+/// member of that set (see [`install_image_set_runtime_overlay_archive`]).
 ///
 /// The archive is trusted only through the set: the root manifest is held to
 /// its locked digest and its publisher's signature, and the archive to the
 /// size and digest that root declares, all before extraction.
 ///
+/// `guest_runtime_key` is the key the OCI guest runtime binaries the archive
+/// also carries are cached under — the running CLI's guest-binary source key.
+///
 /// Returns the installed `RuntimeOverlayArtifact` so the caller
 /// can hand it straight to the backend.
 pub fn download_runtime_overlay(
-    version: &str,
+    guest_runtime_key: &str,
     arch: GuestArch,
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let image_set = crate::published_image_set::PublishedImageSet::acquire()
-        .map_err(RuntimeOverlayError::ImageSet)?;
-    download_runtime_overlay_from(&image_set, version, arch, cache_root)
+    let image_set = PublishedImageSet::acquire().map_err(RuntimeOverlayError::ImageSet)?;
+    download_runtime_overlay_from(&image_set, guest_runtime_key, arch, cache_root)
 }
 
 /// [`download_runtime_overlay`] from a set that has already been acquired.
 pub fn download_runtime_overlay_from(
-    image_set: &crate::published_image_set::PublishedImageSet,
-    version: &str,
+    image_set: &PublishedImageSet,
+    guest_runtime_key: &str,
     arch: GuestArch,
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
@@ -724,12 +770,18 @@ pub fn download_runtime_overlay_from(
     let tmp = tempfile::tempdir()?;
     let archive_local = tmp.path().join(&names.archive);
     image_set.fetch_member_artifact(
-        mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+        ImageSetRole::RuntimeOverlay,
         arch,
         &names.archive,
         &archive_local,
     )?;
-    install_runtime_overlay_archive(&archive_local, version, arch, cache_root)
+    install_image_set_runtime_overlay_archive(
+        &archive_local,
+        &image_set.member_cache(),
+        guest_runtime_key,
+        arch,
+        cache_root,
+    )
 }
 
 /// Fetch `asset` from the per-version directory `release_url` of a CLI
@@ -759,9 +811,11 @@ pub fn fetch_cli_release_archive(
     )
 }
 
-/// Install an authenticated runtime overlay archive: safely extract it,
-/// re-verify each inner artifact against the archive's own manifest, seed the
-/// OCI guest runtime from it, and install the overlay atomically.
+/// Install an authenticated runtime overlay archive published per CLI
+/// version: safely extract it, re-verify each inner artifact against the
+/// archive's own manifest, seed the OCI guest runtime from it, and install the
+/// overlay atomically under `<cache_root>/runtime-overlay/<version>/<arch>/`,
+/// where a resolver expecting `version` will find it.
 ///
 /// The caller must have authenticated `archive` already — tar extraction is
 /// an attack surface, and an unauthenticated archive is never parsed.
@@ -772,7 +826,65 @@ pub fn install_runtime_overlay_archive(
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let tmp = tempfile::tempdir()?;
-    let stage = tmp.path();
+    let staged = stage_runtime_overlay_archive(archive, tmp.path(), version, arch, cache_root)?;
+    install_overlay_into_cache(
+        &RuntimeOverlayArtifact {
+            version: version.to_string(),
+            ..staged
+        },
+        cache_root,
+        &InstallOptions { overwrite: true },
+    )
+}
+
+/// Install an authenticated runtime overlay archive delivered as a member of
+/// the image set `set`, filed under that set's root rather than any CLI
+/// version.
+///
+/// The entry is labelled with the member's own `VERSION`, read from the
+/// verified bytes, and that version is recorded as what the entry's resolver
+/// must expect. The record is written only once the overlay is in place, so
+/// an interrupted install reads as a miss and is acquired again.
+pub fn install_image_set_runtime_overlay_archive(
+    archive: &Path,
+    set: &SetMemberCache,
+    guest_runtime_key: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let tmp = tempfile::tempdir()?;
+    let staged =
+        stage_runtime_overlay_archive(archive, tmp.path(), guest_runtime_key, arch, cache_root)?;
+    let version = MemberVersion::parse(&staged.version)?;
+    let installed = install_overlay_into_cache(
+        &RuntimeOverlayArtifact {
+            version: version.as_str().to_string(),
+            ..staged
+        },
+        &set.cache_root(cache_root),
+        &InstallOptions { overwrite: true },
+    )?;
+    set.record(
+        cache_root,
+        ImageSetRole::RuntimeOverlay,
+        MemberTarget::Arch(arch),
+        &version,
+    )?;
+    Ok(installed)
+}
+
+/// Extract an authenticated overlay archive into `stage`, re-verify it against
+/// its own manifest, and seed the OCI guest runtime it carries under
+/// `guest_runtime_key`. Returns the staged overlay labelled with its own
+/// `VERSION` and a validated roothash — the value the backend bakes into the
+/// kernel cmdline (`mvm.runtime_roothash=…`).
+fn stage_runtime_overlay_archive(
+    archive: &Path,
+    stage: &Path,
+    guest_runtime_key: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     extract_release_archive(archive, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
     verify_overlay_dir_integrity(stage)?;
     verify_release_guest_runtime(stage)?;
@@ -785,35 +897,11 @@ pub fn install_runtime_overlay_archive(
             entrypoint_runner: &stage.join("mvm-oci-entrypoint"),
         },
         &cache_root.join("oci"),
-        version,
+        guest_runtime_key,
         arch,
     )?;
 
-    // Read the roothash text so the returned `RuntimeOverlayArtifact` carries
-    // the value the backend bakes into the kernel cmdline
-    // (`mvm.runtime_roothash=…`).
-    let ext4_local = stage.join("overlay.ext4");
-    let verity_local = stage.join("overlay.verity");
-    let roothash_local = stage.join("overlay.roothash");
-    let roothash = read_roothash_file(&roothash_local)?;
-
-    // Hand off to the existing atomic installer. It copies into a staging dir
-    // under `cache_root` and renames into the canonical artifact dir on
-    // success — so a mid-install crash leaves only a `.tmp.<pid>` behind,
-    // never a partially-overwritten cache entry.
-    let staged_artifact = RuntimeOverlayArtifact {
-        overlay_ext4: ext4_local,
-        sidecar: verity_local,
-        roothash_file: roothash_local,
-        roothash,
-        arch: arch.to_string(),
-        version: version.to_string(),
-    };
-    install_overlay_into_cache(
-        &staged_artifact,
-        cache_root,
-        &InstallOptions { overwrite: true },
-    )
+    Ok(read_overlay_artifact_from_dir(stage, &arch.to_string())?)
 }
 
 /// Exactly the members the overlay's release tarball may carry. Doubles as the
@@ -1046,8 +1134,8 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::published_image_set::ImageSetMemberError;
     use crate::published_image_set::fixture::ImageSetFixture;
-    use crate::published_image_set::{ImageSetMemberError, PublishedImageSet};
     use mvm_core::util::test_env::TestEnv;
     use mvm_fs::ext4::{Node, Owner};
     use tempfile::TempDir;
@@ -1551,7 +1639,10 @@ mod tests {
         assert_eq!(installed.arch, "aarch64");
         assert_eq!(installed.version, "9.9.9");
         assert_eq!(installed.roothash, FAKE_ROOTHASH);
-        let cache_dir = cache.path().join("runtime-overlay/9.9.9/aarch64");
+        let cache_dir = set
+            .member_cache()
+            .cache_root(cache.path())
+            .join("runtime-overlay/9.9.9/aarch64");
         for file in [
             "overlay.ext4",
             "overlay.verity",
@@ -1602,7 +1693,160 @@ mod tests {
             },
             other => panic!("expected a digest mismatch, got {other:?}"),
         }
-        assert!(!cache.path().join("runtime-overlay/9.9.9/aarch64").exists());
+        assert!(!cache.path().join("runtime-overlay").exists());
+        assert!(!set.member_cache().cache_root(cache.path()).exists());
+    }
+
+    /// A member cut from a workspace at another version than this CLI's.
+    const MEMBER_VERSION: &str = "0.0.1-member";
+
+    fn member_overlay_archive(version: &str) -> Vec<u8> {
+        runtime_overlay_archive_bytes(
+            &valid_overlay_ext4_bytes(),
+            b"fake-verity-sidecar",
+            format!("{FAKE_ROOTHASH}\n").as_bytes(),
+            format!("{version}\n").as_bytes(),
+        )
+    }
+
+    /// The set's identity is its signed root, so a member whose `VERSION` is
+    /// not this CLI's installs, and a later boot resolves it from the cache
+    /// without the set being acquired again.
+    #[test]
+    fn a_set_member_at_another_version_installs_and_resolves_from_cache() {
+        assert_ne!(MEMBER_VERSION, env!("CARGO_PKG_VERSION"));
+        let mut env = TestEnv::new();
+        let served = TempDir::new().unwrap();
+        let set = acquire(
+            &with_overlay(member_overlay_archive(MEMBER_VERSION)),
+            served.path(),
+            &mut env,
+        );
+        let cache = TempDir::new().unwrap();
+
+        let installed = download_runtime_overlay_from(
+            &set,
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::Aarch64,
+            cache.path(),
+        )
+        .expect("a member at another version must install");
+        assert_eq!(installed.version, MEMBER_VERSION);
+
+        // Nothing is served any more: a resolve that reached for the set would
+        // fail, so success proves a pure cache hit.
+        std::fs::remove_dir_all(served.path()).unwrap();
+        let resolved = resolve_image_set_runtime_overlay(
+            cache.path(),
+            &set.member_cache(),
+            GuestArch::Aarch64,
+        )
+        .expect("the installed member must resolve from the cache");
+        assert_eq!(resolved, installed);
+    }
+
+    /// An entry installed from another root is not this root's member, even
+    /// when its bytes are intact: the lock moved, so it is acquired again.
+    #[test]
+    fn a_set_member_installed_from_another_root_is_not_reused() {
+        let mut env = TestEnv::new();
+        let served = TempDir::new().unwrap();
+        let set = acquire(
+            &with_overlay(member_overlay_archive(MEMBER_VERSION)),
+            served.path(),
+            &mut env,
+        );
+        let cache = TempDir::new().unwrap();
+        download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path()).unwrap();
+
+        let moved = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"next"));
+        let err = resolve_image_set_runtime_overlay(cache.path(), &moved, GuestArch::Aarch64)
+            .expect_err("another root's member must not resolve");
+        assert!(
+            matches!(
+                err,
+                RuntimeOverlayError::ImageSetCache(
+                    crate::published_image_set::SetMemberCacheError::NotInstalled { .. }
+                )
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A member whose `VERSION` could not name a cache entry is refused before
+    /// anything is installed.
+    #[test]
+    fn a_set_member_with_an_unusable_version_is_refused() {
+        let mut env = TestEnv::new();
+        let served = TempDir::new().unwrap();
+        let set = acquire(
+            &with_overlay(member_overlay_archive("../escape")),
+            served.path(),
+            &mut env,
+        );
+        let cache = TempDir::new().unwrap();
+
+        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
+            .expect_err("a traversal VERSION must be refused");
+        assert!(
+            matches!(err, RuntimeOverlayError::ImageSetCache(_)),
+            "{err:?}"
+        );
+        assert!(!set.member_cache().cache_root(cache.path()).exists());
+    }
+
+    /// Every cache-only consumer — the builder VM, the in-process boot, the
+    /// bootstrap readiness probe — finds the pinned set's member when the
+    /// version-matched entry is absent.
+    #[test]
+    fn a_cache_only_resolve_falls_back_to_the_pinned_sets_member() {
+        // The version-matched arm seeds from the default cache; point that at
+        // an empty home so only the pinned set's member can answer.
+        let mut env = TestEnv::new();
+        let home = TempDir::new().unwrap();
+        env.isolate_mvm_home(home.path());
+        let cache = TempDir::new().unwrap();
+        let archive_dir = TempDir::new().unwrap();
+        let archive = archive_dir.path().join(OVERLAY_ARCHIVE);
+        std::fs::write(&archive, member_overlay_archive(MEMBER_VERSION)).unwrap();
+        install_image_set_runtime_overlay_archive(
+            &archive,
+            &SetMemberCache::locked(),
+            "9.9.9",
+            GuestArch::Aarch64,
+            cache.path(),
+        )
+        .unwrap();
+
+        let resolver = RuntimeOverlayResolver::new(
+            cache.path().to_path_buf(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        let artifact = resolve_cached_runtime_overlay(&resolver, GuestArch::Aarch64)
+            .expect("the pinned set's member must satisfy a cache-only resolve");
+        assert_eq!(artifact.version, MEMBER_VERSION);
+    }
+
+    /// The version-matched cache keeps exact equality with the running CLI: a
+    /// set member in the cache does not satisfy a resolver asking for another
+    /// version, and an overlay whose `VERSION` disagrees with its version key
+    /// is still refused.
+    #[test]
+    fn the_version_matched_cache_still_refuses_a_mismatched_version() {
+        let cache = TempDir::new().unwrap();
+        let archive_dir = TempDir::new().unwrap();
+        let archive = archive_dir.path().join(OVERLAY_ARCHIVE);
+        std::fs::write(&archive, member_overlay_archive(MEMBER_VERSION)).unwrap();
+        install_runtime_overlay_archive(&archive, "9.9.9", GuestArch::Aarch64, cache.path())
+            .unwrap();
+
+        let err = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "9.9.9".to_string())
+            .resolve("aarch64")
+            .expect_err("a VERSION other than the key's must be refused");
+        assert!(
+            matches!(err, OverlayError::VersionMismatch { .. }),
+            "{err:?}"
+        );
     }
 
     /// The current train requires an overlay for every arch, so a root without

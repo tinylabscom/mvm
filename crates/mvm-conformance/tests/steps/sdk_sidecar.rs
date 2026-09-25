@@ -209,15 +209,22 @@ fn acquire_sidecar_from_release(world: &mut CliWorld) {
             .and_then(|image_set| {
                 mvm_build::sdk_sidecar::download_sdk_sidecar_from(
                     &image_set,
-                    FIXTURE_VERSION,
                     GuestArch::host(),
                     SCENARIO_LIBC,
                     &cache,
                 )
+                .map_err(|e| format!("{e:#}"))?;
+                // The installed member is filed under the set's root and
+                // resolved expecting its own recorded VERSION.
+                mvm_build::sdk_sidecar::image_set_sidecar_resolver(
+                    &cache,
+                    &image_set.member_cache(),
+                    GuestArch::host(),
+                    SCENARIO_LIBC,
+                )
                 .map_err(|e| format!("{e:#}"))
             })
-            .and_then(|_installed| {
-                let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
+            .and_then(|resolver| {
                 mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
                     &services,
                     &resolver,
@@ -241,6 +248,13 @@ fn launch_refused_cache_empty(world: &mut CliWorld) {
         !layout.artifact_dir.exists(),
         "a refused acquire must leave no artifact dir at {}",
         layout.artifact_dir.display()
+    );
+    let members =
+        cache_root(world).join(mvm_build::published_image_set::IMAGE_SET_MEMBER_CACHE_DIR);
+    assert!(
+        !members.exists(),
+        "a refused acquire must install no image-set member under {}",
+        members.display()
     );
 }
 

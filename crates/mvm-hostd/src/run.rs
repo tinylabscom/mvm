@@ -140,10 +140,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
 }
 
 /// Attach the verity-sealed runtime overlay (the guest-binary disk carrying
-/// the agent) from the version-keyed cache, through the same resolver the
-/// CLI's boot paths consume (`RuntimeOverlayResolver` +
-/// `resolve_or_seed_from_default_cache` — a pure cache probe: no build, no
-/// download, no nix). Without the overlay a runtime-lean OCI rootfs has no
+/// the agent) from the cache, through the same resolver the CLI's boot paths
+/// consume (`RuntimeOverlayResolver` + `resolve_cached_runtime_overlay` — the
+/// version-matched entry, else the pinned image set's member; a pure cache
+/// probe: no build, no download, no nix). Without the overlay a runtime-lean OCI rootfs has no
 /// guest agent to exec and panics init, so this runs on every in-process
 /// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
 /// `PreferOverlay` (the guest falls back to a baked agent when it has one);
@@ -152,13 +152,13 @@ pub(crate) fn attach_runtime_overlay_from_cache(
     config: &mut VmStartConfig,
     backend_name: &str,
 ) -> Result<()> {
-    use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_or_seed_from_default_cache};
+    use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_cached_runtime_overlay};
     if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
         return Ok(());
     }
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let resolver = RuntimeOverlayResolver::new(cache_root, env!("CARGO_PKG_VERSION").to_string());
-    match resolve_or_seed_from_default_cache(&resolver, mvm_core::arch::GuestArch::host()) {
+    match resolve_cached_runtime_overlay(&resolver, mvm_core::arch::GuestArch::host()) {
         Ok(artifact) => {
             config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
             config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());

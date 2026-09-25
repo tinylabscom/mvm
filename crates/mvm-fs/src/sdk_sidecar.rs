@@ -7,7 +7,8 @@
 //!
 //! Layout mirrors the runtime overlay's cache, and the integrity discipline is
 //! the same one: the artifact directory carries a `sha256sum`-format manifest
-//! over every canonical file, a `VERSION` that must match the running binary,
+//! over every canonical file, a `VERSION` that must match the version the
+//! caller expects (the running binary's, or a pinned image-set member's own),
 //! and an ext4 payload whose required in-image path is proven present before an
 //! attachment is offered. Every failure path returns `Err`; there is no
 //! degraded attach, because a workload that was admitted to call a host service

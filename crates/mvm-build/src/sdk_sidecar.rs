@@ -20,7 +20,9 @@ use crate::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 use thiserror::Error;
 
+use crate::published_image_set::{MemberVersion, SetMemberCache};
 use crate::runtime_overlay::RuntimeOverlayError;
+use mvm_core::image_set::{ImageSetRole, MemberTarget};
 use mvm_fs::overlay::CHECKSUM_MANIFEST_FILE;
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarArtifact, SdkSidecarError,
@@ -133,8 +135,10 @@ fn temp_dir() -> Result<tempfile::TempDir, SdkSidecarBuildError> {
 }
 
 /// Download the SDK sidecar for `arch` and `libc` as a member of the image set
-/// this build pins, verify it, and install it under
-/// `<cache_root>/sdk-sidecar/<version>/<arch>/<libc>/`.
+/// this build pins, verify it, and install it as a member of that set: under
+/// `<cache_root>/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`,
+/// where `<member-version>` is the sidecar's own `VERSION` (see
+/// [`install_image_set_sidecar_archive`]).
 ///
 /// The verification ladder, in order, each rung fatal:
 ///
@@ -153,7 +157,6 @@ fn temp_dir() -> Result<tempfile::TempDir, SdkSidecarBuildError> {
 ///    same check the launch path runs — so a transport bug cannot produce a
 ///    cache entry that only fails later at boot.
 pub fn download_sdk_sidecar(
-    version: &str,
     arch: GuestArch,
     libc: GuestLibc,
     cache_root: &Path,
@@ -163,13 +166,12 @@ pub fn download_sdk_sidecar(
     }
     let image_set = crate::published_image_set::PublishedImageSet::acquire()
         .map_err(RuntimeOverlayError::ImageSet)?;
-    download_sdk_sidecar_from(&image_set, version, arch, libc, cache_root)
+    download_sdk_sidecar_from(&image_set, arch, libc, cache_root)
 }
 
 /// [`download_sdk_sidecar`] from a set that has already been acquired.
 pub fn download_sdk_sidecar_from(
     image_set: &crate::published_image_set::PublishedImageSet,
-    version: &str,
     arch: GuestArch,
     libc: GuestLibc,
     cache_root: &Path,
@@ -182,17 +184,24 @@ pub fn download_sdk_sidecar_from(
     let archive_local = tmp.path().join(&names.archive);
     image_set
         .fetch_member_artifact(
-            mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
+            ImageSetRole::SdkSidecar(libc),
             arch,
             &names.archive,
             &archive_local,
         )
         .map_err(RuntimeOverlayError::from)?;
-    install_sdk_sidecar_archive(&archive_local, version, arch, libc, cache_root)
+    install_image_set_sidecar_archive(
+        &archive_local,
+        &image_set.member_cache(),
+        arch,
+        libc,
+        cache_root,
+    )
 }
 
-/// Install an authenticated SDK-sidecar archive: safely extract it, re-check
-/// it against its own manifest, install it, and resolve the installed entry.
+/// Install an authenticated SDK-sidecar archive published per CLI version:
+/// safely extract it, re-check it against its own manifest, install it under
+/// `version`, and resolve the installed entry expecting `version`.
 ///
 /// The caller must have authenticated `archive` already — an unauthenticated
 /// tar is never parsed.
@@ -205,17 +214,80 @@ pub fn install_sdk_sidecar_archive(
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     let arch_dir = arch.to_string();
     let tmp = temp_dir()?;
-    let extracted = tmp.path().join("extracted");
-    std::fs::create_dir(&extracted).map_err(io_at("creating", &extracted))?;
-    crate::runtime_overlay::extract_release_archive(archive, &extracted, &SIDECAR_ARCHIVE_MEMBERS)?;
-    verify_sidecar_dir_integrity(&extracted)?;
-
+    let extracted = extract_sidecar_archive(archive, tmp.path())?;
     install_sidecar_into_cache(&extracted, cache_root, version, &arch_dir, libc)?;
 
     Ok(
         SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
             .resolve(&arch_dir, libc)?,
     )
+}
+
+/// Install an authenticated SDK-sidecar archive delivered as a member of the
+/// image set `set`, filed under that set's root rather than any CLI version.
+///
+/// The entry is labelled with the member's own `VERSION`, read from the
+/// verified bytes, and resolved expecting it before the install is recorded;
+/// an interrupted install therefore reads as a miss, never as a member.
+pub fn install_image_set_sidecar_archive(
+    archive: &Path,
+    set: &SetMemberCache,
+    arch: GuestArch,
+    libc: GuestLibc,
+    cache_root: &Path,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    let arch_dir = arch.to_string();
+    let tmp = temp_dir()?;
+    let extracted = extract_sidecar_archive(archive, tmp.path())?;
+    let version = MemberVersion::read(&extracted.join(SDK_SIDECAR_VERSION_FILE))
+        .map_err(RuntimeOverlayError::from)?;
+    let member_root = set.cache_root(cache_root);
+    install_sidecar_into_cache(&extracted, &member_root, version.as_str(), &arch_dir, libc)?;
+    let artifact = SdkSidecarResolver::new(member_root, version.as_str().to_string())
+        .resolve(&arch_dir, libc)?;
+    set.record(
+        cache_root,
+        ImageSetRole::SdkSidecar(libc),
+        MemberTarget::Arch(arch),
+        &version,
+    )
+    .map_err(RuntimeOverlayError::from)?;
+    Ok(artifact)
+}
+
+/// The resolver for the `libc` sidecar installed from the image set `set`: it
+/// reads that set's entry and expects the member `VERSION` recorded when it
+/// was installed, not the running CLI's.
+pub fn image_set_sidecar_resolver(
+    cache_root: &Path,
+    set: &SetMemberCache,
+    arch: GuestArch,
+    libc: GuestLibc,
+) -> Result<SdkSidecarResolver, SdkSidecarBuildError> {
+    let version = set
+        .installed_version(
+            cache_root,
+            ImageSetRole::SdkSidecar(libc),
+            MemberTarget::Arch(arch),
+        )
+        .map_err(RuntimeOverlayError::from)?;
+    Ok(SdkSidecarResolver::new(
+        set.cache_root(cache_root),
+        version.into(),
+    ))
+}
+
+/// Extract an authenticated sidecar archive into `<scratch>/extracted` and
+/// re-check it against the manifest it carries.
+fn extract_sidecar_archive(
+    archive: &Path,
+    scratch: &Path,
+) -> Result<PathBuf, SdkSidecarBuildError> {
+    let extracted = scratch.join("extracted");
+    std::fs::create_dir(&extracted).map_err(io_at("creating", &extracted))?;
+    crate::runtime_overlay::extract_release_archive(archive, &extracted, &SIDECAR_ARCHIVE_MEMBERS)?;
+    verify_sidecar_dir_integrity(&extracted)?;
+    Ok(extracted)
 }
 
 /// Install a verified sidecar artifact directory into the canonical cache
@@ -949,14 +1021,23 @@ mod tests {
         cache: &Path,
         libc: GuestLibc,
     ) -> Result<SdkSidecarArtifact, String> {
-        download_sdk_sidecar_from(
-            &fixture.set,
+        download_sdk_sidecar_from(&fixture.set, GuestArch::host(), libc, cache)
+            .map_err(|e| format!("{e}"))
+    }
+
+    /// Where a download from `fixture` installs the `libc` variant: under the
+    /// fixture root's member cache, at the member's own version.
+    fn member_layout_of(
+        fixture: &ReleaseFixture,
+        cache: &Path,
+        libc: GuestLibc,
+    ) -> SdkSidecarLayout {
+        SdkSidecarLayout::under(
+            &fixture.set.member_cache().cache_root(cache),
             FIXTURE_VERSION,
-            GuestArch::host(),
+            &GuestArch::host().to_string(),
             libc,
-            cache,
         )
-        .map_err(|e| format!("{e}"))
     }
 
     #[test]
@@ -970,7 +1051,10 @@ mod tests {
             .expect("the published musl sidecar must install");
 
         assert_eq!(artifact.libc, GuestLibc::Musl);
-        assert_eq!(artifact.image, layout_of(cache, GuestLibc::Musl).image);
+        assert_eq!(
+            artifact.image,
+            member_layout_of(&fixture, cache, GuestLibc::Musl).image
+        );
     }
 
     #[test]
@@ -979,13 +1063,8 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         env.set("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:1/never");
 
-        let error = download_sdk_sidecar(
-            FIXTURE_VERSION,
-            GuestArch::host(),
-            GuestLibc::Unknown,
-            cache.path(),
-        )
-        .expect_err("an unknown libc cannot select a release asset");
+        let error = download_sdk_sidecar(GuestArch::host(), GuestLibc::Unknown, cache.path())
+            .expect_err("an unknown libc cannot select a release asset");
 
         assert!(
             matches!(error, SdkSidecarBuildError::UnknownLibc { .. }),
@@ -1011,6 +1090,12 @@ mod tests {
             !layout.artifact_dir.exists(),
             "a refused download must leave no artifact dir at {}",
             layout.artifact_dir.display()
+        );
+        let members = cache.join(crate::published_image_set::IMAGE_SET_MEMBER_CACHE_DIR);
+        assert!(
+            !members.exists(),
+            "a refused download must install no image-set member under {}",
+            members.display()
         );
         assert!(
             SdkSidecarResolver::new(cache.to_path_buf(), FIXTURE_VERSION.to_string())
@@ -1075,7 +1160,7 @@ mod tests {
 
         let artifact = download_from(&fixture, cache.path()).expect("a sound release installs");
 
-        let layout = layout_of(cache.path(), GuestLibc::Glibc);
+        let layout = member_layout_of(&fixture, cache.path(), GuestLibc::Glibc);
         assert_eq!(artifact.image, layout.image);
         assert_eq!(artifact.version, FIXTURE_VERSION);
         assert_eq!(artifact.arch, GuestArch::host().to_string());
@@ -1086,9 +1171,15 @@ mod tests {
 
         // The installed bytes satisfy the same contract the launch path
         // enforces — the transport cannot widen it.
-        SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
-            .resolve(&GuestArch::host().to_string(), GuestLibc::Glibc)
-            .expect("the installed entry must resolve");
+        image_set_sidecar_resolver(
+            cache.path(),
+            &fixture.set.member_cache(),
+            GuestArch::host(),
+            GuestLibc::Glibc,
+        )
+        .expect("the install is recorded")
+        .resolve(&GuestArch::host().to_string(), GuestLibc::Glibc)
+        .expect("the installed entry must resolve");
     }
 
     /// The current train requires both sidecar variants for every arch, so a
@@ -1301,7 +1392,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let fixture = ReleaseFixture::sound(&mut env);
         download_from(&fixture, cache.path()).expect("first install");
-        let layout = layout_of(cache.path(), GuestLibc::Glibc);
+        let layout = member_layout_of(&fixture, cache.path(), GuestLibc::Glibc);
         std::fs::write(layout.artifact_dir.join("stale-residue"), b"x").unwrap();
 
         download_from(&fixture, cache.path()).expect("second install");
@@ -1310,5 +1401,51 @@ mod tests {
             !layout.artifact_dir.join("stale-residue").exists(),
             "a reinstall must replace the artifact dir, not merge into it"
         );
+    }
+
+    /// A member cut from a workspace at another version than this CLI's.
+    const MEMBER_VERSION: &str = "0.0.1-member";
+
+    /// Both libc variants of a set whose sidecars carry another version than
+    /// this CLI's install, and a later launch resolves each from the cache
+    /// through the recorded member version, without the set being served.
+    #[test]
+    fn set_sidecars_at_another_version_install_and_resolve_from_cache() {
+        assert_ne!(MEMBER_VERSION, env!("CARGO_PKG_VERSION"));
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            let mut env = TestEnv::new();
+            let cache = tempfile::tempdir().unwrap();
+            let archive = well_formed_archive(MEMBER_VERSION, libc);
+            let fixture = ReleaseFixture::stage_for_libc(&mut env, libc, &archive, &archive);
+
+            let installed = download_from_for_libc(&fixture, cache.path(), libc)
+                .unwrap_or_else(|e| panic!("the {libc} member must install: {e}"));
+            assert_eq!(installed.version, MEMBER_VERSION);
+
+            let set = fixture.set.member_cache();
+            drop(fixture);
+            let resolved = image_set_sidecar_resolver(cache.path(), &set, GuestArch::host(), libc)
+                .expect("the install is recorded")
+                .resolve(&GuestArch::host().to_string(), libc)
+                .expect("the installed member must resolve from the cache");
+            assert_eq!(resolved, installed);
+        }
+    }
+
+    /// A sidecar installed from one root is not a member of another: once the
+    /// lock moves, it is acquired again rather than reused.
+    #[test]
+    fn a_set_sidecar_from_another_root_is_not_reused() {
+        let mut env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let archive = well_formed_archive(MEMBER_VERSION, GuestLibc::Musl);
+        let fixture = ReleaseFixture::stage_for_libc(&mut env, GuestLibc::Musl, &archive, &archive);
+        download_from_for_libc(&fixture, cache.path(), GuestLibc::Musl).unwrap();
+
+        let moved = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"next"));
+        let err =
+            image_set_sidecar_resolver(cache.path(), &moved, GuestArch::host(), GuestLibc::Musl)
+                .expect_err("another root's sidecar is not installed for this root");
+        assert!(err.to_string().contains("no sdk_sidecar_musl"), "{err}");
     }
 }
