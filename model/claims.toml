@@ -453,3 +453,19 @@ witnesses = [
     "fn:fresh_install_requires_tag_pinned_bundle",
     "fn:fresh_install_has_no_unsigned_fallback",
 ]
+
+[[claim]]
+id = "MVM-SEC-22"
+level = "build"
+witness_kinds = ["fn"]
+suite = "cumulative_ledger"
+statement = "A signed execution plan may carry cumulative per-VM action budgets over host-observable seams; absent keeps existing plan bytes identical, present rides signed so a launcher cannot widen a checked ceiling"
+# Phase 0 scope: the signed carrier and its wire stability. Host-side
+# enforcement at the egress, DNS, substitution, input, and output seams
+# lands with the ledger itself.
+witnesses = [
+    "fn:action_budget_defaults_to_no_limits",
+    "fn:action_budget_roundtrips_each_dimension_through_serde",
+    "fn:action_budget_absent_preserves_existing_plan_bytes",
+    "fn:action_budget_extracted_from_signed_envelope",
+]

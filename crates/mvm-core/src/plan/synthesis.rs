@@ -852,6 +852,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
+        action_budget: None,
         sdk_uses_sidecar: true,
     };
 

@@ -109,6 +109,18 @@ pub fn reversible_replacement_from_signed_json(
     Ok(plan.reversible_replacement)
 }
 
+/// Extract the cumulative action budget from a signed plan's payload, without
+/// re-verifying the signature — same trust posture as
+/// [`redaction_from_signed_json`]. Returns `None` for plans that carry no
+/// budget, which is the default and the common case.
+pub fn action_budget_from_signed_json(
+    plan_json: &str,
+) -> Result<Option<crate::policy::action_budget::ActionBudget>, serde_json::Error> {
+    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
+    Ok(plan.action_budget)
+}
+
 /// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
 ///
 /// The Firecracker launch path reads the admitted plan from disk
@@ -224,6 +236,7 @@ pub mod test_support {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
+            action_budget: None,
             ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
@@ -426,6 +439,27 @@ mod tests {
         assert_eq!(recovered, plan.redaction);
         assert_eq!(recovered.profiles.len(), 1);
         assert_eq!(recovered.profiles[0].host, "*.untrusted.example");
+    }
+
+    #[test]
+    fn action_budget_extracted_from_signed_envelope() {
+        use crate::policy::action_budget::ActionBudget;
+        let mut plan = sample_plan();
+        plan.action_budget = Some(
+            ActionBudget::default()
+                .with_max_egress_flows(3)
+                .with_max_dns_queries(1_000),
+        );
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        let recovered = action_budget_from_signed_json(&json).unwrap();
+        assert_eq!(recovered, plan.action_budget);
+
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&sample_plan(), &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        assert!(action_budget_from_signed_json(&json).unwrap().is_none());
     }
 
     #[test]
