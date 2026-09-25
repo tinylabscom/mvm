@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-#[path = "src/workspace_graph.rs"]
-mod workspace_graph;
-pub(crate) use workspace_graph::*;
+// Every includer declares `workspace_graph` at its crate root: `mvm-cli` as an
+// ordinary module, the build script and the integration test by path. Including
+// it here as well would compile a second copy into `mvm-cli`.
+pub(crate) use crate::workspace_graph::*;
 
 /// The inputs that decide whether two builds of one binary are the same build.
 ///

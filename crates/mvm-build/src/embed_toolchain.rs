@@ -89,10 +89,6 @@ pub fn strip_glibc(t: &str) -> &str {
     t.split('.').next().unwrap()
 }
 
-pub fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
-    resolve_pinned_zig(zig_pin).unwrap_or_else(|reason| panic!("{reason}"))
-}
-
 /// The pinned zig, or why it could not be found.
 ///
 /// `Ok(None)` means a matching zig is already on `PATH`: nothing to pin
@@ -118,11 +114,7 @@ pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
     ))
 }
 
-pub fn rustup_cargo_and_rustc(target: &str, toolchain: &str) -> (String, String) {
-    try_rustup_cargo_and_rustc(target, toolchain).unwrap_or_else(|reason| panic!("{reason}"))
-}
-
-/// `rustup_cargo_and_rustc` for a caller that has somewhere to go on failure.
+/// The pinned toolchain's `cargo` and `rustc`, provided it carries `target`.
 pub fn try_rustup_cargo_and_rustc(
     target: &str,
     toolchain: &str,
@@ -298,6 +290,26 @@ aarch64 = "aarch64-unknown-linux-musl"
         assert_eq!(pin.zig, "0.13.0");
         assert_eq!(pin.cargo_zigbuild, "0.23.0");
         assert_eq!(pin.target, "aarch64-unknown-linux-musl");
+    }
+
+    #[test]
+    fn strip_glibc_removes_only_the_version_suffix() {
+        assert_eq!(
+            strip_glibc("aarch64-unknown-linux-gnu.2.17"),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            strip_glibc("aarch64-unknown-linux-musl"),
+            "aarch64-unknown-linux-musl"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_arch_is_refused_by_name() {
+        let toolchain: toml::Value =
+            toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
+        let reason = resolve_target_for_arch(&toolchain, "riscv64").unwrap_err();
+        assert!(reason.contains("`riscv64`"), "{reason}");
     }
 
     /// The readiness probe reports rather than panics, so its caller has to be

@@ -15,3 +15,11 @@
 pub mod embedded;
 pub mod extract;
 pub mod manifest;
+// Shared with `build.rs`, which reaches parts `mvmctl` never does (its rerun
+// bookkeeping, restoring into `OUT_DIR`).
+#[cfg(test)]
+#[allow(dead_code)]
+mod payload_build;
+
+#[cfg(test)]
+use mvm_build::embed_toolchain;
