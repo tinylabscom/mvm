@@ -301,33 +301,58 @@ pub fn stage0_nix_store_image_name() -> String {
 }
 
 /// Populate the Stage 0 store image from a materialized seed, when present.
+///
+/// Must run under the store's image lock: it judges the filesystem by the
+/// state its last mount left behind, which only holds while nothing has it
+/// mounted.
 pub fn prepopulate_stage0_nix_store_image(
     image: &BuilderVmImage,
     store_image: &Path,
 ) -> Result<(), BuilderVmError> {
     let host_mkfs = find_host_mkfs_ext4();
-    prepopulate_with_mkfs(image, store_image, host_mkfs.as_deref())
+    if let StorePreparation::Discarded(state) =
+        prepopulate_with_mkfs(image, store_image, host_mkfs.as_deref())?
+    {
+        eprintln!("{}", stage0_store_discard_notice(store_image, state));
+    }
+    Ok(())
+}
+
+/// What preparing the Stage 0 store did to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorePreparation {
+    /// The image is not a seed root, so there was nothing to prepare from.
+    NoSeed,
+    /// Bound to this seed and cleanly unmounted: handed to the guest as-is.
+    Reused,
+    /// New, or bound to a different seed: formatted from the seed.
+    Formatted,
+    /// Bound to this seed but not safe to mount: discarded and formatted.
+    Discarded(StoreSuperblock),
 }
 
 pub(crate) fn prepopulate_with_mkfs(
     image: &BuilderVmImage,
     store_image: &Path,
     host_mkfs: Option<&Path>,
-) -> Result<(), BuilderVmError> {
+) -> Result<StorePreparation, BuilderVmError> {
     let BuilderVmImage::RootDir { root_dir, .. } = image else {
-        return Ok(());
+        return Ok(StorePreparation::NoSeed);
     };
     let seed_nix = root_dir.join("nix");
     let seed_store = seed_nix.join("store");
     if !seed_store.is_dir() {
-        return Ok(());
+        return Ok(StorePreparation::NoSeed);
     }
     let marker = stage0_marker(&seed_store)?;
     let marker_path = marker_path(store_image);
-    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
-        && superblock_is_recoverable(store_image)?
-    {
-        return Ok(());
+    let mut preparation = StorePreparation::Formatted;
+    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker) {
+        let state = StoreSuperblock::read(store_image)?;
+        if state.is_reusable() {
+            return Ok(StorePreparation::Reused);
+        }
+        preparation = StorePreparation::Discarded(state);
     }
     if marker_path.exists() {
         std::fs::remove_file(&marker_path).map_err(|error| {
@@ -361,7 +386,8 @@ pub(crate) fn prepopulate_with_mkfs(
     }
     std::fs::write(&marker_path, marker).map_err(|error| {
         BuilderVmError::ExtractionFailed(format!("write {}: {error}", marker_path.display()))
-    })
+    })?;
+    Ok(preparation)
 }
 
 pub(crate) fn format_empty_stage0_store(path: &Path) -> Result<(), BuilderVmError> {
@@ -432,6 +458,13 @@ pub(crate) fn marker_path(store_image: &Path) -> PathBuf {
     store_image.with_extension("stage0-seed")
 }
 
+/// Unbind the Stage 0 store from its seed when the guest reported ext4 errors
+/// on it, so the next preparation rebuilds it rather than mounting it again.
+///
+/// The superblock usually records the same thing, but not always: a journaled
+/// store never loses its valid bit, and the kernel commits the error bit
+/// asynchronously. The guest's own report is the one signal that is always
+/// written before it powers off.
 pub fn invalidate_stage0_store_after_ext4_error(
     console_log: &Path,
     store_image: &Path,
@@ -441,7 +474,13 @@ pub fn invalidate_stage0_store_after_ext4_error(
         return Ok(());
     }
     match std::fs::remove_file(marker_path(store_image)) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            eprintln!(
+                "{}",
+                stage0_store_discard_notice(store_image, StoreSuperblock::ErrorsRecorded)
+            );
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
             "remove invalid Stage 0 store marker for {}: {error}",
@@ -450,24 +489,89 @@ pub fn invalidate_stage0_store_after_ext4_error(
     }
 }
 
-fn superblock_is_recoverable(path: &Path) -> Result<bool, BuilderVmError> {
-    let mut file = std::fs::File::open(path).map_err(|error| {
-        BuilderVmError::ExtractionFailed(format!("open {}: {error}", path.display()))
-    })?;
-    file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
-        .map_err(|error| {
-            BuilderVmError::ExtractionFailed(format!("seek {}: {error}", path.display()))
+/// What a store image's ext4 superblock records about how its last mount
+/// ended.
+///
+/// The seed marker beside the image binds it to a seed but lives outside the
+/// filesystem, so it cannot say whether the filesystem is intact. The
+/// superblock can. A read-write mount of an ext4 without a journal clears
+/// `EXT4_VALID_FS` and only an unmount sets it again, so a guest that died
+/// mid-build leaves the bit clear, and with no journal there is nothing to
+/// replay: the next mount reads half-written allocation bitmaps as truth. The
+/// pure-Rust formatter writes exactly that journal-less filesystem. A
+/// journaled one never clears the bit (it marks the journal for recovery
+/// instead), so requiring it costs a journaled store nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreSuperblock {
+    /// Unmounted cleanly, no errors recorded.
+    Clean,
+    /// Mounted read-write and never unmounted.
+    NotCleanlyUnmounted,
+    /// The kernel recorded filesystem errors on it.
+    ErrorsRecorded,
+    /// No ext4 superblock at all.
+    NotExt4,
+}
+
+impl StoreSuperblock {
+    /// Classify the four bytes at `s_magic`: the magic, then `s_state`.
+    fn parse(fields: [u8; 4]) -> Self {
+        let magic = u16::from_le_bytes([fields[0], fields[1]]);
+        let state = u16::from_le_bytes([fields[2], fields[3]]);
+        if magic != EXT4_SUPERBLOCK_MAGIC {
+            Self::NotExt4
+        } else if state & EXT4_ERROR_FS != 0 {
+            Self::ErrorsRecorded
+        } else if state & EXT4_VALID_FS == 0 {
+            Self::NotCleanlyUnmounted
+        } else {
+            Self::Clean
+        }
+    }
+
+    pub(crate) fn read(path: &Path) -> Result<Self, BuilderVmError> {
+        let mut file = std::fs::File::open(path).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("open {}: {error}", path.display()))
         })?;
-    let mut fields = [0_u8; 4];
-    file.read_exact(&mut fields).map_err(|error| {
-        BuilderVmError::ExtractionFailed(format!(
-            "read ext4 state from {}: {error}",
-            path.display()
-        ))
-    })?;
-    let magic = u16::from_le_bytes([fields[0], fields[1]]);
-    let state = u16::from_le_bytes([fields[2], fields[3]]);
-    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state & EXT4_ERROR_FS == 0)
+        file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+            .map_err(|error| {
+                BuilderVmError::ExtractionFailed(format!("seek {}: {error}", path.display()))
+            })?;
+        let mut fields = [0_u8; 4];
+        file.read_exact(&mut fields).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!(
+                "read ext4 state from {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Self::parse(fields))
+    }
+
+    pub(crate) fn is_reusable(self) -> bool {
+        self == Self::Clean
+    }
+
+    fn discard_reason(self) -> &'static str {
+        match self {
+            Self::Clean => "is clean",
+            Self::NotCleanlyUnmounted => {
+                "was left mounted by a Stage 0 run that did not shut down cleanly \
+                 (it was interrupted or its VM was killed)"
+            }
+            Self::ErrorsRecorded => "has ext4 errors recorded by the guest kernel",
+            Self::NotExt4 => "has no ext4 filesystem",
+        }
+    }
+}
+
+/// The one line a user sees when a warm Stage 0 store is thrown away, so a
+/// slower bootstrap is explained rather than mysterious.
+pub(crate) fn stage0_store_discard_notice(store_image: &Path, state: StoreSuperblock) -> String {
+    format!(
+        "[mvm] the Stage 0 Nix store {} {}; discarding it and rebuilding it from the seed",
+        store_image.display(),
+        state.discard_reason()
+    )
 }
 
 pub(crate) fn stage0_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
@@ -478,7 +582,6 @@ pub(crate) fn stage0_marker(seed_store: &Path) -> Result<String, BuilderVmError>
     ))
 }
 
-#[cfg(all(test, feature = "builder-libkrun"))]
 pub(crate) const EXT4_VALID_FS: u16 = 0x0001;
 pub(crate) const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
 pub(crate) const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
@@ -587,6 +690,230 @@ mod tests {
         let (millis, pid) = id.split_once('-').expect("timestamp-pid shape");
         assert!(millis.parse::<u128>().is_ok());
         assert_eq!(pid, std::process::id().to_string());
+    }
+
+    /// A seed root with one store entry, and a sparse store image beside it.
+    fn seeded_stage0_store(scratch: &Path) -> (BuilderVmImage, PathBuf) {
+        let root_dir = scratch.join("root");
+        let seed_store = root_dir.join("nix").join("store");
+        std::fs::create_dir_all(&seed_store).expect("create seed store");
+        std::fs::write(seed_store.join("aaa-seed-pkg"), b"x").expect("write seed entry");
+        let store_image = scratch.join("nix-store-stage0-test.img");
+        std::fs::File::create(&store_image)
+            .and_then(|file| file.set_len(64 * 1024 * 1024))
+            .expect("create sparse store image");
+        (BuilderVmImage::new_root_dir(root_dir, "init"), store_image)
+    }
+
+    /// Stands in for everything a Stage 0 guest writes to its store: a reformat
+    /// zeroes the image, so a surviving sentinel is a surviving store.
+    const WARM_SENTINEL_OFFSET: u64 = 8 * 1024 * 1024;
+
+    fn write_warm_sentinel(store_image: &Path) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(store_image)
+            .expect("open store image");
+        file.seek(SeekFrom::Start(WARM_SENTINEL_OFFSET))
+            .and_then(|_| file.write_all(b"warm-cache"))
+            .expect("write sentinel");
+    }
+
+    fn warm_sentinel_survived(store_image: &Path) -> bool {
+        let mut file = std::fs::File::open(store_image).expect("open store image");
+        let mut sentinel = [0_u8; 10];
+        file.seek(SeekFrom::Start(WARM_SENTINEL_OFFSET))
+            .and_then(|_| file.read_exact(&mut sentinel))
+            .expect("read sentinel");
+        &sentinel == b"warm-cache"
+    }
+
+    /// Writes `s_state` the way the guest kernel leaves it: cleared at a
+    /// read-write mount of an unjournaled filesystem, set again at unmount.
+    fn write_superblock_state(store_image: &Path, state: u16) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(store_image)
+            .expect("open store image");
+        file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET + 2))
+            .and_then(|_| file.write_all(&state.to_le_bytes()))
+            .expect("write s_state");
+    }
+
+    fn superblock_fields(magic: u16, state: u16) -> [u8; 4] {
+        let [m0, m1] = magic.to_le_bytes();
+        let [s0, s1] = state.to_le_bytes();
+        [m0, m1, s0, s1]
+    }
+
+    #[test]
+    fn superblock_state_classifies_the_last_mount() {
+        let magic = EXT4_SUPERBLOCK_MAGIC;
+        assert_eq!(
+            StoreSuperblock::parse(superblock_fields(magic, EXT4_VALID_FS)),
+            StoreSuperblock::Clean
+        );
+        assert_eq!(
+            StoreSuperblock::parse(superblock_fields(magic, 0)),
+            StoreSuperblock::NotCleanlyUnmounted
+        );
+        // Errors are the more specific diagnosis, so they win over a dirty bit.
+        assert_eq!(
+            StoreSuperblock::parse(superblock_fields(magic, EXT4_ERROR_FS)),
+            StoreSuperblock::ErrorsRecorded
+        );
+        assert_eq!(
+            StoreSuperblock::parse(superblock_fields(magic, EXT4_VALID_FS | EXT4_ERROR_FS)),
+            StoreSuperblock::ErrorsRecorded
+        );
+        assert_eq!(
+            StoreSuperblock::parse(superblock_fields(0, EXT4_VALID_FS)),
+            StoreSuperblock::NotExt4
+        );
+    }
+
+    #[test]
+    fn only_a_clean_superblock_is_reusable() {
+        assert!(StoreSuperblock::Clean.is_reusable());
+        for state in [
+            StoreSuperblock::NotCleanlyUnmounted,
+            StoreSuperblock::ErrorsRecorded,
+            StoreSuperblock::NotExt4,
+        ] {
+            assert!(!state.is_reusable(), "{state:?}");
+        }
+    }
+
+    /// The pure-Rust formatter must hand the guest a store that reads as
+    /// cleanly unmounted, or every first reuse would be a discard.
+    #[test]
+    fn a_freshly_formatted_store_reads_as_clean() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+
+        assert_eq!(prepared, StorePreparation::Formatted);
+        assert_eq!(
+            StoreSuperblock::read(&store_image).expect("read superblock"),
+            StoreSuperblock::Clean
+        );
+    }
+
+    #[test]
+    fn a_cleanly_unmounted_store_is_reused() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+        prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+        write_warm_sentinel(&store_image);
+
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("reuse");
+
+        assert_eq!(prepared, StorePreparation::Reused);
+        assert!(warm_sentinel_survived(&store_image));
+    }
+
+    /// The reported failure: a Stage 0 VM killed mid-build leaves its
+    /// unjournaled store with the valid bit clear. Mounting that again is what
+    /// produced `freeing already freed block` and a zero-filled `flake.nix`.
+    #[test]
+    fn a_store_an_interrupted_run_left_mounted_is_discarded() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+        prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+        write_warm_sentinel(&store_image);
+        write_superblock_state(&store_image, 0);
+
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("discard");
+
+        assert_eq!(
+            prepared,
+            StorePreparation::Discarded(StoreSuperblock::NotCleanlyUnmounted)
+        );
+        assert!(!warm_sentinel_survived(&store_image));
+        assert_eq!(
+            StoreSuperblock::read(&store_image).expect("read superblock"),
+            StoreSuperblock::Clean,
+            "the replacement store must itself be reusable"
+        );
+        assert!(
+            marker_path(&store_image).exists(),
+            "the replacement store is bound to the seed again"
+        );
+    }
+
+    #[test]
+    fn a_store_with_recorded_errors_is_discarded() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+        prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+        write_warm_sentinel(&store_image);
+        write_superblock_state(&store_image, EXT4_VALID_FS | EXT4_ERROR_FS);
+
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("discard");
+
+        assert_eq!(
+            prepared,
+            StorePreparation::Discarded(StoreSuperblock::ErrorsRecorded)
+        );
+        assert!(!warm_sentinel_survived(&store_image));
+    }
+
+    /// A build failure is not corruption. The guest unmounts the store on the
+    /// failure path too, so the superblock reads clean and the console carries
+    /// no ext4 report: the warm store has to survive.
+    #[test]
+    fn a_failed_build_that_shut_down_cleanly_keeps_its_store() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+        prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+        write_warm_sentinel(&store_image);
+        // Mounted read-write, then unmounted by the guest's failure path.
+        write_superblock_state(&store_image, 0);
+        write_superblock_state(&store_image, EXT4_VALID_FS);
+        let console = scratch.path().join("console.log");
+        std::fs::write(&console, b"stage0-init: build failed: nix build exit 1\n")
+            .expect("write console");
+
+        invalidate_stage0_store_after_ext4_error(&console, &store_image).expect("inspect console");
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("reuse");
+
+        assert_eq!(prepared, StorePreparation::Reused);
+        assert!(warm_sentinel_survived(&store_image));
+    }
+
+    /// A seed change is a routine rebuild, not a fault, so it reformats without
+    /// announcing a discard.
+    #[test]
+    fn a_store_formatted_for_a_different_seed_is_replaced_without_a_discard() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (image, store_image) = seeded_stage0_store(scratch.path());
+        prepopulate_with_mkfs(&image, &store_image, None).expect("format");
+        write_superblock_state(&store_image, 0);
+        std::fs::write(marker_path(&store_image), b"schema_version=2\nold-seed\n")
+            .expect("write stale marker");
+
+        let prepared = prepopulate_with_mkfs(&image, &store_image, None).expect("reformat");
+
+        assert_eq!(prepared, StorePreparation::Formatted);
+    }
+
+    #[test]
+    fn the_discard_notice_names_the_store_and_the_cause() {
+        let store = Path::new("/cache/nix-store-stage0-aarch64.img");
+
+        let notice = stage0_store_discard_notice(store, StoreSuperblock::NotCleanlyUnmounted);
+
+        assert!(notice.starts_with("[mvm] "), "{notice}");
+        assert!(notice.contains(&store.display().to_string()), "{notice}");
+        assert!(notice.contains("did not shut down cleanly"), "{notice}");
+        assert!(notice.contains("rebuilding it from the seed"), "{notice}");
+        assert!(
+            stage0_store_discard_notice(store, StoreSuperblock::ErrorsRecorded)
+                .contains("ext4 errors"),
+        );
     }
 
     #[test]

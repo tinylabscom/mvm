@@ -4409,58 +4409,6 @@ mod tests {
     }
 
     #[test]
-    fn stage0_store_prepopulate_preserves_recoverable_dirty_marked_store() {
-        use std::io::{Read, Seek, SeekFrom, Write};
-
-        let scratch = TempDir::new().unwrap();
-        let root_dir = scratch.path().join("root");
-        let seed_store = root_dir.join("nix").join("store");
-        std::fs::create_dir_all(&seed_store).unwrap();
-        std::fs::write(seed_store.join("aaa-seed-pkg"), b"x").unwrap();
-        let image = BuilderVmImage::RootDir {
-            root_dir,
-            entry_path: "init".into(),
-        };
-        let store_image = scratch.path().join("nix-store-stage0-test.img");
-        std::fs::File::create(&store_image)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
-            .unwrap();
-
-        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
-        // Model a successful guest format followed by a forced host-side
-        // timeout while the filesystem is mounted. The valid bit is clear,
-        // but ext4 has not recorded an error and can replay its journal.
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&store_image)
-                .unwrap();
-            file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
-                .unwrap();
-            file.write_all(&EXT4_SUPERBLOCK_MAGIC.to_le_bytes())
-                .unwrap();
-            file.write_all(&0_u16.to_le_bytes()).unwrap();
-        }
-        let sentinel_offset = 8 * 1024 * 1024;
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&store_image)
-            .unwrap();
-        file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
-        file.write_all(b"warm-cache").unwrap();
-        drop(file);
-
-        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
-        let mut file = std::fs::File::open(&store_image).unwrap();
-        file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
-        let mut sentinel = [0u8; 10];
-        file.read_exact(&mut sentinel).unwrap();
-        assert_eq!(&sentinel, b"warm-cache");
-    }
-
-    #[test]
     fn stage0_ext4_error_report_invalidates_only_the_external_store_marker() {
         let scratch = TempDir::new().unwrap();
         let store_image = scratch.path().join("nix-store-stage0-test.img");

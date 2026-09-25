@@ -148,8 +148,7 @@ pub(super) mod collect {
     use std::process::{Command, Stdio};
 
     use crate::linux::{
-        NIX_TARGET, STAGE0_NIX_STORE_MARKER, STAGE0_NIX_STORE_MOUNT, is_mountpoint, is_qemu,
-        persistent_store_finalization_required,
+        NIX_TARGET, STAGE0_NIX_STORE_MARKER, STAGE0_NIX_STORE_MOUNT, is_mountpoint,
     };
     use crate::seed::{find_seed_bin, find_seed_cacert};
 
@@ -197,8 +196,7 @@ pub(super) mod collect {
     /// Never fails Stage 0: the artifacts are already on the output disk, and a
     /// store left large is the state every run before this one left.
     pub(crate) fn collect_stage0_store_garbage() {
-        if !persistent_store_finalization_required(is_qemu(), is_mountpoint(STAGE0_NIX_STORE_MOUNT))
-        {
+        if !is_mountpoint(STAGE0_NIX_STORE_MOUNT) {
             eprintln!("stage0-init: no persistent Nix store mounted; not collecting garbage");
             return;
         }

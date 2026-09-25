@@ -148,7 +148,7 @@ mod linux {
             crate::store_gc::collect::collect_stage0_store_garbage();
         }
         let store_result = finalize_persistent_nix_store();
-        let result = build_result.and(output_result).and(store_result);
+        let result = stage0_result(build_result.and(output_result), store_result);
         match result {
             Ok(()) => {
                 eprintln!("stage0-init: done; halting");
@@ -158,6 +158,17 @@ mod linux {
                 eprintln!("stage0-init: build failed: {e}");
                 power_off()
             }
+        }
+    }
+
+    /// The run's one result line. A store fault must survive a build failure
+    /// rather than be hidden behind it: the host discards the store only when
+    /// it sees the fault reported, and a store that corrupted mid-build is
+    /// exactly the one whose build also failed.
+    fn stage0_result(build: Result<(), String>, store: Result<(), String>) -> Result<(), String> {
+        match (build, store) {
+            (Err(build), Err(store)) => Err(format!("{build}; {store}")),
+            (build, store) => build.and(store),
         }
     }
 
@@ -745,9 +756,14 @@ mod linux {
     /// host accept a corrupt cache. The explicit unmount moves all filesystem
     /// writeback ahead of that marker and makes kernel error accounting part of
     /// the guest result.
+    ///
+    /// Every backend, QEMU included. The store is ext4 without a journal when
+    /// the host formatted it, and such a filesystem only records a clean
+    /// unmount at unmount time; the host discards a store that lacks one, so a
+    /// backend that skipped this would rebuild its store from the seed on
+    /// every bootstrap.
     fn finalize_persistent_nix_store() -> Result<(), String> {
-        if !persistent_store_finalization_required(is_qemu(), is_mountpoint(STAGE0_NIX_STORE_MOUNT))
-        {
+        if !is_mountpoint(STAGE0_NIX_STORE_MOUNT) {
             return Ok(());
         }
 
@@ -759,8 +775,10 @@ mod linux {
             virtio_block_devices(),
             mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
         )
-        .and_then(|path| path.file_name().map(|name| name.to_owned()))
-        .unwrap_or_else(|| std::ffi::OsString::from("vdb"));
+        .unwrap_or_else(|| PathBuf::from(stage0_nix_store_device(is_qemu())));
+        let store_device = store_device
+            .file_name()
+            .ok_or_else(|| format!("{} names no device", store_device.display()))?;
         reject_ext4_errors(
             &Path::new("/sys/fs/ext4")
                 .join(store_device)
@@ -769,13 +787,6 @@ mod linux {
         unmount(NIX_TARGET)?;
         unmount(STAGE0_NIX_STORE_MOUNT)?;
         Ok(())
-    }
-
-    pub(crate) fn persistent_store_finalization_required(
-        qemu: bool,
-        persistent_mounted: bool,
-    ) -> bool {
-        !qemu && persistent_mounted
     }
 
     fn reject_ext4_errors(errors_count_path: &Path) -> Result<(), String> {
@@ -1533,11 +1544,26 @@ mod linux {
         }
 
         #[test]
-        fn ext4_finalization_applies_only_to_a_mounted_libkrun_store() {
-            assert!(super::persistent_store_finalization_required(false, true));
-            assert!(!super::persistent_store_finalization_required(false, false));
-            assert!(!super::persistent_store_finalization_required(true, true));
-            assert!(!super::persistent_store_finalization_required(true, false));
+        fn a_store_fault_is_reported_alongside_a_build_failure() {
+            let store_fault = "persistent Stage 0 ext4 store reported 3 filesystem error(s)";
+
+            let both = super::stage0_result(
+                Err("nix build exit 1".to_string()),
+                Err(store_fault.to_string()),
+            )
+            .expect_err("two failures are a failure");
+            assert!(both.starts_with("nix build exit 1"), "{both}");
+            assert!(both.contains(store_fault), "{both}");
+
+            assert_eq!(
+                super::stage0_result(Ok(()), Err(store_fault.to_string())),
+                Err(store_fault.to_string())
+            );
+            assert_eq!(
+                super::stage0_result(Err("nix build exit 1".to_string()), Ok(())),
+                Err("nix build exit 1".to_string())
+            );
+            assert_eq!(super::stage0_result(Ok(()), Ok(())), Ok(()));
         }
 
         #[test]
