@@ -1036,12 +1036,21 @@ impl VmFullControl for HvfVmFullControl {
             .parent()
             .map(|parent| parent.join("rootfs.verity"))
             .filter(|path| path.exists());
+        // The guest reads its per-boot FlowMux signing key off this drive, and
+        // the captured supervisor config lists it as a read-only disk. A
+        // same-identity restore rebuilds the state dir from checkpoint content,
+        // so the drive has to travel with the checkpoint or the restore refuses
+        // a disk that is no longer on disk once the stopped state dir is reaped.
+        let identity = self
+            .state_dir
+            .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+        let identity = identity.is_file().then_some(identity);
         Ok(DeviceAnchors {
             rootfs,
             rootfs_verity,
             config: None,
             secrets: None,
-            identity: None,
+            identity,
             vsock: hvf_agent_socket(&self.state_dir),
         })
     }
@@ -1599,6 +1608,48 @@ mod tests {
         assert_eq!(cfg.disks[1].path, PathBuf::from("/img/nix-store.img"));
         assert!(!cfg.disks[1].read_only);
         assert!(!cfg.disks[1].ephemeral);
+    }
+
+    #[test]
+    fn device_anchors_capture_the_identity_drive_when_present() {
+        use mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE;
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+
+        let state = vm_state_dir("anchor-vm");
+        std::fs::create_dir_all(&state).unwrap();
+        let rootfs = state.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let meta = mvm_vmm::host::runtime_meta::VmRuntimeMeta {
+            mode: mvm_vmm::host::runtime_meta::StartModeKind::Detached,
+            accessible: true,
+            rootfs_path: Some(rootfs.display().to_string()),
+            runtime_overlay_version: None,
+            observability_target: None,
+        };
+        mvm_vmm::host::runtime_meta::write("anchor-vm", &meta).unwrap();
+
+        let ctl = HvfVmFullControl {
+            vm_name: "anchor-vm".into(),
+            state_dir: state.clone(),
+        };
+        assert_eq!(
+            ctl.device_anchors().unwrap().identity,
+            None,
+            "no drive on disk means no identity anchor"
+        );
+
+        let drive = state.join(IDENTITY_DRIVE_FILE);
+        std::fs::write(&drive, b"identity").unwrap();
+        assert_eq!(
+            ctl.device_anchors().unwrap().identity,
+            Some(drive),
+            "the captured identity anchor points at the state dir's own drive"
+        );
     }
 
     /// A control over a state dir holding a launch config with these disks.

@@ -639,6 +639,11 @@ pub fn fork_vm_full(
     // from its OWN copies — never the parent's live blobs.
     materialize_checkpoint_blobs(store, &parent, &params.dest_dir)?;
 
+    // A fork branches a new VM identity, so it must never boot on the parent's
+    // FlowMux signing key. The captured identity drive was just cloned into the
+    // child's dir with the rest of the content; mint a fresh one over it.
+    reseed_forked_identity_drive(&params.child_vm_name, &params.dest_dir)?;
+
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
     // The bound rides on the spawn, so the grant that just cleared the subset
@@ -676,6 +681,31 @@ pub fn fork_vm_full(
     .build();
     store.write_meta(&child)?;
     Ok(child)
+}
+
+/// Replace a forked child's cloned FlowMux identity drive with a freshly minted
+/// one so the child never boots on the parent's signing key.
+///
+/// `materialize_checkpoint_blobs` clones every captured blob into the child's
+/// state dir, including the identity drive when the checkpoint carried one. That
+/// copy holds the *parent's* per-boot signing key; a fork is a new VM identity,
+/// so it mints its own key pinned to the same host signer and writes it over the
+/// clone. Checkpoints captured before the identity drive was content — and every
+/// backend that attaches none — leave nothing to replace, and this is a no-op.
+fn reseed_forked_identity_drive(child_vm_name: &str, child_dir: &Path) -> Result<()> {
+    let drive = child_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+    if !drive.is_file() {
+        return Ok(());
+    }
+    mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(child_vm_name)
+        .context("minting a fresh FlowMux identity for the fork")?
+        .write_drive(&drive)
+        .with_context(|| {
+            format!(
+                "writing the fork's fresh identity drive to {}",
+                drive.display()
+            )
+        })
 }
 
 /// Ensure a cloned checkpoint keeps the complete dm-verity binding and the
@@ -3148,6 +3178,88 @@ mod tests {
         assert!(
             child.session.is_none(),
             "forked child must not inherit the parent's session binding"
+        );
+    }
+
+    /// A fork branches a new VM identity, so it must never boot on the parent's
+    /// captured FlowMux signing key. The identity drive is cloned into the child
+    /// with the rest of the content and then replaced with a freshly minted one.
+    #[test]
+    fn fork_vm_full_mints_a_fresh_identity_drive_for_the_child() {
+        use mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE;
+        let tmp = tempfile::tempdir().unwrap();
+        // The mint pins the child to the host signer, so an isolated home needs
+        // that key on disk.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path().join("home"));
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(
+            keys.join(mvm_vmm::host::broker_services_spawn::HOST_SIGNER_KEY),
+            [7u8; 32],
+        )
+        .unwrap();
+
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent_state = tmp.path().join("parent-state");
+        std::fs::create_dir_all(&parent_state).unwrap();
+        let rootfs = parent_state.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let parent_identity_bytes = b"parent-identity-drive-bytes";
+        let identity = parent_state.join(IDENTITY_DRIVE_FILE);
+        std::fs::write(&identity, parent_identity_bytes).unwrap();
+        let ctl = MockControl {
+            rootfs,
+            identity: Some(identity),
+            events: RefCell::new(vec![]),
+        };
+        let parent = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("idp"),
+                vm_name: "identity-parent".into(),
+                supervisor_config_digest: "d".into(),
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 1,
+                retain_paused: false,
+                grants: None,
+            },
+            &ctl,
+        )
+        .unwrap();
+        assert!(
+            parent.content.iter().any(|b| b.name == IDENTITY_DRIVE_FILE),
+            "the parent checkpoint must carry the identity drive"
+        );
+
+        let dest = tmp.path().join("child-state");
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let restorer = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("idf"),
+                child_vm_name: "identity-child".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .unwrap();
+
+        let child_drive = dest.join(IDENTITY_DRIVE_FILE);
+        assert!(child_drive.is_file(), "the child keeps an identity drive");
+        assert_ne!(
+            std::fs::read(&child_drive).unwrap().as_slice(),
+            parent_identity_bytes.as_slice(),
+            "a fork must mint its own identity, never boot on the parent's captured drive"
         );
     }
 
