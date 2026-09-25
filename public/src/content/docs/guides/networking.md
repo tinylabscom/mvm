@@ -209,8 +209,8 @@ tier and there is no per-launch selector:
 
 ```bash
 mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares
-mvmctl machine run --flake . --profile standard      # explicit env; read-only host shares (default)
-mvmctl machine run --flake . --profile dev           # dev ergonomics: explicit env + writable host shares
+mvmctl machine run --flake . --profile standard      # explicit env; read-only host dirs, writable disk images (default)
+mvmctl machine run --flake . --profile dev           # dev ergonomics: as standard + writable host dirs, dev guest
 ```
 
 The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.

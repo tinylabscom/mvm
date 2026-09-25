@@ -702,9 +702,15 @@ the console PTY-over-vsock transport on a dev-tier machine (claim 15
 gates it out of sealed production); nothing SSH-shaped exists anywhere in
 this repository. `scripts/check-no-ssh.sh` (CI: `no-ssh-forwarding`) greps
 source for ssh-agent-forwarding identifiers as a regression backstop.
-Every dev-tier hook — writable volumes, dev-lifecycle
+Every dev-tier hook — writable host-directory volumes, dev-lifecycle
 side effects — stays visible in dry-run, admission and audit output, and
-receipts; it is never hidden behind a convenience default.
+receipts; it is never hidden behind a convenience default. A writable
+disk-image volume (`HOST.img:/GUEST:SIZE:rw`) is not a dev-tier hook: the
+guest writes into its own ext4 image file, never into the host filesystem,
+so every profile that accepts volumes accepts it, the default and `--prod`
+included. It is still declared in the signed plan's shares and recorded in
+the same outputs, and the guest mount allow-list still decides where it may
+mount.
 
 ### Cloud control-plane trust boundary
 

@@ -135,8 +135,12 @@ be under `/data` or `/work`:
 mvmctl machine run --flake . --mount ./store.img:/data/store:1024:rw
 ```
 
-`:rw` requires `--profile dev` or `--profile permissive`. A *transient* run's
-share is read-only under every profile.
+A writable disk image is accepted under every profile that allows volumes —
+the default `standard` and `--prod` included — because the guest writes into
+its own ext4 image file, never into the host filesystem. `:rw` on a host
+*directory* is different: it requires `--profile dev` or `--profile
+permissive`, and a *transient* run's directory share is read-only under every
+profile. `--profile restrictive` accepts no volume at all.
 
 For managed encrypted local volumes and workspace cleanup policy, see
 [Persistent workspaces](/guides/persistent-workspaces/).

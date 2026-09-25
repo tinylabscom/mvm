@@ -40,9 +40,9 @@ Use this path when the VM has state, files, services, or snapshots that should s
 
 | Profile | Use it when | Notes |
 | --- | --- | --- |
-| `restrictive` | Running generated or untrusted code. | No env injection and no host directory shares. |
-| `standard` | Normal local runs. | Explicit env is allowed; host shares must be read-only. |
-| `dev` | Iterating on a local project. | Host shares may be writable on a persistent machine; a transient run's share stays read-only. Also selects the dev guest profile. |
+| `restrictive` | Running generated or untrusted code. | No env injection, no host directory shares, and no disk images. |
+| `standard` | Normal local runs. | Explicit env is allowed; host directory shares must be read-only; a sized disk image (`HOST.img:/GUEST:SIZE:rw`) may be writable. |
+| `dev` | Iterating on a local project. | Host directory shares may be writable on a persistent machine; a transient run's directory share stays read-only. Also selects the dev guest profile. |
 | `permissive` | Last-resort debugging. | Same grants as `dev`, and refuses unless `MVM_ACK_PERMISSIVE_RUN=1` is set. |
 
 ## Security notes

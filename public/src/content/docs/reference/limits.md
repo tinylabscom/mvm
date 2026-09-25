@@ -51,8 +51,10 @@ appear in `mvmctl machine --help`.
 Declared volumes are `--mount host:guest[:SIZE][:ro|rw]` (`--volume` is an alias;
 there is no `-v` short form — that is the global verbosity counter). The guest
 path must live under `/data` or `/work`, and every mount is **read-only unless
-you write `:rw`** — which itself needs `--profile dev` or `--profile permissive`.
-A transient run's share is read-only under every profile.
+you write `:rw`**. A writable disk image (`host.img:guest:SIZE:rw`) is accepted
+under every profile that allows volumes; a writable host directory needs
+`--profile dev` or `--profile permissive`, and a transient run's directory
+share is read-only under every profile.
 
 Snapshots and cold-mode artifacts may contain guest memory, generated files,
 and credentials present inside the guest. Treat them as sensitive state.

@@ -62,7 +62,8 @@ mvmctl machine volume mount app --volume config \
 
 # Durable read-write disk image. The third field is a size, which is what
 # distinguishes a disk spec from a directory share's `:ro` mode field.
-mvmctl machine run --manifest my-app --name app -d --profile dev \
+# Any profile that allows volumes accepts it; `--profile dev` is not needed.
+mvmctl machine run --manifest my-app --name app -d \
     --mount app-data.img:/data/state:4G:rw
 ```
 

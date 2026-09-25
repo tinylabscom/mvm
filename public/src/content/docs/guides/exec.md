@@ -67,12 +67,29 @@ echo "hello" > /tmp/foo
 mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo   # prints "hello"
 ```
 
-### Writable: `:rw` needs a persistent machine
+### Writable disk images: `:rw` under any profile
 
-A **transient** run's live shares are read-only under *every* profile —
-`--profile dev` does not change that. `:rw` is accepted only on a persistent
-machine (`--name` plus `-d`), and only under `--profile dev` or
-`--profile permissive`:
+A sized disk image (`HOST.img:GUEST:SIZE:rw`) is an ext4 file mvm creates at
+`HOST` if it is absent and attaches as a block device. The guest writes into
+that image, never into the host filesystem, so every profile that accepts
+`--mount` accepts it writable — the default `standard`, and `--prod`, included.
+This is the way to keep data without `--profile dev`, which would also hand the
+guest the dev shell agent and the DevOnly verbs:
+
+```bash
+mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \
+  -- sh -c 'echo kept > /data/state/note'
+```
+
+The guest mount path still has to sit under `/data` or `/work`; the profile
+decides whether a volume may be writable, not where it may mount.
+
+### Writable directories: `:rw` needs a persistent machine and `--profile dev`
+
+A **transient** run's live directory shares are read-only under *every*
+profile — `--profile dev` does not change that. `:rw` on a directory is
+accepted only on a persistent machine (`--name` plus `-d`), and only under
+`--profile dev` or `--profile permissive`:
 
 ```bash
 mvmctl machine run --flake . --profile dev --name builder -d --mount .:/work:rw
@@ -234,9 +251,10 @@ highest):
   [Workload input](/guides/workload-input/). For a trailing-argv run, pipe
   data via a `--mount`-shared file instead.
 - **Persistent state** doesn't survive teardown. A transient run cannot take
-  a `:rw` share at all, so nothing is written back to the host. For state
-  that has to outlive the run, boot a persistent machine (`--name` + `-d`)
-  with a `:rw` share or a managed volume.
+  a `:rw` directory share, so nothing is written back to a host directory. For
+  state that has to outlive the run, attach a writable disk image
+  (`HOST.img:/GUEST:SIZE:rw`, any profile that accepts `--mount`), or boot a
+  persistent machine (`--name` + `-d`) with a managed volume.
 
 ## See also
 

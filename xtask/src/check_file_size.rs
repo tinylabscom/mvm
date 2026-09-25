@@ -26,9 +26,9 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("crates/mvm-agentd/src/guest_mount.rs", 1620),
     ("crates/mvm-build/src/bin/mvm-host-vm-init.rs", 3637),
     ("crates/mvm-build/src/libkrun_builder.rs", 4485),
-    ("crates/mvm-cli/src/commands/machine/mod.rs", 1745),
+    ("crates/mvm-cli/src/commands/machine/mod.rs", 1720),
     ("crates/mvm-cli/src/commands/ops/audit.rs", 1649),
-    ("crates/mvm-cli/src/commands/vm/exec.rs", 1654),
+    ("crates/mvm-cli/src/commands/vm/exec.rs", 1533),
     ("crates/mvm-hostd/src/plan_admission.rs", 2256),
     ("crates/mvm-runtime/src/backends/hvf/kernel_boot.rs", 2208),
 ];
