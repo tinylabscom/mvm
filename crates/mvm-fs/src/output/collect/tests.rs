@@ -87,6 +87,22 @@ impl Fixture {
             image: &self.image,
             destination: &self.destination(),
             bounds,
+            protected: None,
+        })
+    }
+
+    /// Collect under an explicit protected-path matcher, the way the CLI
+    /// hands the admitted plan's policy in.
+    fn collect_with(
+        &self,
+        bounds: OutputBounds,
+        protected: Option<&mvm_contract::policy::protected_paths::ProtectedPathSet>,
+    ) -> Result<CollectedOutputs, OutputRefusal> {
+        collect_from_ext4(&OutputCollection {
+            image: &self.image,
+            destination: &self.destination(),
+            bounds,
+            protected,
         })
     }
 }
@@ -428,6 +444,7 @@ fn a_destination_behind_a_linked_parent_is_refused() {
         image: &fixture.image,
         destination: &link.join("results"),
         bounds: generous(),
+        protected: None,
     })
     .unwrap_err();
     assert!(
@@ -471,4 +488,95 @@ fn availability_check_accepts_absent_and_empty_and_refuses_the_rest() {
         check_destination_available(Path::new("/")),
         Err(OutputRefusal::DestinationNotDirectory { .. })
     ));
+}
+
+#[test]
+fn a_tree_touching_a_protected_class_is_refused_whole() {
+    let fixture = Fixture::new();
+    fixture.write(|fs| {
+        fs.apply_mkdir("/.github", 0o755).unwrap();
+        fs.apply_mkdir("/.github/workflows", 0o755).unwrap();
+        fs.apply_mkdir("/src", 0o755).unwrap();
+    });
+    fixture.file("/.github/workflows/ci.yml", b"on: push\n");
+    fixture.file("/src/main.rs", b"fn main() {}\n");
+
+    let policy = mvm_contract::policy::protected_paths::ProtectedPathsPolicy::default();
+    let refusal = fixture
+        .collect_with(generous(), policy.matcher().as_ref())
+        .unwrap_err();
+
+    assert_eq!(refusal.audit_tag(), "protected_path");
+    assert!(matches!(refusal, OutputRefusal::Path { .. }), "{refusal}");
+    // The whole collection is refused, not the single entry: a partial
+    // result that looks complete is worse than none.
+    assert_nothing_left(&fixture);
+}
+
+#[test]
+fn benign_trees_collect_under_the_default_policy() {
+    let fixture = Fixture::new();
+    fixture.write(|fs| {
+        fs.apply_mkdir("/.github", 0o755).unwrap();
+        fs.apply_mkdir("/src", 0o755).unwrap();
+        fs.apply_mkdir("/docs", 0o755).unwrap();
+    });
+    // Neighbors of protected classes: same parent, not inside it.
+    fixture.file("/.github/dependabot.yml", b"version: 2\n");
+    fixture.file("/src/main.rs", b"fn main() {}\n");
+    fixture.file("/docs/pem.md", b"not key material\n");
+
+    let policy = mvm_contract::policy::protected_paths::ProtectedPathsPolicy::default();
+    fixture
+        .collect_with(generous(), policy.matcher().as_ref())
+        .expect("a benign tree collects under the enforcing default policy");
+    assert!(
+        fixture
+            .destination()
+            .join(".github/dependabot.yml")
+            .is_file()
+    );
+}
+
+#[test]
+fn key_material_classes_refuse_at_any_depth() {
+    let fixture = Fixture::new();
+    fixture.write(|fs| {
+        fs.apply_mkdir("/config", 0o755).unwrap();
+        fs.apply_mkdir("/config/prod", 0o755).unwrap();
+    });
+    fixture.file("/config/prod/.env", b"TOKEN=x\n");
+    fixture.file("/config/prod/app.conf", b"ok\n");
+
+    let policy = mvm_contract::policy::protected_paths::ProtectedPathsPolicy::default();
+    let refusal = fixture
+        .collect_with(generous(), policy.matcher().as_ref())
+        .unwrap_err();
+    assert_eq!(refusal.audit_tag(), "protected_path");
+    assert_nothing_left(&fixture);
+}
+
+#[test]
+fn an_off_policy_collects_what_enforce_refuses() {
+    let fixture = Fixture::new();
+    fixture.write(|fs| {
+        fs.apply_mkdir("/.github", 0o755).unwrap();
+        fs.apply_mkdir("/.github/workflows", 0o755).unwrap();
+    });
+    fixture.file("/.github/workflows/ci.yml", b"on: push\n");
+
+    let policy = mvm_contract::policy::protected_paths::ProtectedPathsPolicy {
+        mode: mvm_contract::policy::protected_paths::ProtectedPathsMode::Off,
+        ..Default::default()
+    };
+    assert!(policy.matcher().is_none());
+    fixture
+        .collect_with(generous(), None)
+        .expect("an off policy is the caller passing no matcher at all");
+    assert!(
+        fixture
+            .destination()
+            .join(".github/workflows/ci.yml")
+            .is_file()
+    );
 }

@@ -113,7 +113,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-23` | `build` | A signed execution plan carries a protected-paths policy — enforce over the shipped CI/build/test path set by default, off only as a signed decision — and a pure segment-aware matcher decides protected-path membership, with path traversal never matching | `fn:protected_paths_policy_roundtrips_through_serde`, `fn:default_policy_enforces_the_default_path_set`, `fn:matcher_respects_segment_boundaries`, `fn:dot_dot_traversal_never_matches`, `fn:protected_paths_defaults_to_enforce_and_states_itself_on_the_wire` |
+| `MVM-SEC-23` | `build` | A signed execution plan carries a protected-paths policy — enforce over the shipped CI/build/test path set by default, off only as a signed decision — and guest-authored output trees touching a protected class are refused whole at collection with a stable audit tag that never echoes guest-chosen names | `fn:protected_paths_policy_roundtrips_through_serde`, `fn:default_policy_enforces_the_default_path_set`, `fn:matcher_respects_segment_boundaries`, `fn:dot_dot_traversal_never_matches`, `fn:protected_paths_defaults_to_enforce_and_states_itself_on_the_wire`, `fn:a_tree_touching_a_protected_class_is_refused_whole`, `fn:benign_trees_collect_under_the_default_policy`, `fn:key_material_classes_refuse_at_any_depth` |
 
 ## runtime_overlay
 

@@ -30,19 +30,28 @@ use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
 use super::manifest::{OutputEntry, OutputEntryKind, OutputManifest};
+use super::rules::PathRule;
 use super::rules::{validate_name, validate_relative_path};
 use super::{OutputBounds, OutputRefusal};
 
 /// Bytes read from the image per write to the host.
 const COPY_CHUNK: usize = 64 * 1024;
 
-/// One collection: which image, where its contents land, and the bounds.
+/// One collection: which image, where its contents land, the bounds, and
+/// the protected-path classes the admitted plan enforces (absent = `None`,
+/// the pre-policy behavior).
 #[derive(Debug, Clone, Copy)]
 pub struct OutputCollection<'a> {
     pub image: &'a Path,
     /// Absolute destination whose parent is already resolved. Absent or empty.
     pub destination: &'a Path,
     pub bounds: OutputBounds,
+    /// Protected-path matcher from the admitted plan's `protected_paths`
+    /// policy. When present, any tree entry inside a protected class refuses
+    /// the whole collection — a workload must not hand CI, build, test, or
+    /// key-material edits back to the host as "work product". When absent
+    /// (an `off` policy), nothing is protected here.
+    pub protected: Option<&'a mvm_contract::policy::protected_paths::ProtectedPathSet>,
 }
 
 /// A successful collection.
@@ -116,7 +125,7 @@ pub fn collect_from_ext4(
 ) -> Result<CollectedOutputs, OutputRefusal> {
     check_destination_available(collection.destination)?;
     let fs = Ext4::load_from_path(collection.image).map_err(unreadable)?;
-    let planned = plan_tree(&fs, collection.bounds)?;
+    let planned = plan_tree(&fs, collection.bounds, collection.protected)?;
 
     let destination = Destination::open(collection.destination)?;
     let manifest_path = manifest_path_for(collection.destination);
@@ -170,7 +179,11 @@ fn special_kind(file_type: FileType) -> Option<&'static str> {
 
 /// Pass one: validate the entire image against the rules and bounds, touching
 /// nothing on the host. Parents always precede their children in the result.
-fn plan_tree(fs: &Ext4, bounds: OutputBounds) -> Result<Vec<Planned>, OutputRefusal> {
+fn plan_tree(
+    fs: &Ext4,
+    bounds: OutputBounds,
+    protected: Option<&mvm_contract::policy::protected_paths::ProtectedPathSet>,
+) -> Result<Vec<Planned>, OutputRefusal> {
     let mut planned = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut pending = vec![String::new()];
@@ -212,6 +225,17 @@ fn plan_tree(fs: &Ext4, bounds: OutputBounds) -> Result<Vec<Planned>, OutputRefu
                 format!("{directory}/{name}")
             };
             validate_relative_path(path.as_bytes())?;
+            // The path is now known-clean relative, so a match names a
+            // class the admitted plan protects, not a guest escape attempt:
+            // refuse the whole collection rather than hand it back.
+            if let Some(set) = protected
+                && set.contains(&path)
+            {
+                return Err(OutputRefusal::Path {
+                    path,
+                    rule: PathRule::ProtectedPath,
+                });
+            }
             if !seen.insert(name.to_string()) {
                 return Err(OutputRefusal::DuplicateName { path });
             }
