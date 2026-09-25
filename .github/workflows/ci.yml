@@ -607,7 +607,7 @@ jobs:
         run: |
           cargo nextest run --features test-support --lib \
             -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
-            -p mvm-fs
+            -p mvm-fs -p mvm-build
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
