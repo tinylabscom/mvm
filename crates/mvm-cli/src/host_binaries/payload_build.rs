@@ -28,6 +28,17 @@ pub(crate) struct EmbeddedSourceBinary {
     pub features: String,
 }
 
+/// The payload manifest, relative to the workspace root.
+pub(crate) const MANIFEST_PATH: &str = "crates/mvm-cli/src/host_binaries/manifest.rs";
+
+/// Every binary in the payload, read from the manifest in `workspace_root`.
+pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceBinary>, String> {
+    let path = workspace_root.join(MANIFEST_PATH);
+    let src =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    parse_embedded_manifest(&src)
+}
+
 /// Every binary in the payload, in the order the table lists them.
 ///
 /// Read out of the *text* of `crates/mvm-cli/src/host_binaries/manifest.rs`,
@@ -253,6 +264,7 @@ pub(crate) struct ZigbuildRequest<'a> {
     binary: Option<&'a EmbeddedSourceBinary>,
     pin: Option<&'a Pin>,
     output: Option<&'a Path>,
+    quiet: bool,
 }
 
 impl<'a> ZigbuildRequest<'a> {
@@ -281,6 +293,12 @@ impl<'a> ZigbuildRequest<'a> {
         self
     }
 
+    /// Pass `--quiet`: compiler errors still print, progress does not.
+    pub(crate) fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
+        self
+    }
+
     pub(crate) fn build(self) -> ZigbuildSpec<'a> {
         ZigbuildSpec {
             root: self.root.expect("zigbuild request root"),
@@ -288,6 +306,7 @@ impl<'a> ZigbuildRequest<'a> {
             binary: self.binary.expect("zigbuild request binary"),
             pin: self.pin.expect("zigbuild request toolchain pin"),
             output: self.output.expect("zigbuild request output"),
+            quiet: self.quiet,
         }
     }
 }
@@ -298,6 +317,30 @@ pub(crate) struct ZigbuildSpec<'a> {
     binary: &'a EmbeddedSourceBinary,
     pin: &'a Pin,
     output: &'a Path,
+    quiet: bool,
+}
+
+impl ZigbuildSpec<'_> {
+    /// The `cargo` arguments, after the program name.
+    fn args(&self) -> Vec<&str> {
+        let binary = self.binary;
+        let mut args = vec!["zigbuild", "--release"];
+        if self.quiet {
+            args.push("--quiet");
+        }
+        args.extend([
+            "--target",
+            self.pin.target.as_str(),
+            "-p",
+            binary.package.as_str(),
+            "--bin",
+            binary.name.as_str(),
+        ]);
+        if !binary.features.is_empty() {
+            args.extend(["--features", binary.features.as_str()]);
+        }
+        args
+    }
 }
 
 /// Cross-compile one payload binary and copy it to the spec's output.
@@ -315,19 +358,7 @@ pub(crate) fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) -> Result<(), String> {
     let (cargo, rustc) = try_rustup_cargo_and_rustc(strip_glibc(target), &spec.pin.rust)?;
     let rust_sysroot = rustc_sysroot(&rustc)?;
     let mut cmd = Command::new(&cargo);
-    cmd.args([
-        "zigbuild",
-        "--release",
-        "--target",
-        target,
-        "-p",
-        package,
-        "--bin",
-        binary,
-    ]);
-    if !spec.binary.features.is_empty() {
-        cmd.args(["--features", &spec.binary.features]);
-    }
+    cmd.args(spec.args());
     apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir, spec.root, &rust_sysroot);
     cmd.current_dir(spec.root);
     apply_zigbuild_env(&mut cmd, spec.target_dir)?;
@@ -522,6 +553,72 @@ mod tests {
         assert_eq!(
             zig_global_cache_dir(target_dir),
             PathBuf::from("/tmp/build/out/tool-cache/zig")
+        );
+    }
+
+    fn spec_args(binary: &EmbeddedSourceBinary, quiet: bool) -> Vec<String> {
+        let pin = Pin {
+            rust: "1.91.1".to_string(),
+            zig: "0.13.0".to_string(),
+            cargo_zigbuild: "0.23.0".to_string(),
+            target: "aarch64-unknown-linux-musl".to_string(),
+        };
+        ZigbuildRequest::default()
+            .with_root(Path::new("/workspace"))
+            .with_target_dir(Path::new("/nested"))
+            .with_binary(binary)
+            .with_pin(&pin)
+            .with_output(Path::new("/out/bin"))
+            .with_quiet(quiet)
+            .build()
+            .args()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn the_zigbuild_names_the_package_binary_features_and_target() {
+        let binary = EmbeddedSourceBinary {
+            package: "mvm-agentd".to_string(),
+            name: "mvm-egress-client".to_string(),
+            features: "addons".to_string(),
+        };
+        assert_eq!(
+            spec_args(&binary, false),
+            [
+                "zigbuild",
+                "--release",
+                "--target",
+                "aarch64-unknown-linux-musl",
+                "-p",
+                "mvm-agentd",
+                "--bin",
+                "mvm-egress-client",
+                "--features",
+                "addons",
+            ]
+        );
+    }
+
+    /// Runtime callers pass `--quiet` unless asked to be verbose; nothing else
+    /// about the compile may change with it, or the bytes would.
+    #[test]
+    fn a_quiet_zigbuild_differs_only_by_quiet() {
+        let binary = EmbeddedSourceBinary {
+            package: "mvm-build".to_string(),
+            name: "mvm-host-vm-init".to_string(),
+            features: String::new(),
+        };
+        let loud = spec_args(&binary, false);
+        let quiet = spec_args(&binary, true);
+        assert!(!loud.contains(&"--quiet".to_string()));
+        assert_eq!(
+            quiet
+                .iter()
+                .filter(|arg| *arg != "--quiet")
+                .collect::<Vec<_>>(),
+            loud.iter().collect::<Vec<_>>()
         );
     }
 

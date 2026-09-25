@@ -859,41 +859,6 @@ fn bundle_fetch_prod_refuses_a_tag_reference() {
     assert!(stderr.contains("digest-pinned"), "stderr: {stderr}");
 }
 
-/// The root build script records this binary's features for the bootstrap
-/// helper to mirror. Every name it records must be a feature the root package
-/// declares, or the helper's `cargo build --features` names one that does not
-/// exist. Checked against the manifest rather than a fixed list, so it holds
-/// under any feature selection this test is compiled with.
-#[test]
-fn recorded_features_are_declared_root_features() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).expect("read the root manifest");
-    let parsed: toml::Table = text.parse().expect("parse the root manifest");
-    let declared = parsed
-        .get("features")
-        .and_then(toml::Value::as_table)
-        .expect("the root package declares features");
-
-    let recorded: Vec<&str> = env!("MVMCTL_ENABLED_FEATURES")
-        .split(',')
-        .filter(|name| !name.is_empty())
-        .collect();
-    // Without this, a build script that recorded nothing would pass: the loop
-    // below checks only what was recorded.
-    if cfg!(feature = "default") {
-        assert!(
-            recorded.contains(&"default"),
-            "this test was compiled with default features, so they must be recorded: {recorded:?}"
-        );
-    }
-    for name in recorded {
-        assert!(
-            declared.contains_key(name),
-            "recorded feature {name:?} is not declared by the root package"
-        );
-    }
-}
-
 /// Run `mvmctl agent-session …` against an isolated home.
 fn agent_session(mvm_home: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_mvmctl"))

@@ -71,14 +71,14 @@ also stays (ADR-030's contributor invariant). It happens inside the one command.
 - [x] **W2 — release profile embeds by default** (Decision 1), with the
       embed decision a pure function of (feature, profile, `MVM_EMBED`,
       toolchain readiness) and unit-tested per case.
-- [ ] **W3 — store-backed payload at run time** (Decision 2). Extraction reads
+- [x] **W3 — store-backed payload at run time** (Decision 2). Extraction reads
       from a payload source abstraction with two impls (compiled-in table;
       content store). Tests: store hit extracts without a compile; store miss
       invokes the build; a tampered store entry is refused by the existing
       sha256 check; a library embedder is refused as today.
-- [ ] **W4 — delete the second-`mvmctl` helper** (Decision 3) and its tests,
+- [x] **W4 — delete the second-`mvmctl` helper** (Decision 3) and its tests,
       keeping the library-embedder refusals and the bootstrap-active marker.
-- [ ] **W5 — progress output** (Decision 4), with a test that the message is
+- [x] **W5 — progress output** (Decision 4), with a test that the message is
       emitted before the compile starts.
 - [ ] **W6 — CI and docs.** Release-profile CI builds that neither boot a VM
       nor carry zig set `MVM_EMBED=0` or rely on the warning path; `CLAUDE.md`,

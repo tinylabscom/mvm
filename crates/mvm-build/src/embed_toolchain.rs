@@ -1,12 +1,12 @@
 //! The pinned cross-compile toolchain that produces mvmctl's embedded Linux
 //! host binaries: which zig, which Rust, which musl target.
 //!
-//! Two consumers, which is why this sits in `mvm-build` rather than in the
-//! crate that owns the embed table. `crates/mvm-cli/build.rs` `#[path]`-includes
-//! it to *run* the cross-compile, and panics are the right failure there — a
-//! build script that cannot find its toolchain has nothing to fall back on.
-//! `libkrun_builder`'s bootstrap-helper resolution calls the `try_` variants to
-//! decide, in milliseconds, whether spawning that build is worth the wait.
+//! Two consumers compile the payload with it: `crates/mvm-cli/build.rs`, which
+//! `#[path]`-includes this file because a build script cannot depend on a
+//! workspace crate, and `mvmctl` itself, which builds the payload from its
+//! checkout when it was compiled without one. Both ask
+//! [`check_toolchain_ready`] first, so a missing toolchain is reported in
+//! milliseconds rather than at the end of a compile.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -166,9 +166,9 @@ pub fn try_rustup_cargo_and_rustc(
 pub fn check_toolchain_ready(pin: &Pin) -> Result<(), String> {
     resolve_pinned_zig(&pin.zig)?;
     let (cargo, _) = try_rustup_cargo_and_rustc(strip_glibc(&pin.target), &pin.rust)?;
-    let zigbuild = Command::new(&cargo)
-        .args(["zigbuild", "--version"])
-        .output();
+    // `--help`, not `--version`: the subcommand has no version flag, and cargo
+    // fails `--help` too when no `cargo-zigbuild` is installed to dispatch to.
+    let zigbuild = Command::new(&cargo).args(["zigbuild", "--help"]).output();
     if zigbuild.is_ok_and(|out| out.status.success()) {
         return Ok(());
     }

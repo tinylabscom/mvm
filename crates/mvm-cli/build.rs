@@ -7,8 +7,10 @@ mod workspace_graph;
 #[path = "../mvm-build/src/embed_toolchain.rs"]
 mod embed_toolchain;
 // What the payload holds, its content-store keys and the `cargo zigbuild` that
-// produces it. `mvmctl` compiles the same file to build the payload at run time.
+// produces it. `mvmctl` compiles the same file to build the payload at run time,
+// and each side uses parts the other does not.
 #[path = "src/host_binaries/payload_build.rs"]
+#[allow(dead_code)]
 mod payload_build;
 
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use build_support::{EmbedDecision, EmbedRequest, embed_request};
 use embed_toolchain::{Pin, workspace_root_from_manifest_dir};
 use payload_build::{
     EmbedCache, EmbeddedSourceBinary, ZigbuildRequest, artifact_key_for, build_embed_cache,
-    parse_embedded_manifest, run_cargo_zigbuild, zigbuild_output,
+    run_cargo_zigbuild, zigbuild_output,
 };
 
 fn main() {
@@ -363,10 +365,7 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
 
 /// Every binary that gets cross-compiled and embedded, from `manifest.rs`.
 fn read_embedded_manifest(workspace_root: &Path) -> Vec<EmbeddedSourceBinary> {
-    let path = workspace_root.join("crates/mvm-cli/src/host_binaries/manifest.rs");
-    let src =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    parse_embedded_manifest(&src).unwrap_or_else(|reason| panic!("{reason}"))
+    payload_build::read_manifest(workspace_root).unwrap_or_else(|reason| panic!("{reason}"))
 }
 
 /// Copy a stored artifact into place, if the store has it.

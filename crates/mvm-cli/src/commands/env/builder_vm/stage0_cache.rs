@@ -456,16 +456,19 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
         hash_named_file(&mut hasher, name, &path)?;
     }
 
-    // Layer 2: the embedded host-binary identity (`mvm-host-vm-init`,
-    // `mvm-builderd`). `build.rs` cross-compiles them and embeds the bytes
-    // in mvmctl; Stage 0 installs those bytes into the rootfs. Hashing the
+    // Layer 2: the host-binary identity (`mvm-host-vm-init`, `mvm-builderd`).
+    // `build.rs` cross-compiles them and embeds the bytes in mvmctl, or a
+    // binary built without them produces the same bytes from its checkout;
+    // Stage 0 installs those bytes into the rootfs. Hashing the
     // bytes captures the bin source, the `mvm-build` lib, its dep closure, AND
     // the cross-compile toolchain (a gnu→musl switch yields different bytes
     // from identical source) in one shot. (`build.rs` reruns the cross-compile
     // when its real inputs change, so a rebuilt binary's bytes shift this
     // layer.)
-    for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
-        fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
+    let payload = crate::host_binaries::source::host_payload_if_any()
+        .context("produce the Linux host binaries the builder image is fingerprinted by")?;
+    for bin in payload {
+        fold_embedded_binary_identity(&mut hasher, &bin.name, &bin.sha256_hex);
     }
 
     // Layer 3: every Nix source outside its own directory that the flake

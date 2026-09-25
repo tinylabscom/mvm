@@ -59,8 +59,9 @@ pub mod cache_install;
 /// installs or runs any more; see the module docs.
 pub mod egress_proxy;
 pub mod egress_readiness;
-/// The pinned zig + Rust cross-compile toolchain behind `embed-host-bins`.
-/// Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes it.
+/// The pinned zig + Rust cross-compile toolchain that produces `mvmctl`'s Linux
+/// host payload. Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes
+/// it.
 pub mod embed_toolchain;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
