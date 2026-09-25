@@ -1361,15 +1361,24 @@ fn validate_machine_name(name: &str) -> Result<()> {
 /// removing a live supervisor's pid file and sockets would strand it and hide
 /// it from every later `machine ls` at the same time. Uses the same liveness
 /// probe `env cleanup` and the reconciler make this decision with.
+///
+/// `instances/<name>/` goes with it: it holds the machine's volume mount
+/// registry and any sealed snapshot, both keyed by name. Left behind, a
+/// machine later created under the same name inherits the removed machine's
+/// mounts and refuses its own.
 fn remove_machine_runtime_state(name: &str) -> Result<bool> {
     let dir = config::vm_state_dir(name);
-    if !dir.exists() {
-        return Ok(true);
+    if dir.exists() {
+        if mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir) {
+            return Ok(false);
+        }
+        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
     }
-    if mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir) {
-        return Ok(false);
+    let instance = config::instance_dir(name);
+    if instance.exists() {
+        fs::remove_dir_all(&instance)
+            .with_context(|| format!("removing {}", instance.display()))?;
     }
-    fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
     Ok(true)
 }
 

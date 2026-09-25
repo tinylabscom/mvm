@@ -130,7 +130,7 @@ pub fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
         return Ok(());
     }
     match atomic_write_new(&path, &bytes) {
-        Ok(()) => Ok(()),
+        Ok(()) => discard_orphaned_instance_state(&spec.name),
         // Every caller of this arm already believed nothing was there —
         // some checked, some are `mvmctl machine create`'s own first write —
         // so "pass --force" alone would mislead a caller who raced another
@@ -145,6 +145,23 @@ pub fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
         }),
         Err(err) => Err(err).with_context(|| format!("writing machine spec {}", path.display())),
     }
+}
+
+/// The exclusive write above just created a machine that did not exist, so
+/// anything already under `instances/<name>/` belongs to an earlier machine of
+/// the same name — left by a removal that predates cleaning it up, or by a
+/// crash. Its volume mount registry and any sealed snapshot would otherwise be
+/// adopted by the new machine. A live process still owning the name's runtime
+/// state means it is not an orphan, and it is left alone.
+fn discard_orphaned_instance_state(name: &str) -> Result<()> {
+    let instance = config::instance_dir(name);
+    if !instance.exists()
+        || mvm_vmm::host::process_liveness::state_dir_has_live_process(&config::vm_state_dir(name))
+    {
+        return Ok(());
+    }
+    fs::remove_dir_all(&instance)
+        .with_context(|| format!("removing orphaned instance state {}", instance.display()))
 }
 
 /// Overwrite an existing spec unconditionally (no `force` flag required).
@@ -566,6 +583,37 @@ mod tests {
         let loaded = load_machine_spec("web").expect("load");
         assert_eq!(loaded, spec);
         assert_eq!(loaded.schema_version, MACHINE_SPEC_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_new_machine_does_not_adopt_an_earlier_machines_instance_state() {
+        let _state = IsolatedMachineState::new();
+        let orphan = config::instance_dir("web");
+        fs::create_dir_all(&orphan).expect("orphaned instance dir");
+        fs::write(orphan.join("volume_mounts.json"), b"{\"mounts\":{}}").expect("registry");
+
+        save_machine_spec(&spec_fixture("web"), false).expect("create");
+
+        assert!(
+            !orphan.exists(),
+            "a newly created machine inherited an earlier machine's instance state"
+        );
+    }
+
+    #[test]
+    fn overwriting_a_spec_keeps_the_machines_own_instance_state() {
+        let _state = IsolatedMachineState::new();
+        save_machine_spec(&spec_fixture("web"), false).expect("create");
+        let instance = config::instance_dir("web");
+        fs::create_dir_all(&instance).expect("instance dir");
+        fs::write(instance.join("volume_mounts.json"), b"{\"mounts\":{}}").expect("registry");
+
+        save_machine_spec(&spec_fixture("web"), true).expect("forced overwrite");
+
+        assert!(
+            instance.join("volume_mounts.json").exists(),
+            "an overwrite of an existing machine is not a new machine"
+        );
     }
 
     #[test]
