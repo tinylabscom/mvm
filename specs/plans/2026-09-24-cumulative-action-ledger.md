@@ -129,11 +129,11 @@ signed into the plan, so "no budget on this run" is attributable the same way
 
 ### Phase 1 — Ledger core
 
-- [ ] `ActionLedger` in `mvm-hostd/src/supervisor/` — per-dimension
+- [x] `ActionLedger` in `mvm-hostd/src/supervisor/` — per-dimension
   `AtomicU64` + `exceeded` latch, `record(dim, n) -> Status` and
   `check(dim) -> bool`; generalize the `AiBudgetTracker` shape without touching
   it.
-- [ ] Unit tests: saturating adds, strict `>` ceiling, latch latches, zero
+- [x] Unit tests: saturating adds, strict `>` ceiling, latch latches, zero
   budget refuses the first request, `None` dimension never refuses,
   per-dimension independence. If a function can fail, a test proves
   refusal/`Err`, not panic.
