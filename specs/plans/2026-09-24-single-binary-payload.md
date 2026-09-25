@@ -68,7 +68,7 @@ also stays (ADR-030's contributor invariant). It happens inside the one command.
       of `crates/mvm-cli/build.rs` into one file both the build script
       (`#[path]`, as `embed_toolchain.rs` already is) and runtime code compile.
       Build-script behaviour is unchanged by this step alone.
-- [ ] **W2 — release profile embeds by default** (Decision 1), with the
+- [x] **W2 — release profile embeds by default** (Decision 1), with the
       embed decision a pure function of (feature, profile, `MVM_EMBED`,
       toolchain readiness) and unit-tested per case.
 - [ ] **W3 — store-backed payload at run time** (Decision 2). Extraction reads

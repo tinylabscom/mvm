@@ -158,6 +158,28 @@ pub fn try_rustup_cargo_and_rustc(
     ))
 }
 
+/// Whether this host can cross-compile the payload under `pin`.
+///
+/// Runs the resolutions the compile itself makes, and compiles nothing, so a
+/// caller learns in milliseconds what a failed compile would take minutes to
+/// report.
+pub fn check_toolchain_ready(pin: &Pin) -> Result<(), String> {
+    resolve_pinned_zig(&pin.zig)?;
+    let (cargo, _) = try_rustup_cargo_and_rustc(strip_glibc(&pin.target), &pin.rust)?;
+    let zigbuild = Command::new(&cargo)
+        .args(["zigbuild", "--version"])
+        .output();
+    if zigbuild.is_ok_and(|out| out.status.success()) {
+        return Ok(());
+    }
+    Err(format!(
+        "cargo-zigbuild {} is required to cross-compile the embedded host binaries but \
+         `{cargo} zigbuild` did not run. Install it with `cargo install cargo-zigbuild \
+         --version {} --locked`.",
+        pin.cargo_zigbuild, pin.cargo_zigbuild
+    ))
+}
+
 fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
     let ver = Command::new("python3")
         .args(["-m", "ziglang", "version"])
