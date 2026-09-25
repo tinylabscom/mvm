@@ -4,6 +4,30 @@ Last updated: 2026-09-25
 
 ## In progress
 
+- [ ] **Agent-sandbox product surface — tracking issue #3731.**
+      `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
+      microVM / vsock / signed-plan security core and close every
+      product-surface gap on top of it. One issue per workstream:
+  - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+  - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
+  - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
+  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+  - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
+  - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
+  - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+  - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
+  - [ ] PS-09 detachable sessions and console reattach — #3719
+  - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
+  - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
+  - [ ] PS-12 environment hygiene denylist — #3722
+  - [ ] PS-13 tool-level privileges — #3723
+  - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
+  - [ ] PS-16 Nix developer experience — #3725
+  - [ ] PS-17 task-runner surface — #3726
+  - [ ] PS-18 docs per capability and per agent — #3727
+  - [ ] PS-19 fewer feature flags — #3728
+  - [ ] PS-20 unreachable CLI surface and stale references — #3729
+  - [ ] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
