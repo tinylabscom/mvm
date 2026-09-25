@@ -2588,6 +2588,23 @@ fn removing_a_machine_removes_its_runtime_state_not_only_its_spec() {
 }
 
 #[test]
+fn a_machine_recreated_under_a_removed_name_starts_with_no_volume_mounts() {
+    use mvm_runtime::vm::volume_registry::VolumeMountRegistry;
+    let _state = IsolatedMachineState::new();
+    seed_machine_spec("web");
+    let registry = VolumeMountRegistry::path_for("web");
+    std::fs::create_dir_all(registry.parent().unwrap()).expect("instance dir");
+    std::fs::write(&registry, b"{\"mounts\":{}}").expect("mount registry");
+
+    remove_machine(rm_args(&["web"], false, true)).expect("remove");
+
+    assert!(
+        !config::instance_dir("web").exists(),
+        "the removed machine's mount registry would be inherited by the next machine named web",
+    );
+}
+
+#[test]
 fn removing_a_machine_with_no_runtime_state_is_not_an_error() {
     // A machine created but never booted has a spec and no `vms/` entry.
     let _state = IsolatedMachineState::new();
