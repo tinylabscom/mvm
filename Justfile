@@ -454,6 +454,7 @@ build-supervisors *ARGS:
     # same rust-objcopy repair; without it every supervisor ships unstripped.
     source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
+    ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
 
 # Explicit contributor-only libkrun integration. This is intentionally absent
 # from `build` and `build-supervisors` so standard builds never probe for
@@ -491,6 +492,7 @@ embed *ARGS:
     # profile arguments (`--release`, `--profile ...`) so runtime's adjacent-
     # executable lookup always finds the helper matching the selected mvmctl.
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
+    ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
     ./scripts/cargo-fast.sh build --features embed-host-bins {{ARGS}}
 
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.
