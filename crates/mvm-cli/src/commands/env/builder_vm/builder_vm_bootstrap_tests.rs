@@ -1211,6 +1211,116 @@ fn fold_embedded_binary_identity_distinguishes_inputs() {
     assert_ne!(base, glued, "name/hash boundary must be unambiguous");
 }
 
+/// Every binary the payload carries, each with the same stand-in digest: the
+/// baked host binaries, then the seed and bootstrap-support binaries.
+fn stand_in_payload() -> Vec<(&'static str, String)> {
+    use crate::host_binaries::manifest::{
+        BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, SEED_BINARIES,
+    };
+    HOST_BINARIES
+        .iter()
+        .map(|bin| bin.name)
+        .chain(SEED_BINARIES.iter().copied())
+        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name))
+        .map(|name| (name, "aa".to_string()))
+        .collect()
+}
+
+/// `payload` with `name`'s digest replaced, as a rebuild of that one binary
+/// leaves it.
+fn with_rebuilt(payload: &[(&'static str, String)], name: &str) -> Vec<(&'static str, String)> {
+    payload
+        .iter()
+        .map(|(bin, digest)| {
+            let digest = if *bin == name { "bb" } else { digest.as_str() };
+            (*bin, digest.to_string())
+        })
+        .collect()
+}
+
+fn as_identities<'a>(payload: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    payload
+        .iter()
+        .map(|(name, digest)| (*name, digest.as_str()))
+        .collect()
+}
+
+fn fingerprint_with(flake: &std::path::Path, payload: &[(&'static str, String)]) -> String {
+    fingerprint_builder_vm_sources(flake.to_str().unwrap(), &as_identities(payload))
+        .expect("fingerprint")
+}
+
+/// A seed or bootstrap-support binary drives Stage 0 but is never installed in
+/// the image it produces, so rebuilding one must not rebuild the image.
+#[test]
+fn builder_vm_source_fingerprint_ignores_seed_and_support_binary_digests() {
+    use crate::host_binaries::manifest::{BOOTSTRAP_SUPPORT_BINARIES, SEED_BINARIES};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flake = write_builder_vm_workspace(tmp.path());
+    let payload = stand_in_payload();
+    let before = fingerprint_with(&flake, &payload);
+
+    let unbaked = SEED_BINARIES
+        .iter()
+        .copied()
+        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name));
+    for name in unbaked {
+        assert_eq!(
+            fingerprint_with(&flake, &with_rebuilt(&payload, name)),
+            before,
+            "a rebuilt {name} must not change the builder image's key"
+        );
+    }
+}
+
+/// A baked host binary is installed in the image, so rebuilding any one of
+/// them must change the key.
+#[test]
+fn builder_vm_source_fingerprint_changes_with_each_baked_binary_digest() {
+    use crate::host_binaries::manifest::HOST_BINARIES;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flake = write_builder_vm_workspace(tmp.path());
+    let payload = stand_in_payload();
+    let before = fingerprint_with(&flake, &payload);
+
+    for bin in HOST_BINARIES {
+        assert_ne!(
+            fingerprint_with(&flake, &with_rebuilt(&payload, bin.name)),
+            before,
+            "a rebuilt {} must change the builder image's key",
+            bin.name
+        );
+    }
+}
+
+/// Layer 2 folds exactly the manifest's baked set: no payload binary outside
+/// `HOST_BINARIES` moves the key, and none inside it is left out.
+#[test]
+fn layer_two_folds_exactly_the_manifest_host_binaries() {
+    use crate::host_binaries::manifest::HOST_BINARIES;
+    let payload = stand_in_payload();
+    let fold = |payload: &[(&'static str, String)]| {
+        let mut h = Sha256::new();
+        fold_baked_binary_identities(&mut h, &as_identities(payload));
+        hex::encode(h.finalize())
+    };
+    let base = fold(&payload);
+
+    let mut folded: Vec<&str> = payload
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| fold(&with_rebuilt(&payload, name)) != base)
+        .collect();
+    folded.sort_unstable();
+    let mut baked: Vec<&str> = HOST_BINARIES.iter().map(|bin| bin.name).collect();
+    baked.sort_unstable();
+    assert_eq!(folded, baked);
+    assert!(
+        payload.len() > baked.len(),
+        "the stand-in payload must carry unbaked binaries for this to test anything"
+    );
+}
+
 #[test]
 fn builder_vm_source_fingerprint_is_deterministic_for_identical_workspace() {
     let tmp1 = tempfile::tempdir().expect("tempdir 1");

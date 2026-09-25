@@ -618,12 +618,17 @@ the Stage 0 flake reference follows W8's re-pointing.
 
 ## Workstreams
 
-- [ ] **W0 — fold only what is baked.** Layer 2 folds `HOST_BINARIES` rather
+- [x] **W0 — fold only what is baked.** Layer 2 folds `HOST_BINARIES` rather
       than `EMBEDDED`, so `stage0-init`, `mvm-rootfs-patcher` and
       `mvm-egress-client` edits stop invalidating the builder cache. Tests:
       the fingerprint is unchanged when a seed or support binary's digest
       changes, and changed when a baked one's does. Independent of everything
       below; it lands first.
+      - Done: `fold_baked_binary_identities` folds a payload binary only when
+        `manifest::is_baked_into_rootfs` holds, which reads `HOST_BINARIES`.
+        `HOST_BINARIES` is now `mvm-host-vm-init` and `mvm-builderd`;
+        `mvm-egress-proxy` is retired. Delivery note:
+        `specs/sprint/delivery/builder-key-baked-bins-only.md`.
 - [ ] **W1 — payload assembly.** In `mvm-build`, next to
       `rootfs_inject::build_newc_cpio`, add a deterministic payload builder
       that takes the extracted host-bin directory and returns bytes plus a

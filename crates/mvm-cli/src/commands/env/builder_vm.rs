@@ -170,8 +170,8 @@ use stage0_cache::{
 #[cfg(test)]
 use stage0_cache::{
     builder_vm_source_cache_ready, builder_vm_source_cache_status, builder_vm_source_fingerprint,
-    fold_embedded_binary_identity, is_orphan_stage0_staging_dir_name,
-    stage0_bootstrap_in_flight_at, stage0_fingerprint_prefix,
+    fingerprint_builder_vm_sources, fold_baked_binary_identities, fold_embedded_binary_identity,
+    is_orphan_stage0_staging_dir_name, stage0_bootstrap_in_flight_at, stage0_fingerprint_prefix,
     sweep_orphaned_stage0_staging_dirs_at, write_builder_vm_artifact_digest_manifest,
     write_builder_vm_source_cache_provenance, write_builder_vm_source_fingerprint,
 };

@@ -44,6 +44,13 @@ pub const HOST_BINARIES: &[HostBinary] = &[
     },
 ];
 
+/// Whether the embedded binary `name` is installed into the builder/dev VM
+/// rootfs. Only [`HOST_BINARIES`] are; the seed and bootstrap-support
+/// binaries are embedded alongside them but never baked.
+pub fn is_baked_into_rootfs(name: &str) -> bool {
+    HOST_BINARIES.iter().any(|bin| bin.name == name)
+}
+
 /// Host-side-only embedded `mvm-build` binaries. Cross-compiled +
 /// embedded by `mvm-cli/build.rs` exactly like [`HOST_BINARIES`], but
 /// **not** installed into any VM rootfs — they carry no `install_path`
