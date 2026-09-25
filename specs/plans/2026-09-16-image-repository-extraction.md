@@ -863,13 +863,20 @@ macOS/HVF.
 
 Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
 
-- [ ] For at least one image and CLI release, publish canonical assets from
+- [x] For at least one image and CLI release, publish canonical assets from
       `mvm-images` while mirroring the required legacy assets to `mvm` releases.
-- [ ] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
+      (W7.2: `image-set/v0.1.1` and CLI `v0.18.0-rc.2`, whose release verified
+      and mirrored the pinned set's 29 artifacts.)
+- [x] Prove old CLIs use legacy URLs and new CLIs use the locked image manifest.
+      (W7.2: across the window `boot-image/v0.1.5` and `v0.18.0-rc.1` kept
+      serving downloads while the `image-set/v*` roots were fetched by new
+      CLIs; every merge-group run booted the locked set.)
 - [x] Compare canonical and mirrored digests automatically. (W7.1: the
       released `mvmctl` verifies the signed root and members, then
       `xtask release-boot-image validate` gates every mirrored file.)
-- [ ] Exercise rollback to the previous image-set pin without rebuilding a CLI.
+- [x] Exercise rollback to the previous image-set pin without rebuilding a CLI.
+      (W7.3: `image-set/v0.1.0` → `v0.1.1` → `v0.1.0` by lock edit alone, both
+      boot lanes green each way.)
 - [x] Publish migration and support-window documentation. (W7.4:
       `public/src/content/docs/reference/releases.md` and the release notes.)
 

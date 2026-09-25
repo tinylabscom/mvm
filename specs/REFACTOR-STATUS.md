@@ -3877,5 +3877,8 @@ resume` takes a `current_head` and refuses when it differs from the
             and every member, and `xtask release-boot-image validate` refuses
             any mirrored file the root does not account for. Checked against
             the real `image-set/v0.1.0` bytes.
-      - [ ] W7.2 window signals · W7.3 rollback drill · W7.4 support docs.
+      - [x] W7.2 window signals · W7.3 rollback drill · W7.4 support docs.
+            Window closed 2026-09-25 after `v0.18.0-rc.2` and
+            `image-set/v0.1.1`: guest-image-boot green on 17 of 17 merge
+            runs, rollback drilled both ways by lock edit alone.
       - [ ] W8 waves 0–4 and the re-measure (gated on W7 evidence).
