@@ -44,6 +44,8 @@ mod signals;
 mod socket;
 #[path = "mvm-guest-agent/state.rs"]
 mod state;
+#[path = "mvm-guest-agent/telemetry.rs"]
+mod telemetry;
 #[path = "mvm-guest-agent/transport.rs"]
 mod transport;
 
@@ -827,6 +829,12 @@ fn main() {
             let s = Arc::clone(&probe_state);
             std::thread::spawn(move || init_probes(&bs, &s));
         }
+
+        // The telemetry listener spawns a thread, so it belongs in this
+        // post-activation zone with the other background workers; boot
+        // readiness is already served by the control plane above and never
+        // waits on it.
+        telemetry::spawn_telemetry_listener();
     }
 
     // Port forwarders are started on-demand via StartPortForward requests

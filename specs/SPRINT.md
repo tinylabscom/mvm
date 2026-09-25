@@ -358,6 +358,17 @@ docs commit went out as #3581). Under the
       regressions and the full host workspace pass.
       Standby capture also provisions its own identity. Identity-stage policy
       gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W2b guest listener half is delivered: the agent serves the authenticated
+      telemetry session over any stream (fresh producer epoch, Coverage-Started
+      announcement, wrong-guest-key and wrong-host-anchor refusals, dead-peer
+      handling; five focused tests), and the guest binary binds the reserved
+      vsock telemetry port on a post-activation thread with the host-only
+      peer-CID gate, one session at a time and lazy per-connection key load.
+      Vsock-only; with #3597's registration merged, a full-chain witness
+      composes register → resolve → assert-current → authenticated receive
+      against the serving guest over a live stream. No capture or
+      VM-lifetime collection is claimed. Evidence:
+      `specs/sprint/delivery/3421-telemetry-guest-listener.md`.
       W3b prepared-record handoff is tested: fixed queue storage, non-waiting
       admission/close and independent loss evidence pass nine new component tests.
       Two allocation regressions also pass natively and under Miri; native mutex
