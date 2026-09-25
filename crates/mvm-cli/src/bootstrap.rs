@@ -5,12 +5,14 @@ use mvm_core::platform::{self, Platform};
 
 /// Check that a package manager is available for the current platform.
 ///
-/// - macOS: requires Homebrew
+/// - macOS: reports whether Homebrew is present; never fails (see
+///   [`homebrew_report`])
 /// - Linux: any of apt, dnf, pacman is accepted
 /// - Windows: requires WSL2 (delegates to [`bootstrap_wsl2`])
 pub fn check_package_manager() -> Result<()> {
     if cfg!(target_os = "macos") {
-        check_homebrew()
+        ui::info(homebrew_report(which::which("brew").is_ok()));
+        Ok(())
     } else if cfg!(target_os = "windows") {
         bootstrap_wsl2()
     } else {
@@ -96,18 +98,22 @@ pub fn bootstrap_wsl2() -> Result<()> {
     Ok(())
 }
 
-/// Check if Homebrew is installed and accessible (macOS only).
-pub fn check_homebrew() -> Result<()> {
-    which::which("brew").map_err(|_| {
-        anyhow::anyhow!(
-            "Homebrew is not installed.\n\
-             Install it first:\n\n  \
-             /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n\n\
-             Then run 'mvmctl bootstrap' again."
-        )
-    })?;
-    ui::info("Homebrew found.");
-    Ok(())
+/// What `bootstrap` says about Homebrew on macOS.
+///
+/// Homebrew is optional. The default backend on Apple Silicon is the in-house
+/// HVF VMM, which needs nothing installed, and a release binary carries every
+/// helper it spawns; only the opt-in libkrun backend is installed through
+/// Homebrew, and [`hint_libkrun_if_useful`] says how when it applies. A
+/// bootstrap that refused without Homebrew stopped before it prepared anything,
+/// so a first run on a Mac without it printed an install error and then paid
+/// the whole preparation itself.
+fn homebrew_report(found: bool) -> &'static str {
+    if found {
+        "Homebrew found."
+    } else {
+        "Homebrew not found — not needed: the default HVF backend has no host \
+         dependencies. Only the opt-in libkrun backend installs through it."
+    }
 }
 
 /// Print an informational hint about libkrun availability.
@@ -146,15 +152,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_check_homebrew_error_message() {
-        if which::which("brew").is_err() {
-            let err = check_homebrew().unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains("Homebrew is not installed"));
-            assert!(msg.contains("curl -fsSL"));
-            assert!(msg.contains("mvmctl bootstrap"));
-        } else {
-            assert!(check_homebrew().is_ok());
+    fn a_mac_without_homebrew_is_told_it_is_optional() {
+        let report = homebrew_report(false);
+        assert!(report.contains("not needed"), "{report}");
+        assert!(report.contains("libkrun"), "{report}");
+        for alarming in ["not installed", "Install it first", "curl -fsSL"] {
+            assert!(
+                !report.contains(alarming),
+                "a missing optional tool must not read as a failure: {report}"
+            );
         }
+        assert_eq!(homebrew_report(true), "Homebrew found.");
+    }
+
+    /// The package-manager check is informational on every Unix host: a
+    /// bootstrap that stops here prepares none of what the first run needs.
+    #[cfg(unix)]
+    #[test]
+    fn the_package_manager_check_never_stops_a_bootstrap() {
+        assert!(check_package_manager().is_ok());
     }
 }
