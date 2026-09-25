@@ -556,6 +556,17 @@ impl InputGate {
         Self::open_authorized(vm, plan, authorized)
     }
 
+    /// Take the drive input lease for an already-running machine whose
+    /// persisted authority was re-verified by [`crate::drive::DriveAuthority`].
+    ///
+    /// Crate-visible only: callers outside the host boundary must obtain the
+    /// proof-carrying authority and can never pass a bare plan here.
+    pub(crate) fn open_drive_authority(
+        authority: &crate::drive::DriveAuthority,
+    ) -> Result<InputSession, InputRefusal> {
+        Self::open_authorized(authority.vm(), authority.plan(), true)
+    }
+
     fn open_authorized(
         vm: &str,
         plan: &ExecutionPlan,

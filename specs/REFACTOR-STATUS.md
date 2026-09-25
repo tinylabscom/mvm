@@ -556,9 +556,12 @@ Last updated: 2026-09-24
       owns an offline live smoke witness and audit verification. Open: the
       SDK's argv transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
       with its versioned ABI and read-only machine methods; the bindings that
-      replace the argv transport are next), MCP (#3262) — whose existing tool surface is now pinned
-      by a checked-in contract fixture, so the new tools land as reviewed
-      contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
+      replace the argv transport are next), and the rest of WS-S. WS3's MCP
+      surface (#3262) is done: `mvmctl ops mcp stdio --machine <name>` binds
+      the six `mvm.drive.*` tools to one machine's verified drive grant through
+      `mvm_client::drive::LocalDrive`; they are not listed without the grant,
+      and a tool the explicit risk table does not classify is denied. Makes the
+      AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv

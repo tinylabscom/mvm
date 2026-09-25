@@ -12,6 +12,147 @@
       "requires": null
     },
     {
+      "description": "Read the next queued event from the driven program without waiting.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "mvm.drive.events",
+      "requires": "drive_grant"
+    },
+    {
+      "description": "List a directory inside the granted workspace roots.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "follow_symlinks": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.drive.files.list",
+      "requires": "drive_grant"
+    },
+    {
+      "description": "Read bounded bytes from a path inside the granted workspace roots.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "follow_symlinks": {
+            "type": "boolean"
+          },
+          "length": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "length"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.drive.files.read",
+      "requires": "drive_grant"
+    },
+    {
+      "description": "Write bounded base64 bytes inside the granted workspace roots.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "create_parents": {
+            "type": "boolean"
+          },
+          "data_b64": {
+            "type": "string"
+          },
+          "follow_symlinks": {
+            "type": "boolean"
+          },
+          "mode": {
+            "maximum": 4095,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "truncate": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "data_b64"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.drive.files.write",
+      "requires": "drive_grant"
+    },
+    {
+      "description": "Start the program selected by the signed drive grant.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cwd": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cwd"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.drive.open",
+      "requires": "drive_grant"
+    },
+    {
+      "description": "Write one ordered base64 input frame to the driven program.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "data_b64": {
+            "type": "string"
+          },
+          "eof": {
+            "type": "boolean"
+          },
+          "seq": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "data_b64"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.drive.write",
+      "requires": "drive_grant"
+    },
+    {
       "description": "Create a stopped machine through MvmClient.",
       "inputSchema": {
         "additionalProperties": false,
