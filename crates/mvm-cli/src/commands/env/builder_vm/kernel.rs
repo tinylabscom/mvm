@@ -303,18 +303,10 @@ pub(super) fn run_stage0_rootfs_with_external_kernel(
     Ok(())
 }
 
-/// Render the compile heartbeat line. Pure (testable); the live
-/// heartbeat thread routes it through `ui::notice` (always-on liveness).
-#[cfg(feature = "builder-vm")]
-pub(super) fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    format!("still compiling… ({}m{:02}s elapsed)", secs / 60, secs % 60)
-}
-
 #[cfg(feature = "builder-vm")]
 pub(super) fn format_compile_start(label: &str, arch: &str) -> String {
     format!(
-        "Compiling {label} kernel ({arch}) via Stage 0 — the first build can take several minutes depending on the host; later runs reuse the persistent Nix store."
+        "Compiling {label} kernel ({arch}) via Stage 0 — the first build can take several minutes depending on the host; later runs reuse the persistent Nix store"
     )
 }
 
@@ -339,7 +331,8 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::create_dir_all(out_dir_path)
         .with_context(|| format!("creating kernel cache dir {out_dir}"))?;
 
-    let _stage0_guard = acquire_stage0_lock(&out_dir)?;
+    let _stage0_guard =
+        acquire_stage0_lock(&out_dir, &format!("the {} kernel build", variant.label()))?;
     let removed = sweep_stage0_staging_siblings(out_dir_path)?;
     if removed > 0 {
         ui::info(&format!(
@@ -363,39 +356,11 @@ pub(crate) fn build_kernel_via_stage0(
     }
     let request = request_builder.build()?;
 
-    ui::info(&format_compile_start(variant.label(), arch));
-
-    {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let heartbeat = if verbose {
-            None
-        } else {
-            let stop = Arc::clone(&stop);
-            Some(std::thread::spawn(move || {
-                let start = std::time::Instant::now();
-                let mut ticks: u64 = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    ticks += 1;
-                    if ticks.is_multiple_of(40) {
-                        ui::notice(&format_compile_elapsed(start.elapsed()));
-                    }
-                }
-            }))
-        };
-
-        let result = request.run();
-
-        stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = heartbeat {
-            let _ = handle.join();
-        }
-
-        result.context("Stage 0 kernel build")?;
-    }
+    // Live at every verbosity: the builder runner nests the in-guest nix
+    // progress under this line, and `-v` adds the raw build log above it.
+    let phase = mvm_runtime::ui::activity::start(format_compile_start(variant.label(), arch));
+    request.run().context("Stage 0 kernel build")?;
+    phase.finish();
 
     let published = publish_kernel_artifacts(&staging_dir, out_dir_path, variant);
     let _ = std::fs::remove_dir_all(&staging_dir);

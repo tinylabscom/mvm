@@ -36,7 +36,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
     let arch_dir = arch.to_string();
     let builder_lock_scope = cache_root.join("builder-vm").join(&arch_dir);
     let lock_scope = builder_lock_scope.to_string_lossy();
-    let _stage0_guard = acquire_stage0_lock(&lock_scope)?;
+    let _stage0_guard = acquire_stage0_lock(&lock_scope, "the SDK sidecar build")?;
     let removed = sweep_stage0_staging_siblings(&builder_lock_scope)?;
     if removed > 0 {
         ui::info(&format!(

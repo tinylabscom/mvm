@@ -7,8 +7,8 @@ use super::kernel::{
 use super::stage0_cache::write_builder_vm_cache_sidecars;
 #[cfg(feature = "builder-vm")]
 use super::stage0_cache::{
-    acquire_stage0_lock, promote_builder_vm_stage0_cache, stage0_failure_reason_summary,
-    stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
+    BUILDER_VM_CACHE_LOCK_SUBJECT, acquire_stage0_lock, promote_builder_vm_stage0_cache,
+    stage0_failure_reason_summary, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
 };
 use super::stage0_cache::{
     builder_vm_source_cache_status, builder_vm_source_fingerprint,
@@ -286,22 +286,26 @@ fn bootstrap_tool_builder_vm_image_in_process() -> Result<()> {
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
             {
-                // `-v`/`RUST_LOG` streams the in-guest nix `--print-build-logs`
-                // output live to the terminal. In that mode the streamed lines
-                // are the progress signal, so the spinner/heartbeat stays off (it
-                // would fight the scrolling output). Quiet mode keeps the spinner:
-                // the Stage 0 build is otherwise silent for minutes and would read
-                // as a hang.
+                // One live status line for the whole bootstrap, at every
+                // verbosity. The builder runner nests its own line under it
+                // carrying the in-guest nix progress, and `-v` interleaves the
+                // raw build log above it rather than replacing it.
                 let verbose = mvm_runtime::ui::is_verbose();
-                let _heartbeat = (!verbose)
-                    .then(|| BuildHeartbeat::start("Preparing the builder VM (one-time setup)"));
-                bootstrap_builder_vm_image_via_root_dir_stage0(
+                let phase = mvm_runtime::ui::activity::start(
+                    "Preparing the builder VM (first run in this checkout; \
+                     a cold Stage 0 build can take tens of minutes)",
+                );
+                let built = bootstrap_builder_vm_image_via_root_dir_stage0(
                     &flake_dir,
                     &out_dir,
                     &source_fingerprint,
                     verbose,
                 )
-                .context("building the source-checkout builder VM image via root-dir Stage 0")
+                .context("building the source-checkout builder VM image via root-dir Stage 0");
+                if built.is_ok() {
+                    phase.finish();
+                }
+                built
             }
 
             #[cfg(not(feature = "builder-vm"))]
@@ -379,118 +383,6 @@ pub(super) fn builder_vm_host_arch() -> &'static str {
         "aarch64"
     } else {
         "x86_64"
-    }
-}
-
-/// Cadence of [`BuildHeartbeat`] liveness lines. ~20s keeps a multi-minute
-/// Stage 0 build under ~20 lines while never leaving the user wondering for long.
-#[cfg(feature = "builder-vm")]
-const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// RAII liveness ticker for a long, silent blocking step. While alive, a thread
-/// emits a periodic [`ui::format_heartbeat`] line so the operation can't be
-/// mistaken for a hang — the Stage 0 builder-image build runs `nix` inside the
-/// guest with no host-visible output until it completes. Stops + joins on drop,
-/// so the build's own return is the natural end of the heartbeat.
-#[cfg(feature = "builder-vm")]
-pub(super) struct BuildHeartbeat {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-    // `Some` on a TTY: an animated spinner whose message is refreshed with the
-    // elapsed time. `None` when piped/redirected — there the text path emits a
-    // periodic line instead (a spinner draws nothing off a terminal).
-    spinner: Option<crate::ui::Spinner>,
-}
-
-#[cfg(feature = "builder-vm")]
-impl BuildHeartbeat {
-    fn start(activity: &'static str) -> Self {
-        // On a TTY the animated spinner is the liveness signal and reads far
-        // better than a wall of repeating text lines. Off a TTY (pipe, CI, log
-        // capture) a spinner renders nothing, so fall back to the periodic text
-        // line — routed through `notice`, not `info`, so it survives the default
-        // quiet mode where `info` chatter is suppressed.
-        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-            Self::start_spinner(activity)
-        } else {
-            Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::notice)
-        }
-    }
-
-    /// TTY path: an `indicatif` spinner refreshed with elapsed time. The spinner
-    /// self-animates via its steady tick; this thread only updates the message.
-    fn start_spinner(activity: &'static str) -> Self {
-        use std::sync::atomic::Ordering;
-        let pb = ui::spinner(&ui::format_build_progress(
-            activity,
-            std::time::Duration::ZERO,
-        ));
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_stop = std::sync::Arc::clone(&stop);
-        let pb_thread = pb.clone();
-        let handle = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            while !thread_stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                if thread_stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                pb_thread.set_message(ui::format_build_progress(activity, start.elapsed()));
-            }
-        });
-        Self {
-            stop,
-            handle: Some(handle),
-            spinner: Some(pb),
-        }
-    }
-
-    /// Injectable text core: `interval` and `emit` are parameters so a test can
-    /// drive a tight cadence into a counter instead of stdout. Also the non-TTY
-    /// runtime path.
-    pub(super) fn start_with(
-        activity: &'static str,
-        interval: std::time::Duration,
-        emit: impl Fn(&str) + Send + 'static,
-    ) -> Self {
-        use std::sync::atomic::Ordering;
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_stop = std::sync::Arc::clone(&stop);
-        // Poll finely so `drop` is responsive; emit only once per `interval`.
-        let poll = interval.min(std::time::Duration::from_millis(250));
-        let handle = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            let mut next = interval;
-            while !thread_stop.load(Ordering::Relaxed) {
-                std::thread::sleep(poll);
-                if thread_stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                if start.elapsed() >= next {
-                    emit(&ui::format_heartbeat(activity, start.elapsed()));
-                    next += interval;
-                }
-            }
-        });
-        Self {
-            stop,
-            handle: Some(handle),
-            spinner: None,
-        }
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-impl Drop for BuildHeartbeat {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-        // Clear the spinner line so the build's own next output starts clean.
-        if let Some(pb) = self.spinner.take() {
-            pb.finish_and_clear();
-        }
     }
 }
 
@@ -1049,7 +941,14 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     source_fingerprint: &str,
     verbose: bool,
 ) -> Result<()> {
-    let _stage0_guard = acquire_stage0_lock(out_dir)?;
+    let _stage0_guard = acquire_stage0_lock(out_dir, BUILDER_VM_CACHE_LOCK_SUBJECT)?;
+    // A caller that queued behind another bootstrap usually wanted the very
+    // image that bootstrap just produced.
+    if builder_vm_source_cache_status(std::path::Path::new(out_dir), source_fingerprint).is_ready()
+    {
+        ui::info(&format!("Builder VM image already cached at {out_dir}."));
+        return Ok(());
+    }
     let removed = sweep_stage0_staging_siblings(std::path::Path::new(out_dir))?;
     if removed > 0 {
         ui::info(&format!(
@@ -1064,6 +963,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // The seed is the official Nix release tarball + the embedded
     // `stage0-init` PID 1 — one userland (busybox), no Alpine/apk/pgp.
     let fetch_started = std::time::Instant::now();
+    mvm_runtime::ui::activity::set_current_detail("fetching the Stage 0 bootstrap assets");
     let stage0_assets = mvm_build::stage0::assets_for_host_arch();
     let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
         .context("preparing Stage 0 bootstrap assets")?;
@@ -1093,6 +993,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // The selected Stage 0 backend turns it into its block-root boot shape.
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
     let materialize_started = std::time::Instant::now();
+    mvm_runtime::ui::activity::set_current_detail("materializing the Stage 0 root");
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
     let boot_binaries = crate::host_binaries::extract::ensure_boot_host_binaries(
         std::path::Path::new(&host_bins_cache),
