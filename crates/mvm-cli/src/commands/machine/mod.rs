@@ -23,6 +23,7 @@ mod receipt;
 pub(crate) mod runtime;
 mod spec_ops;
 mod start_create_flags;
+mod volume_profile;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -67,6 +68,7 @@ pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
 use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
+use volume_profile::enforce_volume_profile;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -530,32 +532,21 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
     }
 }
 
-/// A writable (`:rw`) host share needs a dev-capable profile, matching the
-/// transient-run gate and the `dev.init` rule.
-fn profile_allows_writable_volume(profile: RunProfile) -> bool {
-    profile.grants().writable_shares_when_persistent
-}
-
 /// Validate `--mount`/`--volume` specs and normalise them for storage in a managed
-/// `MachineSpec`. Each spec is run through the shared
-/// `vm_volume_from_spec_validated` choke point (protected-dir deny-list +
-/// guest-mount validation, claim 1) and its host path is canonicalised to an
-/// **absolute** path so a later reconnect from a different working directory
-/// still resolves the same share. `:rw` requires a dev-capable profile. The
-/// boot path re-validates via `build_machine_volume_cfg`, so this is the
-/// early, user-facing gate, not the only one.
+/// `MachineSpec`. Each spec is checked against the profile's grants and run
+/// through the shared `vm_volume_from_spec_validated` choke point
+/// (protected-dir deny-list + guest-mount validation, claim 1), and its host
+/// path is canonicalised to an **absolute** path so a later reconnect from a
+/// different working directory still resolves the same share. The boot path
+/// re-validates via `build_machine_volume_cfg`, so this is the early,
+/// user-facing gate, not the only one.
 fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    let profile = args.run.profile;
+    enforce_volume_profile(args.run.profile, &args.run.mounts)?;
     let mut out = Vec::with_capacity(args.run.mounts.len());
     for raw in &args.run.mounts {
         let spec = super::shared::parse_volume_spec(raw)?;
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {raw:?}"))?;
-        if !vmv.read_only && !profile_allows_writable_volume(profile) {
-            bail!(
-                "volume {raw:?} requests ':rw', which needs --profile dev or --profile permissive"
-            );
-        }
         // Pin the canonical absolute host path; keep the guest[:size][:mode]
         // tail verbatim so disk volumes and modifiers survive the round-trip.
         let (_, tail) = raw
@@ -1147,6 +1138,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // explicitly opts into a stricter profile. The daemon is the only
     // producer that should supply a non-dev production profile by policy.
     let profile = inputs.profile.unwrap_or(RunProfile::Dev);
+    enforce_volume_profile(profile, inputs.volumes)?;
     let profile_name = run_profile_name(profile).to_string();
     enforce_dev_init_profile(&profile_name, inputs.init)?;
     Ok(MachineSpec {

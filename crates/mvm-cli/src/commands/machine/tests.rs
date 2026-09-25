@@ -1270,7 +1270,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
 }
 
 #[test]
-fn run_rw_volume_requires_dev_profile() {
+fn run_rw_directory_volume_requires_dev_profile() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
     // The default is `standard`, so a writable share is refused unless the user
@@ -1331,6 +1331,177 @@ fn run_rw_volume_requires_dev_profile() {
         "stored: {}",
         spec.volumes[0]
     );
+}
+
+/// A persistent `machine run` spec for `--volume <volume>` under `profile`.
+/// `None` leaves the flag off, which is the default (`standard`) profile.
+fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<MachineSpec> {
+    let mut argv = vec!["run", "--image", "x", "--name", "web"];
+    if let Some(profile) = profile {
+        argv.extend(["--profile", profile]);
+    }
+    argv.extend(["--volume", volume]);
+    let args = parse_run(&argv).expect("parse");
+    machine_run_spec(&args, "web".to_string(), None)
+}
+
+/// Persisting data must not require unsealing the guest. A writable disk
+/// image is the guest's own ext4 file, so the default profile accepts it, as
+/// does an explicit `standard`.
+#[test]
+fn run_rw_disk_image_is_accepted_without_the_dev_profile() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("state.img");
+    let volume = format!("{}:/data:20G:rw", image.display());
+    for profile in [None, Some("standard"), Some("dev"), Some("permissive")] {
+        let spec = machine_run_spec_with_volume(profile, &volume)
+            .unwrap_or_else(|e| panic!("{profile:?} must accept a writable disk image: {e:#}"));
+        assert_eq!(spec.volumes.len(), 1);
+        assert!(
+            spec.volumes[0].ends_with(":/data:20G:rw"),
+            "{profile:?} stored: {}",
+            spec.volumes[0]
+        );
+    }
+}
+
+/// The refusal of a writable directory names the directory as the problem
+/// and points at the disk image that works in any profile.
+#[test]
+fn run_rw_directory_refusal_points_at_a_disk_image() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let volume = format!("{}:/work:rw", dir.path().display());
+    let message = machine_run_spec_with_volume(Some("standard"), &volume)
+        .expect_err("standard must refuse a writable directory")
+        .to_string();
+    assert!(message.contains("host directory"), "{message}");
+    assert!(message.contains("HOST.img:/GUEST:SIZE:rw"), "{message}");
+}
+
+/// Restrictive accepts no volume at all: not a read-only one, and not a
+/// writable disk image either.
+#[test]
+fn run_restrictive_refuses_every_volume() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("state.img");
+    for volume in [
+        format!("{}:/work:ro", dir.path().display()),
+        format!("{}:/data:1G:ro", image.display()),
+        format!("{}:/data:1G:rw", image.display()),
+    ] {
+        let message = machine_run_spec_with_volume(Some("restrictive"), &volume)
+            .expect_err("restrictive must refuse every volume")
+            .to_string();
+        assert!(message.contains("does not allow volumes"), "{message}");
+    }
+}
+
+/// The profile decides whether a disk may be writable; the guest mount
+/// allow-list decides where it may mount. Accepting writable disks under
+/// `standard` must not let one land on a system path.
+#[test]
+fn run_rw_disk_image_on_a_system_path_is_refused_by_the_mount_allow_list() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("bin.img");
+    for profile in [Some("standard"), Some("dev")] {
+        let volume = format!("{}:/usr/bin:1G:rw", image.display());
+        let message = format!(
+            "{:#}",
+            machine_run_spec_with_volume(profile, &volume)
+                .expect_err("a disk over /usr/bin must be refused")
+        );
+        assert!(
+            !message.contains("--profile"),
+            "{profile:?}: the refusal must come from the allow-list, not the profile: {message}"
+        );
+        assert!(
+            message.contains("mount path \"/usr/bin\""),
+            "{profile:?}: the guest mount policy must name the path: {message}"
+        );
+    }
+}
+
+/// `machine create` args sourcing everything from the manifest at `manifest`.
+fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> MachineCreateArgs {
+    MachineCreateArgs {
+        name: Some("web".to_string()),
+        manifest: Some(manifest.display().to_string()),
+        image: None,
+        net: false,
+        allow_host: Vec::new(),
+        peer: Vec::new(),
+        gpu: false,
+        gpu_device: None,
+        cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
+        memory: None,
+        mem_initial: None,
+        profile,
+        force: false,
+        json: false,
+    }
+}
+
+/// Write an image-backed manifest declaring one volume and return its path.
+fn manifest_with_volume(dir: &Path, volume: &str) -> PathBuf {
+    let path = dir.join("mvm.toml");
+    std::fs::write(
+        &path,
+        format!("image = \"alpine:latest\"\n[dev]\nvolumes = [\"{volume}\"]\n"),
+    )
+    .expect("manifest");
+    path
+}
+
+/// `machine create` applies the same volume grants as `machine run`: a
+/// writable disk image under `standard` is accepted.
+#[test]
+fn create_accepts_a_rw_disk_image_under_standard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
+    let spec = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
+        .into_spec()
+        .expect("standard must accept a writable disk image");
+    assert_eq!(spec.profile, "standard");
+    assert_eq!(
+        spec.volumes,
+        vec![format!(
+            "{}:/data:20G:rw",
+            dir.path().join("state.img").display()
+        )]
+    );
+}
+
+/// ...and refuses a writable directory under `standard`, with the same
+/// message, while `dev` still accepts it.
+#[test]
+fn create_refuses_a_rw_directory_under_standard_and_accepts_it_under_dev() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+    let manifest = manifest_with_volume(dir.path(), "./src:/work:rw");
+    let message = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
+        .into_spec()
+        .expect_err("standard must refuse a writable directory")
+        .to_string();
+    assert!(message.contains("host directory"), "{message}");
+    assert!(message.contains("--profile dev"), "{message}");
+    create_args_from_manifest(&manifest, Some(RunProfile::Dev))
+        .into_spec()
+        .expect("dev accepts a writable directory");
+}
+
+/// ...and refuses any volume under `restrictive`.
+#[test]
+fn create_restrictive_refuses_a_disk_image() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
+    let message = create_args_from_manifest(&manifest, Some(RunProfile::Restrictive))
+        .into_spec()
+        .expect_err("restrictive must refuse every volume")
+        .to_string();
+    assert!(message.contains("does not allow volumes"), "{message}");
 }
 
 #[test]
