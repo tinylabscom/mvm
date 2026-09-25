@@ -1178,6 +1178,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
     }
@@ -1200,6 +1201,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -1224,6 +1226,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -1243,6 +1246,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ));
         // Both present → runs.
@@ -1269,6 +1273,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1284,6 +1289,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1299,6 +1305,7 @@ mod tests {
                 workload_kernel: false,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1314,6 +1321,7 @@ mod tests {
                 workload_kernel: true,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
@@ -1329,6 +1337,7 @@ mod tests {
                 workload_kernel: true,
                 wall_clock_enforced: false,
                 warm_claim: false,
+                destructive_lab_opted_in: false,
             },
         ];
         let shapes = [
