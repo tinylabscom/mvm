@@ -730,28 +730,27 @@ the Stage 0 flake reference follows W8's re-pointing.
   `check-single-network-path` must stay green; the payload adds no network
   path.
 
-## Open questions for a maintainer
+## Decisions
 
-1. **Crate count for W9.** Is a new leaf package acceptable for `mvm-setpriv`?
-   `CLAUDE.md` records the consolidation to 20 crates. The alternative is
-   leaving layer 4 wide, which keeps about 25% of commits rebuilding.
-2. **Schema field.** Is `builder_boot_abi` in the signed image-set
-   `[compatibility]` the right home, or should the ABI ride inside the
-   existing `builder_cache_contract` integer? A separate field lets a Nix-only
-   change bump the cache contract without claiming an ABI change.
-3. **Legacy ABI 0 support window.** How long does the payload accept
-   marker-less images? The proposal is until the `image-set` carrying
-   `builder_boot_abi = 1` is the only pinned set and the W7 window of the
-   cutover plan has closed.
-4. **Witness status.** Should the builder boot payload get a `model/claims.toml`
-   entry or an ADR-001 row, or stay ordinary tests? This plan assumes ordinary
-   tests, because ADR-004 keeps the builder outside the numbered claims.
-5. **`drvPath` keying (alternative 7).** Worth a follow-up plan once the
-   payload makes any cached image bootable?
-6. **Ordering against the cutover plan's W8.** If `nix/images/builder-vm` is
-   deleted first, Stage 0's flake reference moves to the pair or published
-   path. Confirm that Stage 0 remains a from-seed source build for contributors
-   after that deletion, since ADR-030 item 4 depends on it.
+Taken on 2026-09-24.
+
+1. **Crate count for W9.** `mvm-setpriv` becomes its own leaf package. Leaving
+   layer 4 wide keeps about 25% of commits rebuilding the image, which costs
+   more than one small guest-only crate.
+2. **Schema field.** The boot ABI gets its own `builder_boot_abi` field in the
+   signed image-set `[compatibility]` section, so a Nix-only change can bump
+   `builder_cache_contract` without claiming an ABI change.
+3. **Legacy ABI 0 support window.** Marker-less images stay accepted for one
+   release cycle: until the `image-set` carrying `builder_boot_abi = 1` is the
+   only pinned set and the W7 window of the cutover plan has closed.
+4. **Witness status.** The builder boot payload is covered by ordinary tests.
+   ADR-004 keeps the builder outside the numbered claims, and this plan does
+   not change that.
+5. **`drvPath` keying (alternative 7).** A follow-up plan, once the payload
+   makes any cached image bootable.
+6. **Ordering against the cutover plan's W8.** Stage 0 remains a from-seed
+   source build for contributors after `nix/images/builder-vm` is deleted,
+   because ADR-030 item 4 depends on it.
 
 ## Non-goals
 
