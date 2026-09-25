@@ -21,9 +21,12 @@
 //!   arguments, so the pinned seed has to arrive through the `e2fsprogs` it is
 //!   handed.
 //!
-//! It is a static check. The merge-queue image job rebuilds the default image
-//! and runtime overlay with `nix build --rebuild`, which is the byte-level
-//! witness; this gate is what fails on a pull request.
+//! It is a static check. The image flakes that call `mkfs`, `veritysetup` and
+//! `cpio` live in mvm-images; what stays under `nix/` is `mkGuest`, the
+//! library those flakes build their rootfs through, so its `make-ext4-fs` call
+//! is what this gate holds here. The merge-queue image job rebuilds the
+//! default image and runtime overlay from mvm-images with `nix build
+//! --rebuild`, which is the byte-level witness.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -360,10 +363,11 @@ mod tests {
         assert!(r.problems.is_empty(), "{:?}", r.problems);
     }
 
-    /// The real recipes: clean, and the scan reaches every kind of call, so a
-    /// parser change that stops seeing them cannot pass vacuously.
+    /// The real recipes: clean, and the scan reaches mkGuest's `make-ext4-fs`
+    /// call, so a parser change that stops seeing it cannot pass vacuously.
+    /// The other kinds are exercised by the fixtures above.
     #[test]
-    fn the_checked_in_recipes_are_clean_and_each_kind_is_seen() {
+    fn the_checked_in_recipes_are_clean() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask sits under the workspace root");
@@ -375,13 +379,6 @@ mod tests {
             report.scan(&file.display().to_string(), &text);
         }
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert!(report.mkfs >= 3, "mkfs calls seen: {}", report.mkfs);
-        assert!(
-            report.verity >= 2,
-            "veritysetup calls seen: {}",
-            report.verity
-        );
-        assert!(report.cpio >= 1, "cpio creates seen: {}", report.cpio);
         assert!(
             report.make_ext4_fs >= 1,
             "make-ext4-fs calls seen: {}",

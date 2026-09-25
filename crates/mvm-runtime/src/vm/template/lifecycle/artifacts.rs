@@ -40,8 +40,8 @@ pub(super) fn slot_kernel_source(
     // A workload guest needs the workload kernel, on every arch.
     //
     // The builder kernel has no device-mapper, and not by accident:
-    // `nix/images/kernel/builder.nix` lists `BLK_DEV_DM` and `DM_VERITY` among
-    // the options it force-drops, because the builder VM boots `ro` with no
+    // mvm-images' builder kernel lists `BLK_DEV_DM` and `DM_VERITY` among the
+    // options it force-drops, because the builder VM boots `ro` with no
     // roothash and never opens a dm device — "verified boot is a
     // workload-kernel concern", in its words. So a workload booted on it dies
     // in activation the moment dm-verity reaches for /dev/mapper/control, which
@@ -508,7 +508,7 @@ mod tests {
     /// aarch64.
     ///
     /// This test asserted the opposite, and the behaviour it pinned is the
-    /// bug: `nix/images/kernel/builder.nix` force-drops `BLK_DEV_DM` and
+    /// bug: mvm-images' builder kernel force-drops `BLK_DEV_DM` and
     /// `DM_VERITY` because the builder VM boots `ro` with no roothash and
     /// never opens a dm device — "verified boot is a workload-kernel concern".
     /// So a sealed workload booted on the builder kernel died in activation on

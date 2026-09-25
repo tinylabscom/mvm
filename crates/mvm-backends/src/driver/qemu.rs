@@ -148,7 +148,7 @@ fn qemu_boot_argv_for_arch(
     // And no host-side number is the one the caller observes: the guest kernel
     // binds first. `--cpus 100` and `--cpus 300` both pass QEMU's check, boot,
     // and report 64 (`CPU topo: Allowing 64 present CPUs`) -- `CONFIG_NR_CPUS`,
-    // which `nix/images/kernel/` does not set, so it is nixpkgs' arch-dependent
+    // which the mvm-images kernel does not set, so it is nixpkgs' arch-dependent
     // default. A warning naming any ceiling above 64 would misdescribe the
     // machine the caller got, which is why silence here is the accurate answer
     // rather than the unfinished one.

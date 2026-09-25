@@ -91,7 +91,7 @@ fn agent_workload_smoke_uses_the_per_call_input_path() {
     assert!(!smoke.contains("MVM_AGENT_SMOKE"));
 
     let marker = "mvm-agent-smoke";
-    let recipe = read(&workspace_root().join("nix/images/examples/llm-agent/default.nix"));
+    let recipe = read(&workspace_root().join("nix/examples/llm-agent/default.nix"));
     let steps =
         read(&workspace_root().join("crates/mvm-conformance/tests/steps/agent_workload.rs"));
     let readme = read(&example_file("README.md"));
@@ -103,17 +103,17 @@ fn agent_workload_smoke_uses_the_per_call_input_path() {
 
 #[test]
 fn the_network_preset_citation_resolves_to_a_real_recipe() {
-    let recipe = workspace_root().join("nix/images/examples/llm-agent/default.nix");
+    let recipe = workspace_root().join("nix/examples/llm-agent/default.nix");
     assert!(recipe.is_file(), "{} must exist", recipe.display());
 
     let policy = read(&workspace_root().join("crates/mvm-contract/src/policy/network_policy.rs"));
-    assert!(policy.contains("nix/images/examples/llm-agent/"));
+    assert!(policy.contains("nix/examples/llm-agent/"));
 }
 
 #[test]
 fn both_agent_examples_reuse_the_one_pinned_binary_recipe() {
     let legacy = read(&workspace_root().join("examples/claude-code/flake.nix"));
-    assert!(legacy.contains("images/examples/llm-agent"));
+    assert!(legacy.contains("${mvm}/examples/llm-agent"));
     assert!(!legacy.contains("linux-x64-musl"));
     assert!(!legacy.contains("linux-arm64-musl"));
 }

@@ -24,11 +24,6 @@ keys
 # Scratch source files a stray guest/host cross-compile may drop at the repo
 # root; never tracked.
 /.tmp-*.rs
-# Local dev-image build output. The sibling `nix/images/builder/` and
-# `nix/images/builder-vm/` directories are flake sources and stay
-# tracked; this one is a build artifact that can run into the hundreds
-# of megabytes per arch.
-nix/images/dev-prebuilt/
 # Plan 86 / ADR-004: docker-build artifact symlink from
 # `nix build --out-link .ur-seed-result`. Points into Docker's /nix/store
 # and is meaningless on the host.

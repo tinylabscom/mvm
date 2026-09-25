@@ -1,15 +1,14 @@
 //! `xtask check-guest-binary-lists`
 //!
 //! CI lint — the guest runtime binaries baked into an OCI `run --image` rootfs
-//! are named in three hand-maintained lists that must stay in lockstep:
+//! are named in two hand-maintained lists that must stay in lockstep:
 //!
 //! - `crates/mvm-build/src/guest_agent_build.rs` — the `cargo zigbuild --bin`
 //!   invocation that actually builds them (the authoritative list).
 //! - `crates/mvm-build/src/oci_runtime_inject.rs` — the `MvmRuntimeBinaries`
 //!   struct whose field docs name each bin.
-//! - `nix/images/runtime-overlay/flake.nix` — files staged for publication.
 //!
-//! The check asserts those three sets are identical to each other AND that every
+//! The check asserts those two sets are identical to each other AND that every
 //! name is a real `[[bin]]` of `mvm-agentd`. A drift — a
 //! renamed bin, a list left behind, or a name that no longer maps to a bin —
 //! fails here instead of silently shipping a rootfs missing (or misnaming) a
@@ -18,10 +17,11 @@
 //! never the host CLI executable.
 //!
 //! A second section ([`check_overlay_parity`]) holds the runtime overlay's
-//! own binary lists — the overlay zigbuild list and `install_one` pairs, the
-//! Rust staging array, and the Nix flake's staging `cp` lines — in the same
-//! lockstep, and rejects an orphaned `--bin` flag left behind by a removed
-//! binary name.
+//! own binary lists — the overlay zigbuild list and `install_one` pairs, and
+//! the Rust staging array — in the same lockstep, and rejects an orphaned
+//! `--bin` flag left behind by a removed binary name. The published overlay is
+//! built in mvm-images, which stages from these same bins through its `mvm`
+//! input and guards its own flake.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -31,7 +31,6 @@ use std::path::Path;
 const GUEST_AGENT_BUILD: &str = "crates/mvm-build/src/guest_agent_build.rs";
 const CLI_BUILD_RS: &str = "crates/mvm-cli/build.rs";
 const OCI_INJECT: &str = "crates/mvm-build/src/oci_runtime_inject.rs";
-const RUNTIME_OVERLAY_FLAKE: &str = "nix/images/runtime-overlay/flake.nix";
 const RUNTIME_OVERLAY_RS: &str = "crates/mvm-build/src/runtime_overlay.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
@@ -45,15 +44,6 @@ pub fn run(workspace: &Path) -> Result<()> {
         (
             "oci_runtime_inject.rs MvmRuntimeBinaries",
             extract_runtime_struct(workspace, OCI_INJECT)?,
-        ),
-        (
-            "runtime-overlay flake guest-runtime output",
-            extract_between(
-                workspace,
-                RUNTIME_OVERLAY_FLAKE,
-                "mkdir -p $out/guest-runtime",
-                "chmod 0555 $out/guest-runtime/*",
-            )?,
         ),
     ];
 
@@ -112,16 +102,15 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The read-only runtime overlay's binary set is maintained in three places:
+/// The read-only runtime overlay's binary set is maintained in two places:
 /// the overlay `cargo zigbuild` bin list plus its `install_one` pairs
-/// (`guest_agent_build.rs`), the staging array that writes the overlay root
-/// (`runtime_overlay.rs`), and the Nix flake's staging `cp` lines
-/// (`runtime-overlay/flake.nix`). They drifted once — the flake shipped
-/// `display-bridge` but not `ping` while the Rust builder did the reverse, so
-/// `/bin/ping` mediation silently no-oped on Nix-built overlays — and an
-/// orphaned `--bin` flag survived a bin removal because cargo happened to
-/// absorb the malformed pair. This section keeps the three lists in lockstep
-/// and rejects a `--bin` flag not followed by a binary name.
+/// (`guest_agent_build.rs`), and the staging array that writes the overlay
+/// root (`runtime_overlay.rs`). Lists like these drifted once — an image
+/// shipped `display-bridge` but not `ping` while the Rust builder did the
+/// reverse, so `/bin/ping` mediation silently no-oped — and an orphaned
+/// `--bin` flag survived a bin removal because cargo happened to absorb the
+/// malformed pair. This section keeps the lists in lockstep and rejects a
+/// `--bin` flag not followed by a binary name.
 fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result<usize> {
     let gab = read(workspace, GUEST_AGENT_BUILD)?;
     let orphan = Regex::new(r#""--bin"(?:\.to_string\(\))?\s*,\s*"--bin""#).unwrap();
@@ -160,21 +149,10 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         .map(|c| (c[1].to_string(), c[2].to_string()))
         .collect();
 
-    // Nix staging: `cp ${pkg}/bin/mvm-x "$staging/staged"` — bin ↔ staged name.
-    let flake = read(workspace, RUNTIME_OVERLAY_FLAKE)?;
-    let cp_re =
-        Regex::new(r#"cp \$\{[A-Za-z0-9]+\}/bin/(mvm-[a-z0-9-]+)\s+"\$staging/([a-z0-9-]+)""#)
-            .unwrap();
-    let nix_pairs: BTreeMap<String, String> = cp_re
-        .captures_iter(&flake)
-        .map(|c| (c[1].to_string(), c[2].to_string()))
-        .collect();
-
     for (label, len) in [
         ("overlay zigbuild bin list", overlay_bins.len()),
         ("install_one pairs", bin_to_field.len()),
         ("runtime_overlay.rs staging array", field_to_staged.len()),
-        ("runtime-overlay flake staging cp lines", nix_pairs.len()),
     ] {
         if len == 0 {
             bail!(
@@ -184,37 +162,24 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
     }
 
     let install_bins: BTreeSet<String> = bin_to_field.keys().cloned().collect();
-    let nix_bins: BTreeSet<String> = nix_pairs.keys().cloned().collect();
-    let rust_staged: BTreeSet<String> = field_to_staged.values().cloned().collect();
-    let nix_staged: BTreeSet<String> = nix_pairs.values().cloned().collect();
-
-    for (label, set) in [
-        ("install_one bin set", &install_bins),
-        ("runtime-overlay flake bin set", &nix_bins),
-    ] {
-        if *set != overlay_bins {
-            bail!(
-                "runtime-overlay binary lists drift:\n  overlay zigbuild list = {overlay_bins:?}\n  {label} = {set:?}"
-            );
-        }
-    }
-    if rust_staged != nix_staged {
+    if install_bins != overlay_bins {
         bail!(
-            "runtime-overlay staged-name sets drift:\n  runtime_overlay.rs = {rust_staged:?}\n  flake = {nix_staged:?}"
+            "runtime-overlay binary lists drift:\n  overlay zigbuild list = {overlay_bins:?}\n  install_one bin set = {install_bins:?}"
+        );
+    }
+    let installed_fields: BTreeSet<&String> = bin_to_field.values().collect();
+    let staged_fields: BTreeSet<&String> = field_to_staged.keys().collect();
+    if installed_fields != staged_fields {
+        bail!(
+            "runtime-overlay staged-name sets drift:\n  install_one fields = {installed_fields:?}\n  runtime_overlay.rs stages = {staged_fields:?}"
         );
     }
 
-    // The three mappings must compose: bin -> field -> staged == bin -> staged.
+    // Every installed field must be staged, under the name the field spells.
     for (bin, field) in &bin_to_field {
         let via_rust = field_to_staged.get(field).with_context(|| {
             format!("overlay bin {bin} installs into layout field {field}, which the runtime_overlay.rs staging array never stages")
         })?;
-        let via_nix = &nix_pairs[bin];
-        if via_rust != via_nix {
-            bail!(
-                "overlay bin {bin} is staged as {via_rust:?} by runtime_overlay.rs but as {via_nix:?} by the flake"
-            );
-        }
         if field.replace('_', "-") != *via_rust {
             bail!(
                 "overlay layout field {field} stages as {via_rust:?}; field and staged name must correspond"
@@ -329,27 +294,6 @@ fn extract_runtime_struct(workspace: &Path, rel: &str) -> Result<BTreeSet<String
     Ok(re.captures_iter(block).map(|c| c[1].to_string()).collect())
 }
 
-fn extract_between(
-    workspace: &Path,
-    rel: &str,
-    start_marker: &str,
-    end_marker: &str,
-) -> Result<BTreeSet<String>> {
-    let src = read(workspace, rel)?;
-    let start = src
-        .find(start_marker)
-        .with_context(|| format!("start marker {start_marker:?} not found in {rel}"))?;
-    let rest = &src[start..];
-    let end = rest
-        .find(end_marker)
-        .with_context(|| format!("end marker {end_marker:?} not found in {rel}"))?;
-    let re = Regex::new(r"mvm-[a-z0-9-]+").unwrap();
-    Ok(re
-        .find_iter(&rest[..end])
-        .map(|found| found.as_str().to_string())
-        .collect())
-}
-
 fn read(workspace: &Path, rel: &str) -> Result<String> {
     let path = workspace.join(rel);
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
@@ -433,16 +377,6 @@ name = "mvm-oci-entrypoint"
             expected
         );
         assert_eq!(extract_runtime_struct(&root, OCI_INJECT).unwrap(), expected);
-        assert_eq!(
-            extract_between(
-                &root,
-                RUNTIME_OVERLAY_FLAKE,
-                "mkdir -p $out/guest-runtime",
-                "chmod 0555 $out/guest-runtime/*",
-            )
-            .unwrap(),
-            expected
-        );
         assert!(
             extract_bin_flags_from_file(&root, CLI_BUILD_RS)
                 .unwrap()
@@ -451,7 +385,7 @@ name = "mvm-oci-entrypoint"
         );
     }
 
-    fn overlay_fixture(root: &Path, gab_bins: &str, staging: &str, flake_cp: &str) {
+    fn overlay_fixture(root: &Path, gab_bins: &str, staging: &str) {
         let write = |rel: &str, text: &str| {
             let path = root.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -471,14 +405,11 @@ name = "mvm-oci-entrypoint"
             RUNTIME_OVERLAY_RS,
             &format!("let binaries = [{staging}];\n"),
         );
-        write(RUNTIME_OVERLAY_FLAKE, flake_cp);
     }
 
     const FIXTURE_BINS: &str = r#""--bin".to_string(), "mvm-guest-agent".to_string(), "--bin".to_string(), "mvm-ping".to_string()"#;
     const FIXTURE_STAGING: &str =
         r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping"))"#;
-    const FIXTURE_FLAKE: &str = "cp ${guest}/bin/mvm-guest-agent \"$staging/agent\"\n\
-                                 cp ${guest}/bin/mvm-ping \"$staging/ping\"\n";
 
     fn fixture_universe() -> BTreeSet<String> {
         BTreeSet::from(["mvm-guest-agent".to_string(), "mvm-ping".to_string()])
@@ -487,7 +418,7 @@ name = "mvm-oci-entrypoint"
     #[test]
     fn rustfmt_wrapped_install_calls_are_still_extracted() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING, FIXTURE_FLAKE);
+        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING);
         // Rewrite the build file with one call wrapped the way rustfmt wraps
         // a long line; extraction must not depend on single-line calls.
         std::fs::write(
@@ -510,7 +441,7 @@ name = "mvm-oci-entrypoint"
     #[test]
     fn overlay_parity_passes_on_agreeing_lists() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING, FIXTURE_FLAKE);
+        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING);
         assert_eq!(
             check_overlay_parity(tmp.path(), &fixture_universe()).unwrap(),
             2
@@ -521,7 +452,7 @@ name = "mvm-oci-entrypoint"
     fn orphaned_bin_flag_fails_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let orphaned = r#""--bin".to_string(), "--bin".to_string(), "mvm-ping".to_string()"#;
-        overlay_fixture(tmp.path(), orphaned, FIXTURE_STAGING, FIXTURE_FLAKE);
+        overlay_fixture(tmp.path(), orphaned, FIXTURE_STAGING);
         let error = check_overlay_parity(tmp.path(), &fixture_universe())
             .unwrap_err()
             .to_string();
@@ -529,14 +460,10 @@ name = "mvm-oci-entrypoint"
     }
 
     #[test]
-    fn flake_missing_a_bin_is_drift() {
+    fn a_built_bin_that_is_never_installed_is_drift() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(
-            tmp.path(),
-            FIXTURE_BINS,
-            FIXTURE_STAGING,
-            "cp ${guest}/bin/mvm-guest-agent \"$staging/agent\"\n",
-        );
+        let extra = format!(r#"{FIXTURE_BINS}, "--bin".to_string(), "mvm-extra".to_string()"#);
+        overlay_fixture(tmp.path(), &extra, FIXTURE_STAGING);
         let error = check_overlay_parity(tmp.path(), &fixture_universe())
             .unwrap_err()
             .to_string();
@@ -553,7 +480,6 @@ name = "mvm-oci-entrypoint"
             tmp.path(),
             FIXTURE_BINS,
             r#"(&bins.agent, root.join("agent"))"#,
-            FIXTURE_FLAKE,
         );
         let error = check_overlay_parity(tmp.path(), &fixture_universe())
             .unwrap_err()
@@ -562,14 +488,12 @@ name = "mvm-oci-entrypoint"
     }
 
     #[test]
-    fn staged_name_disagreement_between_rust_and_flake_fails() {
+    fn a_field_staged_under_another_name_fails() {
         let tmp = tempfile::tempdir().unwrap();
         overlay_fixture(
             tmp.path(),
             FIXTURE_BINS,
             r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("icmp"))"#,
-            "cp ${guest}/bin/mvm-guest-agent \"$staging/agent\"\n\
-             cp ${guest}/bin/mvm-ping \"$staging/icmp\"\n",
         );
         let error = check_overlay_parity(tmp.path(), &fixture_universe())
             .unwrap_err()

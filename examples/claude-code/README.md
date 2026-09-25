@@ -117,6 +117,6 @@ environment, which is exactly what `--secret` exists to avoid.
 
 ## Updating the pinned binary
 
-Bump `version` in `nix/images/examples/llm-agent/default.nix` and refresh both
+Bump `version` in `nix/examples/llm-agent/default.nix` and refresh both
 platform checksums from
 `https://downloads.claude.ai/claude-code-releases/<version>/manifest.json`.

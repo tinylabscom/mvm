@@ -33,9 +33,9 @@ pub const FC_CI_ASSETS_VERSION: &str = "v1.15";
 /// boot into a 404; a copy left behind makes CI validate a different image from
 /// the one users receive, which is what `xtask check-image-lock` refuses.
 ///
-/// The build-time override stays because `nix/images/default-tenant/flake.nix`
-/// reads `MVM_BOOT_IMAGE_TAG`: a build can point at an unpublished tag without
-/// editing the lock, and the lock is what every unset build gets.
+/// The build-time override `MVM_BOOT_IMAGE_TAG` stays so a build can point at
+/// an unpublished tag without editing the lock; the lock is what every unset
+/// build gets.
 pub fn default_boot_image_tag() -> &'static str {
     match option_env!("MVM_BOOT_IMAGE_TAG") {
         Some(tag) => tag,

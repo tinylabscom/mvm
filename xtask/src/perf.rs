@@ -77,8 +77,8 @@ pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Deliberately budgeted and reported **outside** [`GUEST_STORAGE_MAX_BYTES`]:
 /// the sidecar is attached only to workloads whose signed plan binds an
 /// SDK-served host service, so folding it into the base ledger would report a
-/// footprint no ordinary workload actually pays. Mirrors `sdkSidecarSizeBytes`
-/// in `nix/images/runtime-overlay/flake.nix`.
+/// footprint no ordinary workload actually pays. mvm-images' runtime-overlay
+/// flake allocates the sidecar image at exactly this size.
 pub const SDK_SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Cold-boot wall-clock budget for the Firecracker backend.
@@ -609,9 +609,9 @@ fn guest_storage_footprint_check(
 fn kernel_config_summary(path: &Path) -> Result<KernelConfigSummary> {
     let config = std::fs::read_to_string(path)
         .with_context(|| format!("read kernel config at {}", path.display()))?;
-    let builtin_symbols = crate::check_kernel_config_budget::count_builtins(&config);
-    let budget = crate::check_kernel_config_budget::budget_for_path(&path.to_string_lossy());
-    crate::check_kernel_config_budget::evaluate_budget(&config, budget)?;
+    let builtin_symbols = crate::kernel_config_budget::count_builtins(&config);
+    let budget = crate::kernel_config_budget::budget_for_path(&path.to_string_lossy());
+    crate::kernel_config_budget::evaluate_budget(&config, budget)?;
     Ok(KernelConfigSummary {
         path: path.to_path_buf(),
         builtin_symbols,
@@ -809,7 +809,7 @@ fn parse_backend_arg(args: &[String]) -> Result<Backend> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check_kernel_config_budget;
+    use crate::kernel_config_budget;
     use std::io::Write;
 
     // ──────────────────────────────────────────────────────────────
@@ -995,21 +995,10 @@ mod tests {
     }
 
     #[test]
-    fn sdk_sidecar_budget_matches_the_nix_allocation() {
-        // The Nix derivation pre-allocates the sidecar at a fixed size; the
-        // ledger's ceiling must not drift below what the build emits.
+    fn sdk_sidecar_budget_is_the_published_allocation() {
+        // mvm-images allocates the sidecar image at 8 MiB; a ceiling below
+        // that would refuse every sidecar the published set ships.
         assert_eq!(SDK_SIDECAR_MAX_BYTES, 8 * 1024 * 1024);
-        let flake = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("workspace root")
-                .join("nix/images/runtime-overlay/flake.nix"),
-        )
-        .expect("read the runtime-overlay flake");
-        assert!(
-            flake.contains("sdkSidecarSizeBytes = 8 * 1024 * 1024;"),
-            "the flake's sidecar allocation drifted from SDK_SIDECAR_MAX_BYTES"
-        );
     }
 
     #[test]
@@ -1186,7 +1175,7 @@ mod tests {
         assert_eq!(summary.builtin_symbols, 1);
         assert_eq!(
             summary.budget,
-            check_kernel_config_budget::budget_for_path("x86_64")
+            kernel_config_budget::budget_for_path("x86_64")
         );
     }
 
@@ -1194,7 +1183,7 @@ mod tests {
     fn kernel_config_summary_rejects_a_budget_overflow() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("workload-config-x86_64");
-        let config = (0..=check_kernel_config_budget::budget_for_path("x86_64"))
+        let config = (0..=kernel_config_budget::budget_for_path("x86_64"))
             .map(|index| format!("CONFIG_TEST_{index}=y"))
             .collect::<Vec<_>>()
             .join("\n");

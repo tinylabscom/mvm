@@ -2080,8 +2080,8 @@ fn locate_supervisor_in_target_roots(target_roots: &[PathBuf]) -> Option<PathBuf
 
 /// The mvm source checkout this binary was compiled from, when automatic
 /// builds are permitted. The supervisor auto-build keys on the checkout
-/// itself — not on the in-tree image flakes — so removing `nix/images` does
-/// not turn a contributor build into an installed one.
+/// itself — its workspace manifest — rather than on any image source, which
+/// lives in mvm-images.
 fn supervisor_source_checkout_root() -> Option<PathBuf> {
     crate::image_source::mvm_source_checkout(crate::artifact_acquisition::compiled_channel())
 }

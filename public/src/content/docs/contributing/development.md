@@ -110,87 +110,53 @@ bootstrap or supervision stay outside that overlay.
 
 ### Kernel builds
 
-The builder-VM and workload microVM kernels are slim custom Linux
-builds: one shared config in `nix/images/kernel/base.nix` plus a
-per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
-the nix-build sandbox + egress-lockdown bits). Because the config is
-custom, `cache.nixos.org` has no substitute, so the first build on a
-fresh machine compiles the kernel from source. It can take several minutes
-depending on the host and is memory-heavy; later builds reuse the persistent
-Nix store.
+The builder-VM and workload microVM kernels are slim custom Linux builds
+defined in [mvm-images](https://github.com/tinylabscom/mvm-images): one shared
+config plus a per-variant delta (the workload adds dm-verity; the builder adds
+the nix-build sandbox and egress-lockdown bits). Because the config is custom,
+`cache.nixos.org` has no substitute, so compiling one on a fresh machine takes
+several minutes and is memory-heavy; later builds reuse the persistent Nix
+store.
 
-`mvmctl build kernel build` makes that compile explicit and one-time. Image
-backed runs from a source checkout also bootstrap this kernel automatically;
-prebuilding it is useful when you want the first interactive run to be warm:
+With an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling
+`../mvm-images`), `mvmctl build kernel build` compiles from it, and image-backed
+runs from this checkout bootstrap the kernel automatically. Without one, the
+kernel comes from the signed image set `images.lock` pins. Prebuilding is useful
+when you want the first interactive run to be warm:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-just run -- build kernel build --which builder
+MVM_IMAGES_DIR=../mvm-images just run -- build kernel build --which builder
 
 # Or both kernels:
-just run -- build kernel build --all
+MVM_IMAGES_DIR=../mvm-images just run -- build kernel build --all
 
-# The same policy applies to the direct kernel recipe:
+# Fetch the pinned, verified image-set kernel instead of compiling:
 MVM_KERNEL_SOURCE=download just kernel-workload
-```
-
-To skip the kernel compile entirely on a fresh machine, boot the builder
-VM on a published kernel (once a release has shipped one):
-
-```bash
-# Build only the rootfs locally; fetch + hash-verify the kernel.
-just run -- --kernel-source download bootstrap
-# `auto` downloads if available, else compiles in-image (the default).
 ```
 
 Notes:
 
 - **Host-arch only for `--source compile`.** Stage 0 builds your host's
-  architecture (aarch64 *or* x86_64).
-  The other arch is published by the `kernel-build` GitHub workflow,
-  which builds both on native runners — fetch it with `--source
-  download` once a release ships it.
-- Editing `base.nix` or a variant delta? Just re-run the command — a
-  custom config always compiles locally; downloads only ever return the
-  kernel that shipped with that exact `mvmctl` release.
+  architecture (aarch64 *or* x86_64). The other arch is in the published image
+  set — fetch it with `--source download`.
+- Kernel-config work (slimming, adding a driver) happens in the mvm-images
+  checkout: edit the config there and re-run the compile. Boot-smoke the
+  result — a kernel that builds is not proof it boots:
 
-#### Iterating on the kernel config (slimming, adding a driver)
+  ```bash
+  just run -- build kernel build --which workload
+  just run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
+  just run -- machine boot-report smoke   # "control plane  ready" == good
+  just run -- machine stop smoke
+  ```
 
-Changing `base.nix` / `workload.nix` / `builder.nix` and want to see the
-effect? The loop is build → boot-smoke → measure:
-
-```bash
-# 1. Build the variant you touched (compiles your edited config in Stage 0).
-just run -- build kernel build --which workload
-
-# 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
-#    throwaway VM and confirm the in-guest agent answers over vsock.
-just run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
-just run -- machine boot-report smoke   # "control plane  ready" == good
-just run -- machine stop smoke
-```
-
-Two sharp edges worth knowing:
-
-- **A build that passes the config guard still has to boot.** After
-  `make olddefconfig`, the build asserts every requested `enable` is
-  still `=y` and fails loudly if one got dropped by a missing
-  dependency — but that guard can't tell you a *disable* removed
-  something the boot path needed. Only the boot-smoke proves that, so
-  never skip step 2.
-- **`enable` and `disable` are scoped.** A disable in the shared
-  `base.nix` hits *both* kernels; if only the workload should drop a
-  symbol (or only the builder needs one), put it in that variant's
-  delta. (The builder kernel, for example, keeps netfilter for its
-  egress lockdown while the workload drops it.)
-- **You can't read the resolved `.config` locally** — Stage 0 hands the
-  host a `vmlinux`, not the config. The `=y` symbol count + byte size
-  come from the `kernel-build` CI lane, which uploads
-  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
-  without a release via `gh workflow run kernel-build.yml`. The
-  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
-  regresses past `KERNEL_Y_BUDGET`.
+- The resolved `.config`, the `=y` symbol metrics and the built-in symbol
+  budget are mvm-images'. A local compile leaves the resolved `config` and
+  `kernel-metrics-<arch>.json` beside the cached kernel, and
+  `xtask perf footprint --kernel-config <path>` reports a config against the
+  budget.
 
 ## Testing
 

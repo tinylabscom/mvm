@@ -170,15 +170,6 @@ fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
         ),
         "the exported setpriv recipe must pass pkgs into mvm-setpriv.nix"
     );
-
-    let builder_flake = normalized_whitespace(
-        &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
-            .expect("builder VM flake must be readable"),
-    );
-    assert!(
-        builder_flake.contains("builderSetprivFor = system: mvm.packages.${system}.mvm-setpriv;"),
-        "the builder guest must take setpriv from the mvm flake's exported recipe"
-    );
 }
 
 fn collect_nix_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -453,8 +444,6 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         .unwrap_or_else(|e| panic!("nix/packages/libkrunfw.nix must be present: {e}"));
     let libkrun = fs::read_to_string(packages_dir.join("libkrun.nix"))
         .unwrap_or_else(|e| panic!("nix/packages/libkrun.nix must be present: {e}"));
-    let kernel_base = fs::read_to_string(nix_dir().join("images/kernel/base.nix"))
-        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
 
     for (name, content) in [
         ("libkrunfw.nix", libkrunfw.as_str()),
@@ -488,11 +477,6 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
             && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)")
             && libkrunfw.contains("'virtio_transport_alloc_skb(&info, dgram_len, false, NULL,'"),
         "libkrunfw must pin the kernel version, substitute the source, and keep its datagram patch compatible with that kernel"
-    );
-    assert!(
-        kernel_base.contains(&format!("kernelVersion = \"{kernel_version}\""))
-            && kernel_base.contains(&format!("hash = \"{kernel_hash}\"")),
-        "the custom kernel must use the same verified point-release pin as libkrunfw"
     );
     assert!(
         libkrun.contains("rustPlatform.fetchCargoVendor")
@@ -968,22 +952,6 @@ fn mk_guest_carries_overlay_aware_contract() {
          /init resolution ladders may still name the runtime `/usr/local/bin` path \
          for rootfs-only / prefer-overlay boots, but nothing is cp'd there."
     );
-
-    let builder_path = nix_dir()
-        .join("images")
-        .join("builder-vm")
-        .join("flake.nix");
-    let builder = fs::read_to_string(&builder_path)
-        .unwrap_or_else(|e| panic!("nix/images/builder-vm/flake.nix must be present: {e}"));
-    assert!(
-        builder.contains(
-            "builderCmdline = \"console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\";"
-        ),
-        "builder-vm flake must bake the hardened builder rootfs cmdline \
-         (rootfstype=ext4 + rootwait + panic=-1 + loglevel=8 + chained \
-         builder init) so every backend starts from the same disk-builder \
-         boot contract."
-    );
 }
 
 /// Render the `initText = ''…''` block of `mk-guest.nix` the way Nix
@@ -1296,104 +1264,6 @@ fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
 }
 
 #[test]
-fn shared_kernel_base_forces_backend_console_support() {
-    let path = nix_dir().join("images").join("kernel").join("base.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
-
-    let enables = content
-        .split_once("baseEnables =")
-        .and_then(|(_, tail)| tail.split_once("requiredDisables ="))
-        .map(|(enables, _)| enables)
-        .expect("base kernel enables precede required disables");
-    for symbol in [
-        "VIRTIO_CONSOLE",
-        "HVC_DRIVER",
-        "SERIAL_8250",
-        "SERIAL_8250_CONSOLE",
-        "SERIAL_OF_PLATFORM",
-    ] {
-        assert!(
-            enables.contains(&format!("\"{symbol}\"")),
-            "the shared microVM kernel base must force CONFIG_{symbol} for a supported backend console"
-        );
-    }
-}
-
-#[test]
-fn shared_kernel_base_enforces_audited_subsystem_removals() {
-    let path = nix_dir().join("images").join("kernel").join("base.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
-    let required_start = content
-        .find("requiredDisables =")
-        .expect("required kernel-disable set starts");
-    let base_start = content[required_start..]
-        .find("baseDisables =")
-        .map(|offset| required_start + offset)
-        .expect("base kernel-disable set follows required cuts");
-    let required = &content[required_start..base_start];
-
-    for symbol in [
-        "SOUNDWIRE",
-        "NFC",
-        "RFKILL",
-        "VIRTIO_INPUT",
-        "VT",
-        "SQUASHFS",
-        "KEXEC",
-        "DEBUG_FS",
-        "KALLSYMS",
-        "NLS_UTF8",
-        "NETLABEL",
-        "NET_SCHED",
-        "IOSCHED_BFQ",
-        "MQ_IOSCHED_KYBER",
-        "NUMA",
-        "CMA",
-        "QRTR",
-        "BLK_DEV_BSG_COMMON",
-        "BLK_DEV_BSGLIB",
-        "PACKET",
-        "TASKSTATS",
-        "HUGETLB_PAGE",
-        "ACPI_PROCESSOR",
-        "X86_PLATFORM_DEVICES",
-        "ARM_SCMI_PROTOCOL",
-    ] {
-        assert!(
-            required.contains(&format!("\"{symbol}\"")),
-            "the audited kernel cut must retain CONFIG_{symbol} in requiredDisables"
-        );
-    }
-    assert!(
-        content.contains("requiredDisableList =")
-            && content.contains("required kernel disables were reverted by olddefconfig"),
-        "the resolved config must fail if Kconfig selectors silently restore an audited cut"
-    );
-}
-
-#[test]
-fn workload_kernel_optimizes_for_size_by_default() {
-    let path = nix_dir().join("images").join("kernel").join("workload.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/kernel/workload.nix must be present: {e}"));
-    let required_extra = content
-        .split_once("requiredExtraDisables =")
-        .map(|(_, tail)| tail)
-        .expect("workload-specific required kernel cuts are present");
-
-    assert!(
-        content.contains("optimizeForSize ? true")
-            && content.contains("\"CC_OPTIMIZE_FOR_SIZE\"")
-            && content.contains("\"CC_OPTIMIZE_FOR_PERFORMANCE\"")
-            && required_extra.contains("\"NAMESPACES\"")
-            && required_extra.contains("\"CGROUPS\""),
-        "the default workload kernel must select size optimization and enforce workload-only namespace and cgroup cuts"
-    );
-}
-
-#[test]
 fn mk_guest_deindents_pid1_script_before_writing_init() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
@@ -1437,67 +1307,8 @@ fn mk_guest_sealed_images_require_launch_provisioned_grants() {
     );
 }
 
-/// Plan 74 W2 (deferred-list item) — the runtime overlay flake
-/// must stage `mvm-guest-netinit` at the canonical `/netinit`
-/// path inside the overlay so OCI-imported workloads get
-/// Layer 1 network defense too. The `mk-guest.nix` /init prefers
-/// `/mvm/runtime/netinit` over the baked-in copy; without this
-/// line, the prefer-overlay fallback falls through silently on
-/// OCI workloads (which don't have a baked-in copy at all).
 #[test]
-fn runtime_overlay_flake_stages_netinit_binary() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-
-    assert!(
-        content.contains("cp ${guest}/bin/mvm-guest-netinit    \"$staging/netinit\""),
-        "runtime-overlay flake must stage `mvm-guest-netinit` at \
-         `/netinit` inside the overlay ext4. The W1.4b mkGuest \
-         /init resolution prefers `/mvm/runtime/netinit`; if the \
-         overlay doesn't stage the binary, OCI workloads silently \
-         fall through to the no-defense path. Pinned exact-string \
-         match (with the canonical column alignment) to catch a \
-         drop or rename in one regression-shaped commit."
-    );
-}
-
-#[test]
-fn runtime_overlay_flake_stages_egress_client_binary() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-
-    assert!(
-        content.contains("cp ${egressClient}/bin/mvm-egress-client \"$staging/egress-client\""),
-        "runtime-overlay flake must stage `mvm-egress-client` at \
-         `/egress-client` inside the overlay ext4 so runtime-lean \
-         sealed boots can source the egress shim from the mounted \
-         runtime filesystem."
-    );
-}
-
-#[test]
-fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-    let runtime = normalized
-        .split("mkRuntimeOverlay = system:")
-        .nth(1)
-        .and_then(|tail| tail.split(" in {").next())
-        .expect("runtime-overlay derivation body");
-
+fn guest_runtime_recipes_are_static_musl() {
     let guest_recipes = normalized_whitespace(
         &fs::read_to_string(nix_dir().join("packages").join("guest.nix"))
             .expect("read nix/packages/guest.nix"),
@@ -1520,62 +1331,6 @@ fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
     assert!(
         runner.contains("pkgs.pkgsStatic.rustPlatform.buildRustPackage"),
         "the runner must use the static-musl Rust platform too"
-    );
-    for forbidden in [
-        "runtimeLoaderFor",
-        "runtimeLibcFor",
-        "runtimeLibgccFor",
-        "relocate_runtime_exe",
-        "patchelf",
-        "libc.so.6",
-        "libgcc_s.so.1",
-        "hostsvc",
-    ] {
-        assert!(
-            !runtime.contains(forbidden),
-            "static runtime-overlay body must not carry the dynamic loader bundle or SDK FFI: {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn runtime_overlay_exposes_sdk_sidecar_separately() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    assert!(
-        normalized.contains("mkSdkSidecar = system:"),
-        "the glibc SDK FFI must have a distinct sidecar derivation"
-    );
-    assert!(
-        content.contains("sdk-sidecar = mkSdkSidecar system;"),
-        "the runtime-overlay flake must publish the SDK sidecar output"
-    );
-    assert!(
-        content.contains("/mvm/sdk/lib"),
-        "the sidecar must use the stable /mvm/sdk mount contract"
-    );
-    assert!(
-        content.contains("sdkRuntimeLoaderFor")
-            && content.contains("--set-rpath /mvm/sdk/lib")
-            && !content.contains("--set-interpreter /mvm/sdk/lib/"),
-        "the sidecar must carry its matching glibc loader and set the cdylib RPATH without treating the shared object as an executable"
-    );
-}
-
-#[test]
-fn builder_vm_exposes_sdk_sidecar_image_for_stage0() {
-    let content =
-        fs::read_to_string("nix/images/builder-vm/flake.nix").expect("read builder VM flake");
-    assert!(
-        content
-            .contains("sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;"),
-        "the builder VM flake must pass the runtime-overlay sidecar image through for Stage 0"
     );
 }
 
@@ -1613,48 +1368,6 @@ fn gpu_shim_musl_build_uses_the_prebuilt_target_toolchain() {
     assert!(
         content.contains("expected a musl object (NEEDED libc.so)"),
         "the package must reject a musl-labelled shim linked against the wrong libc"
-    );
-}
-
-/// The sidecar has to ship as an attachable read-only ext4 with the exact file
-/// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
-/// alone can't be attached to a microVM.
-#[test]
-fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    assert!(
-        normalized.contains("mkSdkSidecarImage = system:"),
-        "the sidecar must have an ext4-image derivation, not just a directory tree"
-    );
-    assert!(
-        content.contains("sdk-sidecar-image = mkSdkSidecarImage system;"),
-        "the flake must publish the attachable sidecar image output"
-    );
-    // Exactly the resolver's canonical file set, and the manifest that covers it.
-    for required in [
-        "$out/sdk.ext4",
-        "$out/VERSION",
-        "sha256sum sdk.ext4 VERSION > checksums-sha256.txt",
-    ] {
-        assert!(
-            content.contains(required),
-            "the sidecar image must emit {required} for the host-side resolver"
-        );
-    }
-    assert!(
-        content.contains("-L mvm-sdk-sidecar"),
-        "the sidecar image must carry a distinct filesystem label"
-    );
-    assert!(
-        content.contains("sdkSidecarSizeBytes = 8 * 1024 * 1024;"),
-        "the sidecar allocation must stay pinned to the ledger's separate budget"
     );
 }
 
@@ -1744,71 +1457,6 @@ fn mk_guest_trusts_the_egress_ca_from_the_identity_drive_after_it_is_copied_out(
     assert!(
         content.contains("export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt"),
         "Node reads an extra certificate rather than a replacement bundle"
-    );
-}
-
-/// ADR-017 / issue #223 — the OCI-pull verity path runs
-/// `veritysetup format` inside the builder VM, while the Nix-built
-/// runtime-overlay baseline runs it in the runtime-overlay flake.
-/// Both must use the same explicit cryptsetup release pin so a
-/// nixpkgs bump cannot silently change sidecar bytes. The live
-/// Linux integration test `seal_is_byte_deterministic_for_identical_rootfs_bytes`
-/// verifies byte-identical sidecars for fixed input bytes when
-/// `veritysetup` is present; this structural guard verifies the
-/// two Nix closures consume the same pinned toolchain.
-#[test]
-fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
-    let builder_path = nix_dir()
-        .join("images")
-        .join("builder-vm")
-        .join("flake.nix");
-    let runtime_path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let builder = fs::read_to_string(&builder_path)
-        .unwrap_or_else(|e| panic!("nix/images/builder-vm/flake.nix must be present: {e}"));
-    let runtime = fs::read_to_string(&runtime_path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-
-    for (name, content) in [
-        ("builder-vm flake", builder.as_str()),
-        ("runtime-overlay flake", runtime.as_str()),
-    ] {
-        let normalized = normalized_whitespace(content);
-        assert!(
-            normalized.contains("pinnedCryptsetupVersion = \"2.8.6\""),
-            "{name} must pin cryptsetup 2.8.6 explicitly for ADR-017 / #223"
-        );
-        assert!(
-            normalized.contains(
-                "pinnedCryptsetupSrcHash = \"sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=\""
-            ),
-            "{name} must pin the cryptsetup 2.8.6 release tarball hash"
-        );
-        assert!(
-            normalized.contains("pinnedCryptsetupFor = pkgs:"),
-            "{name} must expose a pinned cryptsetup helper instead of using raw pkgs.cryptsetup"
-        );
-        assert!(
-            content.contains("pkgs.cryptsetup.overrideAttrs"),
-            "{name} must override cryptsetup source/version, not only document the desired version"
-        );
-        assert!(
-            content.contains("cryptsetup-${pinnedCryptsetupVersion}.tar.xz"),
-            "{name} must fetch the exact cryptsetup release tarball named by the pin"
-        );
-    }
-
-    assert!(
-        builder.contains("(pinnedCryptsetupFor pkgs) # provides pinned veritysetup"),
-        "builder VM packages must include the pinned cryptsetup package so OCI-pull \
-         verity generation runs the pinned veritysetup binary"
-    );
-    assert!(
-        runtime.contains("(pinnedCryptsetupFor pkgs) # provides pinned veritysetup"),
-        "runtime-overlay nativeBuildInputs must use the pinned cryptsetup package so \
-         the Nix-built verity baseline matches the builder VM"
     );
 }
 
@@ -1936,14 +1584,6 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
 
 #[test]
 fn builder_hook_uses_util_linux_losetup_before_the_mount_syscall() {
-    let builder_flake_path = nix_dir().join("images/builder-vm/flake.nix");
-    let builder_flake = fs::read_to_string(&builder_flake_path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", builder_flake_path.display()));
-    assert!(
-        builder_flake.contains("        util-linux"),
-        "the builder image must retain util-linux for file-backed loop mounts"
-    );
-
     let hook_path = repo_dir().join("crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs");
     let hook = fs::read_to_string(&hook_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", hook_path.display()));
@@ -2132,23 +1772,6 @@ const EXPORTED_GUEST_RECIPES: &[&str] = &[
     "mvm-sdk-cdylib-musl",
 ];
 
-const IMAGE_FLAKES: &[&str] = &[
-    "builder-vm",
-    "default-tenant",
-    "runtime-overlay",
-    "initramfs",
-];
-
-/// Nix source with `#` comments removed, so an assertion about what a flake
-/// imports is not satisfied (or tripped) by prose.
-fn nix_code_only(content: &str) -> String {
-    content
-        .lines()
-        .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[test]
 fn nix_flake_exports_the_guest_recipes_for_the_linux_systems() {
     let guest = normalized_whitespace(
@@ -2184,53 +1807,4 @@ fn nix_flake_exports_the_guest_recipes_for_the_linux_systems() {
         flake.contains("libFor { inherit system; } // {"),
         "the exported lib.<system> must still be the mkGuest library, extended not replaced"
     );
-}
-
-#[test]
-fn image_flakes_build_guest_recipes_through_the_mvm_flake() {
-    for image in IMAGE_FLAKES {
-        let path = nix_dir().join("images").join(image).join("flake.nix");
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} must be present: {e}", path.display()));
-        let code = nix_code_only(&content);
-        let normalized = normalized_whitespace(&code);
-
-        assert!(
-            normalized.contains("mvm = (import (workspaceRoot + \"/nix/flake.nix\")).outputs {")
-                && normalized.contains("mvm-workspace = workspace;"),
-            "{image} must evaluate the mvm flake's outputs against its filtered workspace"
-        );
-        assert!(
-            !code.contains("/nix/packages/"),
-            "{image} must not path-import a guest recipe; use mvm.packages.<system>.*"
-        );
-        // The workspace filter stages the source the mvm flake is called
-        // with, so it is the one nix/lib file an image flake still reads.
-        for (idx, _) in code.match_indices("/nix/lib") {
-            assert!(
-                code[idx..].starts_with("/nix/lib/workspace-filter.nix"),
-                "{image} must take mkGuest and the host-binaries manifest from the mvm flake, \
-                 not import nix/lib directly"
-            );
-        }
-        for (idx, _) in code.match_indices("mvm.packages.${system}.") {
-            let rest = &code[idx + "mvm.packages.${system}.".len()..];
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect();
-            if name.is_empty() {
-                // `mvm.packages.${system}."mvm-sdk-cdylib-${libc}"`
-                assert!(
-                    rest.starts_with("\"mvm-sdk-cdylib-${libc}\""),
-                    "{image} indexes mvm.packages with an unexpected expression"
-                );
-                continue;
-            }
-            assert!(
-                EXPORTED_GUEST_RECIPES.contains(&name.as_str()),
-                "{image} consumes mvm.packages.<system>.{name}, which the mvm flake does not export"
-            );
-        }
-    }
 }

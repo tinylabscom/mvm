@@ -1,8 +1,9 @@
 //! Firecracker builder-image resolver.
 //!
 //! Firecracker boots the builder image exactly as Stage 0 left it under
-//! `builder_vm_cache_dir()/<arch>/`. That image is built from this tree's
-//! `nix/images/builder-vm` flake, which installs `mvm-host-vm-init` at
+//! `builder_vm_cache_dir()/<arch>/`. That image comes from mvm-images' builder
+//! flake (built from a selected checkout, or fetched from the pinned image
+//! set), which installs `mvm-host-vm-init` at
 //! `/sbin/mvm-host-vm-init` itself, so there is nothing to bake in and no
 //! patcher VM to run — the libkrun builder boots the same files the same way,
 //! and like libkrun the image is only as current as the last bootstrap.

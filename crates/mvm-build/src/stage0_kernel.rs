@@ -35,8 +35,8 @@
 //!
 //! The scope is deliberately narrow. It covers the kernel that boots Stage 0
 //! and nothing else — the builder image and the workload kernel keep the
-//! local-build invariant unchanged, so a contributor editing
-//! `nix/images/builder-vm/flake.nix` still sees their change on the next boot.
+//! local-build invariant unchanged, so a contributor editing the builder flake
+//! in their selected mvm-images checkout still sees the change on the next boot.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

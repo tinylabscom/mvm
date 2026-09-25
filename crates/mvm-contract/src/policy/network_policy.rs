@@ -108,7 +108,7 @@ pub enum NetworkPreset {
     Dev,
     /// LLM-agent preset: the LLM inference APIs an agent typically
     /// calls (Anthropic, OpenAI), plus GitHub for source operations.
-    /// Minimum surface for `nix/images/examples/llm-agent/`'s
+    /// Minimum surface for `nix/examples/llm-agent/`'s
     /// `claude-code-vm`. Strictly smaller than `dev` — does NOT include
     /// package registries,
     /// because an agent VM is meant to run trusted closures, not

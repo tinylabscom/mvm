@@ -6,8 +6,8 @@
 //! `<cache_root>/<version>/<arch>/`. Its attestability comes from the
 //! reproducible cargo build of the pinned agent source plus the content
 //! hash, not from Nix. Nix remains the build for kernels, images, and
-//! overlays, where toolchain variance matters; `nix/images/initramfs`
-//! stays as the optional publish-path build of the same artifact. This
+//! overlays, where toolchain variance matters; mvm-images' initramfs flake
+//! is the publish-path build of the same artifact. This
 //! module mirrors the runtime-overlay orchestration but is intentionally
 //! smaller because the artifact has no verity sidecar and no per-rootfs
 //! variation.

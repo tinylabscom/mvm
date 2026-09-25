@@ -74,8 +74,8 @@ pub enum ReleaseTrain {
     /// `release.yml`, signing CLI tarballs under `refs/tags/v<version>`.
     #[default]
     Cli,
-    /// `release-boot-image.yml`, signing images under
-    /// `refs/tags/boot-image/v<version>`.
+    /// The retired `release-boot-image.yml`, which signed the legacy images
+    /// under `refs/tags/boot-image/v<version>`; those releases stay published.
     BootImage,
     /// `mvm-images/release.yml`, signing canonical image sets under
     /// `refs/tags/image-set/v<version>`.

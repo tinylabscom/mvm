@@ -8,7 +8,6 @@ use anyhow::Context;
 #[cfg(feature = "man")]
 use std::path::Path;
 
-mod build_dev_image;
 mod check_abi_layout;
 mod check_adr_coverage;
 mod check_agent_notes;
@@ -47,7 +46,6 @@ mod check_helper_env_hygiene;
 mod check_honesty;
 mod check_image_lock;
 mod check_image_reproducibility;
-pub(crate) mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
 mod check_mutation_witnesses;
@@ -69,7 +67,6 @@ mod check_plan_names;
 mod check_private_mvm_dirs;
 mod check_public_function_names;
 mod check_require_grant_token_allowlist;
-mod check_runtime_overlay_version;
 mod check_sdk_cdylib_deps;
 mod check_sdk_transport_free;
 mod check_single_display_path;
@@ -98,6 +95,7 @@ mod gen_sdk_surface;
 mod gen_stubs;
 mod image_source_ref;
 mod ir_parity;
+pub(crate) mod kernel_config_budget;
 mod perf;
 mod prose_citations;
 mod release_boot_image;
@@ -499,16 +497,11 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_workflow_paths::run(&workspace)
         }
-        Some("check-runtime-overlay-version") => {
-            let workspace = workspace_root();
-            check_runtime_overlay_version::run(&workspace)
-        }
         Some("check-file-size") => {
             let workspace = workspace_root();
             check_file_size::run(&workspace)
         }
         Some("check-binary-size") => check_binary_size::run(&args[2..]),
-        Some("check-kernel-config-budget") => check_kernel_config_budget::run(&args[2..]),
         Some("check-kernel-pin-freshness") => {
             let workspace = workspace_root();
             check_kernel_pin_freshness::run(&workspace, &args[2..])
@@ -516,10 +509,6 @@ fn main() -> Result<()> {
         Some("perf") => perf::run(&args[2..]),
         Some("telemetry-baseline") => telemetry_baseline::run(&args[2..]),
         Some("network-perf") => network_perf::run(&args[2..]),
-        Some("build-dev-image") => {
-            let workspace = workspace_root();
-            build_dev_image::run(&args[2..], &workspace)
-        }
         Some("gen-stubs") => {
             let workspace = workspace_root();
             gen_stubs::generate(&workspace)
@@ -541,7 +530,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -626,10 +615,7 @@ fn main() -> Result<()> {
                 "  check-guest-images-no-builder-tools     assert mkGuest never bakes mvmctl / mvm-builderd into workload guest images"
             );
             eprintln!(
-                "  check-guest-binary-lists                assert the four OCI guest-binary name lists agree and name real [[bin]]s"
-            );
-            eprintln!(
-                "  check-runtime-overlay-version           assert the overlay, SDK sidecar and initramfs VERSION pin matches the workspace version"
+                "  check-guest-binary-lists                assert the OCI guest-binary name lists agree and name real [[bin]]s"
             );
             eprintln!(
                 "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from claim frontmatter embedded in specs/adrs/ outside exempt paths"
@@ -735,9 +721,6 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  network-perf <subcommand>               Validate and compare labelled network benchmark reports"
-            );
-            eprintln!(
-                "  build-dev-image [--arch <arch>]         Build the dev VM image and drop it into nix/images/dev-prebuilt/<arch>/"
             );
             eprintln!(
                 "  gen-stubs                               Regenerate the workload-IR + host↔guest-protocol JSON schemas and their Python/TS SDK types"

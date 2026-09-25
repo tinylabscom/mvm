@@ -286,7 +286,7 @@ if [ "$has_nix" -eq 1 ] && command -v nix >/dev/null 2>&1; then
     #
     #   (2) Canonical formatter from `<repo>/nix/flake.nix`,
     #       regardless of where the staged file lives. Sibling
-    #       flakes (`nix/dev/`, `nix/images/*/`, both
+    #       flakes (`nix/dev/`, both
     #       `*/template_scaffold/`) don't define a `formatter`
     #       output — they're consumers of `nix/`'s lib, not
     #       independent build trees. `nix fmt` walks up to the
