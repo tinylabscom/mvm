@@ -9,7 +9,7 @@ The shared image repositories carry no Kubernetes-specific artifacts —
 consumption is mvm kernel flake -> `mvmctl kernel build` -> launcher
 resolution. Branch: `feat/kubernetes-in-microvm` (merged).
 
-**Status: W1 + W2 merged (#3555); W3 kernel-variant and template
+**Status: PARKED (2026-09-25), low priority. W1 + W2 merged (#3555); W3 kernel-variant and template
 scaffolds landed (#3572, tinylabscom/mvm-templates#2). W4's #3599
 blocker is unproven and reopened: the 2026-09-23 "upstream kernel bug under
 virtualization" conclusion was a reproducer artifact. Every probe ran
@@ -170,7 +170,23 @@ image carries it. `AllowedDeviceNode` gains a mode (default `0o666`; kmsg is
       train's no-consumer-names rule.
 - [ ] Re-diagnose #3599 with a real k3s pod on the `workload-k8s` kernel
       (the container runtime creates the sandbox PID namespace, not an
-      `unshare` probe); any PID-namespace probe uses `--fork`
+      `unshare` probe); any PID-namespace probe uses `--fork`.
+      Progress when parked (2026-09-25):
+  - [x] The template's k3s start script used the same flawed
+        `unshare -Urmp` (k3s itself could not create threads); it now runs
+        `unshare -Urmpf` (tinylabscom/mvm-templates#2, `3ae1cec`)
+  - [x] The template image builds with a release `mvmctl`
+        (`machine build --flake . --dev`, about 1 GiB)
+  - [x] The template README's run example is corrected: a sized mount must
+        be a disk-image file, `:rw` needs `--profile dev`, and Docker Hub
+        pulls need `auth.docker.io` and `production.cloudflare.docker.com`
+  - [ ] Boot on the `workload-k8s` kernel. One attempt hit #3691 (a
+        re-installed revision fails on a read-only `mvm-meta.json`; worked
+        around with `chmod -R u+w`); the next was still starting after four
+        minutes on a heavily loaded host when the lane was parked
+  - [ ] Node Ready, then a Go pod init (CoreDNS) Running; then settle the
+        template README's open items (pod networking with no guest NIC,
+        cgroup delegation, bridge-nf sysctls)
 - [ ] Docs guide page (`public/src/content/docs/guides/`)
 - [ ] Amend the "Kubernetes compatibility" deliberately-not-claimed entry in
       `public/src/content/docs/security/sandbox-parity-status.md`: the claim

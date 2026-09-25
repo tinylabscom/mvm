@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-24
+Last updated: 2026-09-25
 
 ## In progress
 
@@ -84,7 +84,9 @@ Last updated: 2026-09-24
       #3599 is reopened: its "upstream kernel bug" was an `unshare -p`
       probe without `--fork` (fails the same on bare metal), so template
       integration, E2E, and docs are unproven rather than blocked until a
-      real k3s pod runs on the `workload-k8s` kernel.
+      real k3s pod runs on the `workload-k8s` kernel. Parked 2026-09-25 as
+      low priority: template start script fixed and image builds; no pod
+      has run (plan W4 records the progress).
 
 - [ ] **GPU compute by API remoting over vsock.**
       Epic #3560; `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029's
