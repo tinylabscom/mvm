@@ -2273,6 +2273,51 @@ fn only_a_cli_release_can_become_the_latest_release() {
     );
 }
 
+/// Pull requests compile `mvmctl` with the exact feature set the release
+/// builds it with.
+///
+/// v0.18.0-rc.2's tag died at compile time in its macOS documented-surface
+/// lane: an item gated for one release feature and used under another built in
+/// every partial combination CI checked, and only the full set broke. The step
+/// reads the set out of release.yml, so it cannot drift from what ships.
+#[test]
+fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
+    let release = release_workflow();
+    let features: Vec<&str> = release
+        .lines()
+        .find_map(|line| line.strip_prefix("  MVMCTL_RELEASE_FEATURES: "))
+        .expect("release.yml must declare MVMCTL_RELEASE_FEATURES as a workflow env line")
+        .trim()
+        .split(',')
+        .collect();
+    assert!(
+        features.contains(&"embed-host-bins") && features.contains(&"release-artifact-bootstrap"),
+        "the parsed set no longer looks like the release's: {features:?}"
+    );
+
+    let ci = ci_workflow();
+    let lane = job_block(&ci, "lint-features-embed");
+    assert!(
+        lane.contains(
+            "features=\"$(sed -n 's/^  MVMCTL_RELEASE_FEATURES: *//p' .github/workflows/release.yml)\""
+        ),
+        "the CI step must read the feature set from release.yml, not carry a copy"
+    );
+    assert!(
+        lane.contains(r#"cargo check --locked -p mvmctl --bins --features "$features""#),
+        "the CI step must compile the mvmctl binary with that set"
+    );
+    assert!(
+        lane.contains("uses: ./.github/actions/install-zigbuild"),
+        "`embed-host-bins` cross-compiles the host payload, which needs the pinned zig"
+    );
+    let aggregate = job_block(&ci, "lint");
+    assert!(
+        aggregate.contains("lint-features-embed"),
+        "the lane must feed the required Lint aggregate"
+    );
+}
+
 /// `just smoke-fresh-install` runs the same script the release gate runs, so a
 /// maintainer can reproduce a red first-run lane locally.
 #[test]
