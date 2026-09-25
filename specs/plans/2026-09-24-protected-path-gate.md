@@ -1,5 +1,8 @@
 # Plan: Protected-path gate — refuse guest-authored changes to CI/test/build files
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Status
 
 **Not started.** Drafted 2026-09-24 from the sandbox-hardening grade card
