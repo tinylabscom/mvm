@@ -131,6 +131,14 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             vec![artifact(&format!("stage0-vmlinux{suffix}"), kernel)],
             vec![VirtioVsock],
         ),
+        ImageSetRole::Initramfs => (
+            None,
+            vec![artifact(
+                &format!("initramfs{suffix}.tar.gz"),
+                ArtifactFormat::TarGz,
+            )],
+            vec![],
+        ),
         ImageSetRole::QemuWasmSmokePack => (
             None,
             vec![artifact(
@@ -619,6 +627,7 @@ mod serde_shape {
                 r#""stage0_bootstrap_kernel""#,
             ),
             (ImageSetRole::QemuWasmSmokePack, r#""qemu_wasm_smoke_pack""#),
+            (ImageSetRole::Initramfs, r#""initramfs""#),
         ];
         for (role, json) in roles {
             assert_eq!(serde_json::to_string(&role).unwrap(), json);
@@ -737,6 +746,42 @@ mod structure {
 
     fn refused(manifest: &ImageSetManifest) -> ImageSetError {
         validate_structure(manifest).unwrap_err()
+    }
+
+    #[test]
+    fn a_set_carrying_per_arch_initramfs_members_is_well_formed_and_complete() {
+        let mut manifest = manifest();
+        for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+            manifest
+                .members
+                .push(member(ImageSetRole::Initramfs, MemberTarget::Arch(arch)));
+        }
+        validate_structure(&manifest).unwrap();
+        require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
+        let selected = select_member(
+            &manifest,
+            ImageSetRole::Initramfs,
+            GuestArch::Aarch64,
+            &backend(),
+        )
+        .unwrap();
+        assert_eq!(
+            selected.artifacts[0].name.as_str(),
+            "initramfs-aarch64.tar.gz"
+        );
+    }
+
+    /// Published sets carry no initramfs member yet, so requiring one would
+    /// refuse every set a released CLI pins. The role joins the requirement
+    /// with the lock that first selects a set carrying it.
+    #[test]
+    fn the_current_train_does_not_yet_require_an_initramfs() {
+        assert!(
+            ImageSetRequirement::current_train()
+                .members()
+                .iter()
+                .all(|required| required.role != ImageSetRole::Initramfs)
+        );
     }
 
     #[test]
