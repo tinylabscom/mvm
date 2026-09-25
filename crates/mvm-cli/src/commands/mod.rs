@@ -352,6 +352,7 @@ fn run_command() -> Result<()> {
         &cli.command,
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
+    crate::host_binaries::source::allow_payload_from_source();
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
@@ -608,40 +609,24 @@ fn register_builder_session_starter() {
 #[cfg(not(feature = "builder-vm"))]
 fn register_builder_session_starter() {}
 
-/// Tell `mvm-build` whether this binary carries the embedded Linux host
-/// binaries.
+/// Tell `mvm-build` whether this binary can supply the Linux host binaries a
+/// builder VM bootstrap needs.
 ///
-/// It cannot see the embed table itself — that lives here, above it — and on a
-/// source checkout it otherwise assumes it must compile a second `mvmctl` to
-/// get one. When this binary already has the payload, it *is* the bootstrap
-/// helper, and the compile is minutes spent reproducing what is already loaded.
+/// It cannot see the payload itself — that lives here, above it. A binary that
+/// carries the payload, or can produce it from its source checkout, *is* the
+/// bootstrap helper.
 #[cfg(feature = "builder-vm")]
 fn declare_embedded_host_binaries() {
     mvm_build::builder_vm_image::register_source_fingerprint_resolver(
         crate::commands::env::builder_vm::current_builder_vm_source_fingerprint,
     );
-    mvm_build::builder_vm_bootstrap::declare_current_exe_carries_host_binaries(
-        !crate::host_binaries::embedded::EMBEDDED.is_empty(),
+    mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
+        crate::host_binaries::source::payload_available(),
     );
 }
 
 #[cfg(not(feature = "builder-vm"))]
 fn declare_embedded_host_binaries() {}
-
-/// Declare the Cargo features the running `mvmctl` was compiled with, as the
-/// root package's comma-separated feature names.
-///
-/// Only the root package can see those, so `main` passes them in. They reach
-/// `mvm-build`, which builds any bootstrap helper this binary needs with the
-/// same set rather than with `embed-host-bins` alone. Without `builder-vm`
-/// there is no helper to build.
-#[cfg(feature = "builder-vm")]
-pub fn declare_binary_features(enabled: &str) {
-    mvm_build::builder_vm_bootstrap::declare_current_exe_features(enabled);
-}
-
-#[cfg(not(feature = "builder-vm"))]
-pub fn declare_binary_features(_enabled: &str) {}
 
 fn register_inhouse_builder() {
     // Wire the driver-backed builder constructors so that

@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-#[path = "src/workspace_graph.rs"]
-mod workspace_graph;
-pub(crate) use workspace_graph::*;
+// Every includer declares `workspace_graph` at its crate root: `mvm-cli` as an
+// ordinary module, the build script and the integration test by path. Including
+// it here as well would compile a second copy into `mvm-cli`.
+pub(crate) use crate::workspace_graph::*;
 
 /// The inputs that decide whether two builds of one binary are the same build.
 ///
@@ -97,11 +98,20 @@ pub(crate) fn cache_root_from(
     Some(PathBuf::from(home).join(".cache/mvm/embed"))
 }
 
-/// `cache_root_from` against this process's environment.
+/// `cache_root_from` against this process's environment, unless
+/// `MVM_EMBED_NO_CACHE` switches the store off for this build.
 pub(crate) fn cache_root() -> Option<PathBuf> {
     if std::env::var_os("MVM_EMBED_NO_CACHE").is_some_and(|v| !v.is_empty()) {
         return None;
     }
+    store_root()
+}
+
+/// Where the store lives, whether or not a build may use it.
+///
+/// `mvmctl` producing its payload at run time always goes through the store,
+/// because the store is where the next build finds what it produced.
+pub(crate) fn store_root() -> Option<PathBuf> {
     cache_root_from(
         std::env::var_os("MVM_EMBED_CACHE_DIR"),
         std::env::var_os("HOME"),
@@ -120,12 +130,76 @@ pub(crate) fn artifact_path(root: &Path, key: &str, binary: &str) -> PathBuf {
     root.join(key).join(binary)
 }
 
-/// Copy a cached artifact into place, if the store has it.
-pub(crate) fn lookup(root: &Path, key: &str, binary: &str, dest: &Path) -> bool {
-    let cached = artifact_path(root, key, binary);
-    if !cached.is_file() {
-        return false;
+/// Where the SHA-256 recorded for a stored artifact lives, beside it.
+pub(crate) fn digest_path(root: &Path, key: &str, binary: &str) -> PathBuf {
+    root.join(key).join(format!("{binary}.sha256"))
+}
+
+/// What the store holds for one binary under one key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stored {
+    Missing,
+    /// Present, and its bytes still hash to the digest recorded when it was
+    /// published.
+    Verified {
+        path: PathBuf,
+        sha256: String,
+    },
+    /// Present, but its bytes no longer hash to the recorded digest.
+    Corrupt {
+        path: PathBuf,
+        recorded: String,
+        actual: String,
+    },
+}
+
+/// Read one stored artifact and check it against its recorded digest.
+///
+/// The key proves which *sources* an entry was built from; only the digest can
+/// say the bytes are still the ones that were built. An entry published before
+/// digests were recorded has none, and adopts the digest of its bytes as they
+/// stand — the same trust every restore gave it until now.
+pub(crate) fn inspect(root: &Path, key: &str, binary: &str) -> Stored {
+    let path = artifact_path(root, key, binary);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Stored::Missing;
+    };
+    let actual = hex(Sha256::digest(&bytes).as_slice());
+    let digest = digest_path(root, key, binary);
+    match std::fs::read_to_string(&digest) {
+        Ok(recorded) if recorded.trim() == actual => Stored::Verified {
+            path,
+            sha256: actual,
+        },
+        Ok(recorded) => Stored::Corrupt {
+            path,
+            recorded: recorded.trim().to_string(),
+            actual,
+        },
+        Err(_) => {
+            write_digest(&digest, &actual);
+            Stored::Verified {
+                path,
+                sha256: actual,
+            }
+        }
     }
+}
+
+/// Record `sha256` at `digest`, staged and renamed like the artifact itself.
+fn write_digest(digest: &Path, sha256: &str) {
+    let staged = digest.with_extension(format!("sha256.tmp-{}", std::process::id()));
+    if std::fs::write(&staged, sha256).is_err() || std::fs::rename(&staged, digest).is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+}
+
+/// Copy a cached artifact into place, if the store has it and it still matches
+/// its recorded digest.
+pub(crate) fn lookup(root: &Path, key: &str, binary: &str, dest: &Path) -> bool {
+    let Stored::Verified { path: cached, .. } = inspect(root, key, binary) else {
+        return false;
+    };
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -201,7 +275,12 @@ pub(crate) fn stored_keys(root: &Path) -> Vec<StoredKey> {
         };
         let (mut bytes, mut used) = (0u64, 0u64);
         if let Ok(files) = std::fs::read_dir(&path) {
-            for file in files.flatten() {
+            // Artifacts only. A digest is a few bytes, and counting it would
+            // make the ceiling mean something other than binary bytes.
+            let artifacts = files
+                .flatten()
+                .filter(|file| !file.file_name().to_string_lossy().ends_with(".sha256"));
+            for file in artifacts {
                 let Ok(meta) = file.metadata() else { continue };
                 bytes = bytes.saturating_add(meta.len());
                 // `mtime`, not `atime`: many filesystems mount `noatime`, so
@@ -249,5 +328,12 @@ pub(crate) fn install(root: &Path, key: &str, binary: &str, source: &Path) {
     }
     if std::fs::rename(&staged, dir.join(binary)).is_err() {
         let _ = std::fs::remove_file(&staged);
+        return;
+    }
+    if let Ok(bytes) = std::fs::read(source) {
+        write_digest(
+            &digest_path(root, key, binary),
+            &hex(Sha256::digest(&bytes).as_slice()),
+        );
     }
 }

@@ -144,6 +144,10 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
+          # A release build embeds the Linux host binaries by default. This
+          # step verifies an image set and boots nothing, and the runner has no
+          # cross-compile toolchain, so say so rather than probe for one.
+          MVM_EMBED: "0"
         run: |
           set -euo pipefail
           if [[ "${REF}" == refs/tags/v* ]]; then

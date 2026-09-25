@@ -5,15 +5,18 @@
 
 #[path = "../build_embed_cache.rs"]
 mod build_embed_cache;
+#[path = "../src/workspace_graph.rs"]
+mod workspace_graph;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use build_embed_cache::{
-    DEFAULT_MAX_BYTES, KeyInputs, StoredKey, WorkspaceGraph, artifact_key, artifact_path,
-    cache_root_from, hash_file, hash_member, hash_tree, install, lookup, max_bytes_from,
-    parse_manifest_deps, parse_package_name, prune, select_victims, stored_keys, workspace_closure,
+    DEFAULT_MAX_BYTES, KeyInputs, Stored, StoredKey, WorkspaceGraph, artifact_key, artifact_path,
+    cache_root_from, digest_path, hash_file, hash_member, hash_tree, inspect, install, lookup,
+    max_bytes_from, parse_manifest_deps, parse_package_name, prune, select_victims, stored_keys,
+    workspace_closure,
 };
 
 fn graph(edges: &[(&str, &[&str])]) -> WorkspaceGraph {
@@ -324,6 +327,72 @@ fn publishing_then_restoring_round_trips_the_bytes() {
         std::fs::read(&restored).expect("read"),
         b"\x7fELF built here"
     );
+}
+
+/// The key says which sources an entry was built from; only the recorded
+/// digest can say its bytes are still the ones that were built.
+#[test]
+fn a_stored_entry_whose_bytes_changed_is_not_restored() {
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("mvm-host-vm-init");
+    std::fs::write(&built, b"built").expect("write");
+    install(store.path(), "keyA", "mvm-host-vm-init", &built);
+
+    std::fs::write(
+        artifact_path(store.path(), "keyA", "mvm-host-vm-init"),
+        b"tampered",
+    )
+    .expect("tamper");
+
+    assert!(matches!(
+        inspect(store.path(), "keyA", "mvm-host-vm-init"),
+        Stored::Corrupt { .. }
+    ));
+    assert!(!lookup(
+        store.path(),
+        "keyA",
+        "mvm-host-vm-init",
+        &work.path().join("out/mvm-host-vm-init")
+    ));
+}
+
+#[test]
+fn publishing_records_the_digest_of_the_bytes() {
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("mvm-host-vm-init");
+    std::fs::write(&built, b"built").expect("write");
+    install(store.path(), "keyA", "mvm-host-vm-init", &built);
+
+    let recorded = std::fs::read_to_string(digest_path(store.path(), "keyA", "mvm-host-vm-init"))
+        .expect("digest recorded");
+    assert_eq!(recorded, hash_file(&built));
+    assert_eq!(
+        inspect(store.path(), "keyA", "mvm-host-vm-init"),
+        Stored::Verified {
+            path: artifact_path(store.path(), "keyA", "mvm-host-vm-init"),
+            sha256: hash_file(&built),
+        }
+    );
+}
+
+/// Entries published before digests were recorded stay usable, and are given
+/// one on first read.
+#[test]
+fn an_entry_without_a_digest_adopts_one() {
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("mvm-host-vm-init");
+    std::fs::write(&built, b"built").expect("write");
+    install(store.path(), "keyA", "mvm-host-vm-init", &built);
+    std::fs::remove_file(digest_path(store.path(), "keyA", "mvm-host-vm-init")).expect("rm");
+
+    assert!(matches!(
+        inspect(store.path(), "keyA", "mvm-host-vm-init"),
+        Stored::Verified { .. }
+    ));
+    assert!(digest_path(store.path(), "keyA", "mvm-host-vm-init").is_file());
 }
 
 #[test]

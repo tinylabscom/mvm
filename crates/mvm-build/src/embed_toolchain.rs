@@ -1,12 +1,12 @@
 //! The pinned cross-compile toolchain that produces mvmctl's embedded Linux
 //! host binaries: which zig, which Rust, which musl target.
 //!
-//! Two consumers, which is why this sits in `mvm-build` rather than in the
-//! crate that owns the embed table. `crates/mvm-cli/build.rs` `#[path]`-includes
-//! it to *run* the cross-compile, and panics are the right failure there — a
-//! build script that cannot find its toolchain has nothing to fall back on.
-//! `libkrun_builder`'s bootstrap-helper resolution calls the `try_` variants to
-//! decide, in milliseconds, whether spawning that build is worth the wait.
+//! Two consumers compile the payload with it: `crates/mvm-cli/build.rs`, which
+//! `#[path]`-includes this file because a build script cannot depend on a
+//! workspace crate, and `mvmctl` itself, which builds the payload from its
+//! checkout when it was compiled without one. Both ask
+//! [`check_toolchain_ready`] first, so a missing toolchain is reported in
+//! milliseconds rather than at the end of a compile.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -89,10 +89,6 @@ pub fn strip_glibc(t: &str) -> &str {
     t.split('.').next().unwrap()
 }
 
-pub fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
-    resolve_pinned_zig(zig_pin).unwrap_or_else(|reason| panic!("{reason}"))
-}
-
 /// The pinned zig, or why it could not be found.
 ///
 /// `Ok(None)` means a matching zig is already on `PATH`: nothing to pin
@@ -118,11 +114,7 @@ pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
     ))
 }
 
-pub fn rustup_cargo_and_rustc(target: &str, toolchain: &str) -> (String, String) {
-    try_rustup_cargo_and_rustc(target, toolchain).unwrap_or_else(|reason| panic!("{reason}"))
-}
-
-/// `rustup_cargo_and_rustc` for a caller that has somewhere to go on failure.
+/// The pinned toolchain's `cargo` and `rustc`, provided it carries `target`.
 pub fn try_rustup_cargo_and_rustc(
     target: &str,
     toolchain: &str,
@@ -163,6 +155,28 @@ pub fn try_rustup_cargo_and_rustc(
          Install it with `just toolchain-embed`, or with `rustup toolchain install {toolchain} \
          --profile minimal` followed by `rustup target add {target} --toolchain {toolchain}`, or \
          set MVM_EMBED_CARGO and MVM_EMBED_RUSTC to an equivalent pinned toolchain"
+    ))
+}
+
+/// Whether this host can cross-compile the payload under `pin`.
+///
+/// Runs the resolutions the compile itself makes, and compiles nothing, so a
+/// caller learns in milliseconds what a failed compile would take minutes to
+/// report.
+pub fn check_toolchain_ready(pin: &Pin) -> Result<(), String> {
+    resolve_pinned_zig(&pin.zig)?;
+    let (cargo, _) = try_rustup_cargo_and_rustc(strip_glibc(&pin.target), &pin.rust)?;
+    // `--help`, not `--version`: the subcommand has no version flag, and cargo
+    // fails `--help` too when no `cargo-zigbuild` is installed to dispatch to.
+    let zigbuild = Command::new(&cargo).args(["zigbuild", "--help"]).output();
+    if zigbuild.is_ok_and(|out| out.status.success()) {
+        return Ok(());
+    }
+    Err(format!(
+        "cargo-zigbuild {} is required to cross-compile the embedded host binaries but \
+         `{cargo} zigbuild` did not run. Install it with `cargo install cargo-zigbuild \
+         --version {} --locked`.",
+        pin.cargo_zigbuild, pin.cargo_zigbuild
     ))
 }
 
@@ -298,6 +312,26 @@ aarch64 = "aarch64-unknown-linux-musl"
         assert_eq!(pin.zig, "0.13.0");
         assert_eq!(pin.cargo_zigbuild, "0.23.0");
         assert_eq!(pin.target, "aarch64-unknown-linux-musl");
+    }
+
+    #[test]
+    fn strip_glibc_removes_only_the_version_suffix() {
+        assert_eq!(
+            strip_glibc("aarch64-unknown-linux-gnu.2.17"),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            strip_glibc("aarch64-unknown-linux-musl"),
+            "aarch64-unknown-linux-musl"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_arch_is_refused_by_name() {
+        let toolchain: toml::Value =
+            toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
+        let reason = resolve_target_for_arch(&toolchain, "riscv64").unwrap_err();
+        assert!(reason.contains("`riscv64`"), "{reason}");
     }
 
     /// The readiness probe reports rather than panics, so its caller has to be

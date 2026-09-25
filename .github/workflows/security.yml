@@ -217,6 +217,11 @@ jobs:
       SOURCE_DATE_EPOCH: "1700000000"
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-D warnings --remap-path-prefix=/home/runner/work=."
+      # A release build now embeds the Linux host binaries by default, and
+      # Build B would restore them from the content store Build A filled —
+      # which `cargo clean` does not touch — so the comparison would say
+      # nothing about them. Keep this lane's subject what it was.
+      MVM_EMBED: "0"
     steps:
       - uses: actions/checkout@v6
 

@@ -29,7 +29,7 @@ pub mod update;
 pub mod watch;
 pub(crate) mod workspace_graph;
 
-pub use commands::{declare_binary_features, run};
+pub use commands::run;
 
 /// Launch-budget contract consumed by external validation harnesses.
 pub mod launch_contract {
