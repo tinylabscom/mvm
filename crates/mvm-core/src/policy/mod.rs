@@ -27,9 +27,8 @@ pub mod toml_loader;
 // `crate::policy::{security,reversible_replacement,policies,redaction,bundle,projection}::X`
 // path keeps resolving unchanged.
 pub use mvm_contract::policy::{
-    action_budget, approval, bundle, policies, projection, redaction, reversible_replacement,
-    approval, bundle, policies, projection, protected_paths, redaction, reversible_replacement,
-    security,
+    action_budget, approval, bundle, policies, projection, protected_paths, redaction,
+    reversible_replacement, security,
 };
 
 pub use action_budget::ActionBudget;
