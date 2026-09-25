@@ -415,9 +415,9 @@ fn last_admitted_plan_names_the_cached_rootfs_digest(world: &mut CliWorld) {
         .unwrap_or_else(|error| panic!("read audit chain {}: {error}", chain_path.display()));
     let admitted = chain
         .lines()
+        .rev()
         .filter_map(|line| serde_json::from_str::<mvm_contract::verify::SignedEnvelope>(line).ok())
-        .filter(|envelope| envelope.entry.event == "plan.admitted")
-        .last()
+        .find(|envelope| envelope.entry.event == "plan.admitted")
         .unwrap_or_else(|| panic!("no plan.admitted entry in {}", chain_path.display()));
     assert_eq!(
         admitted.entry.image_sha256,
