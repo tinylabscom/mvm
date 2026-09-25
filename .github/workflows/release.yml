@@ -154,6 +154,8 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-gpu-endpoint
           else
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-host-agent \
@@ -161,6 +163,8 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-gpu-endpoint
           fi
 
       - name: Verify Linux release payloads are statically linked
@@ -243,7 +247,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
           fi

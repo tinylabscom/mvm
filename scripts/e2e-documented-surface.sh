@@ -302,6 +302,7 @@ just build-supervisors
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
+  find "$root" -type f -name mvm-gpu-endpoint 2>/dev/null | grep -q . || return 1
   if [[ "$(uname -s)" == "Darwin" ]]; then
     find "$root" -type f -name mvm-hvf-supervisor 2>/dev/null | grep -q . || return 1
   fi
