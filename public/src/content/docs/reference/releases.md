@@ -19,11 +19,32 @@ GitHub Release:
   aarch64 and x86_64 runners and uploads `vmlinux-<arch>-<variant>` +
   `kernel-<arch>-checksums-sha256.txt`.
 
+## Promotion: a release reaches users only after a fresh install boots
+
+`release.yml` publishes every tag as a GitHub prerelease. A stable tag stays
+one until the `first-run-smoke` job has installed it the way a new user
+would — the tag's own `install.sh`, pinned to the tag, into a throwaway `HOME`,
+builder bootstrap included — and run the README's first command,
+`mvmctl machine run --image alpine -- echo <token>`, with stdin closed and a
+time budget. It runs on the self-hosted Apple Silicon runner (HVF) and on a
+hosted Linux runner with KVM (Firecracker). When every lane prints its token,
+`promote-release` makes the tag a full release and GitHub's latest, and
+dispatches the site deployment that bakes it into `https://runmvm.com/install.sh`
+as the offline fallback. A release candidate runs the same smoke and stays a
+prerelease.
+
+Until then nothing moves a user onto the tag: `install.sh` installs the newest
+full release, `mvmctl env update` follows GitHub's latest marker, and the
+served installer's fallback still names the previous release. A red smoke
+leaves the tag staged; the fix ships as a new tag. The same check runs locally
+with `just smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
+alone.
+
 ## How each install path consumes a release
 
 | Path | What it pulls |
 |------|---------------|
-| `install.sh` (curl one-liner) | `mvmctl-<target>.tar.gz` + `checksums-sha256.txt` (+ cosign `.bundle` if cosign present) |
+| `install.sh` (curl one-liner) | the newest full `v*` release publishing `mvmctl-<target>.tar.gz` (or `MVM_VERSION`): that tarball + `checksums-sha256.txt` + its `.bundle` |
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl env update` | the tarball for the latest release, in-place swap |

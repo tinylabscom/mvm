@@ -907,8 +907,12 @@ jobs:
             exit 1
           fi
           RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
+          # Never GitHub's "Latest": that marker is how `mvmctl update` finds a
+          # CLI release, and a boot image carries no mvmctl. `boot-image/v0.1.5`
+          # held it while the newest CLI release was v0.17.0.
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
+            --latest=false \
             --generate-notes \
             --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"

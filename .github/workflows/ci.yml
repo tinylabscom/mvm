@@ -205,6 +205,8 @@ jobs:
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
                      scripts/installer-compat/*.sh \
+                     scripts/smoke-fresh-install.sh \
+                     scripts/pin-installer-default.sh \
                      .githooks/pre-commit \
                      .githooks/pre-commit.test.sh
 
@@ -659,6 +661,23 @@ jobs:
             --test embedded_binaries --test host_binaries_extract \
             --test host_binaries_manifest --test dispatch_host_bin_dir
           cargo check -p mvmctl --features embed-host-bins --bins
+
+      # The release workflow builds `mvmctl` with exactly this feature set and
+      # nothing else on a pull request does. An item gated for one feature and
+      # used under another compiles in every partial combination and breaks
+      # only the tag's build — which is how v0.18.0-rc.2 died at its macOS
+      # documented-surface lane, after the tag was pushed. Read from
+      # release.yml rather than copied, so the two cannot drift apart.
+      - name: mvmctl with the release feature set
+        run: |
+          set -euo pipefail
+          features="$(sed -n 's/^  MVMCTL_RELEASE_FEATURES: *//p' .github/workflows/release.yml)"
+          if [ -z "$features" ]; then
+            echo "::error::could not read MVMCTL_RELEASE_FEATURES from release.yml" >&2
+            exit 1
+          fi
+          echo "release feature set: $features"
+          cargo check --locked -p mvmctl --bins --features "$features"
 
   lint:
     name: Lint (fmt + clippy + policy)
