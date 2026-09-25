@@ -245,9 +245,133 @@ fn blank_char_literal(chars: &[char], start: usize, out: &mut String) -> usize {
     i
 }
 
+/// Blank every item carrying a `#[cfg(test)]` or `#[test]` attribute out of
+/// text that
+/// [`blank_comments_and_strings`] has already blanked, keeping its length and
+/// newlines.
+///
+/// An item ends at its first top-level `;` or at the `}` closing its first
+/// brace, whichever comes first, so `#[cfg(test)] mod tests;`, a test-only
+/// `use`, and an inline `mod tests { .. }` are all dropped while the
+/// production code after them is kept. Splitting the file at the first
+/// `#[cfg(test)]` instead hides everything after an inline test module — in
+/// a file that keeps its tests above a platform module, that is most of the
+/// file. The input must be blanked: a brace inside a string or a comment would
+/// otherwise be counted.
+#[must_use]
+pub fn strip_cfg_test_items(blanked: &str) -> String {
+    blank_ranges(blanked, &cfg_test_item_ranges(blanked))
+}
+
+/// The char ranges of every `#[cfg(test)]` item in `blanked` (see
+/// [`strip_cfg_test_items`]). Char indices line up with the unblanked source,
+/// so a caller that must keep string literals can blank these ranges out of
+/// the original text instead.
+#[must_use]
+pub fn cfg_test_item_ranges(blanked: &str) -> Vec<std::ops::Range<usize>> {
+    const ATTRS: [&str; 2] = ["#[cfg(test)]", "#[test]"];
+    let attrs: Vec<Vec<char>> = ATTRS.iter().map(|a| a.chars().collect()).collect();
+    let chars: Vec<char> = blanked.chars().collect();
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let Some(attr) = attrs
+            .iter()
+            .find(|attr| chars.get(i..i + attr.len()) == Some(&attr[..]))
+        else {
+            i += 1;
+            continue;
+        };
+        let end = cfg_test_item_end(&chars, i + attr.len());
+        ranges.push(i..end);
+        i = end;
+    }
+    ranges
+}
+
+/// Replace every char of `text` inside `ranges` with a space, keeping newlines.
+#[must_use]
+pub fn blank_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
+    text.chars()
+        .enumerate()
+        .map(|(index, c)| {
+            if c != '\n' && ranges.iter().any(|range| range.contains(&index)) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Index one past the end of the item starting at `from`.
+///
+/// A `;` inside parentheses or brackets — `[u8; 32]` in a signature — does not
+/// end the item.
+fn cfg_test_item_end(chars: &[char], from: usize) -> usize {
+    let mut braces = 0usize;
+    let mut groups = 0usize;
+    let mut i = from;
+    while i < chars.len() {
+        match chars[i] {
+            '(' | '[' => groups += 1,
+            ')' | ']' => groups = groups.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => {
+                braces = braces.saturating_sub(1);
+                if braces == 0 {
+                    return i + 1;
+                }
+            }
+            ';' if braces == 0 && groups == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cfg_test_items_are_blanked_and_the_code_after_them_is_kept() {
+        let src = "fn a() {}\n#[cfg(test)]\nmod tests { fn t() { x(); } }\nfn b() { live(); }\n#[cfg(test)]\nmod more;\n#[cfg(test)] use foo::bar;\nfn c() {}\n";
+        let out = strip_cfg_test_items(&blank_comments_and_strings(src));
+        assert_eq!(out.chars().count(), src.chars().count());
+        assert_eq!(out.lines().count(), src.lines().count());
+        assert!(out.contains("fn a()"));
+        assert!(out.contains("live();"), "code after a test module survives");
+        assert!(out.contains("fn c()"));
+        assert!(!out.contains("x();"));
+        assert!(!out.contains("mod more"));
+        assert!(!out.contains("foo::bar"));
+        assert!(!out.contains("cfg(test)"));
+    }
+
+    #[test]
+    fn a_test_fn_outside_a_test_module_is_blanked() {
+        let src = "#[cfg(all(target_os = \"linux\", feature = \"x\"))]\n#[test]\nfn live_probe() { dial(); }\nfn kept() {}\n";
+        let out = strip_cfg_test_items(&blank_comments_and_strings(src));
+        assert!(!out.contains("dial()"));
+        assert!(out.contains("fn kept()"));
+    }
+
+    #[test]
+    fn a_semicolon_in_an_array_type_does_not_end_the_item() {
+        let src = "#[cfg(test)]\nfn keys() -> [u8; 32] { secret(); [0; 32] }\nfn live() {}\n";
+        let out = strip_cfg_test_items(&blank_comments_and_strings(src));
+        assert!(!out.contains("secret()"));
+        assert!(out.contains("fn live()"));
+    }
+
+    #[test]
+    fn a_cfg_test_mention_in_a_comment_hides_nothing() {
+        let src = "// the tests live in `#[cfg(test)] mod tests`\nfn live() { dial(); }\n";
+        let out = strip_cfg_test_items(&blank_comments_and_strings(src));
+        assert!(out.contains("dial();"));
+    }
 
     /// Every caller relies on offsets and line numbers still lining up.
     fn assert_shape_preserved(source: &str, blanked: &str) {

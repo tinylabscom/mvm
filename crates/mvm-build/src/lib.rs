@@ -55,10 +55,8 @@ pub mod cache;
 /// cross-root seed from the host's shared cache, the staging-directory dance
 /// every install uses, and the digest-manifest check that gates admission.
 pub mod cache_install;
-/// Builder-VM egress allowlist proxy — the lib half of the
-/// `mvm-egress-proxy` bin. Kept as a lib module (not bin-inlined) so
-/// its pub API is dead-code-clean on non-Linux and its tests run
-/// cross-platform.
+/// The lib half of the retired `mvm-egress-proxy` bin, which no builder VM
+/// installs or runs any more; see the module docs.
 pub mod egress_proxy;
 pub mod egress_readiness;
 /// The pinned zig + Rust cross-compile toolchain behind `embed-host-bins`.

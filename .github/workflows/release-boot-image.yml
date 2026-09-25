@@ -110,8 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target "$MUSL_TARGET" \
-            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
-            --bin mvm-builderd
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd
           echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
 
       - name: Build builder VM image

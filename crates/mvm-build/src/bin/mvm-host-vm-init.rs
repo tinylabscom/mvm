@@ -87,13 +87,6 @@ mod install;
 #[cfg(any(target_os = "linux", test))]
 #[path = "mvm-host-vm-init/install_spec.rs"]
 mod install_spec;
-#[cfg(any(target_os = "linux", test))]
-#[path = "mvm-host-vm-init/network.rs"]
-mod network;
-#[cfg(any(target_os = "linux", test))]
-#[allow(dead_code)]
-#[path = "mvm-host-vm-init/proxy.rs"]
-mod proxy;
 /// Spawn a workload microVM inside the host VM via a `WorkloadVmm`
 /// backend (Firecracker today). Cross-platform trait +
 /// state-dir/lifecycle logic (tested on macOS); the signal-based
@@ -518,15 +511,44 @@ fn vsock_egress_port_from_cmdline(cmdline: &str) -> Option<u32> {
         .filter(|port| *port > 0)
 }
 
+/// Proxy variables that route a child's traffic through the guest's vsock
+/// egress client. Flake builds and dependency installs both use exactly
+/// this set, so no builder job has a second way out.
+#[cfg(any(target_os = "linux", test))]
+const VSOCK_EGRESS_PROXY_ENV: [(&str, &str); 7] = [
+    ("ALL_PROXY", VSOCK_EGRESS_PROXY_URL),
+    ("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL),
+    ("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL),
+    ("http_proxy", VSOCK_EGRESS_PROXY_URL),
+    ("https_proxy", VSOCK_EGRESS_PROXY_URL),
+    ("NO_PROXY", VSOCK_EGRESS_NO_PROXY),
+    ("no_proxy", VSOCK_EGRESS_NO_PROXY),
+];
+
 #[cfg(any(target_os = "linux", test))]
 fn apply_vsock_egress_proxy_env(cmd: &mut std::process::Command) {
-    cmd.env("ALL_PROXY", VSOCK_EGRESS_PROXY_URL)
-        .env("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL)
-        .env("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL)
-        .env("http_proxy", VSOCK_EGRESS_PROXY_URL)
-        .env("https_proxy", VSOCK_EGRESS_PROXY_URL)
-        .env("NO_PROXY", VSOCK_EGRESS_NO_PROXY)
-        .env("no_proxy", VSOCK_EGRESS_NO_PROXY);
+    cmd.envs(VSOCK_EGRESS_PROXY_ENV);
+}
+
+/// The proxy environment a dependency install runs under, decided from the
+/// kernel cmdline the host booted this builder with.
+///
+/// The builder has no NIC, so the vsock egress client PID 1 forked is the
+/// install's only way to a package index, and the host endpoint behind it is
+/// where the builder's egress policy is enforced. A builder booted without
+/// that client has no path at all; the install is refused rather than left to
+/// time out on its first fetch and blame the index.
+#[cfg(any(target_os = "linux", test))]
+fn install_egress_env(cmdline: &str) -> Result<&'static [(&'static str, &'static str)], String> {
+    if vsock_egress_requested_from_cmdline(cmdline) {
+        Ok(&VSOCK_EGRESS_PROXY_ENV)
+    } else {
+        Err(
+            "builder booted without vsock egress (mvm.vsock_egress=1); a dependency install \
+             has no other way to reach a package index"
+                .to_string(),
+        )
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -883,6 +905,45 @@ mod tests {
                 env.get(key).map(String::as_str),
                 Some(VSOCK_EGRESS_NO_PROXY)
             );
+        }
+    }
+
+    /// A NIC-less builder's install goes out through the vsock egress client
+    /// and nothing else: every proxy variable it gets names that client, and
+    /// the set is the very one a flake build gets.
+    #[test]
+    fn install_on_a_vsock_egress_builder_routes_through_the_egress_client() {
+        let env = install_egress_env(
+            "console=hvc0 root=/dev/vda mvm.vsock_egress=1 mvm.vsock_egress_port=45253",
+        )
+        .expect("a vsock-egress builder admits an install");
+        assert_eq!(env, &VSOCK_EGRESS_PROXY_ENV[..]);
+        for (key, value) in env {
+            if key.eq_ignore_ascii_case("no_proxy") {
+                assert_eq!(*value, VSOCK_EGRESS_NO_PROXY);
+            } else {
+                assert_eq!(
+                    *value, VSOCK_EGRESS_PROXY_URL,
+                    "{key} must name the vsock egress client"
+                );
+            }
+        }
+        assert!(
+            VSOCK_EGRESS_PROXY_URL.starts_with("socks5h://127.0.0.1:"),
+            "the client is guest-loopback and resolves names on the host: {VSOCK_EGRESS_PROXY_URL}"
+        );
+    }
+
+    /// Without the egress client there is no route anywhere, so an install is
+    /// refused up front instead of reaching for a direct connection.
+    #[test]
+    fn install_on_a_builder_without_vsock_egress_is_refused() {
+        for cmdline in [
+            "console=hvc0 root=/dev/vda",
+            "console=hvc0 mvm.vsock_egress=0 root=/dev/vda",
+        ] {
+            let why = install_egress_env(cmdline).expect_err("no egress client, no install");
+            assert!(why.contains("mvm.vsock_egress=1"), "{why}");
         }
     }
 
@@ -1560,8 +1621,7 @@ mod linux {
         append_init_breadcrumb("run_enter", "pid1");
 
         // The Linux kernel doesn't pass a PATH to PID 1, so without
-        // this every `Command::new("iptables")` /
-        // `Command::new("modprobe")` style spawn relies on the
+        // this every `Command::new("modprobe")` style spawn relies on the
         // child to find its binary — which fails on a stock rootfs.
         // Set a canonical PATH that covers the
         // mvm builder VM rootfs layout (busybox at `/bin/*` + extra
@@ -1806,6 +1866,15 @@ mod linux {
             stamp(&timings, |t| {
                 t.job_end_ms = Some(BootTimings::ms_since(anchor))
             });
+            // Same export the cmd.sh arm does below: in disk-transport mode
+            // `/out` only reaches the host as a tar on the output device. Without
+            // this the install writes `result.json` into a directory that dies
+            // with the VM, and the host reports it as never written.
+            if let Some(t) = &disk_transport
+                && let Err(e) = collect_disk_transport_output(t)
+            {
+                eprintln!("mvm-host-vm-init: disk-transport output collection failed: {e}");
+            }
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -2494,25 +2563,6 @@ mod linux {
         }
     }
 
-    /// Set the iptables OUTPUT posture for the given job kind before
-    /// dispatch. Install jobs lock egress (flush + uid-only ACCEPT)
-    /// so untrusted dep code can't reach the network directly; flake
-    /// jobs open egress so nix can fetch substitutes without a proxy.
-    /// Separated from `execute_dispatched_job` so the mapping is
-    /// directly testable — the match is the policy, and an inversion
-    /// would be silent without a unit test pinning the sequences.
-    fn apply_job_posture(
-        job: &crate::builder_request::BuilderJob,
-        ip: &dyn crate::network::IptablesRunner,
-    ) -> Result<(), String> {
-        match job {
-            crate::builder_request::BuilderJob::Install { .. } => {
-                crate::network::reapply_egress_lockdown(ip, crate::network::PROXY_UID)
-            }
-            crate::builder_request::BuilderJob::Flake { .. } => crate::network::open_egress(ip),
-        }
-    }
-
     /// Run one dispatched job: locate cmd.sh under
     /// `/job/<job_dir_relpath>/cmd.sh`, exec it, stream every
     /// stderr line back to `conn` as a `HostVmResponse::StderrChunk`
@@ -2532,23 +2582,6 @@ mod linux {
         cold_boot_timings: Option<BootTimings>,
         disk_transport_active: bool,
     ) -> String {
-        // Set per-job egress posture before dispatch. The install arm
-        // also locks at its own entry for defense in depth, but this
-        // outer reset ensures a prior flake job's open chain never
-        // leaks into a following install and vice versa.
-        let posture_result = apply_job_posture(&job, &crate::network::SystemIptables);
-        if let Err(e) = posture_result {
-            eprintln!("mvm-host-vm-init: dispatch loop: egress posture failed: {e}");
-            let response = crate::dispatch_response::DispatchResponse {
-                job_id,
-                exit_code: 126,
-                stderr_tail: format!("egress posture failed: {e}"),
-                boot_timings: cold_boot_timings,
-                build_ms: 0,
-            };
-            return response.to_json();
-        }
-
         let (exit_code, stderr_tail, build_ms) = match job {
             crate::builder_request::BuilderJob::Flake { .. } => {
                 let cmd_path = format!("{JOB_DIR}/{job_dir_relpath}/cmd.sh");
@@ -2765,7 +2798,6 @@ mod linux {
             InstallContext, InstallError, RESULT_FILENAME, SystemCommandRunner, run_install,
         };
         use crate::install_spec::parse;
-        use crate::proxy::ChildProxyLifecycle;
 
         let bytes = match std::fs::read(spec_path) {
             Ok(b) => b,
@@ -2796,21 +2828,24 @@ mod linux {
             // partial state results.
         }
 
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let egress_env = match crate::install_egress_env(&cmdline) {
+            Ok(env) => env,
+            Err(why) => {
+                eprintln!("mvm-host-vm-init: install job refused: {why}");
+                write_install_failure_at(out_dir, 2, &why);
+                return;
+            }
+        };
+
         let runner = SystemCommandRunner;
-        // The production proxy lifecycle
-        // spawns `mvm-egress-proxy` from PATH. The builder VM
-        // flake installs the binary at `/sbin/mvm-egress-proxy`
-        // (alongside `/sbin/mvm-host-vm-init`), which is on the
-        // kernel's default PATH for PID 1.
-        let mut proxy = ChildProxyLifecycle::default_binary();
         let ctx = InstallContext {
             spec: &spec,
             job_dir: Path::new(job_dir),
             out_dir: Path::new(out_dir),
             runner: &runner,
             extra_path: None,
-            proxy: &mut proxy,
-            iptables: &crate::network::SystemIptables,
+            egress_env,
         };
         let report = match run_install(ctx) {
             Ok(r) => r,
@@ -2828,11 +2863,6 @@ mod linux {
             Err(InstallError::Io(why)) => {
                 eprintln!("mvm-host-vm-init: install pipeline IO: {why}");
                 write_install_failure_at(out_dir, 2, &format!("install pipeline IO: {why}"));
-                return;
-            }
-            Err(InstallError::EgressLockdown(e)) => {
-                eprintln!("mvm-host-vm-init: egress lockdown failed (fatal): {e}");
-                write_install_failure_at(out_dir, 2, &format!("egress lockdown failed: {e}"));
                 return;
             }
         };
@@ -2893,10 +2923,8 @@ mod linux {
         mount_fs_idempotent("sysfs", "/sys", "sysfs")?;
         mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
         mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
-        // `/run` must be a tmpfs so iptables-legacy can write
-        // `/run/xtables.lock`. The rootfs is mounted ro, so without this
-        // `install_egress_lockdown` (called from the install arm) bails with
-        // "Read-only file system" at the first `iptables -A` call.
+        // `/run` must be a tmpfs: the rootfs is mounted read-only and
+        // runtime state (locks, sockets, pid files) lives there.
         // mkGuest's /init does the equivalent for the dev image's boot path.
         mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
         // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
@@ -3530,12 +3558,9 @@ mod linux {
     ///     outside its pid ns / loading a kernel module via the root
     ///     privileges the dispatch loop has as PID 1.
     ///
-    /// Network namespace is intentionally *not* unshared — the
-    /// per-VM iptables baseline already
-    /// gates egress through the proxy, and the build needs the
-    /// proxy reachable. That baseline is re-applied per
-    /// dispatch, so a build can't leave the chain in a state we no
-    /// longer trust without breaking proxy access.
+    /// Network namespace is intentionally *not* unshared. The VM has no
+    /// NIC; the build's only way out is the vsock egress client on
+    /// loopback, and a fresh namespace would lose that loopback.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Isolation {
         Inherit,
@@ -3544,8 +3569,8 @@ mod linux {
 
     /// Unprivileged uid the dispatched build
     /// runs as inside the persistent VM. Picked above the
-    /// `mvm-agent` (1900) / `mvm-worker` (1000) / `mvm-egress-
-    /// proxy` (1801) uids the rest of the rootfs reserves so the
+    /// `mvm-agent` (1900) / `mvm-worker` (1000) uids the rest of
+    /// the rootfs reserves so the
     /// builder identity doesn't collide with any existing service.
     ///
     /// No `/etc/passwd` entry: the build runs as a bare numeric
@@ -4739,114 +4764,6 @@ mod linux {
             std::fs::create_dir(&store).expect("create store");
             std::fs::create_dir(store.join("abc123-some-pkg")).expect("create closure path");
             assert!(!nix_store_needs_seed(base.path()));
-        }
-
-        // --- apply_job_posture tests ---
-
-        struct RecordingIp {
-            calls: std::cell::RefCell<Vec<Vec<String>>>,
-            fail_at: Option<usize>,
-        }
-
-        impl RecordingIp {
-            fn new() -> Self {
-                Self {
-                    calls: std::cell::RefCell::new(Vec::new()),
-                    fail_at: None,
-                }
-            }
-            fn fail_at(idx: usize) -> Self {
-                Self {
-                    calls: std::cell::RefCell::new(Vec::new()),
-                    fail_at: Some(idx),
-                }
-            }
-        }
-
-        impl crate::network::IptablesRunner for RecordingIp {
-            fn run(&self, args: &[&str]) -> Result<(), String> {
-                let mut calls = self.calls.borrow_mut();
-                let idx = calls.len();
-                calls.push(args.iter().map(|s| s.to_string()).collect());
-                if Some(idx) == self.fail_at {
-                    Err(format!("forced failure at {idx}"))
-                } else {
-                    Ok(())
-                }
-            }
-        }
-
-        fn install_job() -> crate::builder_request::BuilderJob {
-            crate::builder_request::BuilderJob::Install {
-                spec_path: "/job/spec.json".to_string(),
-            }
-        }
-
-        fn flake_job() -> crate::builder_request::BuilderJob {
-            crate::builder_request::BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            }
-        }
-
-        #[test]
-        fn apply_job_posture_install_emits_flush_then_three_lockdown_rules() {
-            let ip = RecordingIp::new();
-            apply_job_posture(&install_job(), &ip).expect("happy path");
-            let calls = ip.calls.borrow();
-            // flush + 3 rules = 4 invocations
-            assert_eq!(calls.len(), 4);
-            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
-            assert_eq!(
-                calls[1],
-                vec![
-                    "-A".to_string(),
-                    "OUTPUT".to_string(),
-                    "-o".to_string(),
-                    "lo".to_string(),
-                    "-j".to_string(),
-                    "ACCEPT".to_string(),
-                ]
-            );
-            assert!(calls[2].iter().any(|a| a == "--uid-owner"));
-            assert!(
-                calls[2]
-                    .iter()
-                    .any(|a| a == &crate::network::PROXY_UID.to_string())
-            );
-            assert!(calls[2].iter().any(|a| a == "ACCEPT"));
-            assert_eq!(
-                calls[3],
-                vec!["-P".to_string(), "OUTPUT".to_string(), "DROP".to_string()]
-            );
-        }
-
-        #[test]
-        fn apply_job_posture_flake_emits_flush_then_accept_policy() {
-            let ip = RecordingIp::new();
-            apply_job_posture(&flake_job(), &ip).expect("happy path");
-            let calls = ip.calls.borrow();
-            assert_eq!(calls.len(), 2);
-            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
-            assert_eq!(
-                calls[1],
-                vec!["-P".to_string(), "OUTPUT".to_string(), "ACCEPT".to_string()]
-            );
-        }
-
-        #[test]
-        fn apply_job_posture_install_propagates_error() {
-            // Fail at invocation 0 (the flush) — error surfaces immediately.
-            let ip = RecordingIp::fail_at(0);
-            let result = apply_job_posture(&install_job(), &ip);
-            assert!(result.is_err(), "posture error must propagate");
-        }
-
-        #[test]
-        fn apply_job_posture_flake_propagates_error() {
-            let ip = RecordingIp::fail_at(0);
-            let result = apply_job_posture(&flake_job(), &ip);
-            assert!(result.is_err(), "posture error must propagate");
         }
     }
 }

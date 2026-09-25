@@ -1189,7 +1189,7 @@ fn fold_embedded_binary_identity_distinguishes_inputs() {
     };
     let changed_name = {
         let mut h = Sha256::new();
-        fold_embedded_binary_identity(&mut h, "mvm-egress-proxy", "aa");
+        fold_embedded_binary_identity(&mut h, "mvm-builderd", "aa");
         hex::encode(h.finalize())
     };
 

@@ -2,7 +2,7 @@ name: Install zig + cargo-zigbuild
 description: |
   Plan 115 / ADR-065 — install the pinned cross-compile toolchain that
   mvm-cli's build.rs needs to embed the host-vm binaries
-  (mvm-host-vm-init, mvm-egress-proxy, mvm-builderd) for Linux musl targets
+  (mvm-host-vm-init, mvm-builderd) for Linux musl targets
   (static; the builder VM rootfs has no FHS dynamic loader).
   Versions are pinned in [workspace.metadata.mvm.toolchain] in the root
   Cargo.toml; keep this action in lockstep.

@@ -457,7 +457,7 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
     }
 
     // Layer 2: the embedded host-binary identity (`mvm-host-vm-init`,
-    // `mvm-egress-proxy`). `build.rs` cross-compiles them and embeds the bytes
+    // `mvm-builderd`). `build.rs` cross-compiles them and embeds the bytes
     // in mvmctl; Stage 0 installs those bytes into the rootfs. Hashing the
     // bytes captures the bin source, the `mvm-build` lib, its dep closure, AND
     // the cross-compile toolchain (a gnu→musl switch yields different bytes

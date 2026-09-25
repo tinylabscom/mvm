@@ -13,6 +13,10 @@
 //!    needs to confirm.
 //! 4. Waits for SIGTERM / SIGINT.
 //!
+//! No builder VM runs this binary: it is not in the host-binary manifests,
+//! so `mvmctl` does not embed it and no builder rootfs installs it. See
+//! `mvm_build::egress_proxy` for why it still exists.
+//!
 //! On non-Linux hosts the binary still compiles (for workspace
 //! ergonomics) but prints a hint + exits 1. The production caller
 //! cross-compiles for `<arch>-unknown-linux-musl` from the
