@@ -5,6 +5,14 @@
 //! clearing, no-new-privileges, and the allowlisted inheritable/ambient
 //! capabilities used by the loopback DNS, egress, and restore-time agent.
 //! It intentionally has no shell, NSS lookup, or configuration-file parser.
+//!
+//! The crate depends on `libc` and nothing else. Every image that runs this
+//! helper compiles it from source, the builder image included, so what it
+//! reaches decides which edits rebuild those images. The descriptor hygiene
+//! it applies before exec lives here for that reason; `mvm-agentd` re-exports
+//! it rather than owning a second copy.
+
+pub mod fd_hygiene;
 
 use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "linux")]
@@ -293,10 +301,14 @@ const _: () = {
 
 #[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-const CAP_KILL: u32 = 5;
-const CAP_NET_BIND_SERVICE: u32 = 10;
-const CAP_SYS_ADMIN: u32 = 21;
-const CAP_SYS_TIME: u32 = 25;
+/// `CAP_KILL` in `linux/capability.h`.
+pub const CAP_KILL: u32 = 5;
+/// `CAP_NET_BIND_SERVICE` in `linux/capability.h`.
+pub const CAP_NET_BIND_SERVICE: u32 = 10;
+/// `CAP_SYS_ADMIN` in `linux/capability.h`.
+pub const CAP_SYS_ADMIN: u32 = 21;
+/// `CAP_SYS_TIME` in `linux/capability.h`.
+pub const CAP_SYS_TIME: u32 = 25;
 #[cfg(target_os = "linux")]
 const PR_SET_KEEPCAPS: libc::c_int = 8;
 #[cfg(target_os = "linux")]
@@ -306,7 +318,10 @@ const PR_CAP_AMBIENT: libc::c_int = 47;
 #[cfg(target_os = "linux")]
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
 
-fn main() {
+/// Parse this process's arguments, drop to the requested identity and
+/// capabilities, and exec the command. Never returns: a refused invocation
+/// exits 2, a failed privilege change 126, and a failed exec 127.
+pub fn run() -> ! {
     let invocation = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| {
         eprintln!("mvm-setpriv: {error}");
         std::process::exit(2);
@@ -330,7 +345,7 @@ fn main() {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new(&invocation.command);
         command.args(&invocation.command_args);
-        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        fd_hygiene::configure_close_fds(&mut command, 3, None);
         let error = command.exec();
         eprintln!("mvm-setpriv: exec {:?} failed: {error}", invocation.command);
         std::process::exit(127);
@@ -420,17 +435,6 @@ mod tests {
         .expect("valid helper launch");
         assert_eq!(invocation.capabilities, 1u32 << CAP_SYS_ADMIN);
         assert_eq!(invocation.command_args.len(), 2);
-    }
-
-    #[test]
-    fn capability_numbers_match_the_guest_mount_constants() {
-        assert_eq!(CAP_KILL, mvm_agentd::guest_mount::CAP_KILL);
-        assert_eq!(
-            CAP_NET_BIND_SERVICE,
-            mvm_agentd::guest_mount::CAP_NET_BIND_SERVICE
-        );
-        assert_eq!(CAP_SYS_ADMIN, mvm_agentd::guest_mount::CAP_SYS_ADMIN);
-        assert_eq!(CAP_SYS_TIME, mvm_agentd::guest_mount::CAP_SYS_TIME);
     }
 
     #[test]

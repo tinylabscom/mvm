@@ -75,7 +75,10 @@ const BUDGETS: &[ClosureBudget] = &[
 /// tree measures 229 with no dependency change in the PR that took this down,
 /// so a crate an earlier bump paid for is no longer reachable and the budget
 /// had stopped describing the binary. Same one-crate ratchet on both targets.
-const MACOS_CLOSURE_BUDGET: usize = 229;
+///
+/// 230 (was 229): the `mvm-setpriv` leaf crate, same reason as the Linux
+/// budget bump below.
+const MACOS_CLOSURE_BUDGET: usize = 230;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -214,7 +217,11 @@ const MACOS_CLOSURE_BUDGET: usize = 229;
 /// 235 (was 238): the unused x86_64 KVM VMM in `mvm-runtime` is gone, and with
 /// it `kvm-ioctls`, `kvm-bindings` and the `vmm-sys-util` 0.12 they pinned. The
 /// in-house VMM's `vmm-sys-util` 0.15 stays.
-pub(crate) const CLOSURE_BUDGET: usize = 235;
+///
+/// 236 (was 235): `mvm-setpriv`, the guest privilege-drop helper, moves out of
+/// `mvm-agentd` into its own first-party leaf crate. Its only dependency,
+/// `libc`, was already present, so the one new node is the crate itself.
+pub(crate) const CLOSURE_BUDGET: usize = 236;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

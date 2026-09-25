@@ -2,15 +2,16 @@
 //!
 //! Every other Rust binary in the builder image is embedded in `mvmctl` and
 //! folded into the cache key by its bytes. `mvm-setpriv` is not: the flake
-//! compiles it from workspace source (`cargo build --package mvm-agentd --bin
+//! compiles it from workspace source (`cargo build --package mvm-setpriv --bin
 //! mvm-setpriv`) against the workspace `Cargo.lock`, so its identity has to be
 //! taken from those inputs instead.
 //!
-//! The inputs are derived, not listed: the workspace crates `mvm-agentd`
+//! The inputs are derived, not listed: the workspace crates `mvm-setpriv`
 //! reaches through its manifests, the `Cargo.lock` entries those crates'
 //! non-dev dependencies resolve to, and the parts of the root manifest that
 //! change how they compile. A dependency bump outside that closure — the reason
-//! the whole lockfile is not hashed — leaves the key alone.
+//! the whole lockfile is not hashed — leaves the key alone. The package is a
+//! leaf over `libc`, so in practice the closure is its own source.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ use crate::workspace_graph::{
 };
 
 /// The workspace package whose `mvm-setpriv` binary the builder flake builds.
-pub(super) const SETPRIV_PACKAGE: &str = "mvm-agentd";
+pub(super) const SETPRIV_PACKAGE: &str = "mvm-setpriv";
 
 /// Fold the identity of every input `mvm-setpriv` is compiled from.
 ///
@@ -458,30 +459,84 @@ arrayref = { path = "third_party/arrayref" }
         );
     }
 
-    /// The real tree resolves: every lock entry the closure names exists, the
-    /// setpriv source itself is hashed, and a crate downstream of it is not.
-    #[test]
-    fn the_shipped_workspace_resolves_to_the_setpriv_closure() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn shipped_workspace() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
-            .expect("workspace root");
+            .expect("workspace root")
+    }
 
-        let inputs = SetprivInputs::read(&workspace).expect("the shipped workspace resolves");
+    /// The real tree resolves to the leaf and nothing else: its own source and
+    /// `libc`. A workspace crate or a second external crate in the closure is
+    /// one whose every edit rebuilds the builder image again.
+    #[test]
+    fn the_shipped_setpriv_closure_is_the_leaf_and_libc() {
+        let inputs =
+            SetprivInputs::read(&shipped_workspace()).expect("the shipped workspace resolves");
 
         let paths: Vec<&str> = inputs.sources.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
-            paths.contains(&"crates/mvm-agentd/src/bin/mvm-setpriv.rs"),
-            "the binary's own source must be hashed"
+            paths.contains(&"crates/mvm-setpriv/src/lib.rs"),
+            "the helper's own source must be hashed: {paths:?}"
         );
+        let outside: Vec<&&str> = paths
+            .iter()
+            .filter(|p| !p.starts_with("crates/mvm-setpriv/"))
+            .collect();
         assert!(
-            !paths.iter().any(|p| p.starts_with("crates/mvm-cli/")),
-            "mvm-cli links nothing into mvm-setpriv"
+            outside.is_empty(),
+            "the setpriv closure reaches beyond its leaf: {outside:?}"
         );
+        let external: Vec<&str> = inputs
+            .locked
+            .iter()
+            .map(|e| e.split(' ').next().unwrap_or_default())
+            .collect();
+        assert_eq!(external, vec!["libc"], "{:?}", inputs.locked);
+    }
+
+    /// The key hashes the package the recipe compiles. A recipe pointed at
+    /// another package would build bytes the key never looked at.
+    #[test]
+    fn the_nix_recipe_builds_the_package_the_key_hashes() {
+        let recipe =
+            std::fs::read_to_string(shipped_workspace().join("nix/packages/mvm-setpriv.nix"))
+                .expect("read the setpriv recipe");
+        let flags: Vec<&str> = recipe
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('"') && line.ends_with('"'))
+            .map(|line| line.trim_matches('"'))
+            .collect();
+        let package = flags
+            .iter()
+            .position(|flag| *flag == "--package")
+            .and_then(|at| flags.get(at + 1))
+            .expect("the recipe names a --package");
+        assert_eq!(*package, SETPRIV_PACKAGE);
+        let bin = flags
+            .iter()
+            .position(|flag| *flag == "--bin")
+            .and_then(|at| flags.get(at + 1))
+            .expect("the recipe names a --bin");
+        assert_eq!(*bin, "mvm-setpriv");
+
+        let manifest: toml::Table = std::fs::read_to_string(
+            shipped_workspace().join(format!("crates/{SETPRIV_PACKAGE}/Cargo.toml")),
+        )
+        .expect("read the package manifest")
+        .parse()
+        .expect("parse the package manifest");
+        let bins: Vec<&str> = manifest
+            .get("bin")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|target| target.get("name").and_then(toml::Value::as_str))
+            .collect();
         assert!(
-            inputs.locked.iter().any(|e| e.starts_with("libc ")),
-            "libc is a direct dependency of mvm-agentd: {:?}",
-            inputs.locked
+            bins.contains(bin),
+            "{SETPRIV_PACKAGE} declares no `{bin}` binary: {bins:?}"
         );
     }
 

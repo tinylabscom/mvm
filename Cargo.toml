@@ -15,6 +15,11 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The guest's static privilege-drop helper. A leaf over `libc` alone: the
+    # builder image compiles it from source, so its closure is part of that
+    # image's cache key, and a crate it reaches is a crate whose edits rebuild
+    # the image.
+    "crates/mvm-setpriv",
     # GPU compute by API remoting: the per-VM host endpoint that serves
     # guest CUDA/NVML shim RPCs over vsock against the real driver or a
     # deterministic stub. Host-only (std); the guest side of the wire is
@@ -380,6 +385,7 @@ mvm-core = { path = "crates/mvm-core", version = "0.18.0-rc.2" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0-rc.2" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0-rc.2" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0-rc.2" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.18.0-rc.2" }
 mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0-rc.2" }
 mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.18.0-rc.2" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0-rc.2", default-features = false }

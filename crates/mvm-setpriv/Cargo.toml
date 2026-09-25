@@ -1,0 +1,27 @@
+[package]
+name = "mvm-setpriv"
+version.workspace = true
+edition.workspace = true
+description = "guest privilege-drop and exec helper, and the descriptor hygiene it applies before exec"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Small static-musl privilege-drop helper used by the Nix-built guest init.
+# It has a deliberately narrow flag surface and no dependency on util-linux.
+#
+# The builder image compiles this binary from source, so its dependency closure
+# is part of the builder image's cache key: every crate it reaches is a crate
+# whose edits rebuild that image. Keep it at `libc`.
+[[bin]]
+name = "mvm-setpriv"
+path = "src/main.rs"
+# The library has the same name; documenting both would write one path twice.
+doc = false
+
+[dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

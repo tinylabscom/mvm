@@ -687,7 +687,7 @@ the Stage 0 flake reference follows W8's re-pointing.
       contract 4 → 5. Tests: update the fingerprint layer tests
       (`builder_vm_bootstrap_tests.rs`) so a change to the embed table no
       longer moves the key and every Nix input still does.
-- [ ] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
+- [x] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
       `libc`-only closure (pending the crate-count decision), vendoring
       `configure_close_fds`. Point `nix/packages/mvm-setpriv.nix` and
       `setpriv_source::SETPRIV_PACKAGE` at it. Tests: the existing layer-4
@@ -695,6 +695,16 @@ the Stage 0 flake reference follows W8's re-pointing.
       `…_ignores_changes_outside_the_setpriv_closure`) now name the leaf, and
       an `mvm-core` edit no longer moves the key. Claims 1 and 2 witnesses
       that exercise `mvm-setpriv` stay green unchanged.
+      Landed as `crates/mvm-setpriv`. `fd_hygiene` moved into the leaf whole
+      rather than being vendored, and `mvm-agentd` re-exports it, so there is
+      one copy; the capability numbers `guest_mount` retains are the leaf's.
+      The CRNG reseed test starts its helper through an `mvm-agentd` fixture
+      binary over the same `mvm_setpriv::run` entry point, because a test can
+      only name binaries of its own package. A test holds the shipped closure
+      to the leaf and `libc`, and another holds the Nix recipe's `--package`
+      to the package the key hashes. Over the 458 `main` commits of the 28
+      days before 2026-09-25, layer 4 moved on 107 (23%) under the old
+      closure and would have on 2 under the leaf.
 - [ ] **W10 — per-role pair key.** Replace the `mvm` whole-checkout identity in
       `LocalImageCacheKey` for `BuilderVm` with the derived input digest,
       generated from the same import-site scan. Tests: a crate edit outside

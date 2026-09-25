@@ -405,11 +405,12 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    ([`BUILDER_FLAKE_NIX_INPUTS`]): the shared library, the guest recipes,
 ///    the kernel configs, and the runtime-overlay flake.
 /// 4. The Rust source of `mvm-setpriv`, the one Rust binary the flake compiles
-///    itself (`cargo build --package mvm-agentd --bin mvm-setpriv`) rather
+///    itself (`cargo build --package mvm-setpriv --bin mvm-setpriv`) rather
 ///    than taking from mvmctl's embedded payload: every workspace crate
-///    `mvm-agentd` reaches, the `Cargo.lock` entries of their non-dev
-///    dependency closure, and the root-manifest tables that change how that
-///    closure compiles (see `setpriv_source`).
+///    `mvm-setpriv` reaches (only itself; it is a leaf over `libc`), the
+///    `Cargo.lock` entries of their non-dev dependency closure, and the
+///    root-manifest tables that change how that closure compiles (see
+///    `setpriv_source`).
 ///
 /// The workspace `Cargo.lock` as a whole is deliberately not hashed, so a
 /// dependency bump outside those two binaries' closures does not rebuild the

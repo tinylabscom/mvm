@@ -20,12 +20,6 @@ path = "src/bin/mvm-guest-agent.rs"
 name = "mvm-display-bridge"
 path = "src/bin/mvm-display-bridge.rs"
 
-# Small static-musl privilege-drop helper used by the Nix-built guest init.
-# It has a deliberately narrow flag surface and no dependency on util-linux.
-[[bin]]
-name = "mvm-setpriv"
-path = "src/bin/mvm-setpriv.rs"
-
 # Exec-shim that compiles a syscall allowlist into a BPF program via
 # seccompiler, applies it via prctl, and execve's into the wrapped
 # command. mkServiceBlock wraps every guest service launch with this
@@ -128,6 +122,15 @@ path = "tests/bin/entrypoint_test_wrapper.rs"
 test = false
 doctest = false
 
+# Test fixture for `tests/crng_reseed_helper.rs`: the privilege-drop helper's
+# entry point, so the reseed helper can be started through it exactly as a
+# shell init starts it. Not selected by the production guest closure.
+[[bin]]
+name = "mvm-setpriv-fixture"
+path = "tests/bin/setpriv_fixture.rs"
+test = false
+doctest = false
+
 # Emits the host↔guest RPC protocol JSON Schema. Gated by
 # `required-features = ["schema"]` so it (and `schemars`) is excluded from
 # the default/prod build, exactly like mvm-libkrun-supervisor's
@@ -169,6 +172,9 @@ flowmux-async = ["dep:tokio"]
 
 [dependencies]
 mvm-core.workspace = true
+# The privilege-drop helper's library half: the descriptor hygiene every spawn
+# here applies, and the capability numbers `guest_mount` retains.
+mvm-setpriv.workspace = true
 # `mvm_contract::entrypoint::detect_shell_shebang` — the shell-launcher
 # detector the no-shell-entrypoint validator uses. `no_std` + alloc, so
 # it adds nothing to the lean-agent closure beyond what it already pulls.
