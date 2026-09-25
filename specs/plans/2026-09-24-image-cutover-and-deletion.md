@@ -112,6 +112,17 @@ roll back without rebuilding a CLI.
       (6 tests; idempotent on the real `image-set/v0.1.0` root).
 - [ ] Window length: one full CLI release train plus the observations
       above; extend once if any signal is unavailable, not silently.
+      *2026-09-24:* the producer revocation channel is live —
+      `revocation-list/v1` (tinylabscom/mvm-images#27 moved signing off the
+      `revocations/` prefix, whose tags made the channel's own `revocations`
+      release tag uncreatable), verified with `cosign verify-blob` against
+      `revocations.yml@refs/tags/revocation-list/v1`. The first release-train
+      attempt, `v0.18.0-rc.2` (run 36073659591), was cancelled after the
+      macOS documented-surface lane failed to compile: `main` did not build
+      with the release feature set (`release-artifact-bootstrap` +
+      `manifest-verify`) because W6 had made `builder_vm_artifact_names`
+      test-only while the builder-pack fetch still uses it. CI checked the
+      bootstrap feature alone; it now checks the combination.
 
 ### W7.3 Rollback drill
 
@@ -241,6 +252,14 @@ sibling-checkout selector minus its in-tree arm.
       `mvm-images` but is not a root member, and `release.yml` still builds
       it from `nix/images/initramfs`. Those moves are a Wave 3 precondition,
       not a follow-up.
+      *Second coupling (2026-09-24):* the overlay, sidecar and initramfs
+      resolvers refuse a `VERSION` that differs from the running CLI's
+      semver, and `nix/images/version.nix` is what `_release-prep` bumps. An
+      image set therefore serves exactly one CLI version: the W7.1 mirror for
+      `v0.18.0` needs a set built at `0.18.0`. Moving these artifacts to the
+      image set means replacing that equality with the set's declared
+      `compatibility` range, or every CLI release still needs an image
+      release.
 - [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`, the E-class
       reference edits across remaining crates, and live-doc updates
       (`CLAUDE.md`, `AGENTS.md`, contributor docs) to state that image
