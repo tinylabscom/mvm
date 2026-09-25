@@ -534,10 +534,14 @@ jobs:
       # builds deliberately omit: checkout proximity must never select a local
       # compiler. Compile the CLI and execute the policy boundary tests on every
       # code-changing pull request so the release workflow is not the first
-      # process to exercise that channel.
+      # process to exercise that channel. The combined check matters: release
+      # builds enable manifest verification alongside the bootstrap policy, and
+      # an item gated for one and used under the other compiles cleanly on its
+      # own and breaks only the release.
       - name: release artifact acquisition contract
         run: |
           cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify,builder-vm --lib
           cargo test -p mvm-build --features release-channel --lib \
             artifact_acquisition
           cargo test -p mvm-build --features release-channel --lib \
