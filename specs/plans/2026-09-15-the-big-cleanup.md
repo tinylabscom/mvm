@@ -220,7 +220,10 @@ gate. The duplication is one layer up, in what happens *around* the boot.
 - [ ] **A4.1** Two launch stacks, and the CLI one is missing three enforcement
       steps: the host-budget charge, fatal grant application, and
       `undo_launch` rollback. #3303.
-- [ ] **A4.2** A grant that failed to apply is audited as enforced. #3304.
+- [x] **A4.2** A grant that failed to apply is audited as enforced. #3304.
+      The CLI start path now applies grants through the same
+      `apply_admitted_grants_or_undo_launch` helper as `start_admitted`, on the
+      backend object that started the VM, and refuses the boot on failure.
 - [ ] **A4.3** `mvmctl run --mount` attaches host-fs shares the signed plan
       never admitted — claim 1 and claim 19's share half. #3307. **Highest
       severity item in this plan.**

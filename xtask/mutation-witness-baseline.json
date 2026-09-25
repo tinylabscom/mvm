@@ -145,6 +145,13 @@
       ]
     },
     {
+      "path": "crates/mvm-client/src/launch/grants_report.rs",
+      "package": "mvm-client",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-contract/src/plan/types.rs",
       "package": "mvm-contract",
       "claims": [

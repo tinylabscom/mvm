@@ -367,6 +367,8 @@ witnesses = [
     "fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement",
     "fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it",
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
+    "fn:a_grant_that_cannot_be_applied_undoes_the_launch",
+    "fn:a_grant_that_fails_to_apply_refuses_the_cli_boot",
     "fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
     "fn:a_signed_plan_from_the_launch_path_arms_the_timer",

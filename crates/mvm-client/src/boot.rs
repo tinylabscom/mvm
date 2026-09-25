@@ -145,25 +145,61 @@ pub fn resume_and_boot_local(
     )
 }
 
+/// A VM [`start_prepared`] started, together with the backend object that
+/// started it.
+///
+/// Anything done to the VM after the start — applying its grants, undoing the
+/// launch — has to go to this object, not to one rebuilt from the hypervisor
+/// name: a rebuilt backend is a different instance, and one that keeps per-run
+/// state in memory has nothing to report for a VM it never started.
+pub struct StartedVm {
+    backend: mvm_runtime::backend::AnyBackend,
+    vm_id: VmId,
+}
+
+impl StartedVm {
+    /// The id the backend assigned the started VM.
+    #[must_use]
+    pub fn vm_id(&self) -> &VmId {
+        &self.vm_id
+    }
+
+    /// The backend that started the VM.
+    pub(crate) fn backend(&self) -> &mvm_runtime::backend::AnyBackend {
+        &self.backend
+    }
+
+    /// Pair a backend with a VM it has already started. Crate-private: outside
+    /// tests the only way to hold one is to have gone through
+    /// [`start_prepared`].
+    #[cfg(test)]
+    pub(crate) fn from_started(backend: mvm_runtime::backend::AnyBackend, vm_id: VmId) -> Self {
+        Self { backend, vm_id }
+    }
+}
+
 /// Select the VMM for `backend_name`, verify it supports workloads, and start
 /// the fully-prepared config. Mirrors the CLI's former inline
 /// `from_hypervisor → require_workload_backend → start` triple exactly (both
 /// failure arms carried the same `backend-start` reason). The underlying error
 /// chain is preserved in the reason so the caller can surface and audit it.
+///
+/// Returns the backend that performed the start alongside the VM id, so the
+/// post-start steps act on that same object.
 pub fn start_prepared(
     backend_name: &str,
     config: &mvm_core::vm_backend::VmStartConfig,
-) -> Result<()> {
+) -> Result<StartedVm> {
     let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
     mvm_runtime::workload_backend::require_workload_backend(&backend).map_err(|e| {
         MvmError::Backend {
             reason: format!("{e:#}"),
         }
     })?;
-    backend.start(config).map_err(|e| MvmError::Backend {
+    let vm_id = backend.start(config).map_err(|e| MvmError::Backend {
         reason: format!("{e:#}"),
     })?;
-    Ok(())
+    Ok(StartedVm { backend, vm_id })
 }
 
 /// Clamp a requested vCPU count against the selected backend before admission
@@ -172,38 +208,6 @@ pub fn start_prepared(
 pub fn clamp_vcpus_for_backend(backend_name: &str, requested: u32) -> Option<u32> {
     let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
     mvm_core::vm_backend::clamp_vcpus(requested, backend.capabilities().max_vcpus)
-}
-
-/// Report what actually bounded the VM [`start_prepared`] just started.
-///
-/// This is the seam that puts `VmBackend::apply_grants` on the path `mvmctl`
-/// boots. Without a caller here the read-back is computed correctly and
-/// reported to nobody, which from the outside is indistinguishable from a bound
-/// that was never applied — a bounded CLI boot emitted no `plan.grants_enforced`
-/// and `machine inspect` showed only the request.
-///
-/// Separate from [`start_prepared`] rather than folded into its return, because
-/// the two answer different questions and only one of them can fail: the start
-/// either happened or errored, while the tier is a read-back off the live
-/// control that always has an honest answer (`Declared` for a host whose
-/// mechanism is absent). Folding them would make a degraded — but successful —
-/// boot look like a failure mode of starting.
-///
-/// `grants` is the request the plan was admitted under. It is passed because the
-/// backend seam takes it; a backend derives its tier from the control, never
-/// from what was asked for.
-pub fn enforced_grants_after_start(
-    backend_name: &str,
-    vm_name: &str,
-    grants: &mvm_contract::grants::Grants,
-) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
-    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
-    backend
-        .as_vm_backend()
-        .apply_grants(&VmId(vm_name.to_string()), grants)
-        .map_err(|e| MvmError::Backend {
-            reason: format!("{e:#}"),
-        })
 }
 
 /// The typed tier behind a hypervisor name.
