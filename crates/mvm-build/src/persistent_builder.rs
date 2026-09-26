@@ -1100,10 +1100,15 @@ pub fn stage_flake_dispatch_job(
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)?;
     let out_dir = guest_artifact_dir(transport, &job_id);
+    // The boot payload's copy when the session booted with one, else the copy
+    // a legacy image baked.
+    let payload_host_vm_init = crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR;
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
          OUT_DIR='{out_dir}'\n\
+         HOST_VM_INIT='{payload_host_vm_init}/mvm-host-vm-init'\n\
+         [ -x \"$HOST_VM_INIT\" ] || HOST_VM_INIT=/sbin/mvm-host-vm-init\n\
          mkdir -p \"$OUT_DIR\"\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
@@ -1123,7 +1128,7 @@ pub fn stage_flake_dispatch_job(
          cp -L \"$STORE_PATH/rootfs.ext4\" \"$BUILD_HOOK_ROOTFS\"\n\
          echo 'mvm-host-vm-init: running before_build hook' >&2\n\
          set +e\n\
-         /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
+         \"$HOST_VM_INIT\" run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
          hook_rc=$?\n\
          set -e\n\
          if [ \"$hook_rc\" -ne 0 ]; then\n\
@@ -1819,15 +1824,20 @@ mod tests {
         .expect("stage");
         let body = std::fs::read_to_string(job_dir.join(&job_id).join("cmd.sh")).expect("read");
         assert!(
-            body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),
+            body.contains("\"$HOST_VM_INIT\" run-before-build-hook"),
             "missing before_build hook runner invocation in:\n{body}"
+        );
+        assert!(
+            body.contains("HOST_VM_INIT='/run/mvm/host-bins/mvm-host-vm-init'\n")
+                && body.contains("|| HOST_VM_INIT=/sbin/mvm-host-vm-init\n"),
+            "the hook runner must prefer the boot payload's copy in:\n{body}"
         );
         assert!(
             body.contains("/tmp/mvm-rootfs-before-build.ext4"),
             "missing writable temp rootfs path in:\n{body}"
         );
         let hook_idx = body
-            .find("/sbin/mvm-host-vm-init run-before-build-hook")
+            .find("\"$HOST_VM_INIT\" run-before-build-hook")
             .expect("hook runner present");
         let journal_idx = body
             .find("/sbin/e2fsck -p -f \"$OUT_DIR/rootfs.ext4\"")
@@ -1859,12 +1869,12 @@ mod tests {
         );
         assert!(
             body.contains(
-                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+                "set +e\n\"$HOST_VM_INIT\" run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
             ),
             "the hook's real exit status must be captured before testing it in:\n{body}"
         );
         assert!(
-            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            !body.contains("if ! \"$HOST_VM_INIT\" run-before-build-hook"),
             "negating the hook command loses its real exit status in:\n{body}"
         );
         assert!(
@@ -1881,7 +1891,7 @@ mod tests {
             "an artifact that cannot be made writable for repair must be removed in:\n{body}"
         );
         assert!(
-            !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
+            !body.contains("\"$HOST_VM_INIT\" seal-rootfs-journal"),
             "source-rendered jobs must remain compatible with published builder binaries that predate the seal subcommand"
         );
     }

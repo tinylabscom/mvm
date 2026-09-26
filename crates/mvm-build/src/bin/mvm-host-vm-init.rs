@@ -102,6 +102,12 @@ mod workload;
 #[path = "mvm-host-vm-init/workload_proxy.rs"]
 mod workload_proxy;
 
+/// PID 1 of the builder boot payload: verify it, mount the builder image,
+/// pivot, and hand over to the stage-2 init from the payload's tmpfs copy.
+#[cfg(any(target_os = "linux", test))]
+#[path = "mvm-host-vm-init/stage1.rs"]
+mod stage1;
+
 /// Builder-VM lifecycle hook runner. Mounts a workload rootfs and runs
 /// `/etc/mvm/hooks/before_build.sh` inside a chroot. Linux-only; the
 /// module is compiled on other hosts only for workspace ergonomics.
@@ -150,7 +156,21 @@ fn main() -> ExitCode {
 
     #[cfg(target_os = "linux")]
     {
-        linux::run()
+        let payload_manifest = std::path::Path::new("/")
+            .join(mvm_build::builder_boot::PAYLOAD_DIR_IN_INITRAMFS)
+            .join(mvm_build::builder_boot::PAYLOAD_MANIFEST_NAME);
+        let role = stage1::boot_role(
+            std::process::id(),
+            payload_manifest.is_file(),
+            std::env::var(mvm_build::builder_boot::STAGE_ENV)
+                .ok()
+                .as_deref(),
+        );
+        match role {
+            stage1::BootRole::Stage1 => stage1::run(),
+            stage1::BootRole::Stage2 => linux::run(linux::PseudoFs::CarriedByStage1),
+            stage1::BootRole::Direct => linux::run(linux::PseudoFs::MountAll),
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -399,6 +419,38 @@ fn parse_ext4_recorded_size_bytes(sb: &[u8]) -> Option<u64> {
 // (`main.rs:1501`), and the unit tests live in `#[cfg(test)] mod tests`;
 // on macOS without `--test` the function would otherwise look dead.
 // Matches the sibling pattern at `parse_ext4_recorded_size_bytes` above.
+/// The mounts every PID 1 needs before anything else, as
+/// `(source, target, fstype)`. `/run` must be a tmpfs: the rootfs is mounted
+/// read-only and runtime state (locks, sockets, pid files) lives there.
+///
+/// Stage 1 of a payload boot mounts all five and carries them across its
+/// pivot, so a stage-2 PID 1 mounts none of them — above all not `/run`, whose
+/// tmpfs holds the binaries it is running.
+#[cfg(any(target_os = "linux", test))]
+fn base_pseudofs_mounts(
+    carried_by_stage1: bool,
+) -> &'static [(&'static str, &'static str, &'static str)] {
+    const ALL: &[(&str, &str, &str)] = &[
+        ("proc", "/proc", "proc"),
+        ("sysfs", "/sys", "sysfs"),
+        ("devtmpfs", "/dev", "devtmpfs"),
+        ("tmpfs", "/tmp", "tmpfs"),
+        ("tmpfs", "/run", "tmpfs"),
+    ];
+    if carried_by_stage1 { &[] } else { ALL }
+}
+
+/// PID 1's `PATH`: the payload's copies first, then the builder image's
+/// layout (busybox at `/bin/*`, extra packages at `/sbin/*` and
+/// `/usr/local/bin/*`).
+#[cfg(any(target_os = "linux", test))]
+fn pid1_path() -> String {
+    format!(
+        "{}:/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin",
+        mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR
+    )
+}
+
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn setup_dev_fd_symlinks(dev_root: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::symlink;
@@ -692,6 +744,36 @@ fn closure_marker_contents(closure_hash: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_direct_boot_mounts_the_base_pseudo_filesystems() {
+        let targets: Vec<&str> = base_pseudofs_mounts(false)
+            .iter()
+            .map(|(_, target, _)| *target)
+            .collect();
+        assert_eq!(targets, ["/proc", "/sys", "/dev", "/tmp", "/run"]);
+    }
+
+    /// Stage 1 carried these across the pivot. A second `/run` tmpfs would
+    /// hide the payload binaries stage 2 is executing from.
+    #[test]
+    fn stage2_mounts_nothing_stage1_carried_across() {
+        assert!(base_pseudofs_mounts(true).is_empty());
+        for (_, target, _) in base_pseudofs_mounts(false) {
+            assert!(
+                mvm_agentd::guest_mount::PIVOT_MOVED_MOUNTS.contains(target),
+                "{target} is skipped in stage 2 but stage 1 does not carry it"
+            );
+        }
+    }
+
+    #[test]
+    fn pid1_resolves_the_payload_copies_first() {
+        let path = pid1_path();
+        let first = path.split(':').next().unwrap();
+        assert_eq!(first, mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR);
+        assert!(path.contains(":/sbin:"), "{path}");
+    }
 
     #[test]
     fn loop_device_parser_accepts_only_kernel_loop_paths() {
@@ -1616,8 +1698,26 @@ mod linux {
         }
     }
 
-    pub fn run() -> ExitCode {
-        eprintln!("mvm-host-vm-init: pid 1 starting");
+    /// Which pseudo-filesystems this PID 1 still has to mount.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum PseudoFs {
+        /// A direct boot: nothing is mounted yet.
+        MountAll,
+        /// Stage 2 of a payload boot. Stage 1 mounted `/proc`, `/sys`, `/dev`,
+        /// `/run` and `/tmp` and carried them across the pivot; mounting a
+        /// fresh tmpfs on `/run` would hide the payload this process is
+        /// running from.
+        CarriedByStage1,
+    }
+
+    impl PseudoFs {
+        fn carried(self) -> bool {
+            self == Self::CarriedByStage1
+        }
+    }
+
+    pub fn run(pseudo_fs: PseudoFs) -> ExitCode {
+        eprintln!("mvm-host-vm-init: pid 1 starting ({pseudo_fs:?})");
         append_init_breadcrumb("run_enter", "pid1");
 
         // The Linux kernel doesn't pass a PATH to PID 1, so without
@@ -1635,11 +1735,13 @@ mod linux {
         // applets under `/bin/<applet>`.
         // SAFETY: PID 1 is single-threaded until we spawn the fan-out
         // tracks below; no other thread can be reading the env yet.
+        //
+        // The payload's directory comes first, so a builder booted from the
+        // payload resolves `mvm-host-vm-init` and `mvm-builderd` to the copies
+        // the running `mvmctl` supplied, never to stale ones an older image
+        // baked. It does not exist on a direct boot and is skipped.
         unsafe {
-            std::env::set_var(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin",
-            );
+            std::env::set_var("PATH", crate::pid1_path());
         }
 
         // Anchor the boot-timings clock as close
@@ -1653,7 +1755,7 @@ mod linux {
         // Pseudofs mounts must complete before anything else —
         // every subsequent phase needs /proc, /sys, /dev to be
         // readable.
-        if let Err(e) = mount_pseudofs() {
+        if let Err(e) = mount_pseudofs(pseudo_fs) {
             eprintln!("mvm-host-vm-init: mount_pseudofs failed: {e}");
             write_result(2, &format!("mount_pseudofs failed: {e}"));
             stamp(&timings, |t| {
@@ -2132,7 +2234,7 @@ mod linux {
     /// failure is logged and the builder VM continues serving the legacy
     /// dispatch channel, so an old daemon-less image degrades gracefully.
     fn spawn_builderd() {
-        match Command::new("/sbin/mvm-builderd").spawn() {
+        match Command::new(mvm_build::builder_boot::guest_host_binary("mvm-builderd")).spawn() {
             Ok(child) => eprintln!(
                 "mvm-host-vm-init: spawned mvm-builderd (pid {})",
                 child.id()
@@ -2913,20 +3015,15 @@ mod linux {
         }
     }
 
-    fn mount_pseudofs() -> Result<(), String> {
+    fn mount_pseudofs(pseudo_fs: PseudoFs) -> Result<(), String> {
         // Standard init filesystems. libkrun's kernel mounts
         // devtmpfs (and sometimes /proc /sys) before handing off to
         // init, so EBUSY here means "already mounted by an earlier
         // stage" — that's success for our purposes. Anything else
         // is fatal.
-        mount_fs_idempotent("proc", "/proc", "proc")?;
-        mount_fs_idempotent("sysfs", "/sys", "sysfs")?;
-        mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
-        mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
-        // `/run` must be a tmpfs: the rootfs is mounted read-only and
-        // runtime state (locks, sockets, pid files) lives there.
-        // mkGuest's /init does the equivalent for the dev image's boot path.
-        mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
+        for (source, target, fstype) in crate::base_pseudofs_mounts(pseudo_fs.carried()) {
+            mount_fs_idempotent(source, target, fstype)?;
+        }
         // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
         // `make-ext4-fs.nix` runs `mkfs.ext4` under faketime for
         // deterministic timestamps, and faketime opens a POSIX named
@@ -4186,7 +4283,7 @@ mod linux {
         Ok(())
     }
 
-    fn power_off() -> ExitCode {
+    pub(crate) fn power_off() -> ExitCode {
         use nix::sys::reboot::{RebootMode, reboot};
         let _ = Command::new("/bin/sync").status();
         // `reboot(RB_POWER_OFF)` returns `Infallible` on success

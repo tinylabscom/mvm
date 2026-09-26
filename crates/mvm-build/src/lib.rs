@@ -23,6 +23,8 @@ pub mod builder_boot;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
 mod builder_egress_process;
+/// Where a running builder guest finds mvm's own builder binaries.
+pub mod builder_guest_paths;
 mod builder_host_binaries;
 /// The mvm sources a builder image's evaluation reads, shared by the Stage 0
 /// fingerprint and the local image cache key.

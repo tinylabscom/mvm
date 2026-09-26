@@ -643,7 +643,7 @@ the Stage 0 flake reference follows W8's re-pointing.
         from `mvm-cli` to `crates/mvm-build/src/host_payload_manifest.rs` so
         `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone and the
         sync gate's fourth mirror with it.
-- [ ] **W2 — stage 1 in `mvm-host-vm-init`.** Detection, payload-digest check,
+- [x] **W2 — stage 1 in `mvm-host-vm-init`.** Detection, payload-digest check,
       root mount, ABI check, tmpfs copy, `pivot_to_root` reuse, and re-exec.
       Stage 2 tolerates pre-mounted pseudo-filesystems and resolves siblings
       from `/run/mvm/host-bins`. Tests: unit tests for cmdline parsing,
@@ -651,6 +651,16 @@ the Stage 0 flake reference follows W8's re-pointing.
       mismatch refusal; a Linux-gated test of the copy and pivot plan against a
       temp root. Run `just check-gated`, because this is `cfg(target_os =
       "linux")` code macOS cannot compile.
+      - Done: `mvm-host-vm-init/stage1.rs` reuses `mount_early_filesystems`,
+        `mount_rootfs` (the image mounts at `/mnt/root`, not `/sysroot`) and
+        `pivot_to_root`; the ABI type is `mvm_core::image_set::BuilderBootAbi`
+        and the marker rules are `mvm_build::builder_boot::abi`. The copy and
+        the image checks run against temp roots on every host rather than
+        Linux only, because nothing in them needs Linux; the pivot's reach is
+        pinned by `PIVOT_MOVED_MOUNTS`. In-guest callers resolve builder
+        binaries through `builder_guest_paths::guest_host_binary`, which
+        prefers the payload copy: `mvm-builderd`'s before-build hook runner
+        and the persistent dispatch script used to name `/sbin` outright.
 - [ ] **W3 — one builder boot-contract cmdline.** Converge
       `BUILDER_CMDLINE_TAIL`, `SYNTHESIZED_BUILDER_VM_CMDLINE`, the QEMU
       rewrite and the libkrun call sites on one function that emits
