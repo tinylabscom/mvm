@@ -333,6 +333,7 @@ uncovered = [
     "mvmctl machine run --flake . --name hello --port 8080:8080 --port 9090:9090",
     "mvmctl machine run --flake . --name my-vm --port 8080:8080",
     "mvmctl machine run --flake . --name my-vm -p 3000:3000 -p 8080:8080",
+    'mvmctl machine run --flake . --name triage --allow-endpoint "GET https://api.github.com/repos/my-org/**" --allow-endpoint "POST https://api.github.com/repos/my-org/*/issues"',
     "mvmctl machine run --flake . --net",
     "mvmctl machine run --flake . --profile dev",
     "mvmctl machine run --flake . --profile dev --name build -d --mount ./src:/work/src:rw --mount ~/.cargo:/data/cargo:ro",

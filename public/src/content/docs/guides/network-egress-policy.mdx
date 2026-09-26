@@ -57,6 +57,75 @@ mvmctl machine run --flake . --name api-dev --port 8080:8080
 Opening a host port does not mean the guest should have outbound internet
 access.
 
+## Endpoint rules
+
+An allow-list says which destinations a workload may reach. An endpoint rule
+narrows what it may do there, by HTTP method and path:
+
+```sh
+mvmctl machine run --flake . --name triage \
+  --allow-endpoint "GET https://api.github.com/repos/my-org/**" \
+  --allow-endpoint "POST https://api.github.com/repos/my-org/*/issues"
+```
+
+Each `--allow-endpoint` admits its host as `--allow-host` would and adds a
+rule for it. Every flag for one host becomes one route: its rules are tried in
+order, the first that matches decides, and a request no rule matches is
+refused. `**` matches any number of path segments and `*` any run of
+characters within one; the query string is not part of the match. Without a
+method, a rule matches every method.
+
+A project can declare routes in its `mvm.toml`:
+
+```toml
+[[network.routes]]
+id = "github"
+host = "api.github.com"
+intercept = true
+rules = [
+  { method = "GET", path = "/repos/my-org/**", outcome = "allow" },
+  { method = "DELETE", path = "/**", outcome = "deny" },
+  { method = "POST", path = "/repos/my-org/*/issues", outcome = "ask" },
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Recorded on every decision the route makes. `[a-z0-9._-]`. |
+| `host` | An exact host, or a `*.suffix` wildcard over two or more labels. |
+| `port` | Default `443`. |
+| `rules` | `{ id?, method?, path, outcome }`, tried in order. `outcome` is `allow`, `deny` or `ask`. |
+| `otherwise` | What a request no rule matches gets. Default `deny`. |
+| `intercept` | Whether the host may terminate this destination's TLS to read requests. |
+
+A run reads the manifest `--manifest` points at, or the one in a local `--flake`
+directory, and admits each route host. An `--allow-endpoint` for a destination
+the manifest already routes is refused rather than merged, because adding an
+allow rule would widen what the project declared. Routes are not yet recorded
+on a persistent machine; `machine run --name`, `-d` and `machine create` refuse
+them.
+
+Rules can only be enforced where the host reads the request. A destination a
+secret is bound to is terminated already. Any other destination is terminated
+for its rules only when its route says `intercept = true` — `--allow-endpoint`
+sets it, because writing the flag is the grant — and the per-VM egress
+certificate then covers that host. A route with rules but no interception
+grant is never relayed opaquely with its rules unchecked: the connection is
+refused and recorded as `endpoint_rules_unenforceable`.
+
+A path the host cannot read unambiguously is refused, not matched: a `.` or
+`..` segment, an empty segment, a backslash, or a percent-encoded `/`, `\` or
+`.`. Encoded letters and digits are decoded first, so `/%61dmin` cannot pass a
+rule written for `/admin`.
+
+`ask` is refused for now, recorded with the reason `approval_unavailable`,
+until an approval backend can answer it.
+
+Every decision — allow, deny or ask — is a `host.route.decided` entry in the
+chain-signed audit log, carrying the route id, the rule that decided (its `id`,
+`rule-N` by position, `otherwise` or `ambiguous_path`), the outcome, the
+destination and the method. The path is never recorded.
+
 ## Internal addresses
 
 Every policy, including an unrestricted one, refuses these destinations:

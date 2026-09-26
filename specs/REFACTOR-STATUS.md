@@ -11,7 +11,9 @@ Last updated: 2026-09-26
   - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
     - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
-    - [ ] route + endpoint-rule model, injection modes, `ask` seam, CLI and `[network].routes`
+    - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
+    - [ ] injection modes (`query_param`, `url_path`, `basic_auth`)
+    - [ ] endpoint routes on persistent machines
   - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
     - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
     - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding

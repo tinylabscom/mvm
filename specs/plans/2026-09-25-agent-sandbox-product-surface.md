@@ -99,9 +99,15 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15)
 
 ### PS-02 — Egress route model on vsock flows (#3712)
-- [ ] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
+- [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
+      — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
 - [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
-- [ ] L7 endpoint rules (method + path glob) → allow / deny / ask
+- [x] L7 endpoint rules (method + path glob) → allow / deny / ask
+      — decided by `EgressGate::decide_route` on every read request; an unbound
+      host is terminated only on an explicit `intercept` grant; `ask` goes to the
+      `EgressApprover` seam, which refuses (`approval_unavailable`) until PS-07;
+      `--allow-endpoint` and `[[network.routes]]` (transient runs; persistent
+      machines refuse routes for now)
 - [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
       — one classifier (`mvm_contract::policy::restricted_address`) for every
       connect, datagram, DNS answer and forward-leg dial; metadata, loopback,
@@ -109,7 +115,9 @@ Security-bearing gaps first, then the foundations the UX needs:
       RFC1918/ULA/multicast/reserved re-admitted only by a grant naming the
       address; refusals audited with their class; the forward leg resolves
       through the gate's recorded answer
-- [ ] enforcement only in `EgressGate`; every decision audited with route id and rule
+- [x] enforcement only in `EgressGate`; every decision audited with route id and rule
+      — `host.route.decided { route, rule, outcome, destination, method }`
+- [ ] endpoint routes recorded on persistent machines (`MachineSpec`)
 
 ### PS-03 — Credential injection UX (#3713)
 - [x] `--secret NAME[:HOST,...]` on `run` and `machine run` (finish #3333), fail-closed before boot
