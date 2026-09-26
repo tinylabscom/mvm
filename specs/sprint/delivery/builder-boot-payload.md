@@ -99,3 +99,15 @@ were not booted live here.
   and verified the published image and refused to boot it for want of a
   source fingerprint; libkrun and QEMU had the same rule. An explicit fetch
   now stands the fingerprint rule down.
+- Seeding an isolated builder image cache from the shared one copied each
+  artifact into place with `std::fs::copy`, which truncates and refills an
+  existing file's inode. A second seeder racing the first shrank a
+  `rootfs.ext4` another process was already reading, and the host-side ABI
+  read failed with `ImageUnreadable` ("failed to fill whole buffer"). It
+  showed up as a flaky `libkrun_builder` test in two of three runs with a
+  fresh `MVM_HOME` and a real image in `$HOME`; the seed now stages and
+  renames, and the same runs passed four of four. `ext4_view` itself reads
+  a Nix-built image fine; a committed fixture with that image's exact
+  `dumpe2fs` feature set now pins it. The three `run_build` tests that
+  reached the seed without isolating `HOME` are hermetic, and
+  `check-test-home-isolation` now flags that shape.
