@@ -15,10 +15,12 @@ stops. For the image side, see
 
 ## What the guest receives
 
-For each secret the workload declares, the guest gets one environment variable
-whose value is an opaque token: `mvm-secret-` followed by 48 hex characters,
-minted from the OS random source when the VM boots. Two secrets never share a
-token, and the token says nothing about the value it stands for.
+For each secret the run binds, the guest gets one environment variable whose
+value is an opaque token: `mvm-secret-` followed by 48 hex characters, minted
+from the OS random source when the VM boots. Two bindings never share a token,
+and the token says nothing about the value it stands for. Each token is valid
+only for the destinations its own binding names: presented to any other host,
+it is refused.
 
 Alongside the placeholders, the entrypoint gets:
 
@@ -44,9 +46,11 @@ in the clear.
 
 1. **At boot**, the endpoint reads the secret bindings from the signed
    execution plan, looks up each one's destination list and auth type in the
-   local binding store, mints the placeholders, and hands them back to be
-   injected into the entrypoint's environment. A secret with no binding fails
-   the boot rather than handing the guest a placeholder nothing can resolve.
+   local binding store, narrows that list to the destinations the plan binding
+   names (when it names any), mints the placeholders, and hands them back to be
+   injected into the entrypoint's environment. A secret with no binding, or a
+   plan binding naming a destination outside the stored list, fails the boot
+   rather than handing the guest a placeholder nothing can resolve.
 2. **Per connection**, the in-guest proxy relays the tunnel to the endpoint over
    the VM's authenticated vsock channel. The endpoint checks the destination
    against the VM's network policy first. If a secret is bound to that
@@ -58,7 +62,9 @@ in the clear.
    whose `Host` disagrees with the tunnel it arrived in is refused.
 4. **The endpoint originates the request itself**, including the TLS
    connection to the destination, validated against the host's system roots.
-   The guest's TLS session is with the host, never with the model provider.
+   The guest's TLS session is with the host, never with the model provider. A
+   destination whose certificate does not validate gets nothing — the guest
+   gets a `502` — and there is no fallback to relaying the guest's own bytes.
 5. **When it hands the request to the forward leg**, the endpoint appends a
    `secret.substituted` entry for each secret it substituted into that request
    to the host's chain-signed audit log. When the forward ends, it appends one
@@ -80,14 +86,15 @@ a `502` with the reason in the body.
 Substitution looks only at request **headers**. Put the placeholder where the
 client sends its credential header. A request that carries a placeholder in its
 URL or its body is refused and recorded rather than sent to the destination
-with the token in place of the key. On a streamed body, the refusal comes
-before any byte of the placeholder is sent, but the request headers, carrying
-the substituted credential, may already have gone out.
+with the token in place of the key. In a tunnel the host terminated, the whole
+body is read before anything is forwarded, so that refusal comes before the
+forward leg exists. On the typed HTTP path, where a body can stream, the
+refusal comes before any byte of the placeholder is sent, but the request
+headers, carrying the substituted credential, may already have gone out.
 
 ## Setting it up
 
-Three pieces: the host secret and its binding, the declaration in Workload IR,
-and the run.
+Two pieces: the host secret and its binding, and a run that binds it.
 
 **1. Store the secret and bind it.** `mvmctl secret set` stores the value and
 records where it may be sent and how it authenticates:
@@ -108,8 +115,39 @@ With no `--value` or `--value-file`, the command prompts on a terminal or reads
 a pipe, so the value does not land in shell history or the process table. The
 binding recorded here is the one the host enforces.
 
-**2. Declare the secret in Workload IR.** The host reads secret declarations
-from a Workload IR file. There are two ways to produce one:
+**2. Bind it to the run with `--secret`.** `run` and `machine run` both take
+`--secret NAME[:HOST,...]`, repeatable:
+
+```sh
+mvmctl run --image curlimages/curl:latest --secret anthropic \
+  --allow-host api.anthropic.com -- \
+  sh -c 'curl -sS https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"'
+```
+
+Inside the guest `$ANTHROPIC_API_KEY` is the placeholder; `curl` tunnels
+through the proxy environment, the host terminates that tunnel and sends the
+request on with the real key. The host's connection to the destination
+requires TLS 1.3; a destination that offers only older versions is refused
+with a `502` rather than contacted over a weaker protocol.
+
+The guest variable comes from the provider the secret was bound with
+(`anthropic` hands over `ANTHROPIC_API_KEY`, `openai` `OPENAI_API_KEY`,
+`github` `GITHUB_TOKEN`, `stripe` `STRIPE_API_KEY`); a secret bound with
+`--host` hands over its own name, uppercased, with `-` folded to `_`. The
+optional host list narrows where this run's placeholder is valid:
+`--secret anthropic:api.anthropic.com` binds only that host even if the
+stored binding admits more. It can only narrow — a host the stored binding
+does not admit refuses the run. An unknown secret, a secret with no binding,
+two secrets handing over the same variable, or a malformed spec (an empty
+name or host, or a host with a port) all refuse before anything boots.
+
+A persistent machine (`machine run --name NAME -d --secret ...`) records the
+binding beside its spec and re-validates it on every start, and
+`mvmctl secret rm` refuses while a machine still names the secret.
+
+**Or declare it in Workload IR.** The host also reads secret declarations
+from a Workload IR file, passed with `--from-workload-ir`. There are two ways
+to produce one:
 
 - From an SDK function workload: declare the variable with
   `mvm.secret("anthropic", type="bearer", hosts=["api.anthropic.com"], var="ANTHROPIC_API_KEY")`
@@ -122,7 +160,7 @@ from a Workload IR file. There are two ways to produce one:
 
 `mvm.toml` has no secret declaration.
 
-**3. Run the entrypoint with the IR and an egress allowance.** A compiled
+**Running an IR-declared entrypoint.** A compiled
 function workload reads its call arguments from stdin as a JSON
 `[args, kwargs]` array; plain text is a decode error in the guest. With no
 stdin, the call gets `[[], {}]`.
@@ -139,8 +177,9 @@ A call that outlives it exits with status 124.
 
 ## Which runs receive the placeholder
 
-`--from-workload-ir PATH` resolves the same plan-bound secret metadata on every
-launch shape. The substitution endpoint mints opaque environment placeholders
+`--secret` and `--from-workload-ir PATH` resolve the same plan-bound secret
+metadata on every launch shape, and can be combined as long as they do not
+bind the same guest variable. The substitution endpoint mints opaque environment placeholders
 before boot, and PID 1 exports them before it starts the image workload. Raw
 secret values remain host-only. `--manifest PATH` works in place of `--flake
 PATH`.
@@ -151,11 +190,13 @@ mvmctl machine run --flake PATH --entrypoint --from-workload-ir PATH
 
 | Invocation | Placeholder injected |
 | --- | --- |
+| `run --secret NAME -- argv` | Yes |
 | `machine run --flake PATH --entrypoint --from-workload-ir PATH` | Yes |
-| `machine run --entrypoint` without `--from-workload-ir` | No: the plan carries no secrets |
+| `machine run --flake PATH --entrypoint --secret NAME` | Yes |
+| `machine run --entrypoint` without `--secret` or `--from-workload-ir` | No: the plan carries no secrets |
 | `machine run --flake PATH --from-workload-ir PATH -- argv` | Yes |
-| `machine run --name NAME -d --from-workload-ir PATH` | Yes; references persist beside the machine spec and are revalidated on restart |
-| `machine run` without `--from-workload-ir` | No |
+| `machine run --name NAME -d --secret NAME` or `--from-workload-ir PATH` | Yes; references persist beside the machine spec and are revalidated on restart |
+| `machine run` without `--secret` or `--from-workload-ir` | No |
 | `machine session start TEMPLATE --from-workload-ir PATH` | Yes |
 | `machine session attach SESSION_ID` | Yes, if the session was booted with secrets |
 | In-process `mvm-client` launch with typed secret references | Yes |
@@ -193,16 +234,20 @@ Things still worth knowing:
 
 - **The placeholder goes in a header**, where the credential goes: `x-api-key:
   $ANTHROPIC_API_KEY` or `Authorization: Bearer $API_KEY`. Substitution reads
-  request headers only. A placeholder in a request body is forwarded as-is.
+  request headers only. A placeholder in a request URL or body is refused.
 - **`HTTPS_PROXY` applies to all of the process's HTTPS traffic**, not only the
   requests carrying a placeholder. A destination the network policy does not
   admit is refused whether or not a secret is involved. Node's built-in `fetch`
   does not read `HTTPS_PROXY` by default and connects directly, which has no
   route out of a guest with no NIC.
-- **A tunnel to a destination the secret is not bound to is relayed, not
+- **A tunnel to a destination no secret is bound to is relayed, not
   terminated.** The host does not sit inside TLS it has no reason to open, so
   those connections are end-to-end with the destination and no substitution
-  happens in them.
+  happens in them. A placeholder sent down such a tunnel reaches that
+  destination as the meaningless token it is, never as the key. A tunnel to a
+  destination bound to a *different* secret is terminated, and a placeholder
+  that is not valid there is refused and recorded as
+  `secret.placeholder_dropped`.
 - **Requests are not pipelined.** Bytes that arrive past the declared
   `Content-Length` are refused rather than served, and a `Transfer-Encoding:
   chunked` request body is refused with a `501`.
@@ -278,6 +323,10 @@ end of the log.
   can.
 - **Data the agent sends to allowed hosts.** Anything the agent can read, it
   can put in a request to an admitted destination.
+- **A destination that echoes the credential back.** Responses are relayed to
+  the guest as the destination sent them. An endpoint that reflects request
+  headers in its body — a debugging echo service, for one — hands the guest
+  the real value it was sent. Bind secrets only to destinations that do not.
 - **Credentials that are not HTTP headers.** A database password or a TLS
   client key cannot be substituted. If you give one to a guest, the guest holds
   the real value.

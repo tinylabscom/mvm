@@ -380,25 +380,30 @@ architecture:
 
 Work:
 
-- [ ] A reachable CLI surface binding a managed secret to a run: `--secret
+- [x] A reachable CLI surface binding a managed secret to a run: `--secret
       NAME` exists only on the unreachable `up::Args`
       (`crates/mvm-cli/src/commands/vm/up/mod.rs`); land it on the reachable
       `RunArgs` surface (move, don't fork) with the same
-      destination-binding semantics.
-- [ ] Steer Claude Code onto the typed path: guest env `ANTHROPIC_BASE_URL`
+      destination-binding semantics. Landed on `run`, `machine run` and
+      `machine run --entrypoint`; the optional host list is signed into the
+      plan binding and narrows the stored allow-list on the wire.
+- [~] Superseded by CONNECT termination (Option B, below) — no
+      `ANTHROPIC_BASE_URL` steering is needed. Steer Claude Code onto the typed path: guest env `ANTHROPIC_BASE_URL`
       plus proxy env aimed at the loopback forward proxy so requests arrive
       absolute-form, with `ANTHROPIC_API_KEY` set to the placeholder.
       Verify substitution replaces the placeholder in the header position
       Claude Code sends (`x-api-key` / `Authorization`), not only in
       catalog-templated positions.
-- [ ] Streaming: Claude Code consumes SSE responses. The AI meter parses
+- [~] Superseded: a terminated CONNECT flow writes the response to the
+      guest chunk by chunk as the upstream delivers it. Streaming: Claude Code consumes SSE responses. The AI meter parses
       Anthropic `message_delta` events on this path
       (`crates/mvm-hostd/src/supervisor/ai_meter.rs`), which points to the
       typed flow carrying streamed bodies — verify end-to-end latency and
       incremental delivery through the substitution relay
       (`crates/mvm-agentd/src/substitution_client.rs`), and fix if the wire
       shape buffers whole bodies.
-- [ ] Fallback, only if the typed path cannot carry this traffic: wire
+- [x] Chosen as the mechanism (Option B), shipped as CONNECT termination to
+      bound hosts, then scoped per binding in the `--secret` change. Fallback, only if the typed path cannot carry this traffic: wire
       ADR-023's TLS terminator for CONNECT flows at the endpoint (the guest
       already trusts the per-VM egress CA via the injected
       `NODE_EXTRA_CA_CERTS`; the ADR's nft-redirect premise is stale now
@@ -414,9 +419,12 @@ Work:
       widens practical containment to the workload's own API traffic.
       Whether that becomes new ledger prose is a maintainer decision —
       raise it, do not edit ADR-001's table unilaterally.
-- [ ] Once landed: flip the example + template default to the placeholder
+- [x] Once landed: flip the example + template default to the placeholder
       posture, demote the key-file mount to a documented offline fallback,
-      and update the W3 doc touchpoints in the same change.
+      and update the W3 doc touchpoints in the same change. The example
+      now binds with `--secret anthropic`; the key-file mount is removed
+      rather than kept as a fallback, because a documented guest-held path
+      is the one people copy. The remote template is W4's.
 
 ## Acceptance
 

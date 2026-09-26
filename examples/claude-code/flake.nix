@@ -70,13 +70,10 @@
               export CLAUDE_CONFIG_DIR=/work/.claude
             fi
 
-            # Interim guest-held key posture: a key file mounted read-only at
-            # /data/secrets/anthropic wins over nothing, and an explicit env
-            # var wins over the file.
-            if [ -z "''${ANTHROPIC_API_KEY:-}" ] && [ -r /data/secrets/anthropic ]; then
-              ANTHROPIC_API_KEY="$(cat /data/secrets/anthropic)"
-              export ANTHROPIC_API_KEY
-            fi
+            # The key never enters the guest. `--secret anthropic` hands this
+            # VM an opaque placeholder under ANTHROPIC_API_KEY, and the host
+            # swaps it for the real key in requests to api.anthropic.com.
+            : "''${ANTHROPIC_API_KEY:?bind the key on the host: mvmctl secret set anthropic --provider anthropic, then run with --secret anthropic}"
 
             exec ${claudeBin}/bin/claude "$@"
           '';

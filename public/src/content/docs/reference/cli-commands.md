@@ -258,6 +258,12 @@ already exists. For a SigV4 provider the credential-scope service comes from the
 entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
 belong to your account, not to the provider.
 
+`secret providers` also names the environment variable each provider's own
+tooling reads (`env=ANTHROPIC_API_KEY`). `run --secret <name>` and
+`machine run --secret <name>` hand the guest its placeholder under that
+variable; a secret bound with `--host` uses its own name, uppercased. See
+[Agent sandbox](/guides/agent-sandbox/) for the substitution path.
+
 Secret values are write-only through the CLI after storage: `get` is a presence
 check and never emits the raw value. Replace a secret by running `secret put`
 again with the same name. Local secret storage is encrypted at rest: the OS
@@ -402,6 +408,7 @@ into the image; Nix-built production guests may also use
 | `mvmctl run --output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]] -- <cmd>` | Give the workload a fresh writable disk at `/GUEST`; after it exits, copy its regular files and directories into `HOST_DIR` (absent or empty) under a byte bound (default `64M`) and an entry bound (default `10000`), refusing the whole collection past either. Repeatable; also on `machine run` (foreground only); disabled by `--profile restrictive`                            |
 | `mvmctl run --env KEY=VAL -- <cmd>`                                 | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                                                                                                                                                                              |
 | `mvmctl run --allow-env NAME --env NAME=VAL -- <cmd>`               | Re-admit one denied variable (loader, shell, interpreter, or password-manager session) by exact name; patterns are refused. Without it, a denied `--env` or launch-plan variable refuses the run                                                                                                                                                                                      |
+| `mvmctl run --secret <name>[:<host>,...] -- <cmd>`                  | Bind a stored secret. The guest gets an opaque placeholder under the provider's variable (`ANTHROPIC_API_KEY`, …) and the host substitutes the real value into requests to the bound destinations. Hosts narrow the binding, never widen it. Repeatable; refused before boot                                                                                                          |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`                    | Resize the transient VM                                                                                                                                                                                                                                                                                                                                                               |
 | `mvmctl run --timeout <secs> -- <cmd>`                              | Per-command timeout                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl run --dry-run -- <cmd>`                                     | Validate and explain the run plan without resolving an image, booting a VM, writing a receipt, or executing the command                                                                                                                                                                                                                                                               |
