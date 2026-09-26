@@ -310,12 +310,28 @@ mod tests {
         assert_eq!(process_executable(pid), None);
     }
 
+    /// A child running `sleep`, returned only once it has exec'd.
+    ///
+    /// `spawn` returns after the fork, while the child can still be running
+    /// this test binary. A check made in that window sees the wrong
+    /// executable and is refused, which is correct behaviour and a flaky test.
     fn spawn_sleep() -> (std::process::Child, i32) {
-        let child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn sleep");
         let pid = i32::try_from(child.id()).expect("pid fits in i32");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while process_executable(pid)
+            .is_none_or(|path| path.file_name() != Some(std::ffi::OsStr::new("sleep")))
+        {
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("sleep child {pid} never reported running sleep");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         (child, pid)
     }
 
