@@ -14,6 +14,7 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use mvm_contract::peer::{PeerBinding, PeerName};
+use mvm_contract::policy::restricted_address::{RestrictedClass, classify, grant_readmits};
 use mvm_core::policy::dns_guard::dns_answer_forbidden;
 use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
@@ -132,6 +133,34 @@ pub enum DenyReason {
         /// The name that would not resolve.
         host: String,
     },
+    /// The destination is a restricted address — cloud metadata, loopback,
+    /// link-local, a private range and the rest the shared classifier names —
+    /// and no grant names it. An absolute class can never be named; a private
+    /// one is named by a literal address or CIDR inside its range, or by an
+    /// allow-listed host that resolved to it.
+    RestrictedAddress {
+        /// The refused address.
+        ip: IpAddr,
+        /// The refused port.
+        port: u16,
+        /// Why the address is restricted.
+        class: RestrictedClass,
+    },
+}
+
+impl DenyReason {
+    /// The fixed word a chain entry records for this refusal. Every policy
+    /// refusal is `policy_denied` except a restricted address, which records
+    /// its class — `cloud_metadata`, `private_range` — so the chain says a
+    /// workload reached for the metadata service, not merely that it was
+    /// refused.
+    #[must_use]
+    pub fn audit_label(&self) -> &'static str {
+        match self {
+            Self::RestrictedAddress { class, .. } => class.label(),
+            _ => "policy_denied",
+        }
+    }
 }
 
 impl std::fmt::Display for DenyReason {
@@ -197,6 +226,23 @@ impl std::fmt::Display for DenyReason {
             Self::ResolutionFailed { host } => {
                 write!(f, "could not resolve {host}")
             }
+            Self::RestrictedAddress { ip, port, class } if class.readmittable() => {
+                let host = match ip {
+                    IpAddr::V4(v4) => v4.to_string(),
+                    IpAddr::V6(v6) => format!("[{v6}]"),
+                };
+                write!(
+                    f,
+                    "{ip}:{port} is {} and denied by default; admit it by naming it \
+                     (--allow-host {host}:{port})",
+                    class.describe()
+                )
+            }
+            Self::RestrictedAddress { ip, port, class } => write!(
+                f,
+                "{ip}:{port} is {} and is never reachable from a workload",
+                class.describe()
+            ),
         }
     }
 }
@@ -477,8 +523,29 @@ impl EgressGate {
         EgressVerdict::Allow { ips: v4, port: 0 }
     }
 
+    /// Why `ip` is refused for being a restricted address, if it is: an
+    /// absolute class always, a private one when no rule names it on any
+    /// port. `None` for an ordinary address, or a private one some rule
+    /// names — a refusal of that one is about its port, not its range.
+    fn restriction(&self, proto: &Proto, ip: IpAddr) -> Option<RestrictedClass> {
+        let class = classify(ip)?;
+        if !class.readmittable() {
+            return Some(class);
+        }
+        let named = match &self.egress {
+            CanonicalEgress::Unrestricted => false,
+            CanonicalEgress::Rules(rules) => rules.iter().any(|rule| {
+                rule.proto == *proto && rule.net.contains(&ip) && grant_readmits(&rule.net, ip)
+            }),
+        };
+        (!named).then_some(class)
+    }
+
     fn decide_addr_for_proto(&self, proto: Proto, ip: IpAddr, port: u16) -> EgressVerdict {
         if !self.egress.permits(&proto, ip, port) {
+            if let Some(class) = self.restriction(&proto, ip) {
+                return EgressVerdict::Deny(DenyReason::RestrictedAddress { ip, port, class });
+            }
             // A pinned address on the wrong port is the port-mismatch case even
             // when the guest dialled it numerically, so name the host it belongs
             // to rather than reporting a bare address.
@@ -557,6 +624,16 @@ impl EgressGate {
         if !ips.is_empty() {
             return EgressVerdict::Allow { ips, port };
         }
+        // Every address the name led to is restricted and unnamed: say so,
+        // rather than blaming the allow-list or the port.
+        let restricted: Vec<(IpAddr, RestrictedClass)> = candidates
+            .iter()
+            .filter_map(|ip| self.restriction(&proto, *ip).map(|class| (*ip, class)))
+            .collect();
+        if !restricted.is_empty() && restricted.len() == candidates.len() {
+            let (ip, class) = restricted[0];
+            return EgressVerdict::Deny(DenyReason::RestrictedAddress { ip, port, class });
+        }
         // Pinned but nothing admitted for this port is the port mismatch; an
         // unpinned name only reaches here on an unrestricted gate, where the
         // refusal came from the address filter rather than the allow-list.
@@ -601,7 +678,14 @@ impl EgressGate {
             candidates
                 .into_iter()
                 .filter(|ip| ip.is_ipv4() == want_ipv4)
-                .filter(|ip| explicitly_pinned || !dns_answer_forbidden(*ip))
+                // A pinned answer in a re-admittable private range survives:
+                // the operator named that host. Metadata, loopback and the
+                // other absolute classes never do, pinned or not.
+                .filter(|ip| {
+                    !dns_answer_forbidden(*ip)
+                        || (explicitly_pinned
+                            && !mvm_contract::policy::restricted_address::is_absolute(*ip))
+                })
                 .collect(),
         )
     }
@@ -1312,6 +1396,167 @@ mod tests {
                 ])
             }),
             DnsVerdict::Resolved(vec!["93.184.216.34".parse().unwrap()])
+        );
+    }
+
+    fn pinned_gate(host: &str, ip: &str, port: u16) -> EgressGate {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            host,
+            vec![ip.parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new(host, port)]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        )
+    }
+
+    fn restricted(verdict: &EgressVerdict) -> Option<RestrictedClass> {
+        match verdict {
+            EgressVerdict::Deny(DenyReason::RestrictedAddress { class, .. }) => Some(*class),
+            _ => None,
+        }
+    }
+
+    /// Claim 10's private-range default deny: an unrestricted grant, or a
+    /// rule for a supernet, reaches no private address; a grant naming the
+    /// address — a literal, a CIDR inside the range, or an allow-listed host
+    /// that resolved to it — re-admits it, and nothing else does.
+    #[test]
+    fn private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it() {
+        let open = EgressGate::new(CanonicalEgress::Unrestricted);
+        for target in [
+            "10.0.0.5:443",
+            "172.16.1.1:443",
+            "192.168.1.10:80",
+            "[fd12::1]:443",
+            "224.0.0.251:5353",
+            "255.255.255.255:443",
+        ] {
+            let verdict = open.decide_request(target);
+            assert!(
+                restricted(&verdict).is_some_and(RestrictedClass::readmittable),
+                "{target}: {verdict:?}"
+            );
+        }
+        assert!(matches!(
+            open.decide_request("93.184.216.34:443"),
+            EgressVerdict::Allow { .. }
+        ));
+
+        let supernet = EgressGate::new(CanonicalEgress::Rules(vec![allow_rule("0.0.0.0/0", 443)]));
+        assert_eq!(
+            restricted(&supernet.decide_request("10.0.0.5:443")),
+            Some(RestrictedClass::Private),
+            "0.0.0.0/0 names no private address"
+        );
+
+        let named = EgressGate::new(CanonicalEgress::Rules(vec![allow_rule("10.0.0.0/24", 443)]));
+        assert!(matches!(
+            named.decide_request("10.0.0.5:443"),
+            EgressVerdict::Allow { .. }
+        ));
+        assert!(
+            matches!(
+                named.decide_request("10.0.0.5:80"),
+                EgressVerdict::Deny(DenyReason::AddressNotAdmitted { .. })
+            ),
+            "a named address on the wrong port is a port refusal, not a range one"
+        );
+        assert!(restricted(&named.decide_request("10.0.1.5:443")).is_some());
+
+        // An allow-listed host that resolved to a private address names it.
+        let host = pinned_gate("db.internal.test", "10.20.30.40", 5432);
+        assert!(matches!(
+            host.decide_request("db.internal.test:5432"),
+            EgressVerdict::Allow { .. }
+        ));
+    }
+
+    /// Metadata, loopback, link-local, CGNAT, the unspecified block and
+    /// embedded translation forms are refused whatever the grant, and the
+    /// refusal records the class rather than a generic denial.
+    #[test]
+    fn metadata_and_the_absolute_ranges_are_never_readmitted() {
+        let open = EgressGate::new(CanonicalEgress::Unrestricted);
+        for (target, class) in [
+            ("169.254.169.254:80", RestrictedClass::CloudMetadata),
+            ("[fd00:ec2::254]:80", RestrictedClass::CloudMetadata),
+            (
+                "[::ffff:169.254.169.254]:80",
+                RestrictedClass::CloudMetadata,
+            ),
+            ("100.100.100.200:80", RestrictedClass::CloudMetadata),
+            ("127.0.0.1:8080", RestrictedClass::Loopback),
+            ("0.0.0.0:8080", RestrictedClass::Unspecified),
+            ("169.254.1.1:80", RestrictedClass::LinkLocal),
+            ("100.64.0.1:80", RestrictedClass::SharedAddressSpace),
+            ("[64:ff9b::a9fe:a9fe]:80", RestrictedClass::Embedded),
+            ("[2002:a9fe:a9fe::1]:80", RestrictedClass::Embedded),
+        ] {
+            let verdict = open.decide_request(target);
+            assert_eq!(restricted(&verdict), Some(class), "{target}");
+            let EgressVerdict::Deny(reason) = verdict else {
+                unreachable!()
+            };
+            assert_eq!(reason.audit_label(), class.label());
+        }
+
+        // Naming the metadata address exactly does not re-admit it.
+        for cidr in ["169.254.169.254/32", "169.254.0.0/16", "fd00:ec2::254/128"] {
+            let gate = EgressGate::new(CanonicalEgress::Rules(vec![allow_rule(cidr, 80)]));
+            let target = if cidr.contains(':') {
+                "[fd00:ec2::254]:80"
+            } else {
+                "169.254.169.254:80"
+            };
+            assert_eq!(
+                restricted(&gate.decide_request(target)),
+                Some(RestrictedClass::CloudMetadata),
+                "{cidr}"
+            );
+        }
+
+        // Nor does an allow-listed host that resolved to it.
+        let rebound = pinned_gate("innocent.example.test", "93.184.216.34", 80);
+        assert!(matches!(
+            rebound.decide_request("169.254.169.254:80"),
+            EgressVerdict::Deny(DenyReason::RestrictedAddress { .. })
+        ));
+    }
+
+    /// A live lookup under an unrestricted gate that answers with a private
+    /// or metadata address is refused as that address, so a public name that
+    /// rebinds inward reaches nothing.
+    #[test]
+    fn a_name_that_resolves_inward_is_refused_as_the_address_it_reached() {
+        let open = EgressGate::new(CanonicalEgress::Unrestricted);
+        let verdict = open.decide_request_with("rebind.example.test:443", |_| {
+            Ok(vec!["10.0.0.9".parse().unwrap()])
+        });
+        assert_eq!(restricted(&verdict), Some(RestrictedClass::Private));
+        let verdict = open.decide_request_with("rebind.example.test:80", |_| {
+            Ok(vec!["169.254.169.254".parse().unwrap()])
+        });
+        assert_eq!(restricted(&verdict), Some(RestrictedClass::CloudMetadata));
+        // A mixed answer keeps only the public address.
+        let verdict = open.decide_request_with("mixed.example.test:443", |_| {
+            Ok(vec![
+                "10.0.0.9".parse().unwrap(),
+                "93.184.216.34".parse().unwrap(),
+            ])
+        });
+        assert_eq!(
+            verdict,
+            EgressVerdict::Allow {
+                ips: vec!["93.184.216.34".parse().unwrap()],
+                port: 443
+            }
         );
     }
 

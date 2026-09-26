@@ -71,7 +71,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore` |
+| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore`, `fn:private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it`, `fn:metadata_and_the_absolute_ranges_are_never_readmitted`, `fn:a_name_that_resolves_inward_is_refused_as_the_address_it_reached`, `fn:an_embedded_ipv4_form_is_classified_by_the_address_it_reaches`, `fn:the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup` |
 
 ## fuzz_surface
 

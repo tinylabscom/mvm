@@ -599,6 +599,43 @@ mod server_tests {
         assert!(!logged.contains("secret.forward_outcome"), "{logged}");
     }
 
+    /// A request to the metadata service or a private range is refused on the
+    /// typed path too, and the chain records the class, not a generic denial.
+    #[tokio::test]
+    async fn a_restricted_address_refusal_records_its_class() {
+        let dir = tempdir().unwrap();
+        let (service, ph, chain) = recorded_service(
+            dir.path(),
+            std::sync::Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::new(
+                mvm_contract::policy::projection::CanonicalEgress::Unrestricted,
+            )),
+        );
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.20.30.40/internal",
+        ] {
+            let resp = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: url.into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(
+                matches!(resp, WireResponse::Refused { .. }),
+                "{url}: {resp:?}"
+            );
+        }
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("cloud_metadata"), "{logged}");
+        assert!(logged.contains("private_range"), "{logged}");
+        assert!(
+            !logged.contains("meta-data"),
+            "no path in the chain: {logged}"
+        );
+    }
+
     /// A claim-10 refusal lands one chain-signed entry naming the refused
     /// `host:port` and a fixed reason. Nothing else the request carried does:
     /// not its path, not a header value, not its body. Without the entry a

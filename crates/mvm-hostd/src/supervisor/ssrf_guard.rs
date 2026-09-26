@@ -72,6 +72,14 @@ impl SsrfGuard {
             IpAddr::V4(v4) => classify_v4(v4),
             IpAddr::V6(v6) => classify_v6(v6),
         }
+        // Anything the shared egress classifier restricts is restricted here
+        // too — the IPv4 addresses inside NAT64, 6to4, Teredo and
+        // IPv4-compatible forms, and AWS's IPv6 metadata endpoint — so the host
+        // tools never reach what a workload's egress may not.
+        .or_else(|| {
+            mvm_contract::policy::restricted_address::classify(ip)
+                .map(mvm_contract::policy::restricted_address::RestrictedClass::describe)
+        })
     }
 }
 
@@ -189,6 +197,21 @@ mod tests {
 
     fn ctx_resolved(host: &str, ip: IpAddr) -> RequestCtx {
         RequestCtx::new(host, 443, "/").with_resolved_ip(ip)
+    }
+
+    #[test]
+    fn the_shared_classifier_s_embedded_and_metadata_forms_are_blocked_too() {
+        for addr in [
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::1",
+            "fd00:ec2::254",
+            "::10.0.0.1",
+        ] {
+            assert!(
+                SsrfGuard::classify(addr.parse().unwrap()).is_some(),
+                "{addr}"
+            );
+        }
     }
 
     // ---- IPv4 disallowed ranges ----
