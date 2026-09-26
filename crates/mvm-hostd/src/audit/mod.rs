@@ -26,6 +26,9 @@ pub mod receipt_archive_verify;
 pub mod receipt_export;
 /// Persistent store for runtime-emitted signed ExecutionReceipts.
 pub mod receipt_store;
+/// Per-session seals, the session ledger derived from them, and the
+/// per-session verdict.
+pub mod session;
 pub mod witness;
 
 /// Content-addressed derived store for decision records.

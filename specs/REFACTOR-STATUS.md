@@ -36,6 +36,9 @@ Last updated: 2026-09-26
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
+    - [x] per-session seal, derived session ledger, `trust audit sessions|show|verify <session>`
+    - [x] fsync policy stated and tested; anchoring documented; rotation default confirmed
+    - [ ] snapshot roots in the ledger (waits on PS-08)
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723

@@ -1,6 +1,9 @@
 //! `mvmctl audit` subcommand handlers.
 
 mod inspect;
+mod sessions;
+#[cfg(test)]
+pub(in crate::commands) use sessions::{SessionsArgs, ShowArgs, VerifyArgs};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
@@ -22,7 +25,7 @@ use super::Cli;
 use mvm_contract::provenance::DecisionId;
 use mvm_hostd::audit::decisions::DecisionStore;
 
-use inspect::{audit_show, audit_tail};
+use inspect::audit_tail;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -64,13 +67,15 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long, default_value = "local")]
         tenant: String,
     },
-    /// Verify the chain-signed audit log. Returns nonzero exit on any
-    /// signature or chain-link failure.
-    Verify {
-        /// Tenant whose chain to verify. Defaults to `"local"`.
-        #[arg(long, default_value = "local")]
-        tenant: String,
-    },
+    /// Verify the chain-signed audit log, or one session in it.
+    ///
+    /// Without SESSION, walks every segment from genesis and exits nonzero on
+    /// any signature or chain-link failure. With SESSION, also holds the
+    /// session to its `session.sealed` record and prints VERIFIED, MISMATCH
+    /// with the reason, UNSEALED, or NOT_FOUND (exit 0, 1, 2, 3).
+    Verify(sessions::VerifyArgs),
+    /// List the sessions in the chain-signed log: one row per admitted run.
+    Sessions(sessions::SessionsArgs),
     /// Asset content identities: recompute the canonical digest of a file
     /// or directory tree so it can be compared against the identities
     /// recorded in a run's signed plan or audit chain — `mvmctl audit
@@ -100,17 +105,9 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long)]
         ack: bool,
     },
-    /// Show every audit chain entry bound to a specific plan_id.
-    Show {
-        /// The plan_id (`sha256:<hex>` content-address) to filter by.
-        plan_id: String,
-        /// Tenant whose chain to search. Defaults to `"local"`.
-        #[arg(long, default_value = "local")]
-        tenant: String,
-        /// Emit matching entries as a JSON array to stdout.
-        #[arg(long)]
-        json: bool,
-    },
+    /// Show a session's audit entries, across every segment, from a chain
+    /// that verifies.
+    Show(sessions::ShowArgs),
     /// Run a read-only security-posture self-test. Reports the live
     /// state of the host's mitigations (host
     /// signer present, audit chain verifiable, allowlists populated,
@@ -396,7 +393,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 audit_tail(lines, follow)
             }
         }
-        AuditAction::Verify { tenant } => audit_verify(&tenant),
+        AuditAction::Verify(args) => match args.session {
+            Some(session) => sessions::audit_verify_session(&args.tenant, &session, args.json),
+            None => audit_verify(&args.tenant),
+        },
+        AuditAction::Sessions(args) => sessions::audit_sessions(&args),
         AuditAction::Asset { action } => match action {
             AssetAction::Id { path } => asset_id(&path),
         },
@@ -405,11 +406,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             tenant,
             ack,
         } => audit_prune(&tenant, through, ack),
-        AuditAction::Show {
-            plan_id,
-            tenant,
-            json,
-        } => audit_show(&tenant, &plan_id, json),
+        AuditAction::Show(args) => sessions::audit_show(&args),
         AuditAction::Posture { json } => super::audit_posture::run(json),
         AuditAction::Provenance { action } => match action {
             ProvenanceAction::Export {

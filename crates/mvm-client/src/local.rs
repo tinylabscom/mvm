@@ -1222,6 +1222,13 @@ impl MvmClient for LocalBackend {
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
         let vid = VmId(id.0.clone());
+        // A persistent machine's session ends at its stop; a transient's ends
+        // when its exit is reported, which seals it. Read before the stop: the
+        // plan lives in the state dir the stop removes.
+        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
+            .exists()
+            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
+            .flatten();
         // Stop via the VMM that actually started this VM (resolved from its
         // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
         // own hypervisor, not this client's default. A marker-less VM (mock or
@@ -1246,6 +1253,9 @@ impl MvmClient for LocalBackend {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
             remove_stopped_runtime_state(&id.0)?;
+            if let Some(plan) = stopped_session {
+                crate::launch::seal_stopped_session(&plan, &id.0);
+            }
         }
         result.map_err(backend_err)
     }
