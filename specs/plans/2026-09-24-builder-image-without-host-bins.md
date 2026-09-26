@@ -709,11 +709,21 @@ the Stage 0 flake reference follows W8's re-pointing.
         `read_active_session` (every build's adoption path) and the CLI's
         `start` stop a session booted with other binaries — or with none,
         from an `mvmctl` that predates the payload — before starting afresh.
-- [ ] **W6 — delete the HVF patcher.** Remove `hvf_builder_image.rs`'s bake,
+- [x] **W6 — delete the HVF patcher.** Remove `hvf_builder_image.rs`'s bake,
       `builder_runner/inject.rs`, the `mvm-rootfs-patcher` bin and its
       `SEED_BINARIES` entry, and `hvf-rootfs-inject`. Teach `cache prune`
       about `builder-vm/hvf/`. Measure boot overhead (payload assembly plus
       guest stage 1) on HVF and Firecracker, and record it in the delivery note.
+      - Done: HVF and Firecracker resolve their image through one
+        `driver_builder_image::resolve_driver_builder_image`, which goes
+        through `ensure_builder_vm_image` — the freshness decision (cache
+        contract, source fingerprint, shared-cache seed, auto-bootstrap) the
+        libkrun and QEMU builders already took. The two in-house resolvers
+        used to check only that `vmlinux` and `rootfs.ext4` existed, so a
+        stale or contract-mismatched cache booted on HVF and Firecracker
+        while libkrun and QEMU refused it. `cache prune` removes
+        `builder-vm/hvf/`. The boot-overhead measurement is recorded in the
+        delivery note only if a live boot was possible; see there.
 - [ ] **W7 — the `mvm-images` side** (a PR in that repository). Stop consuming
       `hostBinaries`/`MVM_HOST_BIN_DIR`, write `/etc/mvm/builder-boot-abi`,
       drop the builder job's host-binary build, drop `--impure` for the builder
