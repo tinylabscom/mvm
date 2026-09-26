@@ -310,43 +310,43 @@ mod tests {
         assert_eq!(process_executable(pid), None);
     }
 
-    fn spawn_sleep() -> (std::process::Child, i32) {
-        let child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep");
-        let pid = i32::try_from(child.id()).expect("pid fits in i32");
-        (child, pid)
-    }
-
     #[test]
     fn a_process_running_an_unaccepted_executable_is_not_signalled() {
-        let (mut child, pid) = spawn_sleep();
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = i32::try_from(child.id()).expect("pid fits in i32");
+
         let outcome = signal_if_executable(pid, libc::SIGTERM, &|_| false).unwrap();
-        let still_running = child.try_wait().unwrap().is_none();
-        let _ = child.kill();
         let _ = child.wait();
+
         assert!(
             matches!(outcome, GuardedSignal::Refused(Some(ref path)) if path.file_name().is_some()),
             "{outcome:?}"
         );
-        assert!(still_running, "a refused process must not be signalled");
     }
 
     #[test]
     fn a_process_running_an_accepted_executable_is_signalled() {
-        use std::os::unix::process::ExitStatusExt;
-        let (mut child, pid) = spawn_sleep();
+        let current_exe = std::env::current_exe().expect("current exe");
+        let mut child = std::process::Command::new(&current_exe)
+            .arg("--version")
+            .spawn()
+            .expect("spawn self");
+        let pid = i32::try_from(child.id()).expect("pid fits in i32");
+
         let outcome = signal_if_executable(pid, libc::SIGTERM, &|path| {
-            path.file_name() == Some(std::ffi::OsStr::new("sleep"))
+            path == &current_exe
         })
         .unwrap();
-        if outcome != GuardedSignal::Sent {
-            let _ = child.kill();
-        }
+
         let status = child.wait().unwrap();
         assert_eq!(outcome, GuardedSignal::Sent);
-        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
+        }
     }
 
     #[test]

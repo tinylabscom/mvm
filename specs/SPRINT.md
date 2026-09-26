@@ -4795,3 +4795,8 @@ writes the plan:
       path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
       collection gate).
 
+- [x] Build the `ActionLedger` tracker in `mvm-hostd`: per-dimension
+      saturating counters (a compare-exchange loop, so totals cannot wrap
+      back under a ceiling), per-dimension exceeded latches, and
+      record-then-refuse semantics matching the AI budget tracker.
+
