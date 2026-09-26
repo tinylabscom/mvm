@@ -321,7 +321,7 @@ need an owner in `mvm-images` first.
       `specs/`, open the W8 tracking issue updates. No code changes.
       *Done:* the inventory above, with a fourth class (R, re-point) for code
       that reaches the flakes through a helper rather than a literal path.
-- [ ] **Wave 0.5a — the initramfs becomes a signed root member.**
+- [x] **Wave 0.5a — the initramfs becomes a signed root member.**
       `ImageSetRole::Initramfs` enters the `mvm-core` contract (accepted, not
       yet required by `current_train`), `mvm-images` publishes a per-arch
       `initramfs` member and derives every artifact `VERSION` from the pinned
@@ -339,9 +339,13 @@ need an owner in `mvm-images` first.
       immutable and unused. The role lands in `mvm` first, `mvm-images`
       advances its `mvm` pin to that commit, and the set publishes as
       `image-set/v0.2.1`.
-      *Progress:* the role is in `mvm-core` (`ImageSetRole::Initramfs`,
-      accepted and selectable, not yet in `current_train`); the set release
-      and the pin that adds the requirement follow.
+      *Done 2026-09-26:* the role landed in `mvm-core` (#3740); `mvm-images`
+      advanced its `mvm` pin to that commit (tinylabscom/mvm-images#30) and
+      published `image-set/v0.2.1` (run 36212970402; root
+      `cbe19a17…d58a`, cosign-verified against `release.yml@refs/tags/image-set/v0.2.1`)
+      with per-architecture `initramfs` members. `images.lock` pins it and
+      `current_train()` now requires the role on both architectures, so a set
+      without it is refused as incomplete.
 - [ ] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
       sidecar and initramfs are acquired as members of the locked set —
       digest- and size-checked against the verified root, through the one

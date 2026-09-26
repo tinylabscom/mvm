@@ -750,11 +750,11 @@ mod structure {
 
     #[test]
     fn a_set_carrying_per_arch_initramfs_members_is_well_formed_and_complete() {
-        let mut manifest = manifest();
+        let manifest = manifest();
         for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-            manifest
-                .members
-                .push(member(ImageSetRole::Initramfs, MemberTarget::Arch(arch)));
+            assert!(manifest.members.iter().any(|member| {
+                member.role == ImageSetRole::Initramfs && member.target == MemberTarget::Arch(arch)
+            }));
         }
         validate_structure(&manifest).unwrap();
         require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
@@ -771,17 +771,25 @@ mod structure {
         );
     }
 
-    /// Published sets carry no initramfs member yet, so requiring one would
-    /// refuse every set a released CLI pins. The role joins the requirement
-    /// with the lock that first selects a set carrying it.
+    /// The initramfs is a required member on both architectures: a set that
+    /// omits it is refused as incomplete, naming each missing member.
     #[test]
-    fn the_current_train_does_not_yet_require_an_initramfs() {
-        assert!(
-            ImageSetRequirement::current_train()
-                .members()
-                .iter()
-                .all(|required| required.role != ImageSetRole::Initramfs)
-        );
+    fn the_current_train_requires_an_initramfs_on_both_arches() {
+        let mut manifest = manifest();
+        manifest
+            .members
+            .retain(|member| member.role != ImageSetRole::Initramfs);
+        match require_complete(&manifest, &ImageSetRequirement::current_train()) {
+            Err(ImageSetError::Incomplete { missing }) => {
+                for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+                    assert!(missing.contains(&RequiredMember {
+                        role: ImageSetRole::Initramfs,
+                        target: MemberTarget::Arch(arch),
+                    }));
+                }
+            }
+            other => panic!("a set without an initramfs must be incomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1028,7 +1036,7 @@ mod completeness {
     fn current_train_requires_every_role_on_both_arches_plus_the_smoke_pack() {
         let requirement = ImageSetRequirement::current_train();
         let members = requirement.members();
-        assert_eq!(members.len(), 19);
+        assert_eq!(members.len(), 21);
         for arch in [X86, ARM] {
             for profile in [
                 WorkloadImageProfile::DefaultTenant,
@@ -1053,6 +1061,7 @@ mod completeness {
                 ImageSetRole::SdkSidecar(GuestLibc::Glibc),
                 ImageSetRole::SdkSidecar(GuestLibc::Musl),
                 ImageSetRole::Stage0BootstrapKernel,
+                ImageSetRole::Initramfs,
             ] {
                 assert!(members.contains(&RequiredMember { role, target: arch }));
             }
