@@ -102,7 +102,13 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
 - [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
 - [ ] L7 endpoint rules (method + path glob) → allow / deny / ask
-- [ ] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
+- [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
+      — one classifier (`mvm_contract::policy::restricted_address`) for every
+      connect, datagram, DNS answer and forward-leg dial; metadata, loopback,
+      link-local, CGNAT, `0.0.0.0/8` and embedded IPv4 forms are absolute;
+      RFC1918/ULA/multicast/reserved re-admitted only by a grant naming the
+      address; refusals audited with their class; the forward leg resolves
+      through the gate's recorded answer
 - [ ] enforcement only in `EgressGate`; every decision audited with route id and rule
 
 ### PS-03 — Credential injection UX (#3713)

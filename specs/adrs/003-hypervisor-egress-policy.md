@@ -49,6 +49,28 @@ anchor, but the real boundary is the host-side allow-list check the
 substitution endpoint runs before every substitution, which holds whatever
 the guest's TLS library validates.
 
+**Internal addresses are refused by the gate, not by the allow-list alone.**
+One classifier (`mvm_contract::policy::restricted_address`) decides which
+destinations are internal, for every connect, datagram, DNS answer and
+forward-leg dial. Cloud metadata endpoints (`169.254.169.254`,
+`169.254.170.2`, `100.100.100.200`, `fd00:ec2::254`), loopback, the
+unspecified block, link-local and carrier-grade NAT are refused under every
+policy. RFC1918, IPv6 unique-local, multicast and reserved addresses are
+refused by default and re-admitted only by a grant that names the address — a
+literal IP, a CIDR inside the private range, or an allow-listed host that
+resolved to it at admission. An open policy, or a `0.0.0.0/0` rule, names
+none of them. An IPv6 address carrying an IPv4 one (mapped, compatible, NAT64,
+6to4, Teredo) is judged by the IPv4 address it reaches. Each refusal is
+recorded with its class (`cloud_metadata`, `private_range`, …), not a generic
+denial.
+
+**A host is resolved once.** The gate resolves a destination — against the
+admission pins, or live under an open policy — and every connection to it is
+made to exactly those addresses: FlowMux dials the verdict's addresses, and
+the substitution path's forward leg resolves through the gate's recorded
+answer rather than the system resolver. A name cannot answer the decision
+with one address and the connection with another.
+
 **Per-VM network provisioning goes through one trait.** Each backend's
 provider brings a VM up against an admitted network spec and reports the
 same vsock-only capability shape; a caller never branches on which backend it
