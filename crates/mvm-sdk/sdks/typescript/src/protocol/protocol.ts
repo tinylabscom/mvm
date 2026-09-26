@@ -122,10 +122,25 @@ socket_mode: number
 ConsoleOpen: {
 argv?: string[]
 cols: number
+/**
+ * End the shell once it has had no attached client for this many seconds. Absent: it lives until it exits, is closed, or the VM stops.
+ */
+detach_timeout_secs?: (number | null)
 env?: [string, string][]
 rows: number
 }
 } | {
+ConsoleAttach: {
+cols: number
+rows: number
+session_id: number
+take_over: boolean
+}
+} | {
+ConsoleDetach: {
+session_id: number
+}
+} | "ConsoleList" | {
 ConsoleClose: {
 session_id: number
 }
@@ -477,6 +492,25 @@ host_vsock_port: number
 ConsoleOpened: {
 data_port: number
 session_id: number
+}
+} | {
+ConsoleAttached: {
+data_port: number
+replay_bytes: number
+session_id: number
+}
+} | {
+ConsoleBusy: {
+session_id: number
+}
+} | {
+ConsoleDetached: {
+session_id: number
+was_attached: boolean
+}
+} | {
+ConsoleSessions: {
+sessions: ConsoleSessionInfo[]
 }
 } | {
 ConsoleExited: {
@@ -1180,6 +1214,36 @@ path: string
  * File size in bytes (0 for deleted files).
  */
 size: number
+}
+/**
+ * One console session, as `ConsoleList` reports it.
+ */
+export interface ConsoleSessionInfo {
+/**
+ * Whether a client is connected right now.
+ */
+attached: boolean
+/**
+ * The program the session runs — argv\[0\] only; arguments are never echoed back.
+ */
+command: string
+/**
+ * The session's detach timeout, if it has one.
+ */
+detach_timeout_secs?: (number | null)
+/**
+ * Seconds the running session has had no client.
+ */
+detached_secs?: (number | null)
+/**
+ * Set once the shell has exited.
+ */
+exit_code?: (number | null)
+/**
+ * Scrollback retained for the next attach.
+ */
+scrollback_bytes: number
+session_id: number
 }
 /**
  * Snapshot of agent readiness at the moment of a `ReadinessStatus` call.

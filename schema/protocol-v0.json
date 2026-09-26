@@ -369,6 +369,64 @@
         }
       ]
     },
+    "ConsoleSessionInfo": {
+      "description": "One console session, as `ConsoleList` reports it.",
+      "type": "object",
+      "required": [
+        "attached",
+        "command",
+        "scrollback_bytes",
+        "session_id"
+      ],
+      "properties": {
+        "attached": {
+          "description": "Whether a client is connected right now.",
+          "type": "boolean"
+        },
+        "command": {
+          "description": "The program the session runs — argv\\[0\\] only; arguments are never echoed back.",
+          "type": "string"
+        },
+        "detach_timeout_secs": {
+          "description": "The session's detach timeout, if it has one.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "detached_secs": {
+          "description": "Seconds the running session has had no client.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "exit_code": {
+          "description": "Set once the shell has exited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "scrollback_bytes": {
+          "description": "Scrollback retained for the next attach.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "session_id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "DriveFileOperation": {
       "description": "Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.",
       "oneOf": [
@@ -2100,7 +2158,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Open an interactive PTY console session (dev-mode only). The guest allocates a PTY, spawns a shell, and listens on a dedicated vsock data port for raw byte streaming.",
+          "description": "Open an interactive PTY console session (dev-mode only). The guest allocates a PTY, spawns a shell, and listens on a dedicated vsock data port for raw byte streaming. The session outlives its client: a disconnect detaches, and the shell keeps running until it exits, is closed, or the VM stops.",
           "type": "object",
           "required": [
             "ConsoleOpen"
@@ -2122,6 +2180,15 @@
                 "cols": {
                   "type": "integer",
                   "format": "uint16",
+                  "minimum": 0.0
+                },
+                "detach_timeout_secs": {
+                  "description": "End the shell once it has had no attached client for this many seconds. Absent: it lives until it exits, is closed, or the VM stops.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
                   "minimum": 0.0
                 },
                 "env": {
@@ -2153,7 +2220,78 @@
           "additionalProperties": false
         },
         {
-          "description": "Close an active console session.",
+          "description": "Attach to a running console session, replaying its scrollback. Answered `ConsoleBusy` when another client is attached, unless `take_over` asks to hang that client up first.",
+          "type": "object",
+          "required": [
+            "ConsoleAttach"
+          ],
+          "properties": {
+            "ConsoleAttach": {
+              "type": "object",
+              "required": [
+                "cols",
+                "rows",
+                "session_id",
+                "take_over"
+              ],
+              "properties": {
+                "cols": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "rows": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "take_over": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Hang up the client attached to a console session. The shell keeps running.",
+          "type": "object",
+          "required": [
+            "ConsoleDetach"
+          ],
+          "properties": {
+            "ConsoleDetach": {
+              "type": "object",
+              "required": [
+                "session_id"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "List the agent's console sessions.",
+          "type": "string",
+          "enum": [
+            "ConsoleList"
+          ]
+        },
+        {
+          "description": "End a console session: hang up its shell and report the exit code. A session that already exited answers from its recorded code.",
           "type": "object",
           "required": [
             "ConsoleClose"
@@ -3472,6 +3610,119 @@
                   "type": "integer",
                   "format": "uint32",
                   "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Attached to a running console session. Connect to `data_port`: the first `replay_bytes` are scrollback, then live output follows.",
+          "type": "object",
+          "required": [
+            "ConsoleAttached"
+          ],
+          "properties": {
+            "ConsoleAttached": {
+              "type": "object",
+              "required": [
+                "data_port",
+                "replay_bytes",
+                "session_id"
+              ],
+              "properties": {
+                "data_port": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "replay_bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Attach refused: another client is attached to `session_id`.",
+          "type": "object",
+          "required": [
+            "ConsoleBusy"
+          ],
+          "properties": {
+            "ConsoleBusy": {
+              "type": "object",
+              "required": [
+                "session_id"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The attached client, if any, was hung up. The shell keeps running.",
+          "type": "object",
+          "required": [
+            "ConsoleDetached"
+          ],
+          "properties": {
+            "ConsoleDetached": {
+              "type": "object",
+              "required": [
+                "session_id",
+                "was_attached"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "was_attached": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The agent's console sessions: the running one, or the last to exit.",
+          "type": "object",
+          "required": [
+            "ConsoleSessions"
+          ],
+          "properties": {
+            "ConsoleSessions": {
+              "type": "object",
+              "required": [
+                "sessions"
+              ],
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/ConsoleSessionInfo"
+                  }
                 }
               },
               "additionalProperties": false

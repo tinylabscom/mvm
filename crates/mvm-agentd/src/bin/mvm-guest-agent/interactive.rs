@@ -385,39 +385,46 @@ pub(crate) fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>)
     do_run_detached(argv, env)
 }
 
+/// Whether the provisioned security policy permits the console at all.
+/// Every console verb asks the same question, so reattaching is authorized
+/// exactly as the open was. With no policy file (dev mode) the permissive
+/// defaults apply.
+fn console_refusal() -> Option<GuestResponse> {
+    let policy = mvm_agentd::builder_agent::load_security_policy()
+        .ok()
+        .flatten()
+        .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
+    (!policy.access.console).then(|| GuestResponse::Error {
+        message: "console rejected: access.console not enabled in security policy".to_string(),
+    })
+}
+
 pub(crate) fn handle_console_open(
     cols: u16,
     rows: u16,
     env: Vec<(String, String)>,
     argv: Vec<String>,
+    detach_timeout_secs: Option<u64>,
 ) -> GuestResponse {
-    // Check security policy — console requires access.console = true.
-    // When no policy file is provisioned (dev mode), use permissive defaults.
-    let policy = mvm_agentd::builder_agent::load_security_policy()
-        .ok()
-        .flatten()
-        .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
-    let console_allowed = policy.access.console;
-    if !console_allowed {
-        return GuestResponse::Error {
-            message: "console rejected: access.console not enabled in security policy".to_string(),
-        };
+    if let Some(refusal) = console_refusal() {
+        return refusal;
     }
-    match mvm_agentd::console::open_session(cols, rows, &env, &argv) {
-        Ok(session) => {
-            let session_id = session.session_id;
-            let data_port = session.data_port;
-            eprintln!("console: opened session {session_id}, data port {data_port}");
-
-            // Run the relay in a background thread
-            std::thread::spawn(move || {
-                let exit_code = mvm_agentd::console::run_console_relay(&session);
-                eprintln!("console: session {session_id} ended, exit code {exit_code}");
-            });
-
+    let request = mvm_agentd::console::OpenRequest {
+        cols,
+        rows,
+        env,
+        argv,
+        detach_timeout: detach_timeout_secs.map(std::time::Duration::from_secs),
+    };
+    match mvm_agentd::console::open_session(&request) {
+        Ok(ticket) => {
+            eprintln!(
+                "console: opened session {}, data port {}",
+                ticket.session_id, ticket.data_port
+            );
             GuestResponse::ConsoleOpened {
-                session_id,
-                data_port,
+                session_id: ticket.session_id,
+                data_port: ticket.data_port,
             }
         }
         Err(e) => GuestResponse::Error {
@@ -426,37 +433,99 @@ pub(crate) fn handle_console_open(
     }
 }
 
-pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
-    // A session that has already finished has its exit code on record — the
-    // answer whether the shell exited on its own or a prior close ended it.
-    if let Some(exit_code) = mvm_agentd::console::completed_exit_code(session_id) {
-        return GuestResponse::ConsoleExited {
-            session_id,
-            exit_code,
-        };
+pub(crate) fn handle_console_attach(
+    session_id: u32,
+    cols: u16,
+    rows: u16,
+    take_over: bool,
+) -> GuestResponse {
+    if let Some(refusal) = console_refusal() {
+        return refusal;
     }
-    // Otherwise end the session and wait for it. The host reaches here on every
-    // ordinary logout: it sends the close the instant its relay sees EOF, which
-    // is before the guest has reaped the shell, so refusing while a session was
-    // still winding down turned every clean exit into an error.
-    match mvm_agentd::console::close_active_session(mvm_agentd::console::CLOSE_SETTLE_TIMEOUT) {
-        Some(exit_code) => GuestResponse::ConsoleExited {
+    match mvm_agentd::console::attach_session(session_id, cols, rows, take_over) {
+        Ok(ticket) => {
+            eprintln!(
+                "console: attach {} to session {session_id} (take_over={take_over}), data port {}",
+                ticket.attach_id, ticket.data_port
+            );
+            GuestResponse::ConsoleAttached {
+                session_id,
+                data_port: ticket.data_port,
+                replay_bytes: ticket.replay_bytes,
+            }
+        }
+        Err(mvm_agentd::console::ConsoleError::Busy(session_id)) => {
+            GuestResponse::ConsoleBusy { session_id }
+        }
+        Err(e) => GuestResponse::Error {
+            message: format!("console attach failed: {e}"),
+        },
+    }
+}
+
+pub(crate) fn handle_console_detach(session_id: u32) -> GuestResponse {
+    if let Some(refusal) = console_refusal() {
+        return refusal;
+    }
+    match mvm_agentd::console::detach_session(session_id) {
+        Ok(was_attached) => GuestResponse::ConsoleDetached {
+            session_id,
+            was_attached,
+        },
+        Err(e) => GuestResponse::Error {
+            message: format!("console detach failed: {e}"),
+        },
+    }
+}
+
+pub(crate) fn handle_console_list() -> GuestResponse {
+    if let Some(refusal) = console_refusal() {
+        return refusal;
+    }
+    GuestResponse::ConsoleSessions {
+        sessions: mvm_agentd::console::list_sessions()
+            .into_iter()
+            .map(console_session_info)
+            .collect(),
+    }
+}
+
+fn console_session_info(
+    summary: mvm_agentd::console::SessionSummary,
+) -> mvm_agentd::vsock::ConsoleSessionInfo {
+    mvm_agentd::vsock::ConsoleSessionInfo {
+        session_id: summary.session_id,
+        command: summary.command,
+        attached: summary.attached,
+        exit_code: summary.exit_code,
+        scrollback_bytes: summary.scrollback_bytes,
+        detached_secs: summary.detached_for.map(|d| d.as_secs()),
+        detach_timeout_secs: summary.detach_timeout.map(|d| d.as_secs()),
+    }
+}
+
+pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
+    match mvm_agentd::console::terminate_session(
+        session_id,
+        mvm_agentd::console::CLOSE_SETTLE_TIMEOUT,
+    ) {
+        Ok(exit_code) => GuestResponse::ConsoleExited {
             session_id,
             exit_code,
         },
-        None => GuestResponse::Error {
-            message: "console session did not terminate".to_string(),
+        Err(e) => GuestResponse::Error {
+            message: format!("console close failed: {e}"),
         },
     }
 }
 
 pub(crate) fn handle_console_resize(session_id: u32, cols: u16, rows: u16) -> GuestResponse {
-    if mvm_agentd::console::resize_active_session(cols, rows) {
-        eprintln!("console: resized to {cols}x{rows}");
+    if mvm_agentd::console::resize_session(session_id, cols, rows) {
+        eprintln!("console: resized session {session_id} to {cols}x{rows}");
         GuestResponse::ConsoleResized { session_id }
     } else {
         GuestResponse::Error {
-            message: "no active console session to resize".to_string(),
+            message: format!("no running console session {session_id} to resize"),
         }
     }
 }

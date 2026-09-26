@@ -127,8 +127,9 @@ use handlers::{
     handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 use interactive::{
-    handle_console_close, handle_console_open, handle_console_resize, handle_exec,
-    handle_exec_batch, handle_run_code, handle_run_detached,
+    handle_console_attach, handle_console_close, handle_console_detach, handle_console_list,
+    handle_console_open, handle_console_resize, handle_exec, handle_exec_batch, handle_run_code,
+    handle_run_detached,
 };
 
 /// Shared references every per-verb handler needs: the state Arcs
@@ -465,7 +466,19 @@ fn handle_client(
                 rows,
                 env,
                 argv,
-            } => handle_console_open(cols, rows, env, argv),
+                detach_timeout_secs,
+            } => handle_console_open(cols, rows, env, argv, detach_timeout_secs),
+
+            GuestRequest::ConsoleAttach {
+                session_id,
+                cols,
+                rows,
+                take_over,
+            } => handle_console_attach(session_id, cols, rows, take_over),
+
+            GuestRequest::ConsoleDetach { session_id } => handle_console_detach(session_id),
+
+            GuestRequest::ConsoleList => handle_console_list(),
 
             GuestRequest::ConsoleClose { session_id } => handle_console_close(session_id),
 
