@@ -116,13 +116,13 @@ that is the supported pattern for letting an agent *see* CI config.
 
 ### Phase 1 — Output collection gate
 
-- [ ] `PathRule::Protected*` variants in `mvm-fs/src/output/rules.rs`,
+- [x] `PathRule::Protected*` variants in `mvm-fs/src/output/rules.rs`,
   threaded from the policy into the `collect.rs` validate pass.
-- [ ] Tests: benign tree collects; tree containing a modified
+- [x] Tests: benign tree collects; tree containing a modified
   `.github/workflows/x.yml` is refused whole; refusal audit tag is stable;
   `mode: Off` in a signed policy collects (attributable relaxation); symlinked
   protected name refused (defense in depth even though links aren't followed).
-- [ ] `PreparedOutputs` wiring: read the policy from the signed plan, hand it
+- [x] `PreparedOutputs` wiring: read the policy from the signed plan, hand it
   to collection; fail-closed if the plan is present but the policy projection
   is missing.
 

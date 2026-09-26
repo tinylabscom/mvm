@@ -4788,3 +4788,10 @@ writes the plan:
 - [x] Add a regression test that rejects the retired scripts, recipe, and stale
       downloader guidance.
 - [x] Prepare the issue-closing change for protected merge-queue delivery.
+- [x] Enforce the protected-paths policy at the output-collection
+      chokepoint: `PathRule::ProtectedPath` in `mvm-fs` refuses the whole
+      collection when a guest-authored tree touches a protected class,
+      reusing the standing whole-collection refusal + chain-signed audit
+      path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
+      collection gate).
+

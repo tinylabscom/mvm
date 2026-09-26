@@ -22,6 +22,10 @@ pub enum PathRule {
     NotUtf8,
     TooLong,
     TooDeep,
+    /// The path falls in a class the admitted plan protects (CI, build,
+    /// test control files, or key material). Only reachable when the
+    /// collection was handed a protected-path matcher.
+    ProtectedPath,
 }
 
 impl PathRule {
@@ -36,6 +40,7 @@ impl PathRule {
             Self::NotUtf8 => "not_utf8",
             Self::TooLong => "path_too_long",
             Self::TooDeep => "path_too_deep",
+            Self::ProtectedPath => "protected_path",
         }
     }
 }
@@ -52,6 +57,9 @@ impl std::fmt::Display for PathRule {
             Self::NotUtf8 => "it is not valid UTF-8",
             Self::TooLong => "it is longer than the path bound",
             Self::TooDeep => "it is nested deeper than the depth bound",
+            Self::ProtectedPath => {
+                "it falls in a protected path class (CI, build, test, or key material)"
+            }
         })
     }
 }
@@ -217,6 +225,7 @@ mod tests {
             PathRule::NotUtf8,
             PathRule::TooLong,
             PathRule::TooDeep,
+            PathRule::ProtectedPath,
         ];
         let tags: std::collections::HashSet<_> = rules.iter().map(|r| r.audit_tag()).collect();
         assert_eq!(tags.len(), rules.len());
