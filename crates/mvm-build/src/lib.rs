@@ -23,6 +23,8 @@ pub mod builder_boot;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
 mod builder_egress_process;
+/// Where a running builder guest finds mvm's own builder binaries.
+pub mod builder_guest_paths;
 mod builder_host_binaries;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the

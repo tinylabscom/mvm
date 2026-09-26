@@ -21,6 +21,7 @@ use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 
+mod boot_abi;
 mod checkout;
 mod error;
 mod identity;
@@ -31,6 +32,7 @@ mod trust_tier;
 mod validate;
 mod verify;
 
+pub use boot_abi::{BuilderBootAbi, BuilderBootAbiRange};
 pub use checkout::{LocalCheckouts, RepoIdentity, WorktreeState};
 pub use error::{ImageSetError, ImageSetStage};
 pub use identity::{

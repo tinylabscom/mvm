@@ -512,23 +512,28 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The mounts [`pivot_to_root`] carries from the initramfs into the new root.
+/// Anything an initramfs PID 1 needs to outlive the pivot has to sit on one of
+/// them.
+pub const PIVOT_MOVED_MOUNTS: [&str; 5] = ["/proc", "/sys", "/dev", "/run", "/tmp"];
+
 /// Pivot into the mounted rootfs, making it the active `/`.
 ///
-/// Moves `/proc`, `/sys`, `/dev`, `/run`, and `/tmp` into the new root, then
-/// performs the canonical switch_root sequence (chdir + MS_MOVE + chroot).
-/// The agent process keeps running; it does not exec a new init.
+/// Moves [`PIVOT_MOVED_MOUNTS`] into the new root, then performs the canonical
+/// switch_root sequence (chdir + MS_MOVE + chroot). The calling process keeps
+/// running; it does not exec a new init.
 pub fn pivot_to_root(new_root: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Ensure the target directories exist in the new root.
-        for sub in ["proc", "sys", "dev", "run", "tmp"] {
-            let dst = new_root.join(sub);
+        for sub in PIVOT_MOVED_MOUNTS {
+            let dst = new_root.join(&sub[1..]);
             ensure_dir(&dst.to_string_lossy())?;
         }
 
         // Move the initramfs pseudo-filesystems into the new root so the
         // workload (and the agent itself) keeps seeing them.
-        for sub in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
+        for sub in PIVOT_MOVED_MOUNTS {
             let dst = new_root.join(&sub[1..]).to_string_lossy().to_string();
             let _ = ensure_dir(&dst);
             move_mount(sub, &dst)
@@ -1692,6 +1697,10 @@ mod tests {
             .split("\npub fn ")
             .next()
             .expect("function body is delimited by the next item");
+        assert!(
+            pivot.contains("for sub in PIVOT_MOVED_MOUNTS"),
+            "pivot_to_root must move the mounts it declares"
+        );
 
         for target in ["/run", "/tmp"] {
             assert!(
@@ -1701,7 +1710,7 @@ mod tests {
                 "{target} must be mounted as tmpfs before the read-only root is activated"
             );
             assert!(
-                pivot.contains(&format!("\"{target}\"")),
+                PIVOT_MOVED_MOUNTS.contains(&target),
                 "{target} must move into the activated workload root"
             );
         }

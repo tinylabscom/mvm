@@ -19,10 +19,20 @@
 //! - the digest on the command line — [`PAYLOAD_CMDLINE_KEY`];
 //! - where the binaries live once the guest is running —
 //!   [`RUNTIME_HOST_BIN_DIR`];
-//! - how stage 2 knows it is stage 2 — [`STAGE_ENV`].
+//! - how stage 2 knows it is stage 2 — [`STAGE_ENV`];
+//! - which images the payload boots — [`abi`], against the image's
+//!   [`IMAGE_ABI_MARKER`].
 
+pub mod abi;
+pub mod cmdline;
 pub mod payload;
 
+pub use crate::builder_guest_paths::{RUNTIME_HOST_BIN_DIR, guest_host_binary};
+pub use abi::{
+    BootAbiError, IMAGE_ABI_MARKER, baked_only_abis, check_image_abi, parse_image_abi_marker,
+    payload_supported_abis,
+};
+pub use cmdline::{Stage1Cmdline, Stage1CmdlineError, parse_stage1_cmdline};
 pub use payload::{
     BootPayloadError, BuilderBootPayload, BuilderBootPayloadBuilder, PayloadDigest,
     PayloadManifest, install_payload, verify_unpacked_payload,
@@ -40,10 +50,6 @@ pub const STAGE1_MEMBER: &str = "mvm-host-vm-init";
 
 /// The kernel command-line key carrying the payload digest.
 pub const PAYLOAD_CMDLINE_KEY: &str = "mvm.boot_payload";
-
-/// Where the payload's binaries live in a running builder guest: a directory
-/// on the `/run` tmpfs, which survives the pivot out of the initramfs.
-pub const RUNTIME_HOST_BIN_DIR: &str = "/run/mvm/host-bins";
 
 /// The environment variable stage 1 sets when it re-executes itself as the
 /// builder's PID 1. The kernel command line cannot change between the two
