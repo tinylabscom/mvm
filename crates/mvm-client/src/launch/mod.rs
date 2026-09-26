@@ -124,6 +124,27 @@ fn build_audit_emitter() -> Option<AuditEmitter> {
     }
 }
 
+/// Seal the session of a persistent machine that was just stopped, then publish
+/// the closing root over it. Best-effort for the same reason as at exit: the
+/// machine is already stopped, and a missing seal is reported by
+/// `trust audit verify` as `UNSEALED` rather than hidden.
+pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine: &str) {
+    let Some(emitter) = build_audit_emitter() else {
+        return;
+    };
+    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Stopped) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            machine,
+            "could not seal the stopped machine's session"
+        );
+        return;
+    }
+    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
+        tracing::warn!(error = %format!("{e:#}"), machine, "could not publish an audit root at stop");
+    }
+}
+
 impl LocalBackend {
     /// The secret lifecycle service to validate/record references through:
     /// the injected one, else the production-wired local service.
@@ -1072,6 +1093,16 @@ impl LocalBackend {
                 },
             ) {
                 tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+            }
+            // Seal before the closing root, so the root covers the seal.
+            if let Err(e) =
+                emitter.seal_session(&outcome.plan, mvm_hostd::audit::session::SealReason::Exited)
+            {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    machine = name,
+                    "could not seal the session at exit; `trust audit verify` will report it unsealed"
+                );
             }
             // The closing bracket of the run. Admission published the opening
             // one, so a verifier can prove the log only grew across the whole
