@@ -19,7 +19,7 @@ selection do not install, link, or auto-select libkrun:
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
 | macOS 13–25 Apple Silicon | Unsupported by the standard local runtime; update macOS or use a Linux KVM host. |
-| Linux + `/dev/kvm` | **No** — auto-detect picks the **QEMU** builder, so libkrun is not part of the default builder path on native Linux hosts. |
+| Linux + `/dev/kvm` | **No** — auto-detect picks the **Firecracker** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
 The libkrun Cargo features remain only for explicit integration development and
 CI coverage. `mvmctl doctor` reports the resolved standard backend on the
@@ -67,6 +67,15 @@ cargo run -- bootstrap
 > It never compiles a second `mvmctl`. `just embed` (or `just embed --release`)
 > builds the whole set up front, per-VM helpers included. Released binaries
 > always carry the payload.
+
+> **Note — how the builder VM gets them.** The builder image does not have to
+> carry `mvm-host-vm-init` or `mvm-builderd`. Every builder boot, on every
+> backend, hands the guest a small initramfs — the *builder boot payload* —
+> assembled from the running `mvmctl`'s own copies, and the guest runs those.
+> An edit to either binary therefore reaches the builder at its next boot,
+> after a rebuild of `mvmctl`, without a new builder image. The image and the
+> payload agree on a versioned *builder boot ABI*, declared in the image's
+> `/etc/mvm/builder-boot-abi`; ADR-004 records what each version promises.
 
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain

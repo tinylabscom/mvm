@@ -3,10 +3,11 @@
 Backing: preview
 Validation: none
 
-**Status:** DRAFT. This is a design; nothing here is implemented. It was
-written against `origin/main` at `9ebb81b459` on 2026-09-24. Re-verify every
-file:line citation before starting a workstream, because the builder code
-moves quickly.
+**Status:** IN PROGRESS. W0–W6 and W11 are implemented in `mvm`; W7 is the
+`mvm-images` side, and W8–W10 and W12 remain. The design below was written
+against `origin/main` at `9ebb81b459` on 2026-09-24, so its file:line
+citations describe the code before these workstreams; re-verify them before
+starting one that remains.
 
 **Related:** `specs/plans/2026-09-22-builder-image-source-freshness.md` (#3524,
 the loader-side freshness check this plan narrows),
@@ -738,6 +739,15 @@ the Stage 0 flake reference follows W8's re-pointing.
       contract 4 → 5. Tests: update the fingerprint layer tests
       (`builder_vm_bootstrap_tests.rs`) so a change to the embed table no
       longer moves the key and every Nix input still does.
+      - [ ] Stop packing job-side `mvm-bins` (`runner.rs`, `hvf_persistent.rs`,
+        `libkrun_builder.rs`, `qemu_builder.rs`) once no builder job builds a
+        flake that reads `MVM_HOST_BIN_DIR`; W4 kept it for that reason.
+      - [ ] **Amend ADR-030 item 4.** Its wording names `nix/images/builder-vm/`
+        and "the in-repo flakes". After the in-tree flake is deleted it must
+        read "the paired `mvm-images` checkout selected by `MVM_IMAGES_DIR`",
+        with the no-silent-substitution rule and the `source: fetched` rule
+        unchanged. Record it as an amendment, not as an implicit
+        reinterpretation of the current text.
 - [ ] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
       `libc`-only closure (pending the crate-count decision), vendoring
       `configure_close_fds`. Point `nix/packages/mvm-setpriv.nix` and
@@ -751,10 +761,20 @@ the Stage 0 flake reference follows W8's re-pointing.
       generated from the same import-site scan. Tests: a crate edit outside
       the builder's inputs does not move the builder-vm pair key; an edit to
       each listed input does; other roles are unchanged.
-- [ ] **W11 — ADR amendments** (ADR-004, ADR-030, ADR-018 cross-reference),
+- [x] **W11 — ADR amendments** (ADR-004, ADR-030, ADR-018 cross-reference),
       landed in the same PR as W8, with the text above. Update `CLAUDE.md`
       §"Builder backend selection", the contributor guide's builder section,
       and `specs/REFACTOR-STATUS.md`.
+      - Done ahead of W8, worded for the transition rather than the end
+        state: ADR-004 carries the payload decision and a versioned
+        *builder boot contract* section (where it lives, what ABI 0 and 1
+        mean, what every ABI promises the payload, what the host commits to),
+        says the cache key keeps the baked-binary term until the images move
+        to ABI 1, and corrects the backend paragraph (four backends,
+        Firecracker on Linux with KVM). ADR-030 item 4 gains the
+        never-a-published-artifact sentence; ADR-018's Context points at the
+        builder analogue. The item-4 wording change for the in-tree flake's
+        deletion is a W8 item above.
 - [ ] **W12 — measured acceptance.** On the Apple Silicon workstation and the
       KVM box: after a one-line `mvm-core` edit plus `just embed`, time
       `mvmctl machine run` end to end, before and after. Acceptance: no Stage 0
