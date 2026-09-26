@@ -30,7 +30,7 @@ poc_dir = "pocs/CVE-2026-80521"
 # staging run: it is the sha256 the scenario re-verifies before delivery, so a
 # tampered or mis-built binary is refused rather than run. Left empty until the
 # lab has produced a byte-stable build; see the suite README.
-artifact_sha256 = ""
+artifact_sha256 = "fbc61130ed76ab91e073c25402e1979a77c963321981f5739313d705973595ef"
 
 [kernel]
 # The kernel the public PoC is written against. It is target-specific: the
@@ -44,4 +44,4 @@ target_version = "7.0.0-31-generic"
 # the admitted boot on MVM's own kernel; set, the scenario requires
 # MVM_BDD_CVE_KERNEL + MVM_BDD_CVE_INITRAMFS and re-verifies this digest
 # before boot.
-vmlinux_sha256 = ""
+vmlinux_sha256 = "e4f4486afd398740007df6680e0128e9c8511f035bf82363880fd1f18693e388"
