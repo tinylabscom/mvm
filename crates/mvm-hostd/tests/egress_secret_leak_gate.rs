@@ -101,6 +101,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
                 provider: None,
+                approve: Default::default(),
             },
         )
         .unwrap();

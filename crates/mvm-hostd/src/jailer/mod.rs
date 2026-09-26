@@ -231,6 +231,22 @@ impl ConfinementSpec {
         }
         self
     }
+
+    /// Permit the endpoint to connect to the operator's approval socket.
+    /// The directory, not the socket: the broker binds the socket after the
+    /// endpoint has confined itself, and Landlock cannot grant a path that
+    /// does not exist yet. The directory is the VM's own socket directory,
+    /// which the endpoint already binds its sockets in.
+    #[must_use]
+    pub fn with_approval_socket_parent(mut self, parent: Option<&Path>) -> Self {
+        if let Some(parent) = parent
+            && parent.exists()
+            && !self.read_write_paths.iter().any(|p| p == parent)
+        {
+            self.read_write_paths.push(parent.to_path_buf());
+        }
+        self
+    }
 }
 
 /// Drop paths that don't exist on this host. Landlock installs a rule by
@@ -474,6 +490,36 @@ mod tests {
             vec![dir],
             "Local must add nothing beyond the audit dir"
         );
+    }
+
+    /// The approval socket's directory is granted once, only when it exists,
+    /// and never duplicates a directory already granted.
+    #[test]
+    fn network_endpoint_spec_grants_the_approval_socket_directory_once() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let socket_dir = dir.join("src");
+        let spec = ConfinementSpec::network_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            None,
+        )
+        .with_approval_socket_parent(Some(&socket_dir))
+        .with_approval_socket_parent(Some(&socket_dir));
+        assert_eq!(spec.read_write_paths, vec![dir.clone(), socket_dir]);
+
+        let missing = dir.join("no-such-socket-dir");
+        let spec = ConfinementSpec::network_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            None,
+        )
+        .with_approval_socket_parent(Some(&missing))
+        .with_approval_socket_parent(None);
+        assert_eq!(spec.read_write_paths, vec![dir]);
     }
 
     #[test]

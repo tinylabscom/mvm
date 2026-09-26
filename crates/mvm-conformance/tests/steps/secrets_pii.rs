@@ -41,6 +41,7 @@ fn given_bound_secret(world: &mut CliWorld, name: String, value: String, tenant:
         allowed_hosts: vec!["example.com".to_string()],
         sigv4: None,
         provider: None,
+        approve: Default::default(),
     };
     service
         .bind(&tenant, &name, binding)

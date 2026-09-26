@@ -7,8 +7,8 @@
 //! only when the route grants interception.
 
 use super::*;
-use crate::supervisor::egress_approval::{
-    ApprovalVerdict, EgressApprover, PendingEgressDecision, REASON_APPROVAL_UNAVAILABLE,
+use crate::supervisor::runtime_approval::{
+    ApprovalSubject, ApprovalVerdict, REASON_APPROVAL_UNAVAILABLE, RuntimeApprover,
 };
 use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
 
@@ -43,7 +43,7 @@ fn route(host: &str, rules: Vec<EndpointRule>, intercept: bool) -> EgressRoute {
 /// One secret bound to [`BOUND_HOST`], its route carrying `rules`.
 fn bound_with(
     rules: Vec<EndpointRule>,
-    approver: Option<Arc<dyn EgressApprover>>,
+    approver: Option<Arc<dyn RuntimeApprover>>,
 ) -> (Assembled, Arc<RecordingForwarder>) {
     let forwarder = recording();
     let vm = assemble_with(
@@ -56,6 +56,7 @@ fn bound_with(
         Routing {
             routes: vec![route(BOUND_HOST, rules, false)],
             approver,
+            ..Routing::default()
         },
     );
     (vm, forwarder)
@@ -147,10 +148,20 @@ fn an_ask_is_refused_until_an_approver_answers_it() {
 
     struct Approves;
     #[async_trait]
-    impl EgressApprover for Approves {
-        async fn decide(&self, pending: &PendingEgressDecision<'_>) -> ApprovalVerdict {
-            assert_eq!(pending.route_id, "model-api");
-            assert_eq!(pending.method, "POST");
+    impl RuntimeApprover for Approves {
+        async fn decide(&self, subject: &ApprovalSubject) -> ApprovalVerdict {
+            let ApprovalSubject::Egress {
+                route_id,
+                method,
+                path,
+                ..
+            } = subject
+            else {
+                panic!("an egress question: {subject:?}");
+            };
+            assert_eq!(route_id, "model-api");
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/messages", "the prompt carries the path");
             ApprovalVerdict::Approved
         }
     }
@@ -204,7 +215,7 @@ fn an_unbound_host_is_terminated_for_its_rules_only_when_the_route_grants_interc
         forwarder.clone(),
         Routing {
             routes,
-            approver: None,
+            ..Routing::default()
         },
     );
     assert_eq!(
@@ -232,7 +243,7 @@ fn an_unbound_host_is_terminated_for_its_rules_only_when_the_route_grants_interc
                 vec![rule("GET", "/public/**", RouteOutcome::Allow)],
                 false,
             )],
-            approver: None,
+            ..Routing::default()
         },
     );
     assert_eq!(ungranted.service.terminable(OTHER_HOST, 443), None);
@@ -245,4 +256,88 @@ fn an_unbound_host_is_terminated_for_its_rules_only_when_the_route_grants_interc
         ungranted.service.route_refusal_reason("unrouted.test", 443),
         None
     );
+}
+
+/// Answers every question with a fixed verdict and remembers the last one.
+struct Fixed {
+    verdict: ApprovalVerdict,
+    asked: Mutex<Vec<ApprovalSubject>>,
+}
+
+#[async_trait]
+impl RuntimeApprover for Fixed {
+    async fn decide(&self, subject: &ApprovalSubject) -> ApprovalVerdict {
+        self.asked.lock().unwrap().push(subject.clone());
+        self.verdict
+    }
+}
+
+fn secret_asking(verdict: ApprovalVerdict) -> (Assembled, Arc<RecordingForwarder>, Arc<Fixed>) {
+    let forwarder = recording();
+    let approver = Arc::new(Fixed {
+        verdict,
+        asked: Mutex::new(Vec::new()),
+    });
+    let vm = assemble_with(
+        &[Bound {
+            secret: "model-api",
+            pattern: BOUND_HOST,
+        }],
+        &[BOUND_HOST],
+        forwarder.clone(),
+        Routing {
+            approver: Some(approver.clone()),
+            approval_required: ["model-api".to_string()].into_iter().collect(),
+            ..Routing::default()
+        },
+    );
+    (vm, forwarder, approver)
+}
+
+#[test]
+fn a_secret_that_needs_approval_is_held_and_refused_when_denied() {
+    let (vm, forwarder, approver) = secret_asking(ApprovalVerdict::Denied {
+        reason: "approval_denied",
+    });
+    let refused = send(
+        &vm,
+        BOUND_HOST,
+        "GET",
+        "/v1/models",
+        Some(&vm.placeholders[0]),
+    );
+    assert!(status_line(&refused).starts_with("HTTP/1.1 502"));
+    assert!(
+        forwarder.seen.lock().unwrap().is_none(),
+        "nothing was substituted or sent"
+    );
+    assert_eq!(
+        approver.asked.lock().unwrap().as_slice(),
+        [ApprovalSubject::SecretUse {
+            secret: "model-api".into(),
+            destination: BOUND_HOST.into(),
+        }]
+    );
+    let chain = vm.audit_chain();
+    assert!(chain.contains("approval_denied"), "{chain}");
+    assert!(!chain.contains("secret.substituted"), "{chain}");
+}
+
+#[test]
+fn a_secret_that_needs_approval_is_substituted_once_approved() {
+    let (vm, forwarder, approver) = secret_asking(ApprovalVerdict::Approved);
+    let allowed = send(
+        &vm,
+        BOUND_HOST,
+        "GET",
+        "/v1/models",
+        Some(&vm.placeholders[0]),
+    );
+    assert!(status_line(&allowed).starts_with("HTTP/1.1 200"));
+    assert!(forwarder.seen.lock().unwrap().is_some());
+    assert_eq!(approver.asked.lock().unwrap().len(), 1);
+
+    // A request without the placeholder asks nothing.
+    send(&vm, BOUND_HOST, "GET", "/v1/models", None);
+    assert_eq!(approver.asked.lock().unwrap().len(), 1);
 }

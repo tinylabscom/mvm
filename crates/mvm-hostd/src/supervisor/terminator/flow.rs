@@ -758,7 +758,8 @@ mod tests {
     #[derive(Default)]
     struct Routing {
         routes: Vec<mvm_contract::policy::routes::EgressRoute>,
-        approver: Option<Arc<dyn crate::supervisor::egress_approval::EgressApprover>>,
+        approver: Option<Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>>,
+        approval_required: std::collections::BTreeSet<String>,
     }
 
     /// [`assemble`] with the gate carrying `routing.routes`, and the egress
@@ -846,7 +847,8 @@ mod tests {
         let service = match routing.approver {
             Some(approver) => service.with_approver(approver),
             None => service,
-        };
+        }
+        .with_approval_required(routing.approval_required);
 
         Assembled {
             service: Arc::new(service),

@@ -202,6 +202,7 @@ fn build_service(
                 allowed_hosts: vec![bound_host.to_string()],
                 sigv4: None,
                 provider: None,
+                approve: Default::default(),
             },
         )
         .expect("seed secret binding");

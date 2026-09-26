@@ -267,6 +267,12 @@ pub struct EndpointConfig {
     /// `OpenHttp` flows. Absent on legacy endpoint configs.
     #[serde(default)]
     pub connector_uds_path: Option<std::path::PathBuf>,
+    /// Where the operator's approval broker listens, if one does: the
+    /// foreground `mvmctl` binds it for the life of the run. An `ask` is put
+    /// to it and held until it answers, times out, or turns out not to be
+    /// there — the last two are denials. Absent ⇒ every `ask` is denied.
+    #[serde(default)]
+    pub approval_socket: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -449,8 +455,29 @@ pub fn assemble_with_projection(
     if let Some(recorder) = projection.recorder.as_ref() {
         service = service.with_shared_recorder(Arc::clone(recorder));
     }
+    service = service.with_approver(approval_supervisor(cfg, projection.recorder.clone())?);
 
     Ok((Arc::new(service), handed))
+}
+
+/// The runtime approver for this endpoint: every `ask` recorded in the
+/// approval ledger and audited, and put to the approval socket when the
+/// config names one. Without one every `ask` is denied, still audited.
+fn approval_supervisor(
+    cfg: &EndpointConfig,
+    recorder: Option<Arc<crate::supervisor::audit_recorder::Recorder>>,
+) -> anyhow::Result<Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>> {
+    use crate::supervisor::runtime_approval::{ApprovalSupervisor, SocketBroker};
+    let instance = if cfg.instance_id.is_empty() {
+        cfg.tenant_id.as_str()
+    } else {
+        cfg.instance_id.as_str()
+    };
+    let mut builder = ApprovalSupervisor::builder(instance).recorder(recorder);
+    if let Some(socket) = &cfg.approval_socket {
+        builder = builder.broker(Arc::new(SocketBroker::new(socket.clone())));
+    }
+    Ok(Arc::new(builder.build()?))
 }
 
 /// Fingerprint every secret this endpoint can resolve, for the host→guest
@@ -663,6 +690,7 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
             connector_uds_path: None,
+            approval_socket: None,
         }
     }
 
@@ -784,6 +812,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -931,6 +960,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -988,6 +1018,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -1017,6 +1048,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();

@@ -9,14 +9,14 @@
 use mvm_contract::policy::routes::{DecidedBy, RouteDecision, RouteOutcome};
 
 use super::SubstitutionService;
-use crate::supervisor::egress_approval::{ApprovalVerdict, PendingEgressDecision};
+use crate::supervisor::runtime_approval::{ApprovalSubject, ApprovalVerdict};
 
 /// Why a request a route refused was refused.
 const REASON_ROUTE_DENIED: &str = "route_denied";
 
 /// The request method as a fixed audit label: a standard method, or `other`.
 /// The method is guest-supplied, so an unrecognised token is not recorded.
-pub(super) fn method_label(method: &str) -> &'static str {
+pub(crate) fn method_label(method: &str) -> &'static str {
     const METHODS: [&str; 9] = [
         "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE",
     ];
@@ -44,9 +44,10 @@ impl SubstitutionService {
             return Ok(());
         };
         let destination = format!("{host}:{port}");
-        let method = method_label(method);
-        let verdict = self.route_verdict(&decision, &destination, method).await;
-        self.audit_route_decision(&decision, &destination, method, verdict.err())
+        let verdict = self
+            .route_verdict(&decision, &destination, method, path)
+            .await;
+        self.audit_route_decision(&decision, &destination, method_label(method), verdict.err())
             .await;
         verdict
     }
@@ -55,7 +56,8 @@ impl SubstitutionService {
         &self,
         decision: &RouteDecision,
         destination: &str,
-        method: &'static str,
+        method: &str,
+        path: &str,
     ) -> Result<(), &'static str> {
         match decision.outcome {
             RouteOutcome::Allow => Ok(()),
@@ -64,14 +66,17 @@ impl SubstitutionService {
             }
             RouteOutcome::Deny => Err(REASON_ROUTE_DENIED),
             RouteOutcome::Ask => {
-                let rule = decision.decided_by.label();
-                let pending = PendingEgressDecision {
-                    route_id: &decision.route_id,
-                    rule: &rule,
-                    destination,
-                    method,
+                // The question carries the method and path as the guest sent
+                // them; the approval backend shows them only after stripping
+                // anything a terminal would interpret.
+                let subject = ApprovalSubject::Egress {
+                    route_id: decision.route_id.clone(),
+                    rule: decision.decided_by.label(),
+                    destination: destination.to_string(),
+                    method: method.to_string(),
+                    path: path.to_string(),
                 };
-                match self.approver.decide(&pending).await {
+                match self.approver.decide(&subject).await {
                     ApprovalVerdict::Approved => Ok(()),
                     ApprovalVerdict::Denied { reason } => Err(reason),
                 }
