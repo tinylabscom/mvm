@@ -771,8 +771,24 @@ fn load_name_registry() -> VmNameRegistry {
 /// The directory stays when something still owns it: a supervisor that
 /// survived the stop, or a restore of the same machine in another process,
 /// which holds the machine's lifecycle lock while it fills the directory.
+///
+/// It also stays for a transient run whose exit has not been reported yet. A
+/// transient reports its exit by reading `workload.exit` from this directory
+/// after the machine stops, then removes the directory through its own
+/// cleanup; reaping here would delete that unconsumed exit before it is read.
+/// A persistent machine — the restored-checkpoint case this exists for —
+/// reports no exit through the stop path, so it always reaps.
 fn remove_stopped_runtime_state(name: &str) -> Result<()> {
     let state_dir = vm_state_dir(name);
+    let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
+        && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
+    if transient_exit_pending {
+        tracing::debug!(
+            machine = name,
+            "transient exit not yet reported; leaving state dir for its own cleanup"
+        );
+        return Ok(());
+    }
     let removed = mvm_runtime::vm::reconcile::reap_unowned_state_dir(
         &state_dir,
         &mvm_core::config::instance_dir(name),
