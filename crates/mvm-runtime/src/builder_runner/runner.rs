@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use mvm_agentd::vsock::EGRESS_PORT;
+use mvm_build::builder_boot::stage_builder_boot;
 use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
@@ -118,8 +119,12 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         )?;
         create_output_disk(&transport.output_disk, b.output_size)?;
 
+        // mvm's own builder binaries travel beside the image, in the boot
+        // payload this process assembles, rather than inside it.
+        let boot = stage_builder_boot(&transport.state_dir, b.rootfs)?;
         let spec = builder_spec(&BuilderSpecInputs {
             name: b.name,
+            boot: &boot,
             kernel: b.kernel,
             rootfs: b.rootfs,
             nix_store: b.nix_store,
@@ -397,9 +402,15 @@ mod tests {
         let kernel = tmp.path().join("Image");
         let rootfs = tmp.path().join("rootfs.ext4");
         let nix_store = tmp.path().join("nix-store.img");
-        for f in [&kernel, &rootfs, &nix_store] {
+        for f in [&kernel, &nix_store] {
             std::fs::write(f, b"x").unwrap();
         }
+        // A real legacy image: this process registers no payload source, so
+        // the boot is staged by reading the image's boot ABI, and only an
+        // image that bakes its own init boots without a payload.
+        let image_tree = tmp.path().join("image-tree");
+        std::fs::create_dir_all(image_tree.join("run")).unwrap();
+        mvm_fs::rootfs::materialize_ext4_pure(&image_tree, &rootfs, &Default::default()).unwrap();
 
         // A well-formed ready handshake: the spawner parses this line and
         // fails closed on anything else, so a stub that printed prose would be
@@ -712,7 +723,10 @@ mod tests {
     }
 
     /// The same portability check for an ordinary builder job, which is what
-    /// `--builder firecracker` boots once Stage 0 has produced an image.
+    /// `--builder firecracker` boots once Stage 0 has produced an image — and
+    /// the one table every builder backend's console base goes through. The
+    /// libkrun and QEMU builders assemble their VMs in `mvm-build` rather than
+    /// through a driver, but take the same contract.
     #[test]
     fn the_builder_boot_contract_composes_onto_every_shipped_driver() {
         use crate::driver::VmmDriver;
@@ -724,11 +738,40 @@ mod tests {
             ("qemu", Box::new(QemuDriver::new())),
             ("mock", Box::new(MockDriver::default())),
         ];
+        let mut bases: Vec<(&str, String, &str)> = drivers
+            .iter()
+            .map(|(name, driver)| (*name, driver.workload_base_bootargs(false), ""))
+            .collect();
+        for (name, _, console) in bases.iter_mut() {
+            *console = match *name {
+                "hvf" => "console=ttyAMA0",
+                "fc" => "console=ttyS0",
+                "qemu" | "mock" => "console=",
+                _ => unreachable!(),
+            };
+        }
+        bases.push((
+            "libkrun builder",
+            mvm_build::builder_boot::LIBKRUN_BUILDER_CONSOLE_BASE.to_string(),
+            "console=hvc0",
+        ));
+        for (arch, console) in [("aarch64", "console=ttyAMA0"), ("x86_64", "console=ttyS0")] {
+            bases.push((
+                "qemu builder",
+                mvm_build::qemu_builder::qemu_builder_console_base(arch),
+                console,
+            ));
+        }
 
-        for (name, driver) in drivers {
-            let base = driver.workload_base_bootargs(false);
+        let digest = "15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0";
+        let boot = mvm_build::builder_boot::BuilderBoot::Payload {
+            initramfs: PathBuf::from("/state/boot-payload.cpio"),
+            digest: mvm_build::builder_boot::PayloadDigest::parse(digest).unwrap(),
+        };
+        for (name, base, console) in bases {
             let spec = builder_spec(&BuilderSpecInputs {
                 name: "builder-portability",
+                boot: &boot,
                 kernel: Path::new("/cache/vmlinux"),
                 rootfs: Path::new("/cache/rootfs.ext4"),
                 nix_store: Path::new("/cache/nix-store.img"),
@@ -744,16 +787,17 @@ mod tests {
             });
 
             assert!(
-                spec.cmdline.starts_with(base.trim()),
-                "{name}: the console must be the driver's own: {}",
+                spec.cmdline.starts_with(base.trim()) && spec.cmdline.contains(console),
+                "{name}: the console must be the backend's own: {}",
                 spec.cmdline
             );
             assert!(
-                spec.cmdline
-                    .contains(super::super::spec::BUILDER_CMDLINE_TAIL),
+                spec.cmdline.contains(&format!("mvm.boot_payload={digest}")),
                 "{name}: {}",
                 spec.cmdline
             );
+            assert!(!spec.cmdline.contains("init="), "{name}: {}", spec.cmdline);
+            assert_eq!(spec.initramfs.as_deref(), boot.initramfs(), "{name}");
             // A builder guest runs no agent; a driver that waited for one would
             // time out on a guest that booted and built correctly.
             assert!(!spec.serves_guest_agent(), "{name}");

@@ -1139,7 +1139,7 @@ fn stage_locked_builder_vm_image(
     }
     std::fs::write(
         staging.join("cmdline.txt"),
-        super::SYNTHESIZED_BUILDER_VM_CMDLINE,
+        super::synthesized_builder_vm_cmdline(),
     )
     .context("write builder VM cmdline derived from the cache contract")?;
     let manifest = serde_json::json!({

@@ -71,6 +71,9 @@ mvm-contract.workspace = true
 mvm-core.workspace = true
 mvm-http.workspace = true
 mvm-fs.workspace = true
+# Reads a builder image's boot ABI marker off the ext4 image on the host.
+# Already in the closure through mvm-fs.
+ext4-view.workspace = true
 mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` implements the optional backend's network seam.
 mvm-net = { workspace = true, optional = true }

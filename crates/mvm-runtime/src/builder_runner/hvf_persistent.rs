@@ -231,8 +231,11 @@ impl HvfPersistentHostVm {
         // *path* is needed here, because the spec attaches it as a disk.
         let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
 
+        let boot = mvm_build::builder_boot::stage_builder_boot(&state_dir, &self.rootfs)
+            .context("staging the persistent builder's boot payload")?;
         let spec = persistent_builder_spec(&PersistentBuilderSpecInputs {
             name: &vm_name,
+            boot: &boot,
             kernel: &self.kernel,
             rootfs: &self.rootfs,
             nix_store: nix_store.path(),
@@ -272,6 +275,7 @@ impl HvfPersistentHostVm {
 
         let session = PersistentHvfSession {
             session_id: session_id.to_string(),
+            boot_payload_digest: boot.payload_digest().map(ToString::to_string),
             state_dir,
             job_dir,
             input_disk,
@@ -317,6 +321,10 @@ fn dispatch_loop_answers(socket: &Path) -> bool {
 /// image losing its writer. See the module docs.
 pub struct PersistentHvfSession {
     session_id: String,
+    /// The digest of the boot payload this session booted with, when it
+    /// booted with one. Recorded so a later `mvmctl` carrying different
+    /// builder binaries can tell this session is not running them.
+    boot_payload_digest: Option<String>,
     state_dir: PathBuf,
     job_dir: PathBuf,
     input_disk: PathBuf,
@@ -328,6 +336,11 @@ impl PersistentHvfSession {
     /// Opaque session identifier, stable for the VM's lifetime.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The digest of the boot payload this session booted with.
+    pub fn boot_payload_digest(&self) -> Option<&str> {
+        self.boot_payload_digest.as_deref()
     }
 
     /// Per-VM state dir (vsock sockets, console log, pid file).

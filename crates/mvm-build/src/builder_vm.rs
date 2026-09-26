@@ -630,6 +630,12 @@ pub enum BuilderVmError {
     #[error("extracting artifacts from builder sandbox: {0}")]
     ExtractionFailed(String),
 
+    /// The builder boot could not be staged: the boot payload could not be
+    /// assembled, or the image's boot ABI is one this host cannot boot. Not a
+    /// VMM failure — every backend would refuse the same boot.
+    #[error("staging the builder boot: {0}")]
+    BootStaging(#[from] crate::builder_boot::StageBootError),
+
     /// A library embedding the runtime reached a path that would run or build
     /// `mvmctl`. The host has to be bootstrapped with `mvmctl bootstrap` first.
     #[error(transparent)]

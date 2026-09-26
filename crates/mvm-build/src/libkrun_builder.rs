@@ -55,6 +55,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::builder_boot::{BuilderBoot, LIBKRUN_BUILDER_CONSOLE_BASE, stage_image_boot};
 #[cfg(test)]
 use crate::builder_disk_transport::pack_input_disk;
 use crate::builder_disk_transport::{InputTree, OUTPUT_DISK_BYTES, read_output_disk};
@@ -581,6 +582,7 @@ impl LibkrunBuilderVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
         let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
+        let (image, boot) = stage_image_boot(&image, &vm_state_dir, LIBKRUN_BUILDER_CONSOLE_BASE)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -604,7 +606,7 @@ impl LibkrunBuilderVm {
             OUTPUT_DISK_BYTES,
         )?;
 
-        let mut krun = krun_context_for_image(&vm_name, &image)?
+        let mut krun = krun_context_for_image(&vm_name, &image, &boot)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
@@ -923,7 +925,7 @@ fn builder_shell_krun_context(
     params: &BuilderShellKrunContextParams<'_>,
 ) -> Result<KrunContext, BuilderVmError> {
     let socket_dir = mvm_core::config::vm_socket_dir_at(params.vm_state_dir);
-    let mut krun = krun_context_for_image(params.vm_name, params.image)?
+    let mut krun = krun_context_for_image(params.vm_name, params.image, &BuilderBoot::Baked)?
         .with_resources(params.vcpus, params.memory_mib)
         .with_console_output(path_to_str(params.console_log, "console_log")?)
         .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
@@ -1082,6 +1084,7 @@ impl BuilderVm for LibkrunBuilderVm {
         // is the only observable signal.
         let console_log = vm_state_dir.join("console.log");
         let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
+        let (image, boot) = stage_image_boot(&image, &vm_state_dir, LIBKRUN_BUILDER_CONSOLE_BASE)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -1110,7 +1113,7 @@ impl BuilderVm for LibkrunBuilderVm {
             self.closure_nar.as_deref(),
             OUTPUT_DISK_BYTES,
         )?;
-        let mut krun = krun_context_for_image(&vm_name, &image)?
+        let mut krun = krun_context_for_image(&vm_name, &image, &boot)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
@@ -1375,7 +1378,12 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         // agnostic config. Builds top-down (resources first, then
         // disks, then vsock ports, then networking)
         // because libkrun's builder methods consume `self` by value.
-        let mut krun = krun_context_for_image(&config.name, &self.image)?
+        let (image, boot) = stage_image_boot(
+            &self.image,
+            &config.vm_state_dir,
+            LIBKRUN_BUILDER_CONSOLE_BASE,
+        )?;
+        let mut krun = krun_context_for_image(&config.name, &image, &boot)?
             .with_resources(config.vcpus, config.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?);
@@ -1389,8 +1397,8 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         for port in &config.vsock_ports {
             krun = krun.add_vsock_port(*port);
         }
-        if builder_uses_vsock_egress(&self.image)
-            && let BuilderVmImage::Rootfs { cmdline, .. } = &self.image
+        if builder_uses_vsock_egress(&image)
+            && let BuilderVmImage::Rootfs { cmdline, .. } = &image
         {
             krun = krun
                 .with_cmdline(
@@ -1402,7 +1410,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
                 .with_vsock_direct()
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         }
-        let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
+        let egress_endpoint = if builder_uses_vsock_egress(&image) {
             let (identity_material, identity_drive) =
                 stage_builder_flowmux_identity(&config.vm_state_dir)?;
             krun = krun.add_disk(
@@ -1649,6 +1657,7 @@ fn write_zero_padded_copy(
 fn krun_context_for_image(
     vm_name: &str,
     image: &BuilderVmImage,
+    boot: &BuilderBoot,
 ) -> Result<KrunContext, BuilderVmError> {
     match image {
         BuilderVmImage::Rootfs {
@@ -1657,16 +1666,23 @@ fn krun_context_for_image(
             cmdline,
         } => {
             let (kernel, kernel_format) = builder_kernel_for_host(kernel_path)?;
-            Ok(KrunContext::new(
+            // Read-only at the VMM: every builder boot shares this cached
+            // image, and nothing in the guest writes it.
+            let krun = KrunContext::new(
                 vm_name,
                 path_to_str(&kernel, "kernel_path")?,
                 path_to_str(rootfs_path, "rootfs_path")?,
             )
+            .with_read_only_rootfs()
             .with_cmdline(
                 crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
                     .map_err(BuilderVmError::NixBuildFailed)?,
             )
-            .with_kernel_format(kernel_format))
+            .with_kernel_format(kernel_format);
+            match boot.initramfs() {
+                Some(payload) => Ok(krun.with_boot_initramfs(path_to_str(payload, "boot_payload")?)),
+                None => Ok(krun),
+            }
         }
         BuilderVmImage::RootDir { .. } => Err(BuilderVmError::VmmUnavailable {
             requested: "libkrun RootDir builder image".to_string(),
@@ -3112,6 +3128,7 @@ impl LibkrunPersistentHostVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
         let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
+        let (image, boot) = stage_image_boot(&image, &vm_state_dir, LIBKRUN_BUILDER_CONSOLE_BASE)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -3152,7 +3169,7 @@ impl LibkrunPersistentHostVm {
         )?;
         drop(work_staging);
 
-        let mut krun = krun_context_for_image(&vm_name, &image)?
+        let mut krun = krun_context_for_image(&vm_name, &image, &boot)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
@@ -3258,6 +3275,7 @@ impl LibkrunPersistentHostVm {
             input_disk,
             output_disk,
             session_id,
+            boot_payload_digest: boot.payload_digest().map(ToString::to_string),
             supervisor: Some(child),
             egress_endpoint,
         })
@@ -3276,6 +3294,9 @@ pub struct PersistentVmHandle {
     input_disk: PathBuf,
     output_disk: PathBuf,
     session_id: String,
+    /// The digest of the boot payload the session booted with, when it booted
+    /// with one.
+    boot_payload_digest: Option<String>,
     /// `None` after [`Self::wait_for_shutdown`] consumes it.
     supervisor: Option<std::process::Child>,
     egress_endpoint: Option<BuilderVsockEgressEndpoint>,
@@ -3323,6 +3344,11 @@ impl PersistentVmHandle {
     /// observability. Stable for the VM's lifetime.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The digest of the boot payload this session booted with.
+    pub fn boot_payload_digest(&self) -> Option<&str> {
+        self.boot_payload_digest.as_deref()
     }
 
     /// Block until the supervisor child exits. Normal way to
@@ -3573,7 +3599,7 @@ mod tests {
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init".to_string(),
         );
 
-        let ctx = krun_context_for_image("builder-test", &image).unwrap();
+        let ctx = krun_context_for_image("builder-test", &image, &BuilderBoot::Baked).unwrap();
         assert_eq!(ctx.rootfs_path.as_deref(), Some(rootfs.to_str().unwrap()));
         assert_eq!(
             ctx.kernel_cmdline.as_deref(),
@@ -3592,7 +3618,7 @@ mod tests {
     #[test]
     fn generic_krun_context_refuses_a_root_dir_seed() {
         let image = BuilderVmImage::new_root_dir(PathBuf::from("/seed"), "/init");
-        let error = krun_context_for_image("builder-test", &image)
+        let error = krun_context_for_image("builder-test", &image, &BuilderBoot::Baked)
             .expect_err("a RootDir seed must go through Stage 0 materialization");
         assert!(error.to_string().contains("materialized as an ext4 root"));
     }

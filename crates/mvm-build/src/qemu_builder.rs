@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::builder_boot::stage_image_boot;
 use crate::builder_vm::{
     BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderShellJob,
     BuilderShellResult, BuilderVm, BuilderVmError, BuilderVmImage, DEFAULT_NIX_STORE_MIB,
@@ -1019,20 +1020,24 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = qemu_runtime_overlay_attachment(
+    // The host owns the command line: the image's recorded one predates the
+    // boot payload. The payload rides beside the image as the initramfs.
+    let (image, boot) = stage_image_boot(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
             cmdline: image_cmdline.clone(),
         },
-        Some(runtime_overlay.as_path()),
-    )
-    .ok_or_else(|| {
-        BuilderVmError::RuntimeOverlayUnavailable(
-            "resolved runtime overlay did not produce a builder attachment".to_string(),
-        )
-    })?
-    .cmdline;
+        &vm_state_dir,
+        &qemu_builder_console_base(std::env::consts::ARCH),
+    )?;
+    let overlay_cmdline = qemu_runtime_overlay_attachment(&image, Some(runtime_overlay.as_path()))
+        .ok_or_else(|| {
+            BuilderVmError::RuntimeOverlayUnavailable(
+                "resolved runtime overlay did not produce a builder attachment".to_string(),
+            )
+        })?
+        .cmdline;
     let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
     let timeout_secs = builder_vm_timeout()?.as_secs();
@@ -1049,6 +1054,9 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
+    if let Some(payload) = boot.initramfs() {
+        cmd.arg("-initrd").arg(payload);
+    }
     cmd.arg("-append").arg(
         crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
             .map_err(BuilderVmError::NixBuildFailed)?,
@@ -1057,8 +1065,12 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     // `/dev/vdc` and `/dev/vdd` for the transport pair and `/dev/vde` for the
     // runtime overlay, so these four must be attached in exactly this order.
     // vda rootfs, vdb nix-store, vdc input, vdd output, vde overlay.
-    cmd.arg("-drive")
-        .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
+    // Read-only at the VMM: every builder boot shares this cached image, and
+    // nothing in the guest writes it.
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        rootfs.display()
+    ));
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw",
         nix_store_lock.path().display()
@@ -1283,20 +1295,24 @@ fn run_build_qemu(
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = qemu_runtime_overlay_attachment(
+    // The host owns the command line: the image's recorded one predates the
+    // boot payload. The payload rides beside the image as the initramfs.
+    let (image, boot) = stage_image_boot(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
             cmdline: image_cmdline.clone(),
         },
-        Some(runtime_overlay.as_path()),
-    )
-    .ok_or_else(|| {
-        BuilderVmError::RuntimeOverlayUnavailable(
-            "resolved runtime overlay did not produce a builder attachment".to_string(),
-        )
-    })?
-    .cmdline;
+        &vm_state_dir,
+        &qemu_builder_console_base(std::env::consts::ARCH),
+    )?;
+    let overlay_cmdline = qemu_runtime_overlay_attachment(&image, Some(runtime_overlay.as_path()))
+        .ok_or_else(|| {
+            BuilderVmError::RuntimeOverlayUnavailable(
+                "resolved runtime overlay did not produce a builder attachment".to_string(),
+            )
+        })?
+        .cmdline;
     let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
 
@@ -1315,6 +1331,9 @@ fn run_build_qemu(
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
+    if let Some(payload) = boot.initramfs() {
+        cmd.arg("-initrd").arg(payload);
+    }
     cmd.arg("-append").arg(
         crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
             .map_err(BuilderVmError::NixBuildFailed)?,
@@ -1322,12 +1341,13 @@ fn run_build_qemu(
     // Slot order is the guest's contract, not a preference: the cmdline names
     // `/dev/vdc` and `/dev/vdd` for the transport pair and `/dev/vde` for the
     // runtime overlay, so these five must be attached in exactly this order.
-    // The guest mounts vda `ro`, so the cached `rootfs.ext4` stays pristine
-    // across builds even though the block device is attached writable
-    // (mirrors libkrun).
     //   vda rootfs, vdb nix-store, vdc input, vdd output, vde overlay.
-    cmd.arg("-drive")
-        .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
+    // Read-only at the VMM: every builder boot shares this cached image, and
+    // nothing in the guest writes it.
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        rootfs.display()
+    ));
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw",
         nix_store_lock.path().display()
@@ -1470,20 +1490,20 @@ fn qemu_runtime_overlay_attachment<'a>(
     builder_runtime_overlay_attachment(image, runtime_overlay)
 }
 
-/// Adapt the cached builder-image kernel cmdline for a QEMU boot. The
-/// image cmdline is libkrun-flavoured (`console=hvc0 root=/dev/vda ro
-/// rootfstype=ext4 init=/sbin/mvm-host-vm-init`); for QEMU we swap the
-/// virtio-console for the serial line QEMU captures to `console.log`,
-/// opt the guest into the shared vsock egress relay, mark
-/// `mvm.backend=qemu`, and set `panic=-1` so a guest panic reboots →
-/// `-no-reboot` makes QEMU exit (the host then surfaces the missing
+/// The console tokens a QEMU builder boots with: the serial line QEMU
+/// captures to `console.log`, and `panic=-1` so a guest panic reboots, which
+/// `-no-reboot` turns into QEMU exiting (the host then reports the missing
 /// `/job/result` as a crash).
-///
-/// `root=/dev/vda ro init=…` are preserved from the image verbatim — the
-/// guest mounts the rootfs **read-only** (matching libkrun's proven
-/// contract), so the shared cached image stays pristine across builds.
-/// (`ro` is the proven guest contract and protects the cache — the guest
-/// writes only to the `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.)
+pub fn qemu_builder_console_base(arch: &str) -> String {
+    format!(
+        "console={} panic=-1 mvm.backend=qemu",
+        qemu_console_for_arch(arch)
+    )
+}
+
+/// Finish the builder boot contract's command line for a QEMU boot: opt the
+/// guest into the shared vsock egress relay on this boot's port. A console
+/// still naming libkrun's `hvc0` is swapped for the serial line QEMU captures.
 ///
 /// Idempotent: running it on its own output is a no-op.
 fn qemu_build_cmdline(image_cmdline: &str, egress_port: u32) -> String {
