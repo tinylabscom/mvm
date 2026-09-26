@@ -24,15 +24,15 @@ endpoint's recorder stamps `vm_name` on every entry it writes
 
 ## Reasons and remedies
 
-Every label the endpoint records on this tree, plus the restricted-address
-classes and route outcomes that open PRs add, maps to a description and a
-remedy. Metadata, loopback, link-local and the other absolute classes, and
+Every label the endpoint records on this tree, plus the route outcomes an open
+PR adds, maps to a description and a remedy. Restricted-address classes are
+read through the gate's own `RestrictedClass` (now with `ALL` and
+`from_label`), so the CLI and the gate cannot name a class differently. Metadata, loopback, link-local and the other absolute classes, and
 TCP/22, get no remedy at all. Private ranges (and the other re-admittable
 classes) say they are admitted only by naming the exact address and are kept
-out of the summary's allow command. A gate that records a restricted address
-under the generic `policy_denied` — this tree's gate records metadata that way
-— is still read by its address, so no path offers an allow for the metadata
-service.
+out of the summary's allow command. A refusal of a restricted literal recorded
+under the generic `policy_denied` is still read by its address, through the
+same classifier, so no path offers an allow for the metadata service.
 
 `connect_failed` is not shown: the flow was admitted and the upstream did not
 answer.
@@ -68,11 +68,16 @@ open; guessing from an exit code would print on every offline failure.
 ## Live
 
 HVF on macOS 26, `run --image curlimages/curl:latest --allow-host
-api.github.com:443` reaching `example.com` twice and `169.254.169.254` once:
-two live notices (the metadata one with no remedy — this tree's gate records it
-as `policy_denied`, and the address backstop caught it), the summary with
-`2×` / `1×` and `--allow-host example.com:443`, the allowed host answering 200,
-and `mvmctl explain <vm>` listing the same two refusals from the chain.
+api.github.com:443` reaching `example.com` twice, `169.254.169.254` once and
+`10.0.0.5:8080` once: three live notices — the metadata one with no remedy, the
+private one saying it is admitted only by naming it — then the summary with
+`2×` / `1×` / `1×`, `--allow-host example.com:443` as the only allow, and the
+private address listed apart. The allowed host answered 200. The chain carried
+`cloud_metadata` and `private_range` as the gate recorded them, each stamped
+with the machine's `vm_name`. An earlier run, before the private-range gate
+landed, recorded the metadata refusal as `policy_denied`; the address backstop
+read it as metadata all the same, and `mvmctl explain <vm>` listed the same
+refusals from the chain.
 
 ## Not done here
 

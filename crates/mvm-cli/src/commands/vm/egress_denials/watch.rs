@@ -210,7 +210,7 @@ mod tests {
             [
                 "egress blocked: api.example.com:443 (not in the allow-list) — allow with \
                  --allow-host api.example.com:443",
-                "egress blocked: 169.254.169.254:80 (cloud instance-metadata endpoint) — never \
+                "egress blocked: 169.254.169.254:80 (a cloud instance-metadata endpoint) — never \
                  reachable from a workload; no grant admits it",
             ]
         );

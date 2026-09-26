@@ -436,7 +436,7 @@ uncovered = [
     "mvmctl run --dry-run --json -- python task.py",
     "mvmctl run --dry-run --json --profile restrictive -- python task.py",
     "mvmctl run --env TASK_MODE=check -- python task.py",
-    """mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/'""",
+    """mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'""",
     """mvmctl run --image curlimages/curl:latest --secret anthropic --allow-host api.anthropic.com -- sh -c 'curl -sS https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"'""",
     "mvmctl run --json --receipt /tmp/run-receipt.json -- python task.py",
     "mvmctl run --launch-plan ./build/launch.json",

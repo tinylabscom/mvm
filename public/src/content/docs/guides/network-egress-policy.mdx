@@ -167,30 +167,36 @@ in the chain-signed audit log. A foreground `mvmctl run` or `mvmctl machine
 run`, and `mvmctl machine logs -f`, read those records back for the machine on
 screen and print each distinct refusal on stderr as it happens, once, with the
 remedy for that reason. Here a run allowed only `api.github.com` also reaches
-for `example.com`, twice, and for the cloud metadata service:
+for `example.com` twice, for the cloud metadata service, and for an address on
+a private network:
 
 ```sh
-mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/'
+mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'
 ```
 
 ```text
 curl: (7) CONNECT tunnel failed, response 403
 curl: (7) CONNECT tunnel failed, response 403
 [mvm] egress blocked: example.com:443 (not in the allow-list) — allow with --allow-host example.com:443
-[mvm] egress blocked: 169.254.169.254:80 (cloud instance-metadata endpoint) — never reachable from a workload; no grant admits it
-[mvm] egress denied: 2 destinations, 3 attempts
+[mvm] egress blocked: 169.254.169.254:80 (a cloud instance-metadata endpoint) — never reachable from a workload; no grant admits it
+[mvm] egress blocked: 10.0.0.5:8080 (an RFC1918 private range) — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
+[mvm] egress denied: 3 destinations, 4 attempts
 [mvm]   example.com:443        2×  not in the allow-list
-[mvm]   169.254.169.254:80     1×  cloud instance-metadata endpoint — never reachable from a workload; no grant admits it
+[mvm]   169.254.169.254:80     1×  a cloud instance-metadata endpoint — never reachable from a workload; no grant admits it
+[mvm]   10.0.0.5:8080          1×  an RFC1918 private range — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
 [mvm] to allow what the allow-list refused, re-run with:
 [mvm]   --allow-host example.com:443
 [mvm] or, for a machine created with `machine create --manifest`, in its mvm.toml:
 [mvm]   [network]
 [mvm]   allow_hosts = ["example.com:443"]
+[mvm] denied by default, and admitted only by naming each exactly — do so only if the workload should reach it:
+[mvm]   --allow-host 10.0.0.5:8080
 ```
 
 The block at the end is the exit summary: every refused destination with how
 often it was refused, then the exact flags that admit the ones a grant can
-admit. The metadata service is listed and never offered.
+admit. The metadata service is listed and never offered; the private address is
+kept out of the allow command and named apart.
 
 A run with no egress at all — the default: no `--net`, no `--allow-host`, no
 `--secret`, no published port — starts no network endpoint. The guest has no
