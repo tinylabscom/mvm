@@ -121,6 +121,10 @@ pub struct LaunchFlags {
     pub timeout: Option<u64>,
     /// `--secret`.
     pub secret: Vec<String>,
+    /// Secret names the launch binds from somewhere other than a flag — the
+    /// project manifest's `[secrets]` table. A policy's secret deny list
+    /// reaches these too.
+    pub declared_secrets: Vec<String>,
     /// `--mount`.
     pub mounts: Vec<String>,
     /// The names `--env` sets.
@@ -276,6 +280,16 @@ fn fold_secrets(policy: &PolicyBody, flags: &LaunchFlags) -> Result<Vec<String>,
             destinations: grant.hosts.clone(),
         })
         .collect();
+    if let Some(name) = flags
+        .declared_secrets
+        .iter()
+        .find(|name| secrets.deny.contains(name))
+    {
+        return Err(refuse(
+            "[secrets]",
+            format!("secret {name:?} is declared by the project but denied by the policy"),
+        ));
+    }
     for raw in &flags.secret {
         let spec: RunSecretSpec = raw
             .parse()

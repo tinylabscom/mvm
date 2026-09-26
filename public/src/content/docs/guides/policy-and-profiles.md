@@ -174,7 +174,7 @@ Flags are the last, most specific layer. They follow the same rules:
   network. Under a deny list, `--net` and `--network-preset` are refused; name
   the hosts with `--allow-host` instead.
 - `--secret NAME:HOSTS` may only narrow a secret the policy binds, and cannot
-  bind a denied one.
+  bind a denied one. Nor can the project's `mvm.toml` `[secrets]` table.
 - `--cpu-limit` and `--timeout` apply only when tighter than the policy's.
 - `--cpus` and `--memory` must fit within `max_cpus` and `max_memory`.
 - `--mount` cannot come from a denied source.

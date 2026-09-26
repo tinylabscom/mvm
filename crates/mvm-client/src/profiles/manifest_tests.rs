@@ -223,6 +223,19 @@ fn a_flag_cannot_widen_or_reach_a_denied_secret() {
     assert!(err.message.contains("denied"), "{err}");
 }
 
+#[test]
+fn a_policy_deny_reaches_a_secret_the_project_declares() {
+    let err = fold(
+        &secrets(&[], &["prod-db"]),
+        &LaunchFlags {
+            declared_secrets: vec!["prod-db".into()],
+            ..flags()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.key.as_deref(), Some("[secrets]"));
+}
+
 // ---- shares -------------------------------------------------------------------
 
 #[test]

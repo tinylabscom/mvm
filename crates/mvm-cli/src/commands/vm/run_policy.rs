@@ -87,6 +87,10 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
         cpu_limit: args.cpu_limit,
         timeout: args.timeout,
         secret: args.secret.clone(),
+        declared_secrets: super::run_secrets::project_secret_specs(args)?
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect(),
         mounts: args.mounts.clone(),
         env_names,
         allow_env: args.allow_env.clone(),
