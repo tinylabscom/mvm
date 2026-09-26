@@ -150,7 +150,7 @@ pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> 
 /// Parse one `--allow-host` entry. `HOST:PORT` is parsed strictly;
 /// `HOST` with no port defaults to `443` (https). Fails closed on a
 /// malformed port or empty host before any VM work.
-fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
+pub fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
     use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
     let parsed = match entry.rsplit_once(':') {
         // Has an explicit `:PORT` — strict parse (rejects empty host / bad port).

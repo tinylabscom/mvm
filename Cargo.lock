@@ -3066,6 +3066,7 @@ dependencies = [
  "mvm-sdk",
  "mvm-vmm",
  "rand 0.10.2",
+ "schemars",
  "secrecy",
  "serde",
  "serde_jcs",
@@ -3075,6 +3076,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]

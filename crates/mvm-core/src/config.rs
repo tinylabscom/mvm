@@ -289,6 +289,29 @@ pub fn mvm_config_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::Pa
     mvm_home.as_ref().join("config")
 }
 
+/// The user's authored policy files: `<mvm_home>/config/policy`.
+///
+/// Profiles live in `profiles/<name>.toml` and groups in `groups/<name>.toml`
+/// beneath it; a name given to `--policy` resolves here before the built-ins.
+pub fn policy_dir() -> std::path::PathBuf {
+    policy_dir_at(mvm_home())
+}
+
+/// The authored policy directory beneath an explicit mvm home.
+pub fn policy_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_config_dir_at(mvm_home).join("policy")
+}
+
+/// The user's policy profiles: `<mvm_home>/config/policy/profiles`.
+pub fn policy_profiles_dir() -> std::path::PathBuf {
+    policy_dir().join("profiles")
+}
+
+/// The user's policy groups: `<mvm_home>/config/policy/groups`.
+pub fn policy_groups_dir() -> std::path::PathBuf {
+    policy_dir().join("groups")
+}
+
 /// Default OCI registry trust policy: `<mvm_home>/oci-policy.toml`.
 pub fn oci_policy_path() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("oci-policy.toml")
@@ -1601,6 +1624,14 @@ mod tests {
         assert_eq!(
             oci_policy_path(),
             std::path::PathBuf::from("/custom/root/oci-policy.toml")
+        );
+        assert_eq!(
+            policy_profiles_dir(),
+            std::path::PathBuf::from("/custom/root/config/policy/profiles")
+        );
+        assert_eq!(
+            policy_groups_dir(),
+            std::path::PathBuf::from("/custom/root/config/policy/groups")
         );
         assert_eq!(
             attestation_dir(),

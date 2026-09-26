@@ -40,6 +40,11 @@ test-support = ["mvm-runtime/test-support"]
 # flag parses straight into the one profile table instead of a CLI-side copy.
 # Off by default: an embedder names a profile by value and links no parser.
 clap = ["dep:clap"]
+# Derive `schemars::JsonSchema` on the authored-policy types and build the
+# `emit_policy_schema` bin. Off by default so no shipped closure carries
+# schemars; forwards to `mvm-contract/schema` because a policy embeds endpoint
+# routes and backend kinds from there.
+schema = ["dep:schemars", "mvm-contract/schema"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client"] }
@@ -118,6 +123,16 @@ mvm-http = { workspace = true }
 # `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
 # the one crate that turns the feature on.
 clap = { workspace = true, optional = true }
+# Authored policy profiles: TOML documents (already in this crate's closure
+# through mvm-core).
+toml = { workspace = true }
+# Only under `schema`; 0.8 matches the version every other crate pins.
+schemars = { version = "0.8", optional = true }
+
+[[bin]]
+name = "emit_policy_schema"
+path = "src/bin/emit_policy_schema.rs"
+required-features = ["schema"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
