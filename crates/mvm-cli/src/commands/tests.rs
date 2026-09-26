@@ -2600,11 +2600,11 @@ fn test_audit_show_json_parses() {
         cli.command,
         Commands::Trust(trust::Args {
             action: trust::TrustAction::Audit(audit::Args {
-                action: AuditAction::Show {
+                action: AuditAction::Show(audit::ShowArgs {
                     ref session,
                     json: true,
                     ..
-                }
+                })
             })
         }) if session == "plan-abc"
     ));
@@ -2687,11 +2687,11 @@ fn test_audit_verify_parses() {
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
             action:
-                AuditAction::Verify {
+                AuditAction::Verify(audit::VerifyArgs {
                     tenant,
                     session,
                     json,
-                },
+                }),
         }) => {
             assert_eq!(tenant, "local");
             assert_eq!(session, None, "no session verifies the whole chain");
@@ -2710,7 +2710,7 @@ fn test_audit_verify_with_tenant() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { tenant, .. },
+            action: AuditAction::Verify(audit::VerifyArgs { tenant, .. }),
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
     }
@@ -2748,14 +2748,14 @@ fn test_audit_show_parses() {
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
             action:
-                AuditAction::Show {
+                AuditAction::Show(audit::ShowArgs {
                     session,
                     tenant,
                     kind,
                     since,
                     until,
                     json,
-                },
+                }),
         }) => {
             assert_eq!(session, "plan-abc");
             assert_eq!(tenant, "local");
@@ -2788,9 +2788,10 @@ fn test_audit_show_filters_parse() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Show {
-                kind, since, until, ..
-            },
+            action:
+                AuditAction::Show(audit::ShowArgs {
+                    kind, since, until, ..
+                }),
         }) => {
             assert_eq!(kind.as_deref(), Some("plan.*"));
             assert_eq!(since.unwrap().to_rfc3339(), "2026-09-01T00:00:00+00:00");
@@ -2819,7 +2820,7 @@ fn test_audit_verify_session_parses_with_json() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { session, json, .. },
+            action: AuditAction::Verify(audit::VerifyArgs { session, json, .. }),
         }) => {
             assert_eq!(session.as_deref(), Some("aaaa1111"));
             assert!(json);
@@ -2845,12 +2846,12 @@ fn test_audit_sessions_parses() {
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
             action:
-                AuditAction::Sessions {
+                AuditAction::Sessions(audit::SessionsArgs {
                     tenant,
                     since,
                     until,
                     json,
-                },
+                }),
         }) => {
             assert_eq!(tenant, "local");
             assert!(since.is_some());

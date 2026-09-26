@@ -13,6 +13,62 @@ use mvm_hostd::audit::session::{
 
 use super::{default_audit_dir, host_signer, print_chain_line, ui};
 
+/// `trust audit verify [SESSION]`.
+#[derive(clap::Args, Debug, Clone)]
+pub(in crate::commands) struct VerifyArgs {
+    /// Session to verify: its plan id, or at least 8 leading hex characters
+    /// of it (see `trust audit sessions`).
+    pub session: Option<String>,
+    /// Tenant whose chain to verify. Defaults to `"local"`.
+    #[arg(long, default_value = "local")]
+    pub tenant: String,
+    /// Print the session verdict as JSON. Requires SESSION.
+    #[arg(long, requires = "session")]
+    pub json: bool,
+}
+
+/// `trust audit sessions`.
+#[derive(clap::Args, Debug, Clone)]
+pub(in crate::commands) struct SessionsArgs {
+    /// Tenant whose sessions to list. Defaults to `"local"`.
+    #[arg(long, default_value = "local")]
+    pub tenant: String,
+    /// Only sessions active at or after this time: RFC 3339, YYYY-MM-DD, or a
+    /// duration back from now (30m, 12h, 7d).
+    #[arg(long, value_parser = parse_time_bound)]
+    pub since: Option<DateTime<Utc>>,
+    /// Only sessions active at or before this time (same forms as --since).
+    #[arg(long, value_parser = parse_time_bound)]
+    pub until: Option<DateTime<Utc>>,
+    /// Emit the sessions and the ledger check as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `trust audit show <SESSION>`.
+#[derive(clap::Args, Debug, Clone)]
+pub(in crate::commands) struct ShowArgs {
+    /// The session: its plan id (`sha256:<hex>`), or at least 8 leading hex
+    /// characters of it.
+    pub session: String,
+    /// Tenant whose chain to search. Defaults to `"local"`.
+    #[arg(long, default_value = "local")]
+    pub tenant: String,
+    /// Only entries whose event name matches this glob (`plan.*`, `*.sealed`).
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Only entries at or after this time: RFC 3339, YYYY-MM-DD, or a
+    /// duration back from now (30m, 12h, 7d).
+    #[arg(long, value_parser = parse_time_bound)]
+    pub since: Option<DateTime<Utc>>,
+    /// Only entries at or before this time (same forms as --since).
+    #[arg(long, value_parser = parse_time_bound)]
+    pub until: Option<DateTime<Utc>>,
+    /// Emit matching entries as a JSON array to stdout.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Parse a `--since` / `--until` bound: an RFC 3339 timestamp, a calendar
 /// date (midnight UTC), or a duration back from now (`30m`, `12h`, `7d`).
 pub(in crate::commands) fn parse_time_bound(raw: &str) -> Result<DateTime<Utc>, String> {
@@ -80,15 +136,8 @@ struct SessionList<'a> {
     sessions: Vec<SessionSummary>,
 }
 
-pub(in crate::commands) struct SessionsQuery<'a> {
-    pub tenant: &'a str,
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
-    pub json: bool,
-}
-
-pub(in crate::commands) fn audit_sessions(query: &SessionsQuery<'_>) -> Result<()> {
-    let tenant = query.tenant;
+pub(in crate::commands) fn audit_sessions(query: &SessionsArgs) -> Result<()> {
+    let tenant = query.tenant.as_str();
     let Some(lines) = verified_lines(tenant)? else {
         if query.json {
             return crate::json_out::emit_json(&SessionList {
@@ -174,17 +223,8 @@ fn reason_label(reason: mvm_hostd::audit::session::SealReason) -> &'static str {
     }
 }
 
-pub(in crate::commands) struct ShowQuery<'a> {
-    pub tenant: &'a str,
-    pub session: &'a str,
-    pub kind: Option<String>,
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
-    pub json: bool,
-}
-
-pub(in crate::commands) fn audit_show(query: &ShowQuery<'_>) -> Result<()> {
-    let tenant = query.tenant;
+pub(in crate::commands) fn audit_show(query: &ShowArgs) -> Result<()> {
+    let tenant = query.tenant.as_str();
     let Some(lines) = verified_lines(tenant)? else {
         if query.json {
             return crate::json_out::emit_json(&Vec::<()>::new());
@@ -192,7 +232,7 @@ pub(in crate::commands) fn audit_show(query: &ShowQuery<'_>) -> Result<()> {
         ui::info(&format!("No audit chain for tenant '{tenant}'."));
         return Ok(());
     };
-    let plan_id = resolve_or_exact(&lines, query.session)?;
+    let plan_id = resolve_or_exact(&lines, &query.session)?;
     let filter = EventFilter {
         kind: query.kind.clone(),
         range: range(query.since, query.until),

@@ -1164,47 +1164,10 @@ impl AuditEmitter {
         &self.audit_dir
     }
 
-    /// Seal `plan`'s session: compute its integrity summary over the verified
-    /// chain and append it as a chain-signed `session.sealed` entry.
-    ///
-    /// Call at the session's end — exit, failure, or stop — and before the
-    /// closing root is published, so that root covers the seal. The seal is a
-    /// sync barrier like every event not listed as deferrable: it is on disk
-    /// before this returns. See [`crate::audit::session`] for what it lets a
-    /// verifier detect.
-    pub fn seal_session(
-        &self,
-        plan: &ExecutionPlan,
-        reason: crate::audit::session::SealReason,
-    ) -> Result<crate::audit::session::SessionSeal> {
-        let tenant = &plan.tenant.0;
-        let lines = crate::audit::merkle::read_leaves(
-            &self.audit_dir,
-            tenant,
-            &self.signing_key.verifying_key(),
-        )
-        .context("reading the verified chain to seal the session")?;
-        // Idempotent: a session already sealed with nothing after its seal is
-        // left alone, so two teardown paths reaching the same run write one
-        // seal between them.
-        if let Some(existing) = crate::audit::session::current_seal(&lines, &plan.plan_id.0)? {
-            return Ok(existing);
-        }
-        let seal = crate::audit::session::compute_seal(
-            &lines,
-            &crate::audit::session::SealRequest {
-                plan_id: &plan.plan_id.0,
-                reason,
-                compute_environment: compute_environment_digest(plan),
-                snapshot_root: None,
-            },
-        )?;
-        self.emit(
-            plan,
-            crate::audit::session::SESSION_SEALED_EVENT,
-            seal.to_labels(),
-        )?;
-        Ok(seal)
+    /// The public half of this emitter's signing key: what its chains
+    /// verify under.
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
@@ -1506,15 +1469,6 @@ impl AuditEmitter {
 /// Still atomic — the rename gives a reader either the whole old file or the
 /// whole new one. What is dropped is survival of power loss, which is the
 /// right trade only for something reconstructible from data already durable.
-/// The measured compute-environment identity the signed plan recorded, if it
-/// recorded one.
-fn compute_environment_digest(plan: &ExecutionPlan) -> Option<String> {
-    plan.asset_identities
-        .iter()
-        .find(|asset| matches!(asset.kind, mvm_core::plan::AssetKind::ComputeEnvironment))
-        .map(|asset| asset.digest.clone())
-}
-
 /// Append one published root to `tenant`'s root history, durably.
 ///
 /// One JSON object per line, fsynced before returning: a root that is not on
