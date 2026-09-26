@@ -485,6 +485,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Builder images the retired HVF patcher baked. Every builder now
+            // boots the image as built, with mvm's own binaries in the boot
+            // payload, so nothing reads these copies any more.
+            let retired = mvm_build::builder_vm::builder_vm_cache_dir().join(RETIRED_HVF_IMAGE_DIR);
+            match sweep_retired_hvf_builder_images(&retired, dry_run) {
+                Ok((r, bytes)) => {
+                    removed += r;
+                    freed += bytes;
+                }
+                Err(e) => ui::warn(&format!(
+                    "removing retired HVF builder images under {}: {e}",
+                    retired.display()
+                )),
+            }
+
             // Flow-byte-log retention sweep. Per-tenant subdirs
             // under `<audit>/flow-bytes/` hold opt-in payload records;
             // remove files older than the default window. No tenant policy
@@ -1182,6 +1197,39 @@ fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
 
 /// Recursive on-disk footprint of a cache entry. One line, because every
 /// counter in this file must agree with `du` and with each other.
+/// Where the retired HVF patcher cached the builder images it baked, under the
+/// builder image cache.
+const RETIRED_HVF_IMAGE_DIR: &str = "hvf";
+
+/// Remove every image the retired HVF patcher cached under `root`, returning
+/// how many entries went and the bytes they held. A dry run removes nothing
+/// and reports what it would.
+fn sweep_retired_hvf_builder_images(
+    root: &std::path::Path,
+    dry_run: bool,
+) -> std::io::Result<(u64, u64)> {
+    if !root.is_dir() {
+        return Ok((0, 0));
+    }
+    let mut entries = 0u64;
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            entries += 1;
+        }
+    }
+    let bytes = dir_size(root);
+    if dry_run {
+        ui::info(&format!(
+            "(dry-run) Would remove {entries} retired HVF builder image(s) under {}.",
+            root.display()
+        ));
+        return Ok((0, 0));
+    }
+    std::fs::remove_dir_all(root)?;
+    Ok((entries, bytes))
+}
+
 fn dir_size(path: &std::path::Path) -> u64 {
     mvm_core::disk_usage::tree_bytes(path)
 }
@@ -1903,6 +1951,31 @@ mod tests {
     /// which is how the dry run came to promise several times the disk that
     /// exists.
     #[cfg(unix)]
+    #[test]
+    fn prune_removes_the_retired_hvf_builder_images() {
+        let cache = tempfile::tempdir().unwrap();
+        let hvf = cache.path().join(RETIRED_HVF_IMAGE_DIR);
+        std::fs::create_dir_all(hvf.join("abc123")).unwrap();
+        std::fs::write(hvf.join("abc123/rootfs.ext4"), vec![0u8; 4096]).unwrap();
+        std::fs::create_dir_all(hvf.join("def456.partial")).unwrap();
+
+        assert_eq!(
+            sweep_retired_hvf_builder_images(&hvf, true).unwrap(),
+            (0, 0)
+        );
+        assert!(hvf.join("abc123").exists(), "a dry run removes nothing");
+
+        let (removed, freed) = sweep_retired_hvf_builder_images(&hvf, false).unwrap();
+        assert_eq!(removed, 2);
+        assert!(freed >= 4096, "{freed}");
+        assert!(!hvf.exists());
+        // Nothing left is not an error.
+        assert_eq!(
+            sweep_retired_hvf_builder_images(&hvf, false).unwrap(),
+            (0, 0)
+        );
+    }
+
     #[test]
     fn dir_size_does_not_inflate_a_tree_full_of_symlinks() {
         let tmp = tempfile::tempdir().unwrap();

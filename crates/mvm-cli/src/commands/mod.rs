@@ -647,30 +647,32 @@ fn register_inhouse_builder() {
         type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
         match choice {
             Choice::Hvf => Some(
-                crate::commands::build::hvf_builder_image::resolve_hvf_builder_image().map(
-                    |(kernel, rootfs, closure_nar)| {
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
                         Box::new(
                             DriverBuilderVm::new(
                                 mvm_backends::driver::hvf::HvfDriver::new(),
-                                kernel,
-                                rootfs,
+                                image.kernel,
+                                image.rootfs,
                             )
-                            .with_closure_nar(closure_nar),
+                            .with_closure_nar(image.closure_nar),
                         ) as Boxed
                     },
                 ),
             ),
             Choice::Firecracker => Some(
-                crate::commands::build::fc_builder_image::resolve_fc_builder_image().map(|image| {
-                    Box::new(
-                        DriverBuilderVm::new(
-                            mvm_backends::driver::fc::FcDriver::new(),
-                            image.kernel,
-                            image.rootfs,
-                        )
-                        .with_closure_nar(image.closure_nar),
-                    ) as Boxed
-                }),
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
+                        Box::new(
+                            DriverBuilderVm::new(
+                                mvm_backends::driver::fc::FcDriver::new(),
+                                image.kernel,
+                                image.rootfs,
+                            )
+                            .with_closure_nar(image.closure_nar),
+                        ) as Boxed
+                    },
+                ),
             ),
             Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
         }

@@ -74,11 +74,8 @@ pub fn host_binary_names() -> impl Iterator<Item = &'static str> {
 /// and are absent from `nix/lib/mvm-host-binaries.nix` (the
 /// `check-mvm-host-binaries-sync` xtask only mirrors `HOST_BINARIES`).
 /// The host extracts these by name and lays them down directly:
-/// `stage0-init` becomes the Stage 0 nix-seed's `/init`;
-/// `mvm-rootfs-patcher` becomes the self-hosting bootstrap's inject-initramfs
-/// `/init` (re-bakes a builder rootfs with the current host binaries on the
-/// hvf VMM — no legacy builder).
-pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];
+/// `stage0-init` becomes the Stage 0 nix-seed's `/init`.
+pub const SEED_BINARIES: &[&str] = &["stage0-init"];
 
 /// Stage 0 and builder bootstrap helpers also need a small set of support
 /// binaries mounted under `/mvm-bins` before the runtime overlay is available.

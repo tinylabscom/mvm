@@ -356,12 +356,6 @@ launcher = "crates/mvm-build/src/host_payload_manifest.rs"
 anchor = "SEED_BINARIES"
 activation = "seed"
 
-[[launch_edge]]
-producer = "mvm-build/mvm-rootfs-patcher"
-launcher = "crates/mvm-build/src/host_payload_manifest.rs"
-anchor = "SEED_BINARIES"
-activation = "seed"
-
 # --- Backend telemetry endpoint provisioning anchors -------------------------
 
 [[backend_endpoint]]

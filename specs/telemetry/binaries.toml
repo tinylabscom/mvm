@@ -274,20 +274,6 @@ required_witness = "Authenticated host collector receives producer startup, stan
 
 [[binary]]
 package = "mvm-build"
-name = "mvm-rootfs-patcher"
-source = "crates/mvm-build/src/bin/mvm-rootfs-patcher.rs"
-required_features = []
-[binary.capture]
-kind = "runtime-gap"
-role = "builder-guest"
-owner = "Bootstrap patcher PID 1"
-signals = ["diagnostics", "events", "logs", "spans", "stdio"]
-entrypoint = "fn main("
-gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
-required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
-
-[[binary]]
-package = "mvm-build"
 name = "mvm-test-image-lock-holder"
 source = "crates/mvm-build/src/bin/mvm-test-image-lock-holder.rs"
 required_features = []
