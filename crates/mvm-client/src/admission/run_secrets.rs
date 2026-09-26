@@ -90,6 +90,63 @@ pub fn parse_run_secret_specs(raw: &[String]) -> Result<Vec<RunSecretSpec>> {
     raw.iter().map(|value| value.parse()).collect()
 }
 
+/// The specs a manifest's `[secrets]` table declares, in name order.
+#[must_use]
+pub fn manifest_secret_specs(manifest: &mvm_core::manifest::Manifest) -> Vec<RunSecretSpec> {
+    manifest
+        .secrets
+        .iter()
+        .map(|(name, secret)| RunSecretSpec {
+            name: name.clone(),
+            destinations: secret.hosts.clone(),
+        })
+        .collect()
+}
+
+/// Merge the secrets a project declares with the `--secret` flags of one run.
+///
+/// The same narrowing rule the stored binding imposes on both: a flag naming a
+/// declared secret replaces that entry, and its hosts must each be admitted by
+/// the declared ones, so the command line can narrow what the project declared
+/// and never widen it. A flag with no hosts keeps the declared list. A flag
+/// naming a secret the project does not declare is added as it is. Every host
+/// is still checked against the stored allow-list afterwards.
+///
+/// # Errors
+///
+/// A flag host the declared entry does not admit.
+pub fn merge_secret_specs(
+    declared: Vec<RunSecretSpec>,
+    flags: Vec<RunSecretSpec>,
+) -> Result<Vec<RunSecretSpec>> {
+    let mut merged = declared;
+    for flag in flags {
+        let Some(entry) = merged.iter_mut().find(|spec| spec.name == flag.name) else {
+            merged.push(flag);
+            continue;
+        };
+        if flag.destinations.is_empty() {
+            continue;
+        }
+        if !entry.destinations.is_empty()
+            && let Some(outside) = flag
+                .destinations
+                .iter()
+                .find(|host| !mvm_contract::ir::host_is_bound(&entry.destinations, host))
+        {
+            bail!(
+                "--secret {}:{outside} widens what the manifest declares for {:?} ({}); \
+                     a flag can only narrow it",
+                flag.name,
+                flag.name,
+                entry.destinations.join(",")
+            );
+        }
+        entry.destinations = flag.destinations;
+    }
+    Ok(merged)
+}
+
 /// Resolve parsed specs against `service`, fail-closed, into reference records.
 ///
 /// Every spec must name a stored secret that carries a well-formed egress
@@ -161,7 +218,19 @@ pub fn run_secret_refs(
 /// As [`parse_run_secret_specs`] and [`run_secret_refs`], plus a failure to
 /// open the local secret service.
 pub fn resolve_run_secret_flags(raw: &[String], tenant: &str) -> Result<Vec<MachineSecretRef>> {
-    let specs = parse_run_secret_specs(raw)?;
+    resolve_run_secret_specs(parse_run_secret_specs(raw)?, tenant)
+}
+
+/// Resolve already-merged specs against the host's own secret service. No
+/// specs means no store access at all.
+///
+/// # Errors
+///
+/// As [`run_secret_refs`], plus a failure to open the local secret service.
+pub fn resolve_run_secret_specs(
+    specs: Vec<RunSecretSpec>,
+    tenant: &str,
+) -> Result<Vec<MachineSecretRef>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
@@ -182,10 +251,12 @@ pub fn resolve_run_secret_flags(raw: &[String], tenant: &str) -> Result<Vec<Mach
 pub fn resolve_launch_secrets(
     workload_ir: Option<&std::path::Path>,
     flags: &[String],
+    manifest: &[RunSecretSpec],
     tenant: &str,
 ) -> Result<ResolvedPlanSecrets> {
     let declared = super::secrets::resolve_workload_secrets(workload_ir)?;
-    let bound = resolve_run_secret_flags(flags, tenant)?;
+    let specs = merge_secret_specs(manifest.to_vec(), parse_run_secret_specs(flags)?)?;
+    let bound = resolve_run_secret_specs(specs, tenant)?;
     with_run_secret_flags(declared, &bound)
 }
 
@@ -347,6 +418,61 @@ mod tests {
 
     fn spec(raw: &str) -> RunSecretSpec {
         raw.parse().unwrap()
+    }
+
+    #[test]
+    fn a_flag_narrows_a_declared_secret_and_cannot_widen_it() {
+        let declared = vec![
+            spec("gitlab:gitlab.com,*.gitlab.example"),
+            spec("anthropic"),
+        ];
+        let merged =
+            merge_secret_specs(declared.clone(), vec![spec("gitlab:ci.gitlab.example")]).unwrap();
+        assert_eq!(merged[0].destinations, ["ci.gitlab.example"]);
+        assert!(merged[1].destinations.is_empty(), "untouched entries stay");
+
+        let err = merge_secret_specs(declared.clone(), vec![spec("gitlab:evil.test")]).unwrap_err();
+        assert!(format!("{err:#}").contains("widens"), "{err:#}");
+
+        // A declared entry with no hosts leaves the stored allow-list to judge.
+        let merged =
+            merge_secret_specs(declared.clone(), vec![spec("anthropic:api.anthropic.com")])
+                .unwrap();
+        assert_eq!(merged[1].destinations, ["api.anthropic.com"]);
+
+        // A bare flag keeps what the project declared; a new name is added.
+        let merged = merge_secret_specs(declared, vec![spec("gitlab"), spec("openai")]).unwrap();
+        assert_eq!(merged[0].destinations, ["gitlab.com", "*.gitlab.example"]);
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn a_manifest_secrets_table_becomes_specs() {
+        let manifest = mvm_core::manifest::Manifest::from_toml_str(
+            "flake = \".\"\n[secrets]\nanthropic = {}\ngitlab = { hosts = [\"gitlab.com\"] }\n",
+        )
+        .unwrap();
+        let specs = manifest_secret_specs(&manifest);
+        assert_eq!(specs, vec![spec("anthropic"), spec("gitlab:gitlab.com")]);
+    }
+
+    #[test]
+    fn a_manifest_secret_resolves_like_a_flag_and_is_refused_like_one() {
+        let f = fixture();
+        bound(&f, "claude", Some("anthropic"), &["api.anthropic.com"]);
+        let declared = vec![spec("claude")];
+        let refs = run_secret_refs(
+            &f.service,
+            "local",
+            &merge_secret_specs(declared, Vec::new()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            refs[0].placeholder_var.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+        let widening = vec![spec("claude:collector.evil.test")];
+        assert!(run_secret_refs(&f.service, "local", &widening).is_err());
     }
 
     #[test]
