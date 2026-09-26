@@ -225,15 +225,37 @@ fn seed_from_default_cache(
 }
 
 fn source_checkout_freshness() -> Result<SourceCheckoutFreshness, BuilderVmError> {
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
+    freshness_for(
+        builder_vm_source_checkout_root().as_deref(),
+        crate::boot_image_select::resolve(None, true).choice,
+        SOURCE_FINGERPRINT_RESOLVER.get().copied(),
+    )
+}
+
+/// The freshness rule for one source checkout, acquisition choice and
+/// fingerprint resolver.
+fn freshness_for(
+    workspace_root: Option<&Path>,
+    acquisition: crate::boot_image_select::BootImageAcquisition,
+    resolver: Option<SourceFingerprintResolver>,
+) -> Result<SourceCheckoutFreshness, BuilderVmError> {
+    let Some(workspace_root) = workspace_root else {
         return Ok(SourceCheckoutFreshness::NotApplicable);
     };
-    let Some(resolver) = SOURCE_FINGERPRINT_RESOLVER.get() else {
+    // An explicit fetch in a source checkout boots the published image, which
+    // was authenticated when it was fetched and was never built from this
+    // checkout: there is no source fingerprint to hold it to. Without the
+    // explicit request a fetched image fails the check below, so a source
+    // checkout never boots one silently.
+    if acquisition == crate::boot_image_select::BootImageAcquisition::Fetch {
+        return Ok(SourceCheckoutFreshness::NotApplicable);
+    }
+    let Some(resolver) = resolver else {
         // Library embedders do not own mvmctl's embedded host-binary table and
         // keep the pre-existing cache contract. The CLI always registers.
         return Ok(SourceCheckoutFreshness::NotApplicable);
     };
-    resolver(&workspace_root)
+    resolver(workspace_root)
         .map(|fingerprint| match fingerprint {
             Some(fingerprint) => SourceCheckoutFreshness::Fingerprint(fingerprint),
             // This process has no payload from which to derive the
@@ -671,6 +693,29 @@ mod tests {
         load_from_cache_for_source(cache.path(), None)
             .expect("a release binary has no source checkout to compare");
         assert!(shared_cache_source(cache.path(), None).is_some());
+    }
+
+    /// `MVM_BOOT_IMAGE=fetch` boots the published image, which carries no
+    /// source fingerprint; holding it to one refused every fetched image.
+    #[test]
+    fn an_explicit_fetch_is_not_held_to_the_source_fingerprint() {
+        use crate::boot_image_select::BootImageAcquisition::{Build, Fetch};
+        fn fingerprint(_: &Path) -> Result<Option<String>, String> {
+            Ok(Some("current".to_string()))
+        }
+        let root = Path::new("/checkout");
+        assert!(matches!(
+            freshness_for(Some(root), Fetch, Some(fingerprint)).unwrap(),
+            SourceCheckoutFreshness::NotApplicable
+        ));
+        assert!(matches!(
+            freshness_for(Some(root), Build, Some(fingerprint)).unwrap(),
+            SourceCheckoutFreshness::Fingerprint(f) if f == "current"
+        ));
+        assert!(matches!(
+            freshness_for(None, Build, Some(fingerprint)).unwrap(),
+            SourceCheckoutFreshness::NotApplicable
+        ));
     }
 
     #[test]
