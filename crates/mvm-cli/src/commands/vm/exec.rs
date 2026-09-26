@@ -370,6 +370,9 @@ pub(in crate::commands) struct RunArgs {
     /// Re-admit a denied env variable by exact name. Repeatable.
     #[arg(long = "allow-env", value_name = "NAME")]
     pub allow_env: Vec<String>,
+    /// Bind a stored secret; the guest sees only a placeholder.
+    #[arg(long = "secret", value_name = "NAME[:HOST,...]")]
+    pub secret: Vec<String>,
     /// Set a per-command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -515,6 +518,7 @@ impl Default for RunArgs {
             mounts: Vec::new(),
             env: Vec::new(),
             allow_env: Vec::new(),
+            secret: Vec::new(),
             timeout: None,
             receipt: None,
             caller_commitment: None,
@@ -702,14 +706,7 @@ pub(in crate::commands) fn run_secure_with_source(
         ai: ai_policy.as_ref(),
     })?;
     let network_policy = resolved_grants.network_policy.clone();
-    let admit_secrets =
-        mvm_client::admission::secrets::resolve_workload_secrets(args.from_workload_ir.as_deref())?;
-    if !admit_secrets.secrets.is_empty() {
-        // A restored warm parent has already run PID 1, so it cannot receive a
-        // per-boot placeholder token. Secret-bearing launches cold-boot until
-        // warm claims grow an equivalent post-restore handoff.
-        args.warm_pool_size = 0;
-    }
+    let admit_secrets = super::run_secrets::admitted_run_secrets(&mut args)?;
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the

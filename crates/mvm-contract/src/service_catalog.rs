@@ -61,6 +61,15 @@ pub struct ServiceProvider {
     /// account and stay on the command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sigv4_service: Option<String>,
+    /// The environment variable the provider's own SDK or CLI reads its
+    /// credential from (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`). A run binding a
+    /// secret authored under this provider hands the guest its placeholder
+    /// under this name, so stock tooling picks it up unconfigured. Naming
+    /// only: no destination or substitution decision reads it. `None` when
+    /// the provider has no single conventional variable (a SigV4 credential
+    /// is two halves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
     /// Searchable tags.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -80,6 +89,9 @@ pub enum ProviderInvalid {
     /// auth type that has no use for one. Either way the entry claims
     /// something it cannot deliver.
     Sigv4ScopeMismatch,
+    /// `env_var` is present but not a shell identifier, so no tool could
+    /// read a placeholder handed to the guest under it.
+    BadEnvVar,
 }
 
 impl ProviderInvalid {
@@ -92,6 +104,7 @@ impl ProviderInvalid {
             ProviderInvalid::Sigv4ScopeMismatch => {
                 "sigv4_service must be set for sigv4 auth and absent otherwise"
             }
+            ProviderInvalid::BadEnvVar => "env_var must be a shell identifier",
         }
     }
 }
@@ -117,6 +130,13 @@ impl ServiceProvider {
         // value that would be silently dropped.
         if matches!(self.auth, AuthType::Sigv4) != self.sigv4_service.is_some() {
             return Err(ProviderInvalid::Sigv4ScopeMismatch);
+        }
+        if self
+            .env_var
+            .as_deref()
+            .is_some_and(|var| !crate::protocol::vm_backend::is_secret_env_name(var))
+        {
+            return Err(ProviderInvalid::BadEnvVar);
         }
         Ok(())
     }
@@ -198,7 +218,17 @@ fn provider(
         hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
         auth,
         sigv4_service: sigv4_service.map(ToString::to_string),
+        env_var: None,
         tags: tags.iter().map(|t| (*t).to_string()).collect(),
+    }
+}
+
+impl ServiceProvider {
+    /// Name the variable the provider's own tooling reads its credential from.
+    #[must_use]
+    fn reading(mut self, env_var: &str) -> Self {
+        self.env_var = Some(env_var.to_string());
+        self
     }
 }
 
@@ -220,7 +250,8 @@ pub fn builtin() -> ServiceCatalog {
                 AuthType::Bearer,
                 None,
                 &["llm", "ai"],
-            ),
+            )
+            .reading("OPENAI_API_KEY"),
             provider(
                 "anthropic",
                 "Anthropic HTTP API",
@@ -228,7 +259,8 @@ pub fn builtin() -> ServiceCatalog {
                 AuthType::Bearer,
                 None,
                 &["llm", "ai"],
-            ),
+            )
+            .reading("ANTHROPIC_API_KEY"),
             provider(
                 "github",
                 "GitHub REST + GraphQL API",
@@ -236,7 +268,8 @@ pub fn builtin() -> ServiceCatalog {
                 AuthType::Bearer,
                 None,
                 &["git", "forge", "vcs"],
-            ),
+            )
+            .reading("GITHUB_TOKEN"),
             provider(
                 "stripe",
                 "Stripe HTTP API",
@@ -244,7 +277,8 @@ pub fn builtin() -> ServiceCatalog {
                 AuthType::Bearer,
                 None,
                 &["payments"],
-            ),
+            )
+            .reading("STRIPE_API_KEY"),
             provider(
                 "aws-s3",
                 "Amazon S3 (SigV4; region and access-key id are yours to supply)",
@@ -331,6 +365,34 @@ mod tests {
             ],
         };
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn bearer_api_providers_name_their_conventional_variable() {
+        let c = builtin();
+        let var = |name: &str| c.find(name).and_then(|p| p.env_var.clone());
+        assert_eq!(var("anthropic").as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(var("openai").as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(var("github").as_deref(), Some("GITHUB_TOKEN"));
+        assert_eq!(var("stripe").as_deref(), Some("STRIPE_API_KEY"));
+        // A SigV4 credential is two halves; no single variable carries it.
+        assert_eq!(var("aws-s3"), None);
+    }
+
+    #[test]
+    fn an_env_var_that_is_not_a_shell_identifier_is_invalid() {
+        for bad in ["", "9KEY", "API-KEY", "API KEY", "A=B"] {
+            let p = provider("x", "d", &["h.example"], AuthType::Bearer, None, &[]).reading(bad);
+            assert_eq!(p.validate(), Err(ProviderInvalid::BadEnvVar), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_entry_serialized_without_an_env_var_reads_back_as_none() {
+        let json = r#"{"name":"x","description":"d","hosts":["h.example"],"auth":"bearer"}"#;
+        let p: ServiceProvider = serde_json::from_str(json).unwrap();
+        assert_eq!(p.env_var, None);
+        assert!(!serde_json::to_string(&p).unwrap().contains("env_var"));
     }
 
     #[test]

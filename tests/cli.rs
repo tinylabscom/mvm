@@ -1301,3 +1301,93 @@ fn image_boot_verify_refuses_a_manifest_the_lock_does_not_pin() {
         "stderr: {stderr}"
     );
 }
+
+/// `--secret` is shared run surface: both run verbs advertise it.
+#[test]
+fn run_and_machine_run_help_list_the_secret_flag() {
+    for verb in [&["run", "--help"][..], &["machine", "run", "--help"][..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(verb)
+            .output()
+            .expect("run mvmctl help");
+        assert!(
+            out.status.success(),
+            "{verb:?} must exit 0: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("--secret"), "{verb:?} help missing --secret");
+        assert!(
+            text.contains("NAME[:HOST,...]"),
+            "{verb:?} help missing the spec shape"
+        );
+    }
+}
+
+/// An isolated `mvmctl` whose secrets live in the file store, so nothing
+/// reaches the operator's keychain.
+fn isolated_secret_mvmctl(home: &std::path::Path) -> Command {
+    let mut command = isolated_mvmctl(home);
+    command.env("MVM_SECRET_STORE_BACKEND", "file");
+    command
+}
+
+/// A secret the host has never stored refuses the run before anything boots.
+#[test]
+fn run_with_an_unknown_secret_refuses_before_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let out = isolated_secret_mvmctl(home.path())
+        .args(["run", "--secret", "never-stored", "--", "true"])
+        .output()
+        .expect("run mvmctl run");
+    assert!(!out.status.success(), "an unknown secret must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown secret"), "{stderr}");
+    assert!(
+        stderr.contains("mvmctl secret set never-stored"),
+        "the refusal names the fix: {stderr}"
+    );
+}
+
+/// A destination the stored binding does not admit refuses before boot: the
+/// flag can narrow a binding, never widen it.
+#[test]
+fn run_with_a_destination_outside_the_binding_refuses_before_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let stored = isolated_secret_mvmctl(home.path())
+        .args([
+            "secret",
+            "set",
+            "anthropic",
+            "--provider",
+            "anthropic",
+            "--value",
+            "sk-ant-test-only",
+        ])
+        .output()
+        .expect("run mvmctl secret set");
+    assert!(
+        stored.status.success(),
+        "secret set must succeed: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+
+    let out = isolated_secret_mvmctl(home.path())
+        .args([
+            "run",
+            "--secret",
+            "anthropic:collector.evil.test",
+            "--",
+            "true",
+        ])
+        .output()
+        .expect("run mvmctl run");
+    assert!(!out.status.success(), "a widening destination must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("refused before boot"), "{stderr}");
+    assert!(stderr.contains("collector.evil.test"), "{stderr}");
+    assert!(
+        !stderr.contains("sk-ant-test-only"),
+        "a refusal never echoes the value: {stderr}"
+    );
+}

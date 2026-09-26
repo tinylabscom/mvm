@@ -73,14 +73,6 @@ pub(in crate::commands) struct Args {
     /// Environment variable to inject (format: KEY=VALUE). Repeatable
     #[arg(short, long)]
     pub env: Vec<String>,
-    /// Bind a named secret to an egress destination (format:
-    /// NAME:HOST[,HOST...]). Adds a `SecretRef` to the workload — the guest
-    /// only ever sees a placeholder; the host substitutes the real credential
-    /// on outbound requests to the allow-listed hosts. Bearer auth +
-    /// env-var mount by default; use `mvmctl secret set` for sigv4/hmac/file.
-    /// Repeatable.
-    #[arg(long = "secret")]
-    pub secret: Vec<String>,
     /// Auto-forward declared ports after boot (blocks until Ctrl-C)
     #[arg(long)]
     pub forward: bool,

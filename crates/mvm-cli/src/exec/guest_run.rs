@@ -54,6 +54,7 @@ pub(super) fn run_in_guest(
     )?;
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
+    let req = &with_provisioned_egress_env(req, vm_name);
     let wrapper = build_guest_wrapper(req);
 
     if req.pty {
@@ -196,6 +197,34 @@ fn pty_console_request(req: &ExecRequest, wrapper: String) -> PtyConsoleRequest 
     }
 }
 
+/// `req` with the environment the host provisioned for this VM's egress in
+/// front of the caller's own: the proxy variables, the placeholder minted for
+/// each secret the plan binds, and — when the endpoint terminates for a bound
+/// destination — the variables pointing TLS clients at the trust bundle that
+/// carries this VM's egress certificate.
+///
+/// Read here, after the endpoint has a session, because that is when the
+/// placeholders exist: they are minted at boot, so no request built before
+/// boot can carry them. The caller's explicit `--env` comes last and wins.
+fn with_provisioned_egress_env(req: &ExecRequest, vm_name: &str) -> ExecRequest {
+    let mut provisioned = req.clone();
+    provisioned.env = compose_egress_env(
+        mvm_hostd::workload_env::workload_egress_env(vm_name),
+        &req.env,
+    );
+    provisioned
+}
+
+/// The provisioned egress variables, then the caller's.
+fn compose_egress_env(
+    provisioned: Vec<(String, String)>,
+    caller: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut env = provisioned;
+    env.extend(caller.iter().cloned());
+    env
+}
+
 fn direct_pty_inline_argv(req_argv: &[String]) -> bool {
     req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
 }
@@ -311,6 +340,59 @@ mod tests {
 
         assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
         assert!(pty.env.is_empty());
+    }
+
+    #[test]
+    fn a_secret_bearing_run_exports_its_placeholder_before_the_command() {
+        let placeholder = format!("mvm-secret-{}", "ab".repeat(24));
+        let env = compose_egress_env(
+            vec![
+                ("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into()),
+                ("API_TOKEN".into(), placeholder.clone()),
+            ],
+            &[("TERM".into(), "xterm-256color".into())],
+        );
+        assert_eq!(env.len(), 3);
+        assert_eq!(env[1], ("API_TOKEN".to_string(), placeholder));
+        assert_eq!(
+            env.last().map(|(k, _)| k.as_str()),
+            Some("TERM"),
+            "the caller's explicit env comes last"
+        );
+    }
+
+    #[test]
+    fn a_vm_with_no_provisioned_egress_keeps_the_callers_env() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
+            env: vec![("TERM".into(), "xterm-256color".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: None,
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            gpu: false,
+            gpu_device: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
+        };
+        let provisioned = with_provisioned_egress_env(&req, "no-egress-vm");
+        assert_eq!(provisioned.env, req.env);
     }
 
     #[test]

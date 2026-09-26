@@ -415,6 +415,9 @@ fn cmd_providers(search: Option<&str>) -> Result<()> {
         if let Some(svc) = &p.sigv4_service {
             line.push_str(&format!("\tservice={svc}"));
         }
+        if let Some(var) = &p.env_var {
+            line.push_str(&format!("\tenv={var}"));
+        }
         line.push_str(&format!("\t{}", p.description));
         println!("{line}");
     }
@@ -932,6 +935,7 @@ mod tests {
             hosts: vec!["h.example".into()],
             auth: AuthType::Sigv4,
             sigv4_service: None,
+            env_var: None,
             tags: vec![],
         };
         assert!(bad.validate().is_err());
