@@ -254,7 +254,11 @@ impl Pair {
             roles: contract.set_roles,
         };
         let staged = cache.stage(&key).expect("stage");
-        Self::emit_set(staged.dir(), &key.checkouts, key.arch, members);
+        let checkouts = self
+            .images
+            .current_checkouts(&mvm_root)
+            .expect("the pair's checkouts read");
+        Self::emit_set(staged.dir(), &checkouts, key.arch, members);
         cache
             .publish(staged, &ctx)
             .expect("publish")

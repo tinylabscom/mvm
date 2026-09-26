@@ -18,7 +18,7 @@ use mvm_agentd::crng_reseed::{HelperConnection, HelperSpawn, ReseedError, Reseed
 use mvm_agentd::guest_mount::{CRNG_RESEED_HELPER_GID, CRNG_RESEED_HELPER_UID};
 
 const AGENT: &str = env!("CARGO_BIN_EXE_mvm-guest-agent");
-const SETPRIV: &str = env!("CARGO_BIN_EXE_mvm-setpriv");
+const SETPRIV: &str = env!("CARGO_BIN_EXE_mvm-setpriv-fixture");
 const TOKEN: [u8; 16] = [0x5a; 16];
 
 /// Whether a privileged test asked for with `MVM_GUEST_PRIVILEGED_TESTS=1` may

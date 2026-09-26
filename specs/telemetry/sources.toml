@@ -314,7 +314,7 @@ anchor = "seccomp-apply"
 activation = "on-demand"
 
 [[launch_edge]]
-producer = "mvm-agentd/mvm-setpriv"
+producer = "mvm-setpriv/mvm-setpriv"
 launcher = "nix/lib/mk-guest.nix"
 anchor = "mvm-setpriv"
 activation = "always"

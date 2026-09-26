@@ -22,8 +22,10 @@ use super::{bootstrap, stage0_cache};
 
 /// The canonical identity string the builder-VM cache sidecars record for a
 /// pair-built image: the SHA-256 of the pair cache key's canonical JSON. A
-/// change in either checkout, the toolchain pins or a flake lock changes it,
-/// which is what makes the install cache single-sidedly invalidating.
+/// change in the image checkout, in the mvm sources the builder image reads,
+/// the toolchain pins or a flake lock changes it, which is what makes the
+/// install cache single-sidedly invalidating. An mvm edit the builder image
+/// never reads does not.
 pub(crate) fn pair_fingerprint(key: &LocalImageCacheKey) -> String {
     let digest = key.digest();
     digest.as_str().to_string()
@@ -477,7 +479,10 @@ mod tests {
         let staged = cache.stage(&key).expect("stage");
         Pair::emit_set(
             staged.dir(),
-            &key.checkouts,
+            &pair
+                .images
+                .current_checkouts(&pair.mvm)
+                .expect("the pair's checkouts read"),
             key.arch,
             &[(
                 mvm_core::image_set::ImageSetRole::BuilderVm,

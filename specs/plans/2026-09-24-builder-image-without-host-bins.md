@@ -687,7 +687,7 @@ the Stage 0 flake reference follows W8's re-pointing.
       contract 4 → 5. Tests: update the fingerprint layer tests
       (`builder_vm_bootstrap_tests.rs`) so a change to the embed table no
       longer moves the key and every Nix input still does.
-- [ ] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
+- [x] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
       `libc`-only closure (pending the crate-count decision), vendoring
       `configure_close_fds`. Point `nix/packages/mvm-setpriv.nix` and
       `setpriv_source::SETPRIV_PACKAGE` at it. Tests: the existing layer-4
@@ -695,11 +695,40 @@ the Stage 0 flake reference follows W8's re-pointing.
       `…_ignores_changes_outside_the_setpriv_closure`) now name the leaf, and
       an `mvm-core` edit no longer moves the key. Claims 1 and 2 witnesses
       that exercise `mvm-setpriv` stay green unchanged.
-- [ ] **W10 — per-role pair key.** Replace the `mvm` whole-checkout identity in
+      Landed as `crates/mvm-setpriv`. `fd_hygiene` moved into the leaf whole
+      rather than being vendored, and `mvm-agentd` re-exports it, so there is
+      one copy; the capability numbers `guest_mount` retains are the leaf's.
+      The CRNG reseed test starts its helper through an `mvm-agentd` fixture
+      binary over the same `mvm_setpriv::run` entry point, because a test can
+      only name binaries of its own package. A test holds the shipped closure
+      to the leaf and `libc`, and another holds the Nix recipe's `--package`
+      to the package the key hashes. Over the 458 `main` commits of the 28
+      days before 2026-09-25, layer 4 moved on 107 (23%) under the old
+      closure and would have on 2 under the leaf.
+- [x] **W10 — per-role pair key.** Replace the `mvm` whole-checkout identity in
       `LocalImageCacheKey` for `BuilderVm` with the derived input digest,
       generated from the same import-site scan. Tests: a crate edit outside
       the builder's inputs does not move the builder-vm pair key; an edit to
       each listed input does; other roles are unchanged.
+      Landed as `MvmSourceIdentity`: `Checkout` for every role but the
+      builder image, and `ConsumedInputs` for it — `BUILDER_FLAKE_NIX_INPUTS`
+      (moved to `mvm_build::builder_image_inputs`, one list for both keys),
+      the `mvm-setpriv` closure, and, while the target contract says the image
+      bakes host binaries, the `mvm-build` closure and `.cargo/config.toml`.
+      That last term is not in the design above, which assumed W7 had
+      landed; leaving it out would serve a baked `mvm-host-vm-init` from an
+      older tree. The image checkout's `images/builder-vm/image.nix` is
+      scanned at key time for its reads of the mvm tree, and an unlisted read,
+      or none recognised, keys on the whole checkout instead. For a
+      consumed-input key the set's recorded mvm checkout is provenance
+      (`MvmCheckoutRule::Provenance`); freshness is the key, which lookup and
+      publish now re-derive in full. Over the 458 `main` commits of the 28
+      days before 2026-09-25 (path-level, `Cargo.lock` excluded), the pair
+      key moved on all 458 before, would have moved on 203 (44%) with the
+      host binaries still baked, and would move on 28 (6%) once W7 stops
+      baking them. The extraction plan's open item "make cache keys include
+      both repository commits" is the coarse key this replaces for the
+      builder role; that plan was not edited here.
 - [ ] **W11 — ADR amendments** (ADR-004, ADR-030, ADR-018 cross-reference),
       landed in the same PR as W8, with the text above. Update `CLAUDE.md`
       §"Builder backend selection", the contributor guide's builder section,

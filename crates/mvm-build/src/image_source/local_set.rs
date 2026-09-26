@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ImageSetError, ImageSetRole, LOCAL_SET_MANIFEST_NAME, LocalCheckouts, LocalImageSet,
-    LocalImageSetVerification, RepoIdentity, verify_local_image_set,
+    LocalImageSetVerification, MvmCheckoutRule, RepoIdentity, verify_local_image_set,
 };
 use thiserror::Error;
 
@@ -64,26 +64,35 @@ pub struct LocalSetRequest<'a> {
     pub arch: GuestArch,
     /// Roles the caller is about to use; a set without any of them is refused.
     pub roles: &'a [ImageSetRole],
+    /// How the set's recorded mvm checkout is held against the one on disk.
+    pub mvm_rule: MvmCheckoutRule,
 }
 
 impl LocalImageCheckout {
+    /// This checkout, re-verified, and the paired mvm checkout, as they both
+    /// are now: what a set built from the pair right now would record.
+    pub fn current_checkouts(&self, mvm_checkout: &Path) -> Result<LocalCheckouts, LocalSetError> {
+        self.reverify()?;
+        Ok(LocalCheckouts {
+            images: self.identity().clone(),
+            mvm: open_mvm_checkout(mvm_checkout)?.1,
+        })
+    }
+
     /// Read the set in `request.set_dir`, built from this checkout and the
     /// paired mvm checkout.
     ///
     /// The selection is re-verified first, so a retargeted path or an edit
     /// since selection is refused before anything else is read. The set is
     /// then accepted only if its manifest records exactly the identities both
-    /// checkouts have now: a set built before either tree changed is stale,
+    /// checkouts have now — or, under [`MvmCheckoutRule::Provenance`], the
+    /// image checkout's: a set built before either tree changed is stale,
     /// however well-formed it is. The result is always the `local-dev` tier.
     pub fn read_local_image_set(
         &self,
         request: &LocalSetRequest<'_>,
     ) -> Result<LocalImageSet, LocalSetError> {
-        self.reverify()?;
-        let current = LocalCheckouts {
-            images: self.identity().clone(),
-            mvm: open_mvm_checkout(request.mvm_checkout)?.1,
-        };
+        let current = self.current_checkouts(request.mvm_checkout)?;
         let manifest_bytes = read_manifest(request.set_dir)?;
         let verification = LocalImageSetVerification::new(
             &manifest_bytes,
@@ -91,7 +100,8 @@ impl LocalImageCheckout {
             &current,
             request.arch,
         )
-        .require_roles(request.roles);
+        .require_roles(request.roles)
+        .with_mvm_checkout_rule(request.mvm_rule);
         verify_local_image_set(&verification).map_err(|source| LocalSetError::Refused {
             dir: request.set_dir.to_path_buf(),
             source,

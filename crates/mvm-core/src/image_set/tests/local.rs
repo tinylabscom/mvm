@@ -584,6 +584,56 @@ mod local_path {
     }
 
     #[test]
+    fn an_mvm_checkout_held_as_provenance_is_not_a_freshness_condition() {
+        let set = stage(local_manifest());
+        let mut current = checkouts();
+        current.mvm.commit = commit('7');
+        current.mvm.worktree = dirty("mvm tree, edited since");
+        let read = verify_local_image_set(
+            &LocalImageSetVerification::new(
+                &set.manifest_bytes,
+                set.dir.path(),
+                &current,
+                GuestArch::Aarch64,
+            )
+            .with_mvm_checkout_rule(MvmCheckoutRule::Provenance),
+        )
+        .expect("the recorded mvm checkout is provenance under this rule");
+        assert_eq!(
+            read.checkouts,
+            checkouts(),
+            "the set still reports the checkouts it recorded"
+        );
+    }
+
+    #[test]
+    fn the_image_checkout_is_held_even_when_mvm_is_provenance() {
+        let set = stage(local_manifest());
+        let mut current = checkouts();
+        current.images.commit = commit('9');
+        let err = verify_local_image_set(
+            &LocalImageSetVerification::new(
+                &set.manifest_bytes,
+                set.dir.path(),
+                &current,
+                GuestArch::Aarch64,
+            )
+            .with_mvm_checkout_rule(MvmCheckoutRule::Provenance),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ImageSetError::StaleLocalSet {
+                    checkout: "mvm-images",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_set_from_a_dirty_tree_is_stale_once_the_tree_is_clean() {
         let set = stage(local_manifest());
         let mut current = checkouts();
