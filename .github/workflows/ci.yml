@@ -505,6 +505,14 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
 
+      # The authored-policy schema is generated from the Rust types and
+      # published twice (schema/ and the docs reference page); the drift tests
+      # and the emitter bin exist only under `schema`.
+      - name: policy schema drift (mvm-client schema)
+        run: |
+          cargo nextest run -p mvm-client --features schema -E 'test(/profiles::/)'
+          cargo check -p mvm-client --features schema --bins
+
       # `addons` is off by default so the sealed agent's request path stays
       # synchronous and tokio-free (`check-guest-agent-runtime-free` enforces
       # that, so this must stay a feature rather than move into default). But

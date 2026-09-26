@@ -197,11 +197,27 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
 
 ### PS-05 — Policy files, profiles, resolved manifest (#3715)
-- [ ] TOML policy groups and profiles (`extends`, `groups.include/exclude`, `when`, overrides)
-- [ ] merge rules from Decision 8 with tests, cycle and depth limits
-- [ ] JSON Schema generated from Rust and published in docs
-- [ ] `mvmctl policy resolve|show|validate|diff`; `--plan FILE` accepts a resolved manifest
-- [ ] `mvm.toml [policy]`; user profiles under the config dir via `mvm-core::config`
+- [x] TOML policy groups and profiles (`extends`, `groups.include/exclude`, `when`, overrides)
+      — `mvm_client::profiles`; built-in groups (`registries`, `github`,
+      `llm-apis`, `offline`) and profiles (`default`, `dev-network`,
+      `agent-apis`, `offline`) embedded and drift-tested against the network
+      presets; `[tools]` is parsed and shown but not enforced (PS-13)
+- [x] merge rules from Decision 8 with tests, cycle and depth limits
+      — allows union, denies union and win, blocked network stays blocked,
+      required groups cannot be excluded, secret destinations only narrow
+      (and the stored `secret set` allow-list still bounds them at launch),
+      resource ceilings take the minimum, `env.readmit` is user-only (a
+      `LayerOrigin::Pack` exists for PS-06); cycles named, depth capped at 10
+- [x] JSON Schema generated from Rust and published in docs
+      — `schema/policy-profiles-v0.json` and `reference/policy-schema.md`,
+      both drift-tested under `--features schema`
+- [x] `mvmctl policy resolve|show|validate|diff|groups`; `--plan FILE` accepts a resolved manifest
+      — `--policy NAME|PATH` (the existing `--profile` is the run's security
+      tier), folded into the launch's own flags so a profile and the same
+      flags admit the same signed plan (tested through admission); `--plan`
+      is exclusive with every policy flag and refuses a supplied plan or
+      signature; `ns/name` pack references are parsed and refused
+- [x] `mvm.toml [policy]`; user profiles under the config dir via `mvm-core::config`
 
 ### PS-06 — Signed packs and agent profiles (#3716)
 - [ ] pack manifest schema and keyless signing workflow in `mvm-templates`
