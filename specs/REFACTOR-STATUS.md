@@ -19,7 +19,7 @@ Last updated: 2026-09-25
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
-  - [ ] PS-12 environment hygiene denylist — #3722
+  - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
   - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
   - [ ] PS-16 Nix developer experience — #3725
