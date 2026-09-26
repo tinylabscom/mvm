@@ -188,13 +188,92 @@ fn shared_cache_source(source: &Path, expected_fingerprint: Option<&str>) -> Opt
     shared_cache_is_trustworthy(source).then(|| source.to_path_buf())
 }
 
-fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(target).map_err(|error| {
-        BuilderVmError::ExtractionFailed(format!("create {}: {error}", target.display()))
-    })?;
+/// Install the shared cache at `source` into `target`, never writing into a
+/// file already in place.
+///
+/// The artifacts are copied into a sibling staging directory and renamed in
+/// whole. Writing them into `target` directly was a race: `std::fs::copy` onto
+/// an existing file truncates that same inode and refills it, so a second
+/// seeder — any concurrent `mvmctl`, or a parallel test process sharing one
+/// `MVM_HOME` — shrank a `rootfs.ext4` that another process had already
+/// validated and was reading, which then failed with an unexpected EOF.
+///
+/// A complete, current `target` that appeared while this copy ran is kept, and
+/// this copy is discarded: replacing it would pull it out from under a boot
+/// already using it. Only an incomplete or stale `target` is moved aside.
+fn copy_cache(
+    source: &Path,
+    target: &Path,
+    expected_fingerprint: Option<&str>,
+) -> Result<(), BuilderVmError> {
+    let io_error = |what: &str, path: &Path, error: std::io::Error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "seed builder image cache: {what} {}: {error}",
+            path.display()
+        ))
+    };
+    let (Some(parent), Some(arch)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "seed builder image cache: {} names no architecture directory",
+            target.display()
+        )));
+    };
+    std::fs::create_dir_all(parent).map_err(|e| io_error("create", parent, e))?;
+    crate::cache_install::reap_stale_staging(parent, arch);
+    // Unique per call, not only per process: two threads of one process may
+    // seed at once, and a shared name would let one clear the other's copy.
+    static SEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seed = SEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging_name = format!("{}.{seed}", crate::cache_install::staging_dir_name(arch));
+    let staging = parent.join(&staging_name);
+    std::fs::create_dir(&staging).map_err(|e| io_error("create", &staging, e))?;
+    if let Err(error) = copy_cache_files(source, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    if load_from_cache_for_source(target, expected_fingerprint).is_ok() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Ok(());
+    }
+    // `rename` onto a non-empty directory fails rather than replacing it, so an
+    // existing stale target moves aside first. The aside name carries the
+    // staging prefix, so a crash between the two renames leaves litter the
+    // next install reaps.
+    let aside = parent.join(format!("{staging_name}.stale"));
+    let moved_aside = match std::fs::rename(target, &aside) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(io_error("move aside", target, error));
+        }
+    };
+    let installed = std::fs::rename(&staging, target);
+    if moved_aside {
+        let _ = std::fs::remove_dir_all(&aside);
+    }
+    match installed {
+        Ok(()) => Ok(()),
+        // Another seeder renamed its copy in between: keep it.
+        Err(_) if load_from_cache_for_source(target, expected_fingerprint).is_ok() => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(io_error("install", target, error))
+        }
+    }
+}
+
+/// Copy the cache artifacts, and whichever sidecars exist, from `source`
+/// into the empty directory `into`.
+fn copy_cache_files(source: &Path, into: &Path) -> Result<(), BuilderVmError> {
     for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
         let from = source.join(name);
-        let to = target.join(name);
+        let to = into.join(name);
         std::fs::copy(&from, &to).map_err(|error| {
             BuilderVmError::ExtractionFailed(format!(
                 "seed builder image cache {} -> {}: {error}",
@@ -206,7 +285,7 @@ fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
     for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
         let from = source.join(name);
         if from.is_file() {
-            let _ = std::fs::copy(&from, target.join(name));
+            let _ = std::fs::copy(&from, into.join(name));
         }
     }
     Ok(())
@@ -220,7 +299,7 @@ fn seed_from_default_cache(
         &builder_vm_cache_dir().join(host_arch_tag()),
         &default_cache_dir().join(host_arch_tag()),
         |source| shared_cache_source(source, expected_fingerprint),
-        |source| copy_cache(&source, target),
+        |source| copy_cache(&source, target, expected_fingerprint),
     )
 }
 
@@ -716,6 +795,103 @@ mod tests {
             freshness_for(None, Build, Some(fingerprint)).unwrap(),
             SourceCheckoutFreshness::NotApplicable
         ));
+    }
+
+    /// A cache root holding a stale `target` and a current `source` beside it,
+    /// each with its own `rootfs.ext4` bytes.
+    fn stale_target_and_current_source(root: &Path) -> (PathBuf, PathBuf) {
+        let source = root.join("shared").join("aarch64");
+        let target = root.join("isolated").join("aarch64");
+        write_test_cache(&source, Some("current"));
+        std::fs::write(source.join("rootfs.ext4"), b"rootfs-current").unwrap();
+        write_test_cache(&target, Some("stale"));
+        std::fs::write(target.join("rootfs.ext4"), b"rootfs-stale").unwrap();
+        (source, target)
+    }
+
+    fn leftover_staging(parent: &Path) -> Vec<String> {
+        std::fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect()
+    }
+
+    /// A process that validated the cached image and is reading it must keep
+    /// reading those bytes while another process seeds. Copying onto the file
+    /// in place truncated that same inode, and the reader hit an unexpected
+    /// EOF partway through the image.
+    #[test]
+    fn seeding_never_writes_into_a_file_already_in_place() {
+        use std::io::{Read, Seek, SeekFrom};
+        let root = tempfile::tempdir().expect("tempdir");
+        let (source, target) = stale_target_and_current_source(root.path());
+        let mut reader = std::fs::File::open(target.join("rootfs.ext4")).unwrap();
+
+        copy_cache(&source, &target, Some("current")).expect("seed");
+
+        let mut seen = Vec::new();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(
+            seen, b"rootfs-stale",
+            "an open reader saw its file rewritten"
+        );
+        assert_eq!(
+            std::fs::read(target.join("rootfs.ext4")).unwrap(),
+            b"rootfs-current"
+        );
+        load_from_cache_for_source(&target, Some("current")).expect("the seeded cache loads");
+        assert!(
+            leftover_staging(target.parent().unwrap()).is_empty(),
+            "staging and the stale copy are cleaned up"
+        );
+    }
+
+    /// Two seeders racing: the one that finds a complete, current cache
+    /// already in place keeps it rather than replacing it under its readers.
+    #[test]
+    fn a_current_cache_that_appeared_meanwhile_is_kept() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (source, target) = stale_target_and_current_source(root.path());
+        write_test_cache(&target, Some("current"));
+        std::fs::write(target.join("rootfs.ext4"), b"rootfs-theirs").unwrap();
+        let reader = std::fs::File::open(target.join("rootfs.ext4")).unwrap();
+
+        copy_cache(&source, &target, Some("current")).expect("seed");
+
+        assert_eq!(
+            std::fs::read(target.join("rootfs.ext4")).unwrap(),
+            b"rootfs-theirs"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                reader.metadata().unwrap().ino(),
+                std::fs::metadata(target.join("rootfs.ext4")).unwrap().ino(),
+                "the image in place was not replaced"
+            );
+        }
+        drop(reader);
+        assert!(leftover_staging(target.parent().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_missing_target_is_installed_whole() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (source, target) = stale_target_and_current_source(root.path());
+        std::fs::remove_dir_all(&target).unwrap();
+
+        copy_cache(&source, &target, Some("current")).expect("seed");
+
+        load_from_cache_for_source(&target, Some("current")).expect("the seeded cache loads");
+        assert!(
+            target
+                .join(crate::cache_install::BUILDER_VM_SOURCE_FINGERPRINT_FILE)
+                .is_file(),
+            "sidecars travel with the artifacts"
+        );
     }
 
     #[test]
