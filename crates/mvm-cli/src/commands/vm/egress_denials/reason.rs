@@ -301,8 +301,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{label} is a denial"))
     }
 
-    /// Every label the endpoint records for a refusal, on this tree and in the
-    /// refusal classes and route outcomes that extend it. A label missing here
+    /// Every label the endpoint records for a refusal. A label missing here
     /// would render as "refused: <label>" with no remedy.
     const EVERY_REFUSAL_LABEL: &[&str] = &[
         "policy_denied",
