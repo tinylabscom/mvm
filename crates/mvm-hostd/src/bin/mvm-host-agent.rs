@@ -120,7 +120,7 @@ async fn wait_for_worker_ready(
 
 async fn spawn_worker(raw_cfg: &[u8]) -> Result<Child> {
     let bin = std::env::current_exe().context("resolve mvm-host-agent current_exe")?;
-    let mut command = Command::new(&bin);
+    let mut command = Command::from(mvm_core::env_hygiene::helper_command(&bin));
     command
         .env(HOST_AGENT_WORKER_ENV, "1")
         .stdin(Stdio::piped())
@@ -164,7 +164,7 @@ async fn spawn_signer_helper(cfg: &HostAgentConfig) -> Result<Child> {
         max_frame_bytes: cfg.max_frame_bytes,
     };
     let _ = std::fs::remove_file(&cfg.signer_helper_uds_path);
-    let mut child = Command::new(&bin)
+    let mut child = Command::from(mvm_core::env_hygiene::helper_command(&bin))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

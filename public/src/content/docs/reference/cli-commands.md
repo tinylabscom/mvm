@@ -401,6 +401,7 @@ into the image; Nix-built production guests may also use
 | `mvmctl run --mount HOST:GUEST:ro -- <cmd>`                         | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                                                                                                             |
 | `mvmctl run --output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]] -- <cmd>` | Give the workload a fresh writable disk at `/GUEST`; after it exits, copy its regular files and directories into `HOST_DIR` (absent or empty) under a byte bound (default `64M`) and an entry bound (default `10000`), refusing the whole collection past either. Repeatable; also on `machine run` (foreground only); disabled by `--profile restrictive`                            |
 | `mvmctl run --env KEY=VAL -- <cmd>`                                 | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                                                                                                                                                                              |
+| `mvmctl run --allow-env NAME --env NAME=VAL -- <cmd>`               | Re-admit one denied variable (loader, shell, interpreter, or password-manager session) by exact name; patterns are refused. Without it, a denied `--env` or launch-plan variable refuses the run                                                                                                                                                                                      |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`                    | Resize the transient VM                                                                                                                                                                                                                                                                                                                                                               |
 | `mvmctl run --timeout <secs> -- <cmd>`                              | Per-command timeout                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl run --dry-run -- <cmd>`                                     | Validate and explain the run plan without resolving an image, booting a VM, writing a receipt, or executing the command                                                                                                                                                                                                                                                               |
@@ -1159,6 +1160,10 @@ is the canonical producer today.
 Multi-app IR manifests are rejected — that's an orchestration concern
 that belongs in `mvmd`, not in `mvmctl run`. Env precedence (lowest →
 highest): top-level/app `env` → `entrypoint.env` → CLI `--env`.
+Launch-plan env is checked like `--env`: a key must be a plain shell name
+(`[A-Za-z_][A-Za-z0-9_]*`), and a loader, shell, interpreter, or
+password-manager session variable refuses the run unless `--allow-env NAME`
+re-admits it by exact name.
 
 ### Snapshot restore
 

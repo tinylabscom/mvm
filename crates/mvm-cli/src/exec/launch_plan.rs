@@ -99,6 +99,7 @@ fn parse_launch_artifact(
     for (k, v) in entrypoint.env {
         merged.insert(k, v);
     }
+    validate_env_keys(&merged, source)?;
     Ok(LaunchEntrypoint {
         command: entrypoint.command,
         working_dir: entrypoint.working_dir,
@@ -132,11 +133,24 @@ fn parse_workload_ir(apps: Vec<RawLaunchApp>, source: &str) -> Result<LaunchEntr
     for (k, v) in entrypoint.env {
         merged.insert(k, v);
     }
+    validate_env_keys(&merged, source)?;
     Ok(LaunchEntrypoint {
         command: entrypoint.command,
         working_dir: entrypoint.working_dir,
         env: merged,
     })
+}
+
+/// Refuse an env key that cannot be a single shell assignment. The guest
+/// wrapper exports each key unquoted, so a key such as `A;cmd` would run `cmd`.
+fn validate_env_keys(env: &BTreeMap<String, String>, source: &str) -> Result<()> {
+    if let Some(key) = env
+        .keys()
+        .find(|key| !mvm_core::vm_backend::is_secret_env_name(key))
+    {
+        anyhow::bail!("launch plan '{source}': env key {key:?} must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,6 +279,17 @@ mod tests {
         let plan = r#"{ "entrypoint": { "command": [] } }"#;
         let err = parse_str(plan).unwrap_err();
         assert!(err.to_string().contains("non-empty"));
+    }
+
+    #[test]
+    fn launch_plan_refuses_an_env_key_that_is_not_one_shell_assignment() {
+        let artifact = r#"{ "entrypoint": { "command": ["true"], "env": { "A;touch /x": "1" } } }"#;
+        let err = parse_str(artifact).unwrap_err();
+        assert!(err.to_string().contains("env key"), "{err}");
+        let ir =
+            r#"{ "apps": [{ "entrypoint": { "command": ["true"] }, "env": { "A B": "1" } }] }"#;
+        let err = parse_str(ir).unwrap_err();
+        assert!(err.to_string().contains("env key"), "{err}");
     }
 
     #[test]

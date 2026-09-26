@@ -460,6 +460,7 @@ fn answer(ops: &dyn GuestOps, method: &str, request: &[u8]) -> Result<Outcome, O
                         argv: r.argv,
                         env: r.env,
                         cwd: r.cwd,
+                        allow_env: mvm_core::env_hygiene::EnvReadmit::none(),
                     },
                 )
                 .map_err(guest_error)?;

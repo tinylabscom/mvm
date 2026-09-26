@@ -28,7 +28,7 @@
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -317,7 +317,7 @@ fn bounded_restore_command(
     guest_memory_mib: u32,
     inherited: &[RawFd],
 ) -> Result<mvm_core::spawn_scope::BoundCommand> {
-    let mut command = Command::new(supervisor);
+    let mut command = mvm_core::env_hygiene::helper_command(supervisor);
     inherit_descriptors(&mut command, inherited.to_vec());
     let bound = mvm_core::spawn_scope::bind_spawn(
         command,
@@ -1119,7 +1119,7 @@ mod tests {
         ) -> Result<std::process::Child> {
             self.spawned.set(self.spawned.get() + 1);
             assert_eq!(inherited.len(), 2, "RAM and frame are both handed over");
-            let mut command = Command::new("/bin/sh");
+            let mut command = std::process::Command::new("/bin/sh");
             command
                 .args(["-c", self.script])
                 .env("PID_FILE", &cfg.pid_file)

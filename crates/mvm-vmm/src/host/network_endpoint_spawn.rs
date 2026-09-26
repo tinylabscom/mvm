@@ -15,7 +15,6 @@ use mvm_core::plan::{IngressMapping, SecretBinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -1043,7 +1042,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
             )
         })?;
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(log_file);
@@ -1611,6 +1610,7 @@ mod tests {
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::util::test_env::TestEnv;
+    use std::process::Command;
 
     static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

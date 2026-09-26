@@ -164,9 +164,9 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] mvm-scout static scan for injection indicators in instruction files
 
 ### PS-12 — Environment hygiene (#3722)
-- [ ] one shared denylist filter (loader, shell, interpreter, password-manager session variables)
-- [ ] applied to guest env passthrough and every host helper spawn; exact-name re-admission only
-- [ ] per-family tests and a gate that host spawns use the filter
+- [x] one shared denylist filter (loader, shell, interpreter, password-manager session variables)
+- [x] applied to guest env passthrough and every host helper spawn; exact-name re-admission only
+- [x] per-family tests and a gate that host spawns use the filter
 
 ### PS-13 — Tool-level privileges (#3723)
 - [ ] per-tool policy in profiles (argv patterns, routes, secrets, allow/deny/ask)

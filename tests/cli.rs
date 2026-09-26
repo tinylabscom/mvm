@@ -1097,6 +1097,94 @@ fn machine_run_output_is_advertised_and_refused_before_boot() {
     assert!(!tmp.path().join("fresh").exists());
 }
 
+fn isolated_mvmctl(home: &std::path::Path) -> Command {
+    #[allow(deprecated)]
+    let mut command = Command::cargo_bin("mvmctl").unwrap();
+    command
+        .env("HOME", home)
+        .env("MVM_HOME", home.join("state"))
+        .env("MVM_NO_AUTO_DEV", "1");
+    command
+}
+
+#[test]
+fn run_refuses_a_denied_env_variable_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "LD_PRELOAD=/tmp/hook-value.so",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a loader variable must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("LD_PRELOAD (loader)"), "stderr: {stderr}");
+    assert!(stderr.contains("--allow-env NAME"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("hook-value"),
+        "the value is never echoed: {stderr}"
+    );
+}
+
+#[test]
+fn run_allow_env_readmits_by_exact_name_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "PYTHONPATH=/srv/lib",
+            "--allow-env",
+            "PYTHONPATH",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an exact-name re-admission passes: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "LD_PRELOAD=/x.so",
+            "--allow-env",
+            "LD_*",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a pattern never re-admits");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("never a pattern"), "stderr: {stderr}");
+}
+
+#[test]
+fn allow_env_is_documented_on_run_and_proc_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    for args in [
+        &["run", "--help"][..],
+        &["machine", "proc", "start", "--help"][..],
+    ] {
+        let out = isolated_mvmctl(tmp.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("--allow-env <NAME>"), "{args:?}: {stdout}");
+    }
+}
+
 #[test]
 fn machine_run_refuses_persistent_environment_before_boot() {
     let tmp = tempfile::tempdir().unwrap();

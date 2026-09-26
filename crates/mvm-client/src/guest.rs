@@ -82,13 +82,22 @@ pub struct ProcStart {
     pub env: BTreeMap<String, String>,
     /// Working directory, or the agent's default.
     pub cwd: Option<String>,
+    /// Denied variables the caller re-admits by exact name.
+    pub allow_env: mvm_core::env_hygiene::EnvReadmit,
 }
 
 /// Start a process in `name`'s guest and return the token that names it.
+///
+/// A denied variable in `env` (loader, shell, interpreter, or password-manager
+/// session) refuses the start unless `allow_env` names it: the caller supplied
+/// it explicitly, so it is told which variable and why.
 pub fn start_process(name: &str, start: ProcStart) -> Result<String> {
     let Some(argv0) = start.argv.first().cloned() else {
         bail!("argv cannot be empty");
     };
+    mvm_core::env_hygiene::EnvFilter::new(start.allow_env)
+        .refuse_denied(start.env.keys().map(String::as_str))
+        .context("guest process environment")?;
     let request = GuestRequest::ProcStart {
         argv: start.argv,
         env: start.env,
@@ -461,6 +470,39 @@ mod tests {
     fn starting_an_empty_argv_is_refused_before_any_rpc() {
         let err = start_process("vm-test", ProcStart::default()).expect_err("empty argv");
         assert!(err.to_string().contains("argv cannot be empty"), "{err:#}");
+    }
+
+    fn start_with_env(name: &str, allow: &[&str]) -> ProcStart {
+        ProcStart {
+            argv: vec!["/bin/true".to_string()],
+            env: BTreeMap::from([(name.to_string(), "/tmp/payload".to_string())]),
+            cwd: None,
+            allow_env: mvm_core::env_hygiene::EnvReadmit::from_names(allow).expect("exact names"),
+        }
+    }
+
+    #[test]
+    fn a_denied_variable_is_refused_before_any_rpc() {
+        for name in ["LD_PRELOAD", "BASH_ENV", "PYTHONSTARTUP", "BW_SESSION"] {
+            let err = start_process("../escape", start_with_env(name, &[])).expect_err(name);
+            let message = format!("{err:#}");
+            assert!(message.contains(name), "{message}");
+            assert!(
+                message.contains("refused environment variable"),
+                "{message}"
+            );
+            assert!(!message.contains("/tmp/payload"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_readmitted_variable_passes_the_filter() {
+        let err = start_process("../escape", start_with_env("LD_PRELOAD", &["LD_PRELOAD"]))
+            .expect_err("the invalid machine name still refuses");
+        assert!(
+            !format!("{err:#}").contains("refused environment variable"),
+            "{err:#}"
+        );
     }
 
     #[test]

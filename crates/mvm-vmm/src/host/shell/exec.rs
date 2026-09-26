@@ -8,7 +8,7 @@ use crate::host::linux_env::VM_NAME;
 /// Run a command on the host, capturing output.
 #[instrument(skip_all, fields(cmd, args_count = args.len()))]
 pub fn run_host(cmd: &str, args: &[&str]) -> Result<Output> {
-    Command::new(cmd)
+    mvm_core::env_hygiene::helper_command(cmd)
         .args(args)
         .output()
         .with_context(|| format!("Failed to run: {} {}", cmd, args.join(" ")))
@@ -17,7 +17,7 @@ pub fn run_host(cmd: &str, args: &[&str]) -> Result<Output> {
 /// Run a command on the host, inheriting stdio (visible to user).
 #[instrument(skip_all, fields(cmd, args_count = args.len()))]
 pub fn run_host_visible(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
+    let status = mvm_core::env_hygiene::helper_command(cmd)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -55,7 +55,7 @@ pub fn run_on_vm(vm_name: &str, script: &str) -> Result<Output> {
         return Ok(output);
     }
 
-    Command::new("bash")
+    mvm_core::env_hygiene::helper_command("bash")
         .args(["-c", script])
         .output()
         .with_context(|| "Failed to run command on host")
@@ -68,7 +68,7 @@ pub fn run_on_vm_visible(vm_name: &str, script: &str) -> Result<()> {
         return linux_env::default_env().run_visible(script);
     }
 
-    let status = Command::new("bash")
+    let status = mvm_core::env_hygiene::helper_command("bash")
         .args(["-c", script])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -126,7 +126,7 @@ pub fn run_on_vm_capture(vm_name: &str, script: &str) -> Result<Output> {
         return Ok(output);
     }
 
-    Command::new("bash")
+    mvm_core::env_hygiene::helper_command("bash")
         .args(["-c", script])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

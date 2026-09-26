@@ -14,6 +14,7 @@ use std::io::Write;
 
 use mvm_agentd::vsock::ProcWaitEvent;
 use mvm_client::guest;
+use mvm_core::env_hygiene::{EnvFilter, EnvReadmit};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -40,6 +41,9 @@ pub(in crate::commands) enum ProcCmd {
         /// Environment variable in `KEY=VALUE` form. Repeatable.
         #[arg(short = 'e', long = "env")]
         envs: Vec<String>,
+        /// Re-admit a denied env variable by exact name. Repeatable.
+        #[arg(long = "allow-env", value_name = "NAME")]
+        allow_env: Vec<String>,
         /// Working directory inside the VM
         #[arg(long)]
         cwd: Option<String>,
@@ -101,8 +105,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             name,
             argv,
             envs,
+            allow_env,
             cwd,
-        } => cmd_start(&name, &argv, &envs, cwd.as_deref()),
+        } => cmd_start(&name, proc_start(argv, &envs, &allow_env, cwd)?),
         ProcCmd::Ls { name, json } => cmd_ls(&name, json),
         ProcCmd::Signal {
             name,
@@ -137,15 +142,31 @@ fn parse_envs(raw: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
-fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) -> Result<()> {
-    let token = guest::start_process(
-        name,
-        guest::ProcStart {
-            argv: argv.to_vec(),
-            env: parse_envs(envs)?,
-            cwd: cwd.map(str::to_string),
-        },
+/// The start request for `proc start`: parsed `--env`, refused if it carries
+/// a denied variable the caller did not re-admit with `--allow-env`.
+fn proc_start(
+    argv: Vec<String>,
+    envs: &[String],
+    allow_env: &[String],
+    cwd: Option<String>,
+) -> Result<guest::ProcStart> {
+    let env = parse_envs(envs)?;
+    let allow_env = EnvReadmit::from_names(allow_env).context("--allow-env")?;
+    super::exec::env_args::refuse(
+        &EnvFilter::new(allow_env.clone()),
+        env.keys().map(String::as_str),
+        "--env",
     )?;
+    Ok(guest::ProcStart {
+        argv,
+        env,
+        cwd,
+        allow_env,
+    })
+}
+
+fn cmd_start(name: &str, start: guest::ProcStart) -> Result<()> {
+    let token = guest::start_process(name, start)?;
     println!("{token}");
     Ok(())
 }
@@ -240,5 +261,39 @@ fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
             bail!("ProcWait error ({:?}): {}", kind, message)
         }
         other => bail!("Unexpected terminal event: {:?}", other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start(envs: &[&str], allow_env: &[&str]) -> Result<guest::ProcStart> {
+        let envs: Vec<String> = envs.iter().map(|e| (*e).to_string()).collect();
+        let allow_env: Vec<String> = allow_env.iter().map(|e| (*e).to_string()).collect();
+        proc_start(vec!["/bin/true".to_string()], &envs, &allow_env, None)
+    }
+
+    #[test]
+    fn proc_start_passes_ordinary_env() {
+        let request = start(&["APP_MODE=dev"], &[]).expect("ordinary env passes");
+        assert_eq!(request.env.get("APP_MODE").map(String::as_str), Some("dev"));
+    }
+
+    #[test]
+    fn proc_start_refuses_a_denied_variable_by_name() {
+        let err = start(&["NODE_OPTIONS=--require /tmp/x.js"], &[]).expect_err("denied");
+        let message = format!("{err:#}");
+        assert!(message.contains("NODE_OPTIONS (interpreter)"), "{message}");
+        assert!(message.contains("--allow-env"), "{message}");
+        assert!(!message.contains("/tmp/x.js"), "{message}");
+    }
+
+    #[test]
+    fn proc_start_readmits_by_exact_name_and_carries_it_to_the_client() {
+        let request = start(&["LD_LIBRARY_PATH=/opt/lib"], &["LD_LIBRARY_PATH"])
+            .expect("exact-name re-admission");
+        assert!(request.allow_env.contains("LD_LIBRARY_PATH"));
+        assert!(start(&["LD_LIBRARY_PATH=/opt/lib"], &["LD_*"]).is_err());
     }
 }
