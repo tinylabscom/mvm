@@ -54,6 +54,7 @@ use mvm_contract::merkle::merkle_root;
 use mvm_contract::verify::{
     AuditVerifyError, PlanAuditEntry, SignedEnvelope, hash_line, verify_audit_chain_bytes,
 };
+use mvm_core::plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
 use crate::supervisor::audit_file::VerifyError;
@@ -957,6 +958,49 @@ pub fn resolve_session(lines: &[String], selector: &str) -> Result<String> {
                 .join(", ")
         ),
     }
+}
+
+impl crate::audit::emitter::AuditEmitter {
+    /// Seal `plan`'s session: compute its integrity summary over the verified
+    /// chain and append it as a chain-signed `session.sealed` entry.
+    ///
+    /// Call at the session's end — exit, failure, or stop — and before the
+    /// closing root is published, so that root covers the seal. The seal is a
+    /// sync barrier like every event not listed as deferrable: it is on disk
+    /// before this returns. See [`crate::audit::session`] for what it lets a
+    /// verifier detect.
+    pub fn seal_session(&self, plan: &ExecutionPlan, reason: SealReason) -> Result<SessionSeal> {
+        let tenant = &plan.tenant.0;
+        let lines =
+            crate::audit::merkle::read_leaves(self.audit_dir(), tenant, &self.verifying_key())
+                .context("reading the verified chain to seal the session")?;
+        // Idempotent: a session already sealed with nothing after its seal is
+        // left alone, so two teardown paths reaching the same run write one
+        // seal between them.
+        if let Some(existing) = current_seal(&lines, &plan.plan_id.0)? {
+            return Ok(existing);
+        }
+        let seal = compute_seal(
+            &lines,
+            &SealRequest {
+                plan_id: &plan.plan_id.0,
+                reason,
+                compute_environment: compute_environment_digest(plan),
+                snapshot_root: None,
+            },
+        )?;
+        self.emit(plan, SESSION_SEALED_EVENT, seal.to_labels())?;
+        Ok(seal)
+    }
+}
+
+/// The measured compute-environment identity the signed plan recorded, if it
+/// recorded one.
+fn compute_environment_digest(plan: &ExecutionPlan) -> Option<String> {
+    plan.asset_identities
+        .iter()
+        .find(|asset| matches!(asset.kind, mvm_core::plan::AssetKind::ComputeEnvironment))
+        .map(|asset| asset.digest.clone())
 }
 
 #[cfg(test)]

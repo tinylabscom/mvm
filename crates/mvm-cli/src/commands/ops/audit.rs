@@ -2,6 +2,8 @@
 
 mod inspect;
 mod sessions;
+#[cfg(test)]
+pub(in crate::commands) use sessions::{SessionsArgs, ShowArgs, VerifyArgs};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
@@ -70,38 +72,10 @@ pub(in crate::commands) enum AuditAction {
     /// Without SESSION, walks every segment from genesis and exits nonzero on
     /// any signature or chain-link failure. With SESSION, also holds the
     /// session to its `session.sealed` record and prints VERIFIED, MISMATCH
-    /// with the reason (chain break, signature, count, sequence, root, head,
-    /// ledger), UNSEALED, or NOT_FOUND. Exit status: 0 verified, 1 mismatch,
-    /// 2 unsealed, 3 not found.
-    Verify {
-        /// Session to verify: its plan id, or at least 8 leading hex
-        /// characters of it (see `trust audit sessions`).
-        session: Option<String>,
-        /// Tenant whose chain to verify. Defaults to `"local"`.
-        #[arg(long, default_value = "local")]
-        tenant: String,
-        /// Print the session verdict as JSON. Requires SESSION.
-        #[arg(long, requires = "session")]
-        json: bool,
-    },
-    /// List the sessions in the chain-signed log: one row per admitted run,
-    /// with its entry count and whether it was sealed. Reads only a chain
-    /// that verifies.
-    Sessions {
-        /// Tenant whose sessions to list. Defaults to `"local"`.
-        #[arg(long, default_value = "local")]
-        tenant: String,
-        /// Only sessions active at or after this time: RFC 3339, YYYY-MM-DD,
-        /// or a duration back from now (30m, 12h, 7d).
-        #[arg(long, value_parser = sessions::parse_time_bound)]
-        since: Option<chrono::DateTime<chrono::Utc>>,
-        /// Only sessions active at or before this time (same forms as --since).
-        #[arg(long, value_parser = sessions::parse_time_bound)]
-        until: Option<chrono::DateTime<chrono::Utc>>,
-        /// Emit the sessions and the ledger check as JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    /// with the reason, UNSEALED, or NOT_FOUND (exit 0, 1, 2, 3).
+    Verify(sessions::VerifyArgs),
+    /// List the sessions in the chain-signed log: one row per admitted run.
+    Sessions(sessions::SessionsArgs),
     /// Asset content identities: recompute the canonical digest of a file
     /// or directory tree so it can be compared against the identities
     /// recorded in a run's signed plan or audit chain — `mvmctl audit
@@ -133,28 +107,7 @@ pub(in crate::commands) enum AuditAction {
     },
     /// Show a session's audit entries, across every segment, from a chain
     /// that verifies.
-    Show {
-        /// The session: its plan id (`sha256:<hex>`), or at least 8 leading
-        /// hex characters of it.
-        session: String,
-        /// Tenant whose chain to search. Defaults to `"local"`.
-        #[arg(long, default_value = "local")]
-        tenant: String,
-        /// Only entries whose event name matches this glob (`plan.*`,
-        /// `*.sealed`).
-        #[arg(long)]
-        kind: Option<String>,
-        /// Only entries at or after this time: RFC 3339, YYYY-MM-DD, or a
-        /// duration back from now (30m, 12h, 7d).
-        #[arg(long, value_parser = sessions::parse_time_bound)]
-        since: Option<chrono::DateTime<chrono::Utc>>,
-        /// Only entries at or before this time (same forms as --since).
-        #[arg(long, value_parser = sessions::parse_time_bound)]
-        until: Option<chrono::DateTime<chrono::Utc>>,
-        /// Emit matching entries as a JSON array to stdout.
-        #[arg(long)]
-        json: bool,
-    },
+    Show(sessions::ShowArgs),
     /// Run a read-only security-posture self-test. Reports the live
     /// state of the host's mitigations (host
     /// signer present, audit chain verifiable, allowlists populated,
@@ -440,27 +393,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 audit_tail(lines, follow)
             }
         }
-        AuditAction::Verify {
-            session: Some(session),
-            tenant,
-            json,
-        } => sessions::audit_verify_session(&tenant, &session, json),
-        AuditAction::Verify {
-            session: None,
-            tenant,
-            ..
-        } => audit_verify(&tenant),
-        AuditAction::Sessions {
-            tenant,
-            since,
-            until,
-            json,
-        } => sessions::audit_sessions(&sessions::SessionsQuery {
-            tenant: &tenant,
-            since,
-            until,
-            json,
-        }),
+        AuditAction::Verify(args) => match args.session {
+            Some(session) => sessions::audit_verify_session(&args.tenant, &session, args.json),
+            None => audit_verify(&args.tenant),
+        },
+        AuditAction::Sessions(args) => sessions::audit_sessions(&args),
         AuditAction::Asset { action } => match action {
             AssetAction::Id { path } => asset_id(&path),
         },
@@ -469,21 +406,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             tenant,
             ack,
         } => audit_prune(&tenant, through, ack),
-        AuditAction::Show {
-            session,
-            tenant,
-            kind,
-            since,
-            until,
-            json,
-        } => sessions::audit_show(&sessions::ShowQuery {
-            tenant: &tenant,
-            session: &session,
-            kind,
-            since,
-            until,
-            json,
-        }),
+        AuditAction::Show(args) => sessions::audit_show(&args),
         AuditAction::Posture { json } => super::audit_posture::run(json),
         AuditAction::Provenance { action } => match action {
             ProvenanceAction::Export {
