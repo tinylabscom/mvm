@@ -182,6 +182,7 @@ pub const GATES: &[Gate] = &[
         "check-core-runtime-free",
         crate::check_core_runtime_free::run,
     ),
+    ("check-no-cli-shellout", crate::check_no_cli_shellout::run),
     (
         "check-sdk-transport-free",
         crate::check_sdk_transport_free::run,

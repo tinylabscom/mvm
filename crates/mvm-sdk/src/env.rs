@@ -2,7 +2,7 @@
 //!
 //! Every name the SDKs and the CLI agree on is declared exactly once,
 //! here, and both language SDKs' copies are generated from it by
-//! `cargo xtask gen-stubs`. Before this module `MVM_CLI_BIN` was spelled
+//! `cargo xtask gen-stubs`. Before this module a shared name was spelled
 //! out in four places — twice in this crate, once in each SDK — and
 //! because all four agreed, nothing could detect it if one drifted.
 //!
@@ -92,29 +92,22 @@ macro_rules! sdk_env_vars {
 }
 
 sdk_env_vars! {
-    /// Overrides the path to the `mvmctl` binary the SDKs shell out to.
-    MVM_CLI_BIN_ENV = "MVM_CLI_BIN", [Rust, Python, TypeScript];
-
     /// Selects the SDK's execution mode (for example `live` or `record`).
     MVM_SDK_MODE_ENV = "MVM_SDK_MODE", [Rust, Python, TypeScript];
 
     /// Carries an explicitly selected security profile from `mvmctl run`
-    /// into the live SDK's nested `mvmctl machine run` invocation.
+    /// into the machine a live-mode `Sandbox` boots through the host library.
     MVM_SDK_RUN_PROFILE_ENV = "MVM_SDK_RUN_PROFILE", [Rust, Python, TypeScript];
 
     /// When set, the SDK writes its wire-shape recording JSON to this
     /// path on exit, so a caller need not parse stdout.
     MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH", [Rust, Python, TypeScript];
 
-    /// Overrides the per-call timeout, in seconds, applied to a
-    /// `mvmctl machine` subprocess. Both language wrappers read it and
-    /// give up at the deadline rather than waiting forever.
-    MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC", [Rust, Python, TypeScript];
-
-    /// Overrides the cap, in bytes, on captured output from a `mvmctl
-    /// machine` subprocess. Both language wrappers read it and report an
-    /// overflow as an overflow.
-    MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES", [Rust, Python, TypeScript];
+    /// Names the `libmvm_hostlib` file the SDKs load in-process. Consulted
+    /// before any other location; `mvmctl run --mode live` sets it to the
+    /// library installed beside itself, so a script it runs drives the same
+    /// build.
+    MVM_HOSTLIB_PATH_ENV = "MVM_HOSTLIB_PATH", [Rust, Python, TypeScript];
 }
 
 /// The registry rows that `surface` exports, in declaration order.
@@ -137,21 +130,13 @@ mod tests {
                 .find(|v| v.ident == ident)
                 .unwrap_or_else(|| panic!("{ident} missing from REGISTRY"))
         };
-        assert_eq!(by_ident("MVM_CLI_BIN_ENV").name, MVM_CLI_BIN_ENV);
         assert_eq!(by_ident("MVM_SDK_MODE_ENV").name, MVM_SDK_MODE_ENV);
         assert_eq!(
             by_ident("MVM_SDK_RUN_PROFILE_ENV").name,
             MVM_SDK_RUN_PROFILE_ENV
         );
         assert_eq!(by_ident("MVM_SDK_OUT_PATH_ENV").name, MVM_SDK_OUT_PATH_ENV);
-        assert_eq!(
-            by_ident("MVM_MACHINE_TIMEOUT_ENV").name,
-            MVM_MACHINE_TIMEOUT_ENV
-        );
-        assert_eq!(
-            by_ident("MVM_MACHINE_MAX_OUTPUT_ENV").name,
-            MVM_MACHINE_MAX_OUTPUT_ENV
-        );
+        assert_eq!(by_ident("MVM_HOSTLIB_PATH_ENV").name, MVM_HOSTLIB_PATH_ENV);
     }
 
     #[test]
@@ -174,18 +159,21 @@ mod tests {
         }
     }
 
+    /// The SDKs drive machines through the host library, so no name that
+    /// locates or bounds a CLI subprocess may come back: a surface that exports
+    /// one would be advertising a transport that no longer exists.
     #[test]
-    fn machine_vars_are_claimed_for_typescript() {
-        // The honesty property, now pointing the other way: the TypeScript
-        // machine wrapper bounds its subprocess with these two, so it must
-        // export them. A row is listed for a surface only when that surface
-        // reads it — so this fails if the behaviour is ever removed and the
-        // claim is left behind.
-        for ident in ["MVM_MACHINE_TIMEOUT_ENV", "MVM_MACHINE_MAX_OUTPUT_ENV"] {
-            let v = REGISTRY.iter().find(|v| v.ident == ident).unwrap();
+    fn no_cli_subprocess_names_are_registered() {
+        // Spelled in pieces: `check-no-cli-shellout` refuses the whole
+        // CLI-location name anywhere in SDK code, this test included.
+        for retired in [
+            concat!("MVM_CLI", "_BIN"),
+            "MVM_MACHINE_TIMEOUT_SEC",
+            "MVM_MACHINE_MAX_OUTPUT_BYTES",
+        ] {
             assert!(
-                v.exports_to(Surface::TypeScript),
-                "{ident} is read by the TypeScript machine wrapper but not exported to it"
+                REGISTRY.iter().all(|v| v.name != retired),
+                "{retired} is registered again"
             );
         }
     }
@@ -196,14 +184,12 @@ mod tests {
         assert_eq!(
             ts,
             [
-                "MVM_CLI_BIN_ENV",
                 "MVM_SDK_MODE_ENV",
                 "MVM_SDK_RUN_PROFILE_ENV",
                 "MVM_SDK_OUT_PATH_ENV",
-                "MVM_MACHINE_TIMEOUT_ENV",
-                "MVM_MACHINE_MAX_OUTPUT_ENV"
+                "MVM_HOSTLIB_PATH_ENV",
             ]
         );
-        assert_eq!(exported_to(Surface::Python).count(), 6);
+        assert_eq!(exported_to(Surface::Python).count(), 4);
     }
 }

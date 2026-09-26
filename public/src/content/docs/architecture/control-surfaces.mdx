@@ -157,8 +157,11 @@ These local docs do not claim a shipped HTTP management API or browser
 dashboard. Scripts should use `mvmctl` JSON output or the current SDK surfaces
 instead of assuming a long-running local server.
 
-If an integration needs language-neutral automation today, prefer subprocess
-calls to `mvmctl` with JSON output and explicit state directories.
+If an integration needs language-neutral automation today, load
+`libmvm_hostlib`, the C ABI the Python and TypeScript SDKs bind to (JSON in,
+JSON out; see `crates/mvm-hostlib/README.md`), or call `mvmctl` with JSON
+output and explicit state directories. The SDKs themselves only ever use the
+library.
 
 ## Security checklist
 

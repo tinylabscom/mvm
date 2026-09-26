@@ -1,8 +1,7 @@
-//! The default SDK stays independent from the client facade so it does not add
-//! crates to mvmctl's default closure. The opt-in facade reaches machine
-//! lifecycle through the shared `MvmClient` trait (in `mvm-core`'s `client`
-//! module) via a subprocess impl, never by linking the runtime backend
-//! (`mvm-client`'s `LocalBackend`) — that would form a dependency cycle.
+//! The SDK authors workloads and never drives a machine, so it stays
+//! independent from the client surface and adds nothing to mvmctl's default
+//! closure. Linking the runtime backend (`mvm-client`'s `LocalBackend`) here
+//! would form a dependency cycle: `mvm-client` depends on this crate.
 
 fn cargo_tree(args: &[&str]) -> String {
     let out = std::process::Command::new(env!("CARGO"))
@@ -37,35 +36,5 @@ fn default_sdk_does_not_link_client_surface_or_backend() {
     assert!(
         !tree_contains_crate(&tree, "async-trait"),
         "default mvm-sdk must not pull async-trait (client surface off):\n{tree}"
-    );
-}
-
-#[test]
-fn client_facade_enables_the_trait_without_the_backend() {
-    let tree = cargo_tree(&[
-        "tree",
-        "-p",
-        "mvm-sdk",
-        "-e",
-        "no-dev",
-        "--prefix",
-        "none",
-        "--features",
-        "client-facade",
-    ]);
-    // The facade turns on `mvm-core/client`, so the async-trait glue appears...
-    assert!(
-        tree_contains_crate(&tree, "async-trait"),
-        "client-facade must enable the mvm-core client surface (async-trait):\n{tree}"
-    );
-    // ...but the runtime backend must NOT — that is the cycle guard.
-    assert!(
-        !tree_contains_crate(&tree, "mvm-runtime"),
-        "mvm-sdk client-facade must not link mvm-runtime (dependency cycle):\n{tree}"
-    );
-    // And it must not drag in the heavy `mvm-client` crate (LocalBackend) either.
-    assert!(
-        !tree_contains_crate(&tree, "mvm-client"),
-        "mvm-sdk client-facade must not link mvm-client (LocalBackend):\n{tree}"
     );
 }

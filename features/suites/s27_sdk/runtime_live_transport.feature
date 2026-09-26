@@ -1,39 +1,46 @@
 @sdk
 Feature: Runtime SDK live transport
-  In live mode the imperative Sandbox surface shells every operation to
-  `mvmctl machine …`. That argv is the contract between the language SDKs and
-  the CLI, and it is the same contract in every language.
+  In live mode the imperative Sandbox surface turns every operation into one
+  call on the host library, libmvm_hostlib, loaded in-process. The SDK never
+  runs mvmctl. The sequence of methods and requests is the contract between
+  the language SDKs and the library, and it is the same in every language.
 
   These scenarios drive the built artifacts — the installed Python package and
-  the emitted TypeScript ESM — against a recording `mvmctl` double. No microVM
-  boots. Running the built artifact rather than the sources is deliberate: a
-  source-level runner supplies module interop the published package does not
-  have, and so cannot see a packaging defect.
+  the emitted TypeScript ESM — with the SDK's one C call replaced by an
+  in-process recorder. No library loads and no microVM boots. Running the
+  built artifact rather than the sources is deliberate: a source-level runner
+  supplies module interop the published package does not have, and so cannot
+  see a packaging defect.
 
-  Scenario Outline: live mode drives the documented mvmctl verb sequence
+  Scenario Outline: live mode drives the documented host-library call sequence
     When I run the "<language>" SDK live-transport fixture
     Then the SDK fixture exits successfully
-    And the recorded mvmctl argv matches the golden live session
+    And the recorded host-library calls match the golden live session
 
     Examples:
       | language   |
       | Python     |
       | TypeScript |
 
-  Scenario: both languages drive the CLI identically
+  Scenario: both languages drive the host library identically
     When I run the "Python" SDK live-transport fixture
     And I run the "TypeScript" SDK live-transport fixture
-    Then the two recorded argv traces are identical
+    Then the two recorded call traces are identical
 
-  Scenario: every recorded invocation names a real mvmctl machine verb
-    When I run the "Python" SDK live-transport fixture
-    Then every recorded invocation names a machine verb the CLI defines
+  Scenario Outline: every recorded call names a method the host library defines
+    When I run the "<language>" SDK live-transport fixture
+    Then every recorded call names a method the host library defines
 
-  Scenario Outline: a sealed machine refuses the dev-only verbs before any CLI call
+    Examples:
+      | language   |
+      | Python     |
+      | TypeScript |
+
+  Scenario Outline: a sealed machine refuses the dev-only operations before any guest call
     When I run the "<language>" SDK refusal fixture against a sealed machine
     Then the SDK fixture exits successfully
     And the SDK refused every dev-only and invalid-mode operation
-    And no process or filesystem verb reached the CLI
+    And no guest method reached the host library
 
     Examples:
       | language   |

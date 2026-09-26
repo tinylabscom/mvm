@@ -183,8 +183,8 @@ fn sdk_codegen_drift_check_passes(world: &mut CliWorld) {
 //
 // The decorator and record-mode scenarios above never leave the SDK's own
 // address space. These drive the *live* surface, where every Sandbox call
-// shells to `mvmctl machine …`, against a recording double — so the argv
-// contract between each language SDK and the CLI is asserted directly, and
+// is one host-library call, recorded in-process — so the call contract
+// between each language SDK and `libmvm_hostlib` is asserted directly, and
 // the two languages are asserted against each other.
 // ────────────────────────────────────────────────────────────────────
 
@@ -197,8 +197,10 @@ fn sdk_fixture_dir() -> PathBuf {
         .join("fixtures")
 }
 
-/// Run a named fixture in live mode against the recording `mvmctl` double,
-/// returning its output alongside the argv the double captured.
+/// Run a named fixture in live mode, returning its output. The fixture
+/// replaces the SDK's one C call with a recorder (`_recording_hostlib`), so
+/// the scenario sees exactly which host-library methods the SDK called, with
+/// no library, no process and no microVM.
 fn run_live_fixture(
     world: &mut CliWorld,
     language: &str,
@@ -208,7 +210,7 @@ fn run_live_fixture(
     let fixtures = sdk_fixture_dir();
     let log_dir = world
         .sdk_argv_log_dir
-        .get_or_insert_with(|| tempfile::tempdir().expect("create SDK argv log dir"));
+        .get_or_insert_with(|| tempfile::tempdir().expect("create SDK call log dir"));
     let log = log_dir
         .path()
         .join(format!("{language}-{fixture_stem}.jsonl"));
@@ -236,47 +238,72 @@ fn run_live_fixture(
         .current_dir(repo_root())
         .arg(&script)
         .env("MVM_SDK_MODE", "live")
-        .env("MVM_CLI_BIN", fixtures.join("recording-mvmctl"))
-        .env("MVM_BDD_ARGV_LOG", &log)
+        .env_remove(mvm_sdk::env::MVM_HOSTLIB_PATH_ENV)
+        .env("MVM_BDD_CALL_LOG", &log)
         .env("MVM_BDD_BUILD_MODE", build_mode)
         .output()
         .unwrap_or_else(|error| panic!("spawn {program} for {}: {error}", script.display()));
 
     let recorded = std::fs::read_to_string(&log).unwrap_or_default();
-    let argv: Vec<Vec<String>> = recorded
+    let calls: Vec<Value> = recorded
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("recording double emitted non-JSON argv"))
+        .map(|line| serde_json::from_str(line).expect("the recorder wrote a non-JSON call"))
         .collect();
     world
-        .sdk_recorded_argv
-        .insert(language.to_ascii_lowercase(), argv);
+        .sdk_recorded_calls
+        .insert(language.to_ascii_lowercase(), calls);
     output
 }
 
-/// The one field that legitimately varies between runs: `machine run --name`
-/// carries a random suffix so concurrent sandboxes don't collide.
-fn normalize_vm_name(argv: &[Vec<String>]) -> Vec<Vec<String>> {
-    argv.iter()
-        .map(|invocation| {
-            let mut out = invocation.clone();
-            if let Some(at) = out.iter().position(|arg| arg == "--name")
-                && let Some(name) = out.get_mut(at + 1)
-                && name.starts_with("sdk-")
+/// The one field that legitimately varies between runs: the machine name a
+/// `Sandbox` generates carries a random suffix so concurrent sandboxes don't
+/// collide.
+fn normalize_vm_name(calls: &[Value]) -> Vec<Value> {
+    calls
+        .iter()
+        .map(|call| {
+            let mut out = call.clone();
+            if out[0] == "machine.run"
+                && let Some(name) = out[1].get_mut("name")
+                && name.as_str().is_some_and(|n| n.starts_with("sdk-"))
             {
-                *name = "<vm-name>".to_string();
+                *name = Value::String("<vm-name>".into());
             }
             out
         })
         .collect()
 }
 
-fn recorded(world: &CliWorld, language: &str) -> Vec<Vec<String>> {
+/// A public-surface name list a surface fixture emitted.
+fn recorded(world: &CliWorld, key: &str) -> Vec<Vec<String>> {
     world
         .sdk_recorded_argv
-        .get(language)
-        .unwrap_or_else(|| panic!("no recorded argv for {language}"))
+        .get(key)
+        .unwrap_or_else(|| panic!("no recorded surface for {key}"))
         .clone()
+}
+
+fn recorded_calls(world: &CliWorld, language: &str) -> Vec<Value> {
+    world
+        .sdk_recorded_calls
+        .get(language)
+        .unwrap_or_else(|| panic!("no recorded host-library calls for {language}"))
+        .clone()
+}
+
+/// The language whose live fixture ran last.
+fn last_live_language(world: &CliWorld) -> String {
+    world
+        .sdk_recorded_calls
+        .keys()
+        .next_back()
+        .expect("no live fixture has run")
+        .clone()
+}
+
+fn method_of(call: &Value) -> &str {
+    call[0].as_str().expect("a recorded call names its method")
 }
 
 #[when(expr = "I run the {string} SDK live-transport fixture")]
@@ -289,65 +316,58 @@ fn run_refusal_fixture(world: &mut CliWorld, language: String) {
     world.sdk_output = Some(run_live_fixture(world, &language, "refusals", "prod"));
 }
 
-#[then("the recorded mvmctl argv matches the golden live session")]
-fn recorded_argv_matches_golden(world: &mut CliWorld) {
+#[then("the recorded host-library calls match the golden live session")]
+fn recorded_calls_match_golden(world: &mut CliWorld) {
     let golden_path = sdk_fixture_dir().join("live_session.jsonl");
-    let golden: Vec<Vec<String>> = std::fs::read_to_string(&golden_path)
+    let golden: Vec<Value> = std::fs::read_to_string(&golden_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", golden_path.display()))
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).expect("golden live session is not JSON"))
         .collect();
 
-    let language = world
-        .sdk_recorded_argv
-        .keys()
-        .next_back()
-        .expect("no fixture has run")
-        .clone();
-    let actual = normalize_vm_name(&recorded(world, &language));
+    let language = last_live_language(world);
+    let actual = normalize_vm_name(&recorded_calls(world, &language));
     assert_eq!(
         actual,
         golden,
-        "{language} live-mode argv drifted from {}",
+        "{language} live-mode host-library calls drifted from {}",
         golden_path.display()
     );
 }
 
-#[then("the two recorded argv traces are identical")]
-fn recorded_argv_traces_agree(world: &mut CliWorld) {
-    let python = normalize_vm_name(&recorded(world, "python"));
-    let typescript = normalize_vm_name(&recorded(world, "typescript"));
+#[then("the two recorded call traces are identical")]
+fn recorded_call_traces_agree(world: &mut CliWorld) {
+    let python = normalize_vm_name(&recorded_calls(world, "python"));
+    let typescript = normalize_vm_name(&recorded_calls(world, "typescript"));
     assert_eq!(
         python, typescript,
-        "Python and TypeScript drove `mvmctl` differently in live mode"
+        "Python and TypeScript drove the host library differently in live mode"
     );
 }
 
-/// The `machine` subcommands the live SDK is allowed to reach for. Anchored on
-/// the CLI's own `MachineAction` / `VmCmd` surface: a live SDK call naming a
-/// verb outside this set would be rejected by the real parser.
-const LIVE_MACHINE_VERBS: [&str; 6] = ["run", "ls", "proc", "fs", "cp", "stop"];
-
-#[then("every recorded invocation names a machine verb the CLI defines")]
-fn recorded_argv_names_real_verbs(world: &mut CliWorld) {
-    let language = world
-        .sdk_recorded_argv
-        .keys()
-        .next_back()
-        .expect("no fixture has run")
-        .clone();
-    for invocation in recorded(world, &language) {
-        assert_eq!(
-            invocation.first().map(String::as_str),
-            Some("machine"),
-            "live SDK reached outside the `machine` command group: {invocation:?}"
-        );
-        let verb = invocation.get(1).map(String::as_str).unwrap_or_default();
+#[then("every recorded call names a method the host library defines")]
+fn recorded_calls_name_real_methods(world: &mut CliWorld) {
+    let path = repo_root().join("schema").join("host-abi-methods-v0.json");
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("the host-ABI method table is not JSON");
+    let defined: Vec<&str> = manifest["methods"]
+        .as_array()
+        .expect("the method table has no `methods` array")
+        .iter()
+        .map(|m| m["name"].as_str().expect("a method name"))
+        .collect();
+    let language = last_live_language(world);
+    let calls = recorded_calls(world, &language);
+    assert!(!calls.is_empty(), "the live fixture made no calls");
+    for call in &calls {
         assert!(
-            LIVE_MACHINE_VERBS.contains(&verb),
-            "live SDK named `machine {verb}`, which is not a verb the CLI defines \
-             for this path: {invocation:?}"
+            defined.contains(&method_of(call)),
+            "the live SDK called `{}`, which the host library does not define: {call}",
+            method_of(call)
         );
     }
 }
@@ -369,20 +389,15 @@ fn sdk_refused_every_guarded_operation(world: &mut CliWorld) {
     }
 }
 
-#[then("no process or filesystem verb reached the CLI")]
-fn no_guarded_verb_reached_the_cli(world: &mut CliWorld) {
-    let language = world
-        .sdk_recorded_argv
-        .keys()
-        .next_back()
-        .expect("no fixture has run")
-        .clone();
-    for invocation in recorded(world, &language) {
-        let verb = invocation.get(1).map(String::as_str).unwrap_or_default();
+#[then("no guest method reached the host library")]
+fn no_guest_method_reached_the_library(world: &mut CliWorld) {
+    let language = last_live_language(world);
+    for call in recorded_calls(world, &language) {
         assert!(
-            verb != "proc" && verb != "fs",
-            "a sealed machine let `machine {verb}` through to the CLI — the refusal \
-             must land before the shell-out: {invocation:?}"
+            !method_of(&call).starts_with("guest."),
+            "a sealed machine let `{}` through to the host library — the refusal must \
+             land before the call: {call}",
+            method_of(&call)
         );
     }
 }

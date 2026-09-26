@@ -1,910 +1,739 @@
 /**
- * Live-mode Sandbox tests (Plan 73 Followup H-live).
+ * Live-mode Sandbox tests.
  *
- * Mirrors `sdks/python/tests/test_sandbox_live.py`. Each test stands
- * up a fixture `mvmctl` shell script that records its argv to a
- * sidecar file and emits the expected stdout. The SDK shells to the
- * fixture via `MVM_CLI_BIN`; no real microVM boots.
+ * Mirrors `sdks/python/tests/test_sandbox_live.py`. The host library is
+ * replaced through `setInvokeForTesting` by a recorder that answers from
+ * canned replies, so each test asserts the exact `(method, request)` sequence
+ * the SDK sends. Nothing loads a library and no microVM boots.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+
 import * as mvm from "../src/index.js";
-import { deriveAttachedBuildMode, parseUpEnvelope } from "../src/_sandbox.js";
+import { deriveAttachedBuildMode, parseRunReply } from "../src/_sandbox.js";
+import { HostRecorder, batch, failure, runReply, uninstallRecorder } from "./_recorder.js";
+
+const IMAGE = "docker.io/library/python:3.12-slim";
 
 let tmpDir: string;
-
-interface FixtureOptions {
-  upEnvelope: Record<string, unknown> | null;
-  upExit?: number;
-  procExit?: number;
-  procWaitStdout?: string;
-  procWaitStderr?: string;
-  procWaitExit?: number;
-  fsExit?: number;
-  fsReadStdout?: string;
-  fsLsJson?: string;
-  fsStatJson?: string;
-  cpExit?: number;
-  forwardSleep?: number;
-  downExit?: number;
-  lsOut?: string;
-  lsExit?: number;
-}
-
-function writeFixtureMvmctl(opts: FixtureOptions): string {
-  const log = path.join(tmpDir, "fixture-calls.log");
-  const stdinDir = path.join(tmpDir, "fixture-stdin");
-  fs.mkdirSync(stdinDir, { recursive: true });
-
-  const envelopeJson = opts.upEnvelope === null ? "" : JSON.stringify(opts.upEnvelope);
-  const upExit = opts.upExit ?? 0;
-  const procExit = opts.procExit ?? 0;
-  const procWaitStdout = opts.procWaitStdout ?? "";
-  const procWaitStderr = opts.procWaitStderr ?? "";
-  const procWaitExit = opts.procWaitExit ?? 0;
-  const fsExit = opts.fsExit ?? 0;
-  const fsReadStdout = opts.fsReadStdout ?? "";
-  const fsLsJson = opts.fsLsJson ?? "[]";
-  const fsStatJson = opts.fsStatJson ?? "{}";
-  const cpExit = opts.cpExit ?? 0;
-  const forwardSleep = opts.forwardSleep ?? 0;
-  const downExit = opts.downExit ?? 0;
-  const lsOut = opts.lsOut ?? "[]";
-  const lsExit = opts.lsExit ?? 0;
-
-  const script = path.join(tmpDir, "fake-mvmctl");
-  fs.writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set -u
-verb=\${1:-}
-shift || true
-echo "$verb $*" >> ${JSON.stringify(log)}
-if [ "$verb" = "machine" ]; then
-  verb=\${1:-}
-  shift || true
-fi
-case "$verb" in
-  up | run)
-    if [ -t 0 ]; then :; else cat > ${JSON.stringify(path.join(stdinDir, "up-stdin.bin"))} || true; fi
-    if [ "${upExit}" -eq 0 ]; then
-      echo '${envelopeJson}'
-    fi
-    exit ${upExit}
-    ;;
-  proc)
-    sub=$1
-    if [ -t 0 ]; then :; else cat > ${JSON.stringify(path.join(stdinDir, "proc-stdin.bin"))} || true; fi
-    if [ "$sub" = "start" ]; then
-      if [ "${procExit}" -eq 0 ]; then echo "pid-token-abc123"; fi
-      exit ${procExit}
-    elif [ "$sub" = "wait" ]; then
-      printf '%s' ${JSON.stringify(procWaitStdout)}
-      printf '%s' ${JSON.stringify(procWaitStderr)} >&2
-      exit ${procWaitExit}
-    fi
-    exit ${procExit}
-    ;;
-  fs)
-    sub=$1
-    if [ "$sub" = "write" ]; then
-      cat > ${JSON.stringify(path.join(stdinDir, "fs-write-stdin.bin"))}
-    elif [ "$sub" = "read" ]; then
-      printf '%s' ${JSON.stringify(fsReadStdout)}
-    elif [ "$sub" = "ls" ]; then
-      printf '%s' ${JSON.stringify(fsLsJson)}
-    elif [ "$sub" = "stat" ]; then
-      printf '%s' ${JSON.stringify(fsStatJson)}
-    fi
-    exit ${fsExit}
-    ;;
-  ls)
-    echo '${lsOut}'
-    exit ${lsExit}
-    ;;
-  cp)
-    exit ${cpExit}
-    ;;
-  forward)
-    sleep ${forwardSleep}
-    exit 0
-    ;;
-  stop)
-    exit ${downExit}
-    ;;
-  *)
-    echo "fake-mvmctl: unrecognized verb $verb" >&2
-    exit 2
-    ;;
-esac
-`,
-    { mode: 0o755 },
-  );
-  return script;
-}
-
-function readFixtureLog(): string[] {
-  const log = path.join(tmpDir, "fixture-calls.log");
-  if (!fs.existsSync(log)) return [];
-  return fs.readFileSync(log, "utf-8").split("\n").filter((l) => l.length > 0);
-}
+let host: HostRecorder;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mvm-sdk-live-"));
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
-  delete process.env.MVM_CLI_BIN;
   delete process.env.MVM_SDK_RUN_PROFILE;
+  host = new HostRecorder().install();
 });
 
 afterEach(() => {
+  uninstallRecorder();
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
-  delete process.env.MVM_CLI_BIN;
   delete process.env.MVM_SDK_RUN_PROFILE;
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// ── envelope parsing ─────────────────────────────────────────────────
+/** Boot a live sandbox against a canned `machine.run` reply. */
+function boot(buildMode: "dev" | "prod", name = "sb-vm", options: mvm.SandboxCreateOptions = {}): mvm.Sandbox {
+  process.env.MVM_SDK_MODE = "live";
+  host.on("machine.run", runReply(name, buildMode)).on("machine.stop", {});
+  return mvm.Sandbox.create({ image: IMAGE }, { workloadId: "testwid", ...options });
+}
 
-describe("parseUpEnvelope", () => {
-  it("accepts a dev payload", () => {
-    const parsed = parseUpEnvelope(
-      '{"schema_version": 1, "vm_id": "sb-xyz", "build_mode": "dev"}\n',
-      ["mvmctl", "up"],
-    );
-    expect(parsed).toEqual({ vm_id: "sb-xyz", build_mode: "dev" });
+/** Answer a started process's stream with `batches`. */
+function streamReplies(...batches: Array<Record<string, unknown> | ReturnType<typeof failure>>): void {
+  host
+    .on("guest.proc.start", { token: "tok-1" })
+    .on("guest.proc.stream.open", { stream: 7 })
+    .on("guest.proc.stream.next", ...batches)
+    .on("guest.proc.stream.close", {});
+}
+
+const guestCalls = () => host.methods().filter((m) => m.startsWith("guest."));
+
+// ── reply parsing ────────────────────────────────────────────────────
+
+describe("parseRunReply", () => {
+  it("reads the machine name and build mode", () => {
+    expect(parseRunReply(runReply("sb-xyz", "dev"))).toEqual({ vmId: "sb-xyz", buildMode: "dev" });
   });
 
-  it("rejects unknown schema", () => {
-    expect(() =>
-      parseUpEnvelope('{"schema_version": 99, "vm_id": "x", "build_mode": "dev"}', [
-        "mvmctl",
-        "up",
-      ]),
-    ).toThrow(/schema_version/);
+  it("rejects a reply with no machine name", () => {
+    expect(() => parseRunReply({ machine: {}, build_mode: "dev" })).toThrow(mvm.SandboxLiveError);
   });
 
-  it("rejects missing vm_id", () => {
-    expect(() =>
-      parseUpEnvelope('{"schema_version": 1, "build_mode": "dev"}', ["mvmctl", "up"]),
-    ).toThrow(/vm_id/);
+  it("rejects an unknown build_mode", () => {
+    expect(() => parseRunReply({ machine: { name: "x" }, build_mode: "staging" })).toThrow(/build_mode/);
   });
 
-  it("rejects unknown build_mode", () => {
-    expect(() =>
-      parseUpEnvelope(
-        '{"schema_version": 1, "vm_id": "x", "build_mode": "staging"}',
-        ["mvmctl", "up"],
-      ),
-    ).toThrow(/build_mode/);
-  });
-
-  it("rejects empty stdout", () => {
-    expect(() => parseUpEnvelope("", ["mvmctl", "up"])).toThrow(/empty stdout/);
-  });
-
-  it("rejects invalid JSON", () => {
-    expect(() => parseUpEnvelope("not json", ["mvmctl", "up"])).toThrow(
-      /not valid JSON/,
-    );
+  it("rejects a non-object reply", () => {
+    expect(() => parseRunReply(null)).toThrow(/no reply object/);
   });
 });
 
-// ── deriveAttachedBuildMode + connect ────────────────────────────────
-
 describe("deriveAttachedBuildMode", () => {
-  const argv = ["mvmctl", "machine", "ls", "--json"];
-
-  it("matches on name and returns the entry build_mode", () => {
-    const stdout = JSON.stringify([
+  it("matches on name and returns the record's build_mode", () => {
+    const records = [
       { name: "a", build_mode: "prod", status: "running" },
       { name: "b", build_mode: "dev", status: "running" },
-    ]);
-    expect(deriveAttachedBuildMode(stdout, "b", argv)).toBe("dev");
-    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+    ];
+    expect(deriveAttachedBuildMode(records, "b")).toBe("dev");
+    expect(deriveAttachedBuildMode(records, "a")).toBe("prod");
   });
 
-  it("fails closed on a missing build_mode", () => {
-    const stdout = JSON.stringify([{ name: "a", status: "running" }]);
-    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
-  });
-
-  it("fails closed on an unknown build_mode", () => {
-    const stdout = JSON.stringify([{ name: "a", build_mode: "staging" }]);
-    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+  it("fails closed on a missing or unknown build_mode", () => {
+    expect(deriveAttachedBuildMode([{ name: "a" }], "a")).toBe("prod");
+    expect(deriveAttachedBuildMode([{ name: "a", build_mode: "staging" }], "a")).toBe("prod");
   });
 
   it("throws when the machine is absent", () => {
-    const stdout = JSON.stringify([{ name: "other", build_mode: "dev" }]);
-    expect(() => deriveAttachedBuildMode(stdout, "ghost", argv)).toThrow(
-      /no machine named/,
+    expect(() => deriveAttachedBuildMode([{ name: "other", build_mode: "dev" }], "ghost")).toThrow(
+      /no machine named "ghost"/,
     );
+  });
+
+  it("throws on a non-array inventory", () => {
+    expect(() => deriveAttachedBuildMode({}, "a")).toThrow(/must return an array/);
   });
 });
 
-describe("Sandbox.connect (attach; inherits dev-only guard)", () => {
-  it("attaches to a dev machine and allows exec", () => {
-    const lsOut = JSON.stringify([
+// ── connect ──────────────────────────────────────────────────────────
+
+describe("Sandbox.connect (attach; inherits the dev-only guard)", () => {
+  it("attaches to a dev machine through machine.inventory and allows exec", () => {
+    host.on("machine.inventory", [
       { name: "web-1", build_mode: "dev", status: "running" },
       { name: "other", build_mode: "prod", status: "running" },
     ]);
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut, procWaitStdout: "4" });
-    process.env.MVM_CLI_BIN = script;
+    streamReplies(batch([["stdout", "hi"]], { kind: "exited", code: 0 }));
 
     const sb = mvm.Sandbox.connect("web-1");
-    expect(sb._live).not.toBeNull();
-    expect(sb._live!.vmId).toBe("web-1");
-    expect(sb._live!.buildMode).toBe("dev");
-
-    const r = sb.exec(["python", "-c", "print(2 + 2)"]);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe("4");
-
-    const calls = readFixtureLog();
-    expect(calls[0]).toMatch(/^machine ls --json/);
-    expect(calls.some((c) => c.startsWith("machine proc start web-1"))).toBe(true);
+    expect(sb.info()).toEqual({ id: "web-1", workloadId: "web-1", buildMode: "dev", live: true });
+    expect(sb.exec(["echo", "hi"]).stdout).toBe("hi");
+    expect(host.calls[0]).toEqual({ method: "machine.inventory", request: undefined });
+    expect(host.requests("guest.proc.start")).toEqual([{ id: "web-1", argv: ["echo", "hi"] }]);
   });
 
-  it("refuses exec on a prod machine (fail-closed, no proc traffic)", () => {
-    const lsOut = JSON.stringify([{ name: "sealed", build_mode: "prod", status: "running" }]);
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
-    process.env.MVM_CLI_BIN = script;
-
+  it("refuses exec on a prod machine before any guest call", () => {
+    host.on("machine.inventory", [{ name: "sealed", build_mode: "prod" }]);
     const sb = mvm.Sandbox.connect("sealed");
-    expect(sb._live!.buildMode).toBe("prod");
-    expect(() => sb.exec(["python", "-c", "x"])).toThrow(mvm.SandboxDevOnly);
-    expect(() => sb.commands.start(["python", "run.py"])).toThrow(mvm.SandboxDevOnly);
-    expect(readFixtureLog().some((c) => c.startsWith("machine proc"))).toBe(false);
+    expect(() => sb.exec(["id"])).toThrow(mvm.SandboxDevOnly);
+    expect(host.methods()).toEqual(["machine.inventory"]);
   });
 
-  it("treats a missing build_mode as non-dev (fail-closed)", () => {
-    const lsOut = JSON.stringify([{ name: "m", status: "running" }]);
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.connect("m");
-    expect(sb._live!.buildMode).toBe("prod");
-    expect(() => sb.exec(["echo", "hi"])).toThrow(mvm.SandboxDevOnly);
+  it("treats a missing build_mode as prod", () => {
+    host.on("machine.inventory", [{ name: "m" }]);
+    expect(() => mvm.Sandbox.connect("m").commands.start(["id"])).toThrow(mvm.SandboxDevOnly);
+    expect(guestCalls()).toEqual([]);
   });
 
-  it("throws when the machine is not listed", () => {
-    const lsOut = JSON.stringify([{ name: "other", build_mode: "dev", status: "running" }]);
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
-    process.env.MVM_CLI_BIN = script;
-    expect(() => mvm.Sandbox.connect("ghost")).toThrow(/no machine named/);
+  it("throws SandboxLiveError when the machine is not listed", () => {
+    host.on("machine.inventory", []);
+    expect(() => mvm.Sandbox.connect("ghost")).toThrow(mvm.SandboxLiveError);
   });
 
-  it("propagates a machine ls failure", () => {
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsExit: 5 });
-    process.env.MVM_CLI_BIN = script;
-    expect(() => mvm.Sandbox.connect("web-1")).toThrow(/exit code 5/);
+  it("propagates a typed inventory failure", () => {
+    host.on("machine.inventory", failure("UNAVAILABLE", "backend busy", { retryable: true }));
+    try {
+      mvm.Sandbox.connect("m");
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(mvm.MachineUnavailableError);
+      expect((err as mvm.HostLibraryFailure).code).toBe("UNAVAILABLE");
+      expect((err as mvm.HostLibraryFailure).retryable).toBe(true);
+    }
   });
 
   it("refuses a second concurrent session", () => {
-    const lsOut = JSON.stringify([{ name: "a", build_mode: "dev", status: "running" }]);
-    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
-    process.env.MVM_CLI_BIN = script;
+    host.on("machine.inventory", [{ name: "a", build_mode: "dev" }]);
     mvm.Sandbox.connect("a");
     expect(() => mvm.Sandbox.connect("a")).toThrow(/already active/);
   });
 
   it("rejects an empty id", () => {
-    expect(() => mvm.Sandbox.connect("")).toThrow(/non-empty machine id/);
+    expect(() => mvm.Sandbox.connect("")).toThrow(TypeError);
+    expect(host.calls).toEqual([]);
   });
 });
 
-// ── live-mode boot ───────────────────────────────────────────────────
+// ── create ───────────────────────────────────────────────────────────
 
 describe("Sandbox.create (live mode)", () => {
-  it("parses envelope and records vm_id + build_mode", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-test-vm",
-        build_mode: "dev",
-      },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-3.12", { workloadId: "testwid" });
-    expect(sb._live).not.toBeNull();
+  it("sends one machine.run and records the reply's name and build mode", () => {
+    const sb = boot("dev", "sb-test-vm");
     expect(sb._live!.vmId).toBe("sb-test-vm");
     expect(sb._live!.buildMode).toBe("dev");
+    expect(host.methods()).toEqual(["machine.run"]);
+    const request = host.requests("machine.run")[0];
+    expect(Object.keys(request).sort()).toEqual(["image", "mode", "name", "ttl_seconds"]);
+    expect(request.image).toBe(IMAGE);
+    expect(request.mode).toBe("transient");
+    expect(request.ttl_seconds).toBe(mvm.DEFAULT_TTL_SECONDS);
+    expect(request.name).toMatch(/^sdk-testwid-[0-9a-f]{8}$/);
+  });
 
-    const calls = readFixtureLog();
-    expect(calls.length).toBe(1);
-    expect(calls[0]).toMatch(/^machine run -d --up-json --name /);
-    expect(calls[0]).toContain("--manifest python-3.12");
-    expect(calls[0]).toContain("--ttl");
+  it("slugs the workload id into the generated name", () => {
+    process.env.MVM_SDK_MODE = "live";
+    host.on("machine.run", runReply("x", "dev"));
+    mvm.Sandbox.create({ image: IMAGE });
+    expect(host.requests("machine.run")[0].name).toMatch(/^sdk-docker-io-library-python-[0-9a-f]{8}$/);
+  });
+
+  it("carries an explicit ttl", () => {
+    boot("dev", "vm", { ttl: "5m" });
+    expect(host.requests("machine.run")[0].ttl_seconds).toBe(300);
   });
 
   it("propagates an explicit dev profile", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-dev-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "dev";
-
-    mvm.Sandbox.create("python-3.12", { workloadId: "testwid" });
-
-    expect(readFixtureLog()[0]).toContain("--profile dev");
+    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = " Dev ";
+    boot("dev");
+    expect(host.requests("machine.run")[0].profile).toBe("dev");
   });
 
-  it("rejects an unknown profile before boot", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+  it("rejects an unknown profile before any call", () => {
     process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "unknown";
-
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/MVM_SDK_RUN_PROFILE/);
-    expect(readFixtureLog()).toEqual([]);
+    expect(() => boot("dev")).toThrow(/MVM_SDK_RUN_PROFILE/);
+    expect(host.calls).toEqual([]);
   });
 
-  it("lowers an image, allowlist, and boot command", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    mvm.Sandbox.create(
-      { image: mvm.OBSCURA_IMAGE },
-      {
-        network: {
-          mode: "none",
-          egress: { allowlist: [{ host: "example.com", port: 443 }] },
-        },
-        command: ["/obscura", "serve"],
+  it("lowers the egress allowlist and boot command", () => {
+    boot("dev", "browser", {
+      network: {
+        mode: "none",
+        egress: { allowlist: [{ host: "example.com", port: 443 }, { host: "[2001:db8::1]", port: 8443 }] },
       },
+      command: ["/obscura", "serve"],
+    });
+    const request = host.requests("machine.run")[0];
+    expect(request.egress).toEqual([
+      { host: "example.com", port: 443 },
+      { host: "2001:db8::1", port: 8443 },
+    ]);
+    expect(request.command).toEqual(["/obscura", "serve"]);
+  });
+
+  it("refuses a wildcard or out-of-range egress entry before any call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    for (const entry of [{ host: "*", port: 443 }, { host: "example.com", port: 0 }]) {
+      expect(() =>
+        mvm.Sandbox.create({ image: IMAGE }, { network: { mode: "none", egress: { allowlist: [entry] } } as never }),
+      ).toThrow(mvm.SandboxModeError);
+    }
+    expect(host.calls).toEqual([]);
+  });
+
+  it("refuses a template source before any call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(mvm.SandboxModeError);
+    expect(() => mvm.Sandbox.create({ manifest: "python-3.12" })).toThrow(/pass .*image/i);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("refuses env and unrepresentable options before any call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { env: { MODE: "safe" } })).toThrow(
+      /Sandbox\.commands\.start/,
     );
-    const call = readFixtureLog()[0];
-    expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
-    expect(call).toContain("--allow-host example.com:443");
-    expect(call).toContain("-- /obscura serve");
-  });
-
-  it("rejects env and unrepresentable options before boot", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
     expect(() =>
-      mvm.Sandbox.create("minimal", {
-        env: { MODE: "safe" },
-      }),
-    ).toThrow(/Sandbox\.commands\.start/);
-    expect(readFixtureLog()).toEqual([]);
-    expect(() =>
-      mvm.Sandbox.create("minimal", {
-        resources: { cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 },
-      }),
+      mvm.Sandbox.create({ image: IMAGE }, { resources: { cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 } }),
     ).toThrow(/resources/);
-    expect(readFixtureLog()).toEqual([]);
     expect(() =>
-      mvm.Sandbox.create("minimal", {
-        network: { raw_ip_stack: true } as never,
-      }),
+      mvm.Sandbox.create({ image: IMAGE }, { network: { raw_ip_stack: true } as never }),
     ).toThrow(/unknown fields/);
-    expect(readFixtureLog()).toEqual([]);
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { include: ["src"] })).toThrow(/include/);
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { tags: { a: "b" } })).toThrow(/tags/);
+    expect(host.calls).toEqual([]);
   });
 
-  it("propagates mvmctl failure", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: null,
-      upExit: 7,
-    });
+  it("propagates the library's typed refusal", () => {
     process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/exit code 7/);
+    host.on("machine.run", failure("INVALID_SPEC", "a command override is not supported", { status: 3 }));
+    try {
+      mvm.Sandbox.create({ image: IMAGE }, { command: ["true"] });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(mvm.MachineSpecError);
+      expect(err).toBeInstanceOf(mvm.HostLibraryError);
+      const f = err as mvm.HostLibraryFailure;
+      expect([f.code, f.retryable, f.status]).toEqual(["INVALID_SPEC", false, 3]);
+      expect(f.message).toBe("a command override is not supported");
+    }
   });
 
-  it("enforces one-sandbox-per-process", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-first",
-        build_mode: "dev",
-      },
-    });
+  it("reports a malformed reply as SandboxLiveError", () => {
     process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+    host.on("machine.run", { plan_id: "p" });
+    expect(() => mvm.Sandbox.create({ image: IMAGE })).toThrow(mvm.SandboxLiveError);
+  });
 
-    mvm.Sandbox.create("python-dev");
-    expect(() => mvm.Sandbox.create("python-dev")).toThrow(/already active/);
+  it("enforces one sandbox per process", () => {
+    boot("dev");
+    expect(() => mvm.Sandbox.create({ image: IMAGE })).toThrow(/already active/);
+    expect(host.methods()).toEqual(["machine.run"]);
   });
 });
 
-// ── commands.start (claim-4 dev-only enforcement) ──────────────────
+// ── processes ────────────────────────────────────────────────────────
 
 describe("Sandbox.commands.start (live mode)", () => {
-  it("shells to proc start against dev template", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-dev-vm",
-        build_mode: "dev",
-      },
+  it("sends guest.proc.start with literal env and returns the token's handle", () => {
+    const sb = boot("dev", "sb-dev-vm");
+    host.on("guest.proc.start", { token: "tok-9" });
+    const handle = sb.commands.start(["python", "-c", "print(1)"], {
+      env: { A: "1", B: mvm.literal("2") },
     });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.commands.start(["python", "run.py"], { env: { MODE: "test" } });
-
-    const calls = readFixtureLog();
-    expect(calls.length).toBe(2);
-    expect(calls[1]).toMatch(/^machine proc start sb-dev-vm/);
-    expect(calls[1]).toContain("-e MODE=test");
-    expect(calls[1]).toContain("-- python run.py");
-  });
-
-  it("raises SandboxDevOnly against prod template (no vsock traffic)", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-prod-vm",
-        build_mode: "prod",
-      },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-prod");
-    expect(readFixtureLog().length).toBe(1); // only `up`
-
-    expect(() => sb.commands.start(["python", "run.py"])).toThrow(
-      mvm.SandboxDevOnly,
-    );
-    // Critical: SDK must NOT have shelled to `mvmctl machine proc start`.
-    const calls = readFixtureLog();
-    expect(calls.length).toBe(1);
-    expect(calls.some((c) => c.startsWith("machine proc"))).toBe(false);
-  });
-});
-
-// ── files.write ──────────────────────────────────────────────────────
-
-describe("Sandbox.files.write (live mode)", () => {
-  it("shells with stdin bytes", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-fs-vm",
-        build_mode: "dev",
-      },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.files.write("/app/config.json", new TextEncoder().encode('{"x":1}'));
-
-    const calls = readFixtureLog();
-    expect(calls.some((c) => c.startsWith("machine fs write sb-fs-vm /app/config.json"))).toBe(true);
-    const stdinPath = path.join(tmpDir, "fixture-stdin", "fs-write-stdin.bin");
-    expect(fs.readFileSync(stdinPath, "utf-8")).toBe('{"x":1}');
-  });
-});
-
-describe("runtime process and filesystem surface", () => {
-  it("returns a process handle with streamed output and controls", async () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-proc-vm", build_mode: "dev" },
-      procWaitStdout: "out",
-      procWaitStderr: "err",
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const sb = mvm.Sandbox.create("python-dev");
-    const handle = sb.commands.start(["python", "run.py"]);
-    expect(handle).toBeDefined();
-    const events: mvm.ProcessStreamEvent[] = [];
-    const result = await handle!.wait({ onEvent: (event) => events.push(event) });
-    expect(new TextDecoder().decode(result.stdout)).toBe("out");
-    expect(new TextDecoder().decode(result.stderr)).toBe("err");
-    expect(events.map((event) => [event.stream, new TextDecoder().decode(event.data)]).sort()).toEqual([
-      ["stderr", "err"],
-      ["stdout", "out"],
+    expect(handle!.token).toBe("tok-9");
+    expect(host.requests("guest.proc.start")).toEqual([
+      { id: "sb-dev-vm", argv: ["python", "-c", "print(1)"], env: { A: "1", B: "2" } },
     ]);
-    handle!.sendStdin("input");
-    handle!.signal(15);
-    handle!.kill();
-    const calls = readFixtureLog();
-    expect(calls.some((c) => c.includes("machine proc stdin sb-proc-vm"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine proc signal sb-proc-vm"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine proc kill sb-proc-vm"))).toBe(true);
-    sb.kill();
   });
 
-  it("reads, lists, stats, and mutates guest files", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-fs-vm", build_mode: "dev" },
-      fsReadStdout: "hello",
-      fsLsJson: '[{"name":"note.txt","kind":"file","size":5}]',
-      fsStatJson: '{"canonical_path":"/app/note.txt","kind":"file","mode":420,"size":5,"mtime":null}',
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(new TextDecoder().decode(sb.files.read("/app/note.txt"))).toBe("hello");
-    expect(sb.files.list("/app")[0]?.name).toBe("note.txt");
-    expect(sb.files.stat("/app/note.txt").size).toBe(5);
-    sb.files.mkdir("/app/new", true);
-    sb.files.remove("/app/old", true);
-    sb.files.move("/app/a", "/app/b");
-    const calls = readFixtureLog();
-    expect(calls.some((c) => c.includes("machine fs read sb-fs-vm /app/note.txt"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine fs ls sb-fs-vm /app --json"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine fs stat sb-fs-vm /app/note.txt --json"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine fs mkdir sb-fs-vm /app/new"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine fs rm sb-fs-vm /app/old"))).toBe(true);
-    expect(calls.some((c) => c.includes("machine fs mv sb-fs-vm /app/a /app/b"))).toBe(true);
-    sb.kill();
+  it("omits env when none is given", () => {
+    const sb = boot("dev", "vm");
+    host.on("guest.proc.start", { token: "t" });
+    sb.commands.start(["true"]);
+    expect(host.requests("guest.proc.start")).toEqual([{ id: "vm", argv: ["true"] }]);
   });
 
-  it("fails closed for every development-only live verb on prod", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-prod-vm", build_mode: "prod" },
+  it("refuses a secret env value before any guest call", () => {
+    const sb = boot("dev");
+    const secret = mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] });
+    expect(() => sb.commands.start(["true"], { env: { KEY: secret } })).toThrow(/non-literal/);
+    expect(guestCalls()).toEqual([]);
+  });
+
+  it("raises SandboxDevOnly against a prod machine with zero guest calls", () => {
+    const sb = boot("prod");
+    try {
+      sb.commands.start(["id"]);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(mvm.SandboxDevOnly);
+      expect(err).toBeInstanceOf(mvm.SandboxLiveError);
+      expect((err as mvm.SandboxLiveError).code).toBe("DEV_ONLY");
+    }
+    expect(guestCalls()).toEqual([]);
+  });
+
+  it("returns undefined and records the op in record mode", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(sb.commands.start(["true"])).toBeUndefined();
+    expect(host.calls).toEqual([]);
+  });
+});
+
+describe("ProcessHandle", () => {
+  it("streams output across batches, in order, and maps the exit code", async () => {
+    const sb = boot("dev", "vm");
+    streamReplies(
+      batch([["stdout", "a"], ["stderr", "x"]]),
+      batch([]),
+      batch([["stdout", "b"]], { kind: "exited", code: 3 }),
+    );
+    const events: string[] = [];
+    const handle = sb.commands.start(["job"])!;
+    const result = await handle.wait({
+      timeout: 9.7,
+      onEvent: (e) => events.push(`${e.stream}:${new TextDecoder().decode(e.data)}`),
     });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const sb = mvm.Sandbox.create("python-prod");
-    const operations = [
-      () => sb.commands.start(["python"]),
-      () => sb.exec(["python"]),
-      () => sb.files.write("/app/x", "x"),
-      () => sb.files.read("/app/x"),
-      () => sb.files.list("/app"),
-      () => sb.files.stat("/app/x"),
-      () => sb.files.mkdir("/app/x"),
-      () => sb.files.remove("/app/x"),
-      () => sb.files.move("/app/x", "/app/y"),
-      () => sb.copyIn("/tmp/x", "/app/x"),
-      () => sb.copyOut("/app/x", "/tmp/x"),
+    expect(events).toEqual(["stdout:a", "stderr:x", "stdout:b"]);
+    expect(result.exitCode).toBe(3);
+    expect(new TextDecoder().decode(result.stdout)).toBe("ab");
+    expect(new TextDecoder().decode(result.stderr)).toBe("x");
+    expect(host.requests("guest.proc.stream.open")).toEqual([{ id: "vm", token: "tok-1", timeout_secs: 9 }]);
+    expect(host.requests("guest.proc.stream.next")).toEqual([{ stream: 7 }, { stream: 7 }, { stream: 7 }]);
+    // A stream that reported done is gone on the library's side.
+    expect(host.requests("guest.proc.stream.close")).toEqual([]);
+  });
+
+  it("omits timeout_secs when no timeout is given", async () => {
+    const sb = boot("dev", "vm");
+    streamReplies(batch([], { kind: "exited", code: 0 }));
+    await sb.commands.start(["job"])!.wait();
+    expect(host.requests("guest.proc.stream.open")).toEqual([{ id: "vm", token: "tok-1" }]);
+  });
+
+  it.each([
+    [{ kind: "exited", code: 0 } as const, 0],
+    [{ kind: "exited", code: 2 } as const, 2],
+    [{ kind: "killed", signal: 9 } as const, 137],
+    [{ kind: "timed_out" } as const, 124],
+  ])("maps outcome %j to exit code %i", async (outcome, code) => {
+    const sb = boot("dev");
+    streamReplies(batch([], outcome));
+    expect((await sb.commands.start(["job"])!.wait()).exitCode).toBe(code);
+  });
+
+  it("closes the stream when onEvent throws, and rejects with that error", async () => {
+    const sb = boot("dev");
+    streamReplies(batch([["stdout", "a"]]), batch([], { kind: "exited", code: 0 }));
+    const handle = sb.commands.start(["job"])!;
+    await expect(
+      handle.wait({
+        onEvent: () => {
+          throw new Error("consumer failed");
+        },
+      }),
+    ).rejects.toThrow("consumer failed");
+    expect(host.requests("guest.proc.stream.close")).toEqual([{ stream: 7 }]);
+  });
+
+  it("delivers output before a failed wait, then rejects with the typed error and closes", async () => {
+    const sb = boot("dev");
+    streamReplies(batch([["stdout", "partial"]]), failure("BACKEND_ERROR", "the guest agent went away"));
+    const seen: string[] = [];
+    const handle = sb.commands.start(["job"])!;
+    await expect(
+      handle.wait({ onEvent: (e) => seen.push(new TextDecoder().decode(e.data)) }),
+    ).rejects.toBeInstanceOf(mvm.MachineBackendError);
+    expect(seen).toEqual(["partial"]);
+    expect(host.requests("guest.proc.stream.close")).toEqual([{ stream: 7 }]);
+  });
+
+  it("closes the stream on a malformed batch", async () => {
+    const sb = boot("dev");
+    streamReplies({ done: false });
+    await expect(sb.commands.start(["job"])!.wait()).rejects.toBeInstanceOf(mvm.SandboxLiveError);
+    expect(host.requests("guest.proc.stream.close")).toEqual([{ stream: 7 }]);
+  });
+
+  it("rejects an outcome it does not understand", async () => {
+    const sb = boot("dev");
+    streamReplies({ events: [], done: true, outcome: { kind: "vanished" } });
+    await expect(sb.commands.start(["job"])!.wait()).rejects.toThrow(/does not understand/);
+  });
+
+  it("sends stdin, signal, and kill for the handle's token", () => {
+    const sb = boot("dev", "vm");
+    host
+      .on("guest.proc.start", { token: "tok-1" })
+      .on("guest.proc.stdin", { accepted: 5 })
+      .on("guest.proc.signal", {})
+      .on("guest.proc.kill", {});
+    const handle = sb.commands.start(["cat"])!;
+    handle.sendStdin("hello");
+    handle.sendStdin(new Uint8Array([0, 255]));
+    handle.signal(15);
+    handle.kill();
+    expect(host.requests("guest.proc.stdin")).toEqual([
+      { id: "vm", token: "tok-1", data_b64: Buffer.from("hello").toString("base64") },
+      { id: "vm", token: "tok-1", data_b64: "AP8=" },
+    ]);
+    expect(host.requests("guest.proc.signal")).toEqual([{ id: "vm", token: "tok-1", signum: 15 }]);
+    expect(host.requests("guest.proc.kill")).toEqual([{ id: "vm", token: "tok-1" }]);
+    expect(() => handle.signal(0)).toThrow(RangeError);
+  });
+});
+
+// ── exec ─────────────────────────────────────────────────────────────
+
+describe("Sandbox.exec (live mode)", () => {
+  it("starts with cwd and env, then collects through the stream", () => {
+    const sb = boot("dev", "vm");
+    streamReplies(batch([["stdout", "out\n"], ["stderr", "err\n"]], { kind: "exited", code: 0 }));
+    const result = sb.exec(["sh", "-c", "run"], { cwd: "/work", env: { K: "v" }, timeout: 30 });
+    expect(result).toEqual({ exitCode: 0, stdout: "out\n", stderr: "err\n" });
+    expect(host.methods()).toEqual([
+      "machine.run",
+      "guest.proc.start",
+      "guest.proc.stream.open",
+      "guest.proc.stream.next",
+    ]);
+    expect(host.requests("guest.proc.start")).toEqual([
+      { id: "vm", argv: ["sh", "-c", "run"], env: { K: "v" }, cwd: "/work" },
+    ]);
+    expect(host.requests("guest.proc.stream.open")).toEqual([{ id: "vm", token: "tok-1", timeout_secs: 30 }]);
+  });
+
+  it("surfaces a non-zero exit code", () => {
+    const sb = boot("dev");
+    streamReplies(batch([], { kind: "exited", code: 3 }));
+    expect(sb.exec(["false"]).exitCode).toBe(3);
+  });
+
+  it("decodes invalid UTF-8 with replacement", () => {
+    const sb = boot("dev");
+    streamReplies({
+      events: [{ stream: "stdout", data_b64: Buffer.from([0x61, 0xff, 0x62]).toString("base64") }],
+      done: true,
+      outcome: { kind: "exited", code: 0 },
+    });
+    expect(sb.exec(["cat"]).stdout).toBe("a�b");
+  });
+
+  it("shell runs /bin/sh -lc", () => {
+    const sb = boot("dev");
+    streamReplies(batch([], { kind: "exited", code: 0 }));
+    sb.shell("echo $HOME");
+    expect(host.requests("guest.proc.start")[0].argv).toEqual(["/bin/sh", "-lc", "echo $HOME"]);
+  });
+
+  it("raises SandboxDevOnly against a prod machine with zero guest calls", () => {
+    const sb = boot("prod");
+    expect(() => sb.exec(["id"])).toThrow(mvm.SandboxDevOnly);
+    expect(guestCalls()).toEqual([]);
+  });
+
+  it("is refused in record mode", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.exec(["id"])).toThrow(mvm.SandboxModeError);
+  });
+});
+
+// ── files ────────────────────────────────────────────────────────────
+
+describe("Sandbox.files (live mode)", () => {
+  it("sends each guest.fs request", () => {
+    const sb = boot("dev", "vm");
+    host
+      .on("guest.fs.write", { bytes_written: 2 })
+      .on("guest.fs.read", { data_b64: Buffer.from("hi").toString("base64") })
+      .on("guest.fs.list", { entries: [{ name: "a", kind: "file", size: 1 }], truncated: false })
+      .on("guest.fs.stat", { canonical_path: "/a", kind: "file", size: 1, mode: 420, mtime: null })
+      .on("guest.fs.mkdir", {})
+      .on("guest.fs.remove", { entries_removed: 1 })
+      .on("guest.fs.rename", {});
+
+    sb.files.write("/a", "hi");
+    sb.files.write("/b", new Uint8Array([1]), { mode: 0o600, createParents: true, followSymlinks: true });
+    expect(new TextDecoder().decode(sb.files.read("/a"))).toBe("hi");
+    sb.files.read("/a", 4, 8);
+    expect(sb.files.list("/")).toEqual([{ name: "a", kind: "file", size: 1 }]);
+    expect(sb.files.stat("/a").canonical_path).toBe("/a");
+    sb.files.stat("/link", false);
+    sb.files.mkdir("/d");
+    sb.files.mkdir("/d/e", true, 0o700);
+    sb.files.remove("/a");
+    sb.files.remove("/d", true);
+    sb.files.move("/x", "/y");
+
+    expect(host.calls.slice(1)).toEqual([
+      {
+        method: "guest.fs.write",
+        request: { id: "vm", path: "/a", data_b64: "aGk=", mode: 0o644, create_parents: false, follow_symlinks: false },
+      },
+      {
+        method: "guest.fs.write",
+        request: { id: "vm", path: "/b", data_b64: "AQ==", mode: 0o600, create_parents: true, follow_symlinks: true },
+      },
+      { method: "guest.fs.read", request: { id: "vm", path: "/a", offset: 0, length: 16 * 1024 * 1024 } },
+      { method: "guest.fs.read", request: { id: "vm", path: "/a", offset: 4, length: 8 } },
+      { method: "guest.fs.list", request: { id: "vm", path: "/" } },
+      { method: "guest.fs.stat", request: { id: "vm", path: "/a", follow_symlinks: true } },
+      { method: "guest.fs.stat", request: { id: "vm", path: "/link", follow_symlinks: false } },
+      { method: "guest.fs.mkdir", request: { id: "vm", path: "/d", mode: 0o755, parents: false } },
+      { method: "guest.fs.mkdir", request: { id: "vm", path: "/d/e", mode: 0o700, parents: true } },
+      { method: "guest.fs.remove", request: { id: "vm", path: "/a", recursive: false } },
+      { method: "guest.fs.remove", request: { id: "vm", path: "/d", recursive: true } },
+      { method: "guest.fs.rename", request: { id: "vm", from: "/x", to: "/y" } },
+    ]);
+  });
+
+  it("propagates a typed guest refusal unchanged", () => {
+    const sb = boot("dev");
+    host.on("guest.fs.read", failure("NOT_FOUND", "no such file"));
+    expect(() => sb.files.read("/missing")).toThrow(mvm.MachineNotFoundError);
+  });
+
+  it("refuses every development-only verb on prod with zero guest calls", () => {
+    const sb = boot("prod");
+    const operations: Array<() => unknown> = [
+      () => sb.files.write("/a", "x"),
+      () => sb.files.read("/a"),
+      () => sb.files.list("/"),
+      () => sb.files.stat("/a"),
+      () => sb.files.mkdir("/d"),
+      () => sb.files.remove("/a"),
+      () => sb.files.move("/a", "/b"),
+      () => sb.copyIn(path.join(tmpDir, "f"), "/f"),
+      () => sb.copyOut("/f", path.join(tmpDir, "f")),
+      () => sb.commands.start(["id"]),
+      () => sb.exec(["id"]),
+      () => sb.shell("id"),
     ];
     for (const operation of operations) {
       expect(operation).toThrow(mvm.SandboxDevOnly);
     }
-    expect(() => sb.forward(8080, 80)).toThrow(mvm.SandboxModeError);
-    expect(readFixtureLog().slice(1).some((call) =>
-      call.startsWith("machine proc") ||
-      call.startsWith("machine fs") ||
-      call.startsWith("machine cp") ||
-      call.startsWith("forward"),
-    )).toBe(false);
-    sb.kill();
+    expect(guestCalls()).toEqual([]);
+  });
+
+  it("refuses reads and mutations in record mode", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.files.read("/a")).toThrow(mvm.SandboxModeError);
+    expect(() => sb.files.list("/")).toThrow(mvm.SandboxModeError);
+    expect(() => sb.files.move("/a", "/b")).toThrow(mvm.SandboxModeError);
+    expect(host.calls).toEqual([]);
   });
 });
-
-// ── kill / dispose ───────────────────────────────────────────────────
-
-describe("Sandbox.kill (live mode)", () => {
-  it("shells to mvmctl machine stop", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-kill-vm",
-        build_mode: "dev",
-      },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.kill();
-
-    const calls = readFixtureLog();
-    expect(calls).toContain("machine stop sb-kill-vm --yes");
-  });
-
-  it("[Symbol.dispose] kills once", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: {
-        schema_version: 1,
-        vm_id: "sb-ctx-vm",
-        build_mode: "dev",
-      },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb[Symbol.dispose]();
-
-    const downCalls = readFixtureLog().filter((c) => c.startsWith("machine stop "));
-    expect(downCalls.length).toBe(1);
-  });
-});
-
-// ── copyIn / copyOut (Plan 125 B1) ───────────────────────────────────
 
 describe("Sandbox.copyIn / copyOut (live mode)", () => {
-  it("copyIn shells to mvmctl machine cp host -> vm:guest", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const hostFile = path.join(tmpDir, "local.txt");
-    fs.writeFileSync(hostFile, "hello");
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.copyIn(hostFile, "/app/local.txt");
-
-    const calls = readFixtureLog();
-    expect(
-      calls.some((c) => c.startsWith(`machine cp ${hostFile} sb-cp-vm:/app/local.txt`)),
-    ).toBe(true);
+  it("sends guest.cp in each direction", () => {
+    const sb = boot("dev", "vm");
+    host.on("guest.cp", {});
+    sb.copyIn("/host/in.txt", "/guest/in.txt");
+    sb.copyOut("/guest/out.txt", "/host/out.txt");
+    expect(host.requests("guest.cp")).toEqual([
+      { id: "vm", direction: "host_to_guest", host_path: "/host/in.txt", guest_path: "/guest/in.txt" },
+      { id: "vm", direction: "guest_to_host", host_path: "/host/out.txt", guest_path: "/guest/out.txt" },
+    ]);
   });
 
-  it("copyOut shells to mvmctl machine cp vm:guest -> host", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const dest = path.join(tmpDir, "out.txt");
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.copyOut("/app/out.txt", dest);
-
-    const calls = readFixtureLog();
-    expect(
-      calls.some((c) => c.startsWith(`machine cp sb-cp-vm:/app/out.txt ${dest}`)),
-    ).toBe(true);
+  it("propagates a typed copy failure", () => {
+    const sb = boot("dev");
+    host.on("guest.cp", failure("BACKEND_ERROR", "copy failed"));
+    expect(() => sb.copyIn("/h", "/g")).toThrow(mvm.MachineBackendError);
   });
 
-  it("copyIn propagates a mvmctl machine cp failure", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
-      cpExit: 4,
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const hostFile = path.join(tmpDir, "local.txt");
-    fs.writeFileSync(hostFile, "x");
-
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(() => sb.copyIn(hostFile, "/app/local.txt")).toThrow(
-      mvm.SandboxLiveError,
-    );
-  });
-
-  it("copyIn is refused in record mode", () => {
-    process.env.MVM_SDK_MODE = "record";
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(() => sb.copyIn("/tmp/x", "/app/x")).toThrow(mvm.SandboxModeError);
+  it("is refused in record mode", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.copyIn("/h", "/g")).toThrow(mvm.SandboxModeError);
+    expect(() => sb.copyOut("/g", "/h")).toThrow(mvm.SandboxModeError);
   });
 });
 
-// ── declared ingress ─────────────────────────────────────────────────
+// ── kill ─────────────────────────────────────────────────────────────
 
-describe("Sandbox.forward (live mode)", () => {
-  it("refuses dynamic forwarding with the signed-plan migration", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(() => sb.forward(8080, 80)).toThrow(/before boot/);
-    expect(readFixtureLog().some((c) => c.startsWith("machine forward"))).toBe(false);
+describe("Sandbox.kill (live mode)", () => {
+  it("sends machine.stop once, however often it is called", () => {
+    const sb = boot("dev", "vm");
+    sb.kill();
+    sb._live!.kill();
+    expect(host.requests("machine.stop")).toEqual([{ id: "vm" }]);
   });
 
-  it("passes declared opaque TCP ingress to machine run", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+  it("writes a stop failure to stderr instead of throwing", () => {
+    const sb = boot("dev", "vm");
+    host.on("machine.stop", failure("BACKEND_ERROR", "already gone"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => sb.kill()).not.toThrow();
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("already gone"));
+  });
 
-    mvm.Sandbox.create("python-dev", {
+  it("frees the process slot so another sandbox can start", () => {
+    const sb = boot("dev", "vm");
+    sb.kill();
+    mvm.Sandbox.create({ image: IMAGE });
+    expect(host.requests("machine.run")).toHaveLength(2);
+  });
+
+  it("[Symbol.dispose] and [Symbol.asyncDispose] stop the machine", async () => {
+    const first = boot("dev", "one");
+    first[Symbol.dispose]();
+    const second = mvm.Sandbox.create({ image: IMAGE });
+    await second[Symbol.asyncDispose]();
+    expect(host.requests("machine.stop")).toEqual([{ id: "one" }, { id: "one" }]);
+  });
+});
+
+// ── forward / ports ──────────────────────────────────────────────────
+
+describe("ingress", () => {
+  it("refuses dynamic forwarding", () => {
+    const sb = boot("dev");
+    expect(() => sb.forward(8080, 80)).toThrow(/declare ingress/);
+    expect(() => sb.forward(0, 80)).toThrow(RangeError);
+  });
+
+  it("passes declared opaque TCP ingress to machine.run", () => {
+    boot("dev", "vm", {
       network: {
         mode: "none",
-        ports: [{
-          mapping_id: 1,
-          proto: "tcp",
-          host_addr: "127.0.0.1",
-          host: 8080,
-          guest_addr: "127.0.0.1",
-          guest: 80,
-          transform: "opaque",
-        }],
+        ports: [
+          {
+            mapping_id: 1,
+            proto: "tcp",
+            host_addr: "127.0.0.1",
+            host: 18080,
+            guest_addr: "127.0.0.1",
+            guest: 8080,
+            transform: "opaque",
+          },
+        ],
       },
     });
-    const run = readFixtureLog()[0];
-    expect(run).toContain("machine run");
-    expect(run).toContain("--port 8080:80");
-    expect(run.split(" ")).not.toContain("-d");
+    expect(host.requests("machine.run")[0].ports).toEqual(["18080:8080"]);
   });
 
-  it("is refused in record mode", () => {
-    process.env.MVM_SDK_MODE = "record";
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(() => sb.forward(8080, 80)).toThrow(mvm.SandboxModeError);
-  });
-});
-
-// ── exec (live mode, dev-only) — Plan 125 D1 TS parity ───────────────
-
-describe("Sandbox.exec (live mode)", () => {
-  it("runs argv and returns captured stdout + exit", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
-      procWaitStdout: "4",
-    });
+  it("refuses ingress that is not opaque loopback TCP", () => {
     process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    const r = sb.exec(["python", "-c", "print(2 + 2)"]);
-
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe("4");
-    const calls = readFixtureLog();
-    expect(calls.some((c) => c.startsWith("machine proc start sb-exec-vm"))).toBe(true);
-    expect(
-      calls.some((c) =>
-        c.startsWith("machine proc wait sb-exec-vm pid-token-abc123"),
+    expect(() =>
+      mvm.Sandbox.create(
+        { image: IMAGE },
+        {
+          network: {
+            mode: "none",
+            ports: [
+              { mapping_id: 1, proto: "tcp", host_addr: "0.0.0.0", host: 1, guest_addr: "127.0.0.1", guest: 1, transform: "opaque" },
+            ],
+          },
+        },
       ),
-    ).toBe(true);
-  });
-
-  it("surfaces a non-zero exit code", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
-      procWaitExit: 3,
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(sb.exec(["false"]).exitCode).toBe(3);
-  });
-
-  it("forwards literal env as -e KEY=VAL", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
-      procWaitStdout: "ok",
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.exec(["env"], { env: { MODE: "test" } });
-
-    const calls = readFixtureLog();
-    const start = calls.find((c) => c.startsWith("machine proc start"));
-    expect(start).toContain("-e MODE=test");
-    expect(start).toContain("-- env");
-  });
-
-  it("raises SandboxDevOnly against a prod template (no proc traffic)", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-prod-vm", build_mode: "prod" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-prod");
-    expect(() => sb.exec(["python", "-c", "x"])).toThrow(mvm.SandboxDevOnly);
-    // Claim 4: must not have shelled `mvmctl machine proc start`.
-    expect(readFixtureLog().some((c) => c.startsWith("machine proc"))).toBe(false);
-  });
-
-  it("is refused in record mode", () => {
-    process.env.MVM_SDK_MODE = "record";
-    const sb = mvm.Sandbox.create("python-dev");
-    expect(() => sb.exec(["python"])).toThrow(mvm.SandboxModeError);
+    ).toThrow(/127\.0\.0\.1/);
+    expect(host.calls).toEqual([]);
   });
 });
 
-// ── async surface — Plan 125 B2 (await sb.exec + await using) ─────────
-
-describe("Sandbox async surface", () => {
-  it("await sb.exec(...) works (await passthrough on sync exec)", async () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-ae-vm", build_mode: "dev" },
-      procWaitStdout: "4",
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    const r = await sb.exec(["python", "-c", "print(2 + 2)"]);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe("4");
-  });
-
-  it("[Symbol.asyncDispose] tears down (await using parity)", async () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-ae-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev");
-    await sb[Symbol.asyncDispose]();
-    expect(readFixtureLog().some((c) => c.startsWith("machine stop "))).toBe(true);
-  });
-});
-
-// ── lifecycle: id + info — Plan 125 B3 ───────────────────────────────
+// ── surface ──────────────────────────────────────────────────────────
 
 describe("Sandbox id + info", () => {
-  it("id is the vmId when live, info reflects live state", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-id-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const sb = mvm.Sandbox.create("python-dev", { workloadId: "wl-1" });
-    expect(sb.id).toBe("sb-id-vm");
-    expect(sb.info()).toEqual({
-      id: "sb-id-vm",
-      workloadId: "wl-1",
-      buildMode: "dev",
-      live: true,
-    });
+  it("is the machine name when live", () => {
+    const sb = boot("prod", "sb-info");
+    expect(sb.id).toBe("sb-info");
+    expect(sb.info()).toEqual({ id: "sb-info", workloadId: "testwid", buildMode: "prod", live: true });
   });
 
-  it("id is the workloadId in record mode, info reflects record state", () => {
-    process.env.MVM_SDK_MODE = "record";
-    const sb = mvm.Sandbox.create("python-dev", { workloadId: "wl-1" });
-    expect(sb.id).toBe("wl-1");
-    expect(sb.info()).toEqual({
-      id: "wl-1",
-      workloadId: "wl-1",
-      buildMode: null,
-      live: false,
-    });
+  it("is the workload id in record mode", () => {
+    const sb = mvm.Sandbox.create("python-3.12", { workloadId: "wid" });
+    expect(sb.info()).toEqual({ id: "wid", workloadId: "wid", buildMode: null, live: false });
+  });
+
+  it("await sb.exec(...) passes the synchronous result through", async () => {
+    const sb = boot("dev");
+    streamReplies(batch([["stdout", "ok"]], { kind: "exited", code: 0 }));
+    expect((await sb.exec(["true"])).stdout).toBe("ok");
   });
 });
 
-// ── CodeSandbox typed helper — Plan 125 C1 ───────────────────────────
+describe("SandboxLiveError", () => {
+  it("carries its message and an optional code", () => {
+    expect(new mvm.SandboxLiveError("plain refusal").message).toBe("plain refusal");
+    expect(new mvm.SandboxLiveError("plain refusal").code).toBeUndefined();
+    expect(new mvm.SandboxLiveError("gone", { code: "NOT_FOUND" }).code).toBe("NOT_FOUND");
+  });
+});
+
+// ── typed helpers ────────────────────────────────────────────────────
 
 describe("CodeSandbox", () => {
-  it("run() returns stdout via python -c", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
-      procWaitStdout: "4",
-    });
+  function codeSandbox(image: string, stdout = "", code = 0): mvm.CodeSandbox {
     process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+    host.on("machine.run", runReply("sb-cs-vm", "dev")).on("machine.stop", {}).on("guest.cp", {});
+    streamReplies(batch(stdout ? [["stdout", stdout]] : [], { kind: "exited", code }));
+    return new mvm.CodeSandbox(image);
+  }
 
-    const cs = new mvm.CodeSandbox("python:slim");
+  it("run() returns stdout via python -c", () => {
+    const cs = codeSandbox("python:slim", "4");
     try {
       expect(cs.run("print(2 + 2)")).toBe("4");
-      const calls = readFixtureLog();
-      expect(
-        calls.some((c) => c.startsWith("machine proc start sb-cs-vm") && c.includes("-- python -c")),
-      ).toBe(true);
+      expect(host.requests("machine.run")[0].image).toBe("python:slim");
+      expect(host.requests("guest.proc.start")[0]).toEqual({
+        id: "sb-cs-vm",
+        argv: ["python", "-c", "print(2 + 2)"],
+      });
     } finally {
       cs.kill();
     }
   });
 
   it("run() throws CodeError on a non-zero exit", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
-      procWaitExit: 1,
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const cs = new mvm.CodeSandbox("python:slim");
+    const cs = codeSandbox("python:slim", "", 1);
     try {
       expect(() => cs.run("import sys; sys.exit(1)")).toThrow(mvm.CodeError);
     } finally {
@@ -912,99 +741,78 @@ describe("CodeSandbox", () => {
     }
   });
 
-  it("installPackage() shells the package manager", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const cs = new mvm.CodeSandbox("python:slim");
+  it("installPackage() runs the package manager", () => {
+    const cs = codeSandbox("python:slim");
     try {
       cs.installPackage("requests");
-      expect(readFixtureLog().some((c) => c.includes("-- pip install requests"))).toBe(true);
+      expect(host.requests("guest.proc.start")[0].argv).toEqual(["pip", "install", "requests"]);
     } finally {
       cs.kill();
     }
   });
 
-  it("runScript() copies then execs the script", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
-      procWaitStdout: "ok",
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const hostScript = path.join(tmpDir, "job.py");
-    fs.writeFileSync(hostScript, "print('ok')");
-
-    const cs = new mvm.CodeSandbox("python:slim");
+  it("runScript() copies then runs the script", () => {
+    const cs = codeSandbox("python:slim", "ok");
+    const script = path.join(tmpDir, "job.py");
+    fs.writeFileSync(script, "print('ok')");
     try {
-      expect(cs.runScript(hostScript)).toBe("ok");
-      const calls = readFixtureLog();
-      expect(calls.some((c) => c.startsWith("machine cp ") && c.includes("sb-cs-vm:/tmp/job.py"))).toBe(true);
-      expect(calls.some((c) => c.includes("-- python /tmp/job.py"))).toBe(true);
+      expect(cs.runScript(script)).toBe("ok");
+      expect(host.requests("guest.cp")).toEqual([
+        { id: "sb-cs-vm", direction: "host_to_guest", host_path: script, guest_path: "/tmp/job.py" },
+      ]);
+      expect(host.requests("guest.proc.start")[0].argv).toEqual(["python", "/tmp/job.py"]);
     } finally {
       cs.kill();
     }
   });
 
   it("a node image uses the node runner", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
-      procWaitStdout: "4",
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const cs = new mvm.CodeSandbox("node:22");
+    const cs = codeSandbox("node:22", "4");
     try {
       cs.run("console.log(2 + 2)");
-      expect(readFixtureLog().some((c) => c.includes("-- node -e"))).toBe(true);
+      expect(host.requests("guest.proc.start")[0].argv).toEqual(["node", "-e", "console.log(2 + 2)"]);
     } finally {
       cs.kill();
     }
   });
 });
 
-// ── BrowserSandbox typed helper — Plan 125 C2 ────────────────────────
-
 describe("BrowserSandbox", () => {
-  it("uses the pinned image, fixed proxy/loopback command, and allowlist", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "obscura", build_mode: "dev" },
-    });
+  function liveBrowser(): void {
     process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+    host.on("machine.run", runReply("browser", "dev")).on("machine.stop", {});
+  }
+
+  it("uses the pinned image, fixed proxy/loopback command, and allowlist", () => {
+    liveBrowser();
     const bs = new mvm.BrowserSandbox("obscura", {
-      network: {
-        mode: "none",
-        egress: { allowlist: [{ host: "example.com", port: 443 }] },
-      },
+      network: { mode: "none", egress: { allowlist: [{ host: "example.com", port: 443 }] } },
     });
     try {
-      const call = readFixtureLog()[0];
-      expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
-      expect(call).toContain("--allow-host example.com:443");
-      expect(call).toContain("-- /obscura --proxy http://127.0.0.1:1080 serve");
-      expect(call).toContain("--host 127.0.0.1 --port 9222");
-      expect(call).not.toContain("private");
-      expect(call).not.toContain("stealth");
+      const request = host.requests("machine.run")[0];
+      expect(request.image).toBe(mvm.OBSCURA_IMAGE);
+      expect(request.egress).toEqual([{ host: "example.com", port: 443 }]);
+      expect(request.command).toEqual([
+        "/obscura", "--proxy", "http://127.0.0.1:1080", "serve", "--host", "127.0.0.1", "--port", "9222",
+      ]);
+      expect(request.ports).toEqual(["9222:9222"]);
     } finally {
       bs.kill();
     }
   });
 
-  it("refuses an Obscura command override before boot", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
+  it("refuses a command override before any call", () => {
+    liveBrowser();
     expect(() => new mvm.BrowserSandbox("obscura", { command: ["/bin/sh"] })).toThrow(
       /does not allow command overrides/,
     );
-    expect(readFixtureLog()).toEqual([]);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("refuses the template-backed browsers in live mode before any call", () => {
+    liveBrowser();
+    expect(() => new mvm.BrowserSandbox("chromium")).toThrow(mvm.SandboxModeError);
+    expect(host.calls).toEqual([]);
   });
 
   it("validates CDP readiness and cleans up after timeout", async () => {
@@ -1015,54 +823,25 @@ describe("BrowserSandbox", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("expected TCP address");
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-    const bs = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
-    expect(await bs.waitUntilReady({ timeoutMs: 1000 })).toBe(
-      "ws://127.0.0.1/devtools/browser/test",
-    );
+    liveBrowser();
+    const bs = new mvm.BrowserSandbox("obscura", { hostPort: address.port });
+    expect(await bs.waitUntilReady({ timeoutMs: 1000 })).toBe("ws://127.0.0.1/devtools/browser/test");
     bs.kill();
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 
-    const failing = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
+    const failing = new mvm.BrowserSandbox("obscura", { hostPort: address.port });
     await expect(failing.waitUntilReady({ timeoutMs: 20, retryMs: 2 })).rejects.toBeInstanceOf(
       mvm.BrowserReadyError,
     );
-    expect(readFixtureLog().some((call) => call.startsWith("machine stop browser --yes"))).toBe(true);
-  });
-
-  it("declares the CDP port and endpoint() returns the host URL", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const bs = new mvm.BrowserSandbox("chromium");
-    try {
-      expect(bs.endpoint()).toBe("http://localhost:9222");
-      expect(readFixtureLog()[0]).toContain("--port 9222:9222");
-    } finally {
-      bs.kill();
-    }
+    expect(host.requests("machine.stop")).toEqual([{ id: "browser" }, { id: "browser" }]);
   });
 
   it("honours a custom host port", () => {
-    const script = writeFixtureMvmctl({
-      upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
-    });
-    process.env.MVM_SDK_MODE = "live";
-    process.env.MVM_CLI_BIN = script;
-
-    const bs = new mvm.BrowserSandbox("chromium", { hostPort: 18222 });
+    liveBrowser();
+    const bs = new mvm.BrowserSandbox("obscura", { hostPort: 18222 });
     try {
       expect(bs.endpoint()).toBe("http://localhost:18222");
-      expect(readFixtureLog()[0]).toContain("--port 18222:9222");
+      expect(host.requests("machine.run")[0].ports).toEqual(["18222:9222"]);
     } finally {
       bs.kill();
     }
@@ -1070,40 +849,5 @@ describe("BrowserSandbox", () => {
 
   it("throws on an unknown browser", () => {
     expect(() => new mvm.BrowserSandbox("safari")).toThrow(/unknown browser/);
-  });
-});
-
-describe("SandboxLiveError rendering", () => {
-  // The captured stderr is the only place the refusing verb explains itself.
-  // Storing it on the error and rendering only the summary line is the same as
-  // not capturing it: a live documented-surface failure was undiagnosable from
-  // its CI log for exactly this reason.
-  it("renders the stderr that says why", () => {
-    const error = new mvm.SandboxLiveError(
-      "`mvmctl machine proc start` failed with exit code 1",
-      {
-        argv: ["mvmctl", "machine", "proc", "start", "--", "uname", "-s"],
-        exitCode: 1,
-        stderr: "Error: the guest refused the request\n",
-      },
-    );
-
-    expect(error.message).toContain("failed with exit code 1");
-    expect(error.message).toContain("the guest refused the request");
-    expect(error.message).toContain("mvmctl machine proc start -- uname -s");
-
-    // The structured attributes stay available and unchanged.
-    expect(error.exitCode).toBe(1);
-    expect(error.stderr).toBe("Error: the guest refused the request\n");
-    expect(error.argv[0]).toBe("mvmctl");
-  });
-
-  it("renders only its message when there is no detail", () => {
-    expect(new mvm.SandboxLiveError("plain refusal").message).toBe(
-      "plain refusal",
-    );
-    expect(
-      new mvm.SandboxLiveError("plain refusal", { stderr: "   \n" }).message,
-    ).toBe("plain refusal");
   });
 });

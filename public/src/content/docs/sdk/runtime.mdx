@@ -18,7 +18,7 @@ For the host/guest trust boundary, see [SDK security model](/sdk/security-model/
 The current local imperative runtime path has two transports:
 
 - Record mode runs a `Sandbox.create(...)` script on the host and records operations into Workload IR for build or admission checks.
-- Live mode runs the script with `MVM_SDK_MODE=live`; the SDK shells through the invoking `mvmctl` binary to boot a real microVM and apply command/file operations.
+- Live mode runs the script with `MVM_SDK_MODE=live`; the SDK calls the host library `libmvm_hostlib` in-process to boot a real microVM and apply command/file operations. It never runs `mvmctl`.
 
 <Tabs syncKey="runtime-sdk-current-surface">
 <TabItem label="Python">

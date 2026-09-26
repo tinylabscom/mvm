@@ -230,7 +230,7 @@ const TIER_C: &[SdkErrorType] = &[
     SdkErrorType {
         name: "PayloadTooLarge",
         base: ErrorBase::Named("MvmTransportError"),
-        doc: "The encoded request exceeded the payload cap, refused before any               subprocess spawned.",
+        doc: "The encoded request exceeded the payload cap, refused before               anything was sent.",
         status: None,
         code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
@@ -272,7 +272,7 @@ const TIER_C: &[SdkErrorType] = &[
     SdkErrorType {
         name: "EmittingContextError",
         base: ErrorBase::Runtime,
-        doc: "A transport call fired inside an emit subprocess, where no live               microVM exists.",
+        doc: "A transport call fired while `mvm emit` was running the script to               lower its declarations, where no live microVM exists.",
         status: None,
         code: None,
         surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],

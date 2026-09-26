@@ -177,14 +177,17 @@ pub struct CliWorld {
     pub sdk_output: Option<Output>,
     /// SDK fixture surface most recently exercised (`decorator` or `runtime`).
     pub sdk_surface: Option<String>,
-    /// `mvmctl` argv the recording double captured, one entry per invocation,
-    /// keyed by the language whose fixture produced it.
+    /// Public-surface name lists the surface fixtures emitted, keyed by
+    /// `<language>-surface`.
     pub sdk_recorded_argv: BTreeMap<String, Vec<Vec<String>>>,
+    /// Host-library calls a live fixture made, each a `[method, request]`
+    /// pair, keyed by the language whose fixture made them.
+    pub sdk_recorded_calls: BTreeMap<String, Vec<serde_json::Value>>,
 
     /// Per-language JSON emitted by the Tier A constructor fixtures,
     /// keyed by language, for comparison against the golden document.
     pub sdk_ctor_docs: BTreeMap<String, String>,
-    /// Scenario-local directory holding the recording double's argv logs.
+    /// Scenario-local directory holding the recorded host-library call logs.
     pub sdk_argv_log_dir: Option<tempfile::TempDir>,
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.

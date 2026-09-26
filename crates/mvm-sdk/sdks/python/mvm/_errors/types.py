@@ -68,8 +68,8 @@ class MsgpackUnavailable(RuntimeError):
 
 
 class PayloadTooLarge(MvmTransportError):
-    """The encoded request exceeded the payload cap, refused before any
-    subprocess spawned.
+    """The encoded request exceeded the payload cap, refused before
+    anything was sent.
     """
 
 
@@ -93,8 +93,8 @@ class SecretInArgWarning(UserWarning):
 
 
 class EmittingContextError(RuntimeError):
-    """A transport call fired inside an emit subprocess, where no live
-    microVM exists.
+    """A transport call fired while `mvm emit` was running the script
+    to lower its declarations, where no live microVM exists.
     """
 
 

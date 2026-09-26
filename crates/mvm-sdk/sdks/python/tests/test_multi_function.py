@@ -9,21 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
 import mvm
 
-FAKE_MVM = (
-    Path(__file__).parent / "fixtures" / "fake-mvm"
-).resolve()
-
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_state() -> None:
     mvm.reset()
-    monkeypatch.setenv("MVM_MVM_BIN", str(FAKE_MVM))
     yield
     mvm.reset()
 
@@ -98,129 +92,6 @@ def test_first_decoration_carries_app_level_config() -> None:
     assert len(payload["apps"][0]["entrypoints"]) == 2
 
 
-@pytest.mark.skip(
-    reason="cross-process test needs `mvmctl validate` (not yet wired in "
-    "mvm; the validator itself is exercised by the 39 Rust tests in "
-    "crates/mvm-ir/tests/validate.rs)"
-)
-def test_validator_rejects_no_primary_in_long_form() -> None:
-    """The long form `mv.app(entrypoints=[...])` doesn't auto-mark
-    primary. A multi-function app with zero primaries must be
-    rejected by the validator (E_NO_PRIMARY_ENTRYPOINT)."""
-    mvm.workload(id="math-svc")
-
-    @mvm.app(
-        name="math-svc",
-        source=mvm.local_path("."),
-        image=mvm.nix_packages(["python312"]),
-        resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        dependencies=mvm.no_deps(),
-        entrypoints=[
-            mvm.entrypoint_function(module="math", function="add"),
-            mvm.entrypoint_function(module="math", function="mul"),
-        ],
-    )
-    def _():
-        pass
-
-    # Round-trip through `mvm validate` to exercise the host
-    # validator. Use a subprocess for true integration.
-    import subprocess
-    import sys
-
-    ir = mvm.emit_json()
-    cargo_root = Path(__file__).parent.parent.parent.parent.parent
-    bin_path = cargo_root / "target" / "debug" / "mvm"
-    proc = subprocess.run(
-        [str(bin_path), "validate", "/dev/stdin"],
-        input=ir,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 1, f"expected validate to fail; got {proc.stdout}"
-    out = json.loads(proc.stdout)
-    codes = [e["code"] for e in out["errors"]]
-    assert "E_NO_PRIMARY_ENTRYPOINT" in codes
-
-
-@pytest.mark.skip(
-    reason="cross-process test needs `mvmctl validate` (not yet wired in "
-    "mvm; the validator itself is exercised by the 39 Rust tests in "
-    "crates/mvm-ir/tests/validate.rs)"
-)
-def test_validator_rejects_multiple_primaries() -> None:
-    mvm.workload(id="math-svc")
-
-    @mvm.app(
-        name="math-svc",
-        source=mvm.local_path("."),
-        image=mvm.nix_packages(["python312"]),
-        resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        dependencies=mvm.no_deps(),
-        entrypoints=[
-            mvm.entrypoint_function(module="math", function="add", primary=True),
-            mvm.entrypoint_function(module="math", function="mul", primary=True),
-        ],
-    )
-    def _():
-        pass
-
-    import subprocess
-
-    ir = mvm.emit_json()
-    cargo_root = Path(__file__).parent.parent.parent.parent.parent
-    bin_path = cargo_root / "target" / "debug" / "mvm"
-    proc = subprocess.run(
-        [str(bin_path), "validate", "/dev/stdin"],
-        input=ir,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 1
-    out = json.loads(proc.stdout)
-    codes = [e["code"] for e in out["errors"]]
-    assert "E_MULTIPLE_PRIMARY_ENTRYPOINTS" in codes
-
-
-@pytest.mark.skip(
-    reason="cross-process test needs `mvmctl validate` (not yet wired in "
-    "mvm; the validator itself is exercised by the 39 Rust tests in "
-    "crates/mvm-ir/tests/validate.rs)"
-)
-def test_validator_rejects_duplicate_module_function_pair() -> None:
-    mvm.workload(id="math-svc")
-
-    @mvm.app(
-        name="math-svc",
-        source=mvm.local_path("."),
-        image=mvm.nix_packages(["python312"]),
-        resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        dependencies=mvm.no_deps(),
-        entrypoints=[
-            mvm.entrypoint_function(module="math", function="add", primary=True),
-            mvm.entrypoint_function(module="math", function="add"),  # duplicate
-        ],
-    )
-    def _():
-        pass
-
-    import subprocess
-
-    ir = mvm.emit_json()
-    cargo_root = Path(__file__).parent.parent.parent.parent.parent
-    bin_path = cargo_root / "target" / "debug" / "mvm"
-    proc = subprocess.run(
-        [str(bin_path), "validate", "/dev/stdin"],
-        input=ir,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 1
-    out = json.loads(proc.stdout)
-    codes = [e["code"] for e in out["errors"]]
-    assert "E_DUPLICATE_ENTRYPOINT_FUNCTION" in codes
-
-
 def test_app_rejects_both_entrypoint_and_entrypoints() -> None:
     mvm.workload(id="x")
     with pytest.raises(ValueError, match="not both"):
@@ -252,18 +123,11 @@ def test_app_rejects_neither_entrypoint_nor_entrypoints() -> None:
 
 
 def test_dispatch_to_specific_function_via_remote_function(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each `RemoteFunction` returned from a multi-function decoration
-    dispatches against its own function name once the wrapper supports
-    `--fn` (W11). Today the SDK passes `--fn=<wrapped-fn-name>` via
-    the WorkloadRef path — direct `RemoteFunction` calls don't pass
-    `--fn` (single-function wrappers use the static wrapper.json
-    binding). Test that each handle still dispatches correctly to
-    the same workload."""
-    record = tmp_path / "record"
-    monkeypatch.setenv("MVM_FAKE_MVM_RECORD", str(record))
-    monkeypatch.setenv("MVM_FAKE_MVM_INVOKE_OUT", "5")
+    dispatches to its own body while both stay bound to the one workload."""
+    monkeypatch.setenv("MVM_NO_VM", "1")
 
     @mvm.func(name="math-svc", module="math")
     async def add(a: int, b: int) -> int:
@@ -273,11 +137,6 @@ def test_dispatch_to_specific_function_via_remote_function(
     async def mul(a: int, b: int) -> int:
         return a * b
 
-    asyncio.run(add(2, 3))
-    asyncio.run(mul(4, 5))
-
-    text = record.read_text()
-    invoke_blocks = [b for b in text.split("\n--\n") if "subcommand=invoke" in b]
-    assert len(invoke_blocks) == 2
-    for block in invoke_blocks:
-        assert "workload=math-svc" in block
+    assert asyncio.run(add(2, 3)) == 5
+    assert asyncio.run(mul(4, 5)) == 20
+    assert add.workload_id == mul.workload_id == "math-svc"

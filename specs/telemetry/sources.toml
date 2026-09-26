@@ -193,17 +193,6 @@ gap = "Driver diagnostics and forwarded workload output reach the developer term
 required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
 
 [[script_source]]
-path = "crates/mvm-sdk/sdks/python/mvm/_session.py"
-anchor = "warnings.warn"
-language = "python"
-[script_source.capture]
-kind = "runtime-gap"
-role = "host"
-owner = "language SDK host driver"
-gap = "Abandoned-session warnings surface only through the Python warnings machinery."
-required_witness = "Host-local collection receives session-lifecycle diagnostics."
-
-[[script_source]]
 path = "crates/mvm-sdk/sdks/python/mvm/_remote.py"
 anchor = "warnings.warn"
 language = "python"
