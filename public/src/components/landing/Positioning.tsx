@@ -40,7 +40,7 @@ const ROWS: Row[] = [
   {
     label: "Process",
     heading: "Runtime",
-    body: "Boot and run a machine imperatively, called from a script or another process. Python and Node.js ship a runtime client today; a Rust lifecycle client is planned, not shipped.",
+    body: "Boot and run a machine imperatively, called from a script or another process. Python, Node.js and Rust ship a runtime client today, all driving the same in-process host library rather than running mvmctl.",
     linkLabel: "Node.js SDK docs",
     linkHref: "sdk/nodejs/",
     langs: [

@@ -78,13 +78,9 @@ export const greet = mvm.app({
     source: "crates/mvm-sdk/sdks/python/README.md",
     code: `import mvm as mv
 
-result = mv.Machine.run(
-    image="alpine:latest",
-    command=["uname", "-a"],
-    net=True,
-    allow_hosts=["example.com:443"],
-)
-print(result.stdout)`,
+vm = mv.Machine.run("alpine:latest", allow_hosts=["example.com:443"], ttl_seconds=600)
+print(vm.name, vm.build_mode, vm.inspect()["status"])
+vm.stop()`,
   },
   {
     id: "sdk-node",
@@ -93,26 +89,32 @@ print(result.stdout)`,
     source: "crates/mvm-sdk/sdks/typescript/README.md",
     code: `import { Machine } from "@runmvm/mvm";
 
-const result = Machine.run({
-  image: "alpine:latest",
-  command: ["uname", "-a"],
-  net: true,
-  allowHosts: ["example.com:443"],
-});
-console.log(result.stdout);`,
+const vm = Machine.run("alpine:latest", { allowHosts: ["example.com:443"], ttlSeconds: 600 });
+console.log(vm.name, vm.inspect().status);
+vm.stop();`,
   },
   {
     id: "sdk-rust",
     label: "Rust",
     language: "rust",
-    source: "crates/mvm-sdk/README.md",
-    code: `use mvm_sdk::{Machine, MachineCheckArtifact, MachineRun};
+    source: "public/src/content/docs/getting-started/rust-quickstart.md",
+    code: `use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, MvmClient, RootfsSource};
 
-let result = MachineRun::builder()
-    .image("alpine")
-    .net(true)
-    .command(["uname", "-a"])
-    .run()?;`,
+// inside an async context:
+let client = LocalBackend::new();
+
+let image: RootfsSource = "docker.io/library/nginx:1.27".parse()?;
+let request = LaunchRequest::builder(LifecycleMode::Transient, image)
+    .name("web")
+    .cpus(2)
+    .memory_mib(512)
+    .port("8080:80")
+    .allow_egress("api.example.com", 443)
+    .ttl_seconds(1800)
+    .build()?;
+
+let launched = client.launch(request).await?;
+println!("started {} under plan {}", launched.machine.name, launched.plan_id);`,
   },
   {
     id: "cli-run",
