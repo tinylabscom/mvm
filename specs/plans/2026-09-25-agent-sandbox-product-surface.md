@@ -206,10 +206,19 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
-- [ ] per-session integrity summary (event count, chain head, Merkle root)
-- [ ] hash-chained session ledger (plan id, snapshot roots, image/kernel identity)
-- [ ] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
-- [ ] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
+- [x] per-session integrity summary (event count, chain head, Merkle root)
+      — a chain-signed `session.sealed` entry at exit, failed boot, and
+      persistent stop (`mvm_hostd::audit::session`)
+- [x] hash-chained session ledger (plan id, image/kernel identity) — derived
+      from the chain: each seal links the previous one, so there is no second
+      file or trust root
+- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
+      reserved and unset until PS-08 records snapshot lineage per session
+- [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
+      — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
+      `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`
+      and `NOT_FOUND`, each with its own exit status
+- [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
 - [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
