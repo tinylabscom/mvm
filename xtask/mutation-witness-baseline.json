@@ -259,6 +259,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/audit/session.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        8
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
       "package": "mvm-hostd",
       "claims": [

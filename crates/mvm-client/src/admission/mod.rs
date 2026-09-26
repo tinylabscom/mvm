@@ -1080,6 +1080,13 @@ pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
     if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
+    // A failed boot is the end of its session.
+    if let Err(e) = ctx.emitter.seal_session(
+        ctx.admitted.plan(),
+        mvm_hostd::audit::session::SealReason::Failed,
+    ) {
+        tracing::warn!(error = %format!("{e:#}"), "could not seal the failed session (non-fatal)");
+    }
 }
 
 #[cfg(test)]
