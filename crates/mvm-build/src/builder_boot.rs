@@ -42,8 +42,9 @@ pub use payload::{
     PayloadManifest, install_payload, verify_unpacked_payload,
 };
 pub use stage::{
-    BootPayloadSource, PAYLOAD_FILE_NAME, StageBootError, read_image_boot_abi,
-    register_boot_payload_source, stage_builder_boot, stage_image_boot, supported_image_abis,
+    BootPayloadSource, PAYLOAD_FILE_NAME, StageBootError, current_payload_digest,
+    read_image_boot_abi, register_boot_payload_source, stage_builder_boot, stage_image_boot,
+    supported_image_abis,
 };
 
 /// Where the payload's binaries and manifest sit inside the initramfs,

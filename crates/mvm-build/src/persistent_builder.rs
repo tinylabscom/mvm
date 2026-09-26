@@ -783,6 +783,25 @@ pub struct SessionRecord {
     /// down an upgraded user's existing builder immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_unix_secs: Option<u64>,
+    /// Digest of the builder boot payload the session booted with. Absent for
+    /// a session that booted its image's baked binaries, or that an `mvmctl`
+    /// predating the payload started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_payload_digest: Option<String>,
+}
+
+/// Whether a session runs the builder binaries this process would boot it
+/// with.
+///
+/// A session keeps whatever `mvm-host-vm-init` and `mvm-builderd` it booted
+/// with for as long as it lives, so an `mvmctl` carrying different ones must
+/// not dispatch into it. With no payload of its own (`current` is `None`), a
+/// process cannot tell, and keeps the session.
+pub fn session_payload_is_current(recorded: Option<&str>, current: Option<&str>) -> bool {
+    match current {
+        None => true,
+        Some(current) => recorded == Some(current),
+    }
 }
 
 /// Why the invocation-driven keeper should stop the persistent builder.
@@ -977,6 +996,10 @@ fn wait_for_started_session(marker: &Path) -> SessionAcquisition {
 /// active session, fall back to single-shot" signals as far as
 /// the routing layer is concerned. Never errors: a stale record
 /// shouldn't break the user's build.
+///
+/// A live session running other builder binaries than this process's boot
+/// payload is stopped and not returned, so the caller starts a fresh one (or
+/// falls back to a single-shot builder) instead of dispatching into stale code.
 pub fn read_active_session() -> Option<SessionRecord> {
     let path = session_record_path()?;
     let body = std::fs::read(&path).ok()?;
@@ -984,7 +1007,31 @@ pub fn read_active_session() -> Option<SessionRecord> {
     if !supervisor_alive(record.supervisor_pid) {
         return None;
     }
+    let current = crate::builder_boot::current_payload_digest();
+    if !session_payload_is_current(
+        record.boot_payload_digest.as_deref(),
+        current.as_ref().map(|digest| digest.as_str()),
+    ) {
+        tracing::info!(
+            session = %record.session_id,
+            booted_with = record.boot_payload_digest.as_deref().unwrap_or("its image's own binaries"),
+            "stopping a persistent builder that runs other builder binaries than this mvmctl"
+        );
+        stop_session(&record);
+        return None;
+    }
     Some(record)
+}
+
+/// Stop a live session and forget it: ask its dispatch loop to shut down,
+/// signal its supervisor, and remove the record.
+pub fn stop_session(record: &SessionRecord) {
+    let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path);
+    let _ = supervisor.shutdown();
+    terminate_supervisor(record.supervisor_pid);
+    if let Some(path) = session_record_path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Mark the active session as used. Best-effort: a failed touch should not make
@@ -1024,12 +1071,7 @@ pub fn enforce_active_session_policy(
         return None;
     };
 
-    let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path);
-    let _ = supervisor.shutdown();
-    terminate_supervisor(record.supervisor_pid);
-    if let Some(path) = session_record_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    stop_session(&record);
     Some(reason)
 }
 
@@ -1523,12 +1565,48 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: None,
         };
         let json = serde_json::to_vec(&record).unwrap();
         let back: SessionRecord = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.session_id, "abc");
         assert_eq!(back.supervisor_pid, 4242);
         assert_eq!(back.last_activity_unix_secs, Some(1234567890));
+    }
+
+    #[test]
+    fn a_session_records_the_payload_it_booted_with() {
+        let json = r#"{
+            "session_id": "abc",
+            "dispatch_socket_path": "/tmp/sock",
+            "job_dir": "/tmp/jobs",
+            "workspace_root": "/work",
+            "supervisor_pid": 4242,
+            "boot_payload_digest": "15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0"
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            record.boot_payload_digest.as_deref(),
+            Some("15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0")
+        );
+        let back: SessionRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(back.boot_payload_digest, record.boot_payload_digest);
+    }
+
+    /// A session keeps the builder binaries it booted with. One booted with a
+    /// different payload, or with its image's own binaries, is replaced; one
+    /// booted with this process's payload is reused.
+    #[test]
+    fn a_session_is_reused_only_when_it_runs_this_payload() {
+        let ours = "a".repeat(64);
+        let theirs = "b".repeat(64);
+        assert!(session_payload_is_current(Some(&ours), Some(&ours)));
+        assert!(!session_payload_is_current(Some(&theirs), Some(&ours)));
+        assert!(!session_payload_is_current(None, Some(&ours)));
+        // A process with no payload of its own cannot judge, and keeps it.
+        assert!(session_payload_is_current(Some(&theirs), None));
+        assert!(session_payload_is_current(None, None));
     }
 
     #[test]
@@ -1583,6 +1661,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1604,6 +1683,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1625,6 +1705,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1652,6 +1733,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: std::process::id(),
             last_activity_unix_secs: Some(1),
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
@@ -1683,6 +1765,7 @@ mod tests {
             // This process: alive by construction.
             supervisor_pid: std::process::id(),
             last_activity_unix_secs: None,
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
@@ -1768,6 +1851,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: DEFINITELY_DEAD_PID,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),

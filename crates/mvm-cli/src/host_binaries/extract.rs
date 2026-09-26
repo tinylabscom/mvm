@@ -7,7 +7,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use mvm_build::builder_boot::BuilderBootPayload;
+use mvm_build::builder_boot::{BootPayloadError, BootPayloadSource, BuilderBootPayload};
 
 use super::source::{PayloadBinary, host_payload};
 
@@ -66,6 +66,26 @@ fn extract_payload(payload: &[PayloadBinary], cache_root: &Path) -> std::io::Res
         }
     }
     Ok(target)
+}
+
+/// Where this process extracts its payload: `~/.mvm/cache/host-bins`.
+pub fn host_bin_cache_root() -> PathBuf {
+    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins")
+}
+
+/// The builder boot payload source `mvmctl` registers with `mvm-build`, which
+/// cannot reach the embedded binaries itself.
+pub struct EmbeddedBootPayload;
+
+impl BootPayloadSource for EmbeddedBootPayload {
+    fn boot_payload(&self) -> Result<BuilderBootPayload, BootPayloadError> {
+        let cache_root = host_bin_cache_root();
+        builder_boot_payload(&cache_root).map_err(|source| BootPayloadError::Io {
+            op: "extracting mvmctl's embedded builder binaries into",
+            path: cache_root,
+            source,
+        })
+    }
 }
 
 /// The builder boot payload for this process.

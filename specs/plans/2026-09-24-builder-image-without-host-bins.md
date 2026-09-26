@@ -676,7 +676,7 @@ the Stage 0 flake reference follows W8's re-pointing.
         Every backend stages its boot through `stage_builder_boot` /
         `stage_image_boot`. Table test:
         `the_builder_boot_contract_composes_onto_every_shipped_driver`.
-- [ ] **W4 — wire every backend.** HVF and Firecracker `builder_spec` and
+- [x] **W4 — wire every backend.** HVF and Firecracker `builder_spec` and
       `persistent_builder_spec`; libkrun, including relaxing `validate_boot_config`
       with a test that `rootfs + initramfs` is accepted and `root_dir +
       initramfs` still refused; QEMU steady state. Stop packing job-side
@@ -692,9 +692,23 @@ the Stage 0 flake reference follows W8's re-pointing.
       Live witnesses: a builder job completes on HVF (Apple Silicon
       host) and Firecracker (the KVM box). libkrun and QEMU get one explicit
       `--builder` run each; record them in the delivery note.
-- [ ] **W5 — persistent-builder payload staleness.** Record the payload digest
+      - Done: `mvmctl` registers `host_binaries::extract::EmbeddedBootPayload`
+        as the payload source at startup, so every builder boot on every
+        backend (one-shot, shell job, persistent) carries the payload, legacy
+        ABI-0 images included. The VMM-level wiring and the read-only roots
+        landed with W3. Deviation: job-side `mvm-bins` packing stays. The
+        in-tree builder flake and a pair build of `builder-vm.default` still
+        read `MVM_HOST_BIN_DIR=/mvm-bins` inside a builder job, so removing it
+        now would break the nested builder-image build; it goes with W8, as
+        *Sequencing* step 3 already lists it.
+- [x] **W5 — persistent-builder payload staleness.** Record the payload digest
       in the persistent builder's state; on mismatch, stop and restart it.
       Tests: a mismatched digest triggers a restart and a matching one reuses.
+      - Done: `boot_payload_digest` in both session records;
+        `persistent_builder::session_payload_is_current` decides, and
+        `read_active_session` (every build's adoption path) and the CLI's
+        `start` stop a session booted with other binaries — or with none,
+        from an `mvmctl` that predates the payload — before starting afresh.
 - [ ] **W6 — delete the HVF patcher.** Remove `hvf_builder_image.rs`'s bake,
       `builder_runner/inject.rs`, the `mvm-rootfs-patcher` bin and its
       `SEED_BINARIES` entry, and `hvf-rootfs-inject`. Teach `cache prune`
