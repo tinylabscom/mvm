@@ -178,6 +178,11 @@ pub struct Recorder {
     /// inject a local `Metrics` instance to assert; production
     /// wires the singleton via `Recorder::with_global_metrics()`.
     metrics: Option<Arc<Metrics>>,
+    /// The machine this recorder speaks for, when it speaks for exactly one.
+    /// Stamped as `vm_name` on every unbound entry, because an unbound entry
+    /// carries sentinel plan and image fields and would otherwise say nothing
+    /// about which workload it describes.
+    vm_name: Option<String>,
 }
 
 impl Recorder {
@@ -190,7 +195,21 @@ impl Recorder {
             signer,
             default_tenant,
             metrics: None,
+            vm_name: None,
         }
+    }
+
+    /// Attribute every unbound entry to one machine by stamping it with a
+    /// `vm_name` label. An empty name attributes nothing.
+    ///
+    /// The per-VM network endpoint records its egress decisions unbound — it
+    /// holds no plan — and several machines share one tenant chain, so without
+    /// this a reader cannot tell whose refusal a `host.flow.denied` was. A label
+    /// the caller passes explicitly wins over this one.
+    #[must_use]
+    pub fn with_vm_name(mut self, vm_name: &str) -> Self {
+        self.vm_name = (!vm_name.is_empty()).then(|| vm_name.to_string());
+        self
     }
 
     /// Attach a metrics registry. Every successful emit
@@ -324,7 +343,11 @@ impl Recorder {
         event_name: String,
         extras: impl IntoIterator<Item = (String, String)>,
     ) -> PlanAuditEntry {
-        let labels = merge_extras(category, extras);
+        let attribution = self
+            .vm_name
+            .iter()
+            .map(|name| (LABEL_VM_NAME.to_string(), name.clone()));
+        let labels = merge_extras(category, attribution.chain(extras));
         PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: self.default_tenant.clone(),
@@ -340,6 +363,10 @@ impl Recorder {
         }
     }
 }
+
+/// The label naming the machine an unbound entry describes. The same key the
+/// CLI's plan-bound emitter uses for a machine name.
+pub const LABEL_VM_NAME: &str = "vm_name";
 
 /// Sentinel `plan_id` for unbound events. Recognizable in the
 /// audit stream so consumers can filter "real plans" cleanly.
@@ -597,6 +624,57 @@ pub(crate) mod tests {
             Some(&"0.14.0".to_string())
         );
         assert_eq!(entries[0].labels.get("category"), Some(&"host".to_string()));
+    }
+
+    #[test]
+    fn a_recorder_for_one_machine_names_it_on_every_unbound_entry() {
+        let (recorder, signer) = fixture_recorder();
+        let recorder = recorder.with_vm_name("vm-a");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            recorder
+                .record_unbound(EventCategory::Host, "host.flow.denied", [])
+                .await
+                .unwrap();
+            recorder
+                .record_unbound(
+                    EventCategory::Dns,
+                    "dns.refused",
+                    [(LABEL_VM_NAME.to_string(), "explicit".to_string())],
+                )
+                .await
+                .unwrap();
+        });
+        let entries = signer.entries();
+        assert_eq!(
+            entries[0].labels.get(LABEL_VM_NAME).map(String::as_str),
+            Some("vm-a")
+        );
+        assert_eq!(
+            entries[1].labels.get(LABEL_VM_NAME).map(String::as_str),
+            Some("explicit"),
+            "a label the caller passed wins"
+        );
+    }
+
+    #[test]
+    fn an_empty_machine_name_attributes_nothing() {
+        let (recorder, signer) = fixture_recorder();
+        let recorder = recorder.with_vm_name("");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            recorder
+                .record_unbound(EventCategory::Host, "host.flow.denied", [])
+                .await
+                .unwrap();
+        });
+        assert!(!signer.entries()[0].labels.contains_key(LABEL_VM_NAME));
     }
 
     #[test]

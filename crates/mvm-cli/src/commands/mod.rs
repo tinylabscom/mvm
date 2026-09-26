@@ -159,7 +159,8 @@ pub(in crate::commands) enum Commands {
     /// Report whether a verified runtime pack is ready for instant launch
     #[command(display_order = 6)]
     Prepare(vm::prepare::Args),
-    /// Explain a run after the fact from the chain-signed audit log
+    /// Explain a run after the fact from the chain-signed audit log, including
+    /// the egress it was refused and how to allow it
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
     /// Measure this host's launch latency against the published budgets

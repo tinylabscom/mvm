@@ -23,6 +23,10 @@ pub(super) struct RunJsonSummary {
     pub(super) phase_timing: Option<crate::commands::vm::phase_timing::RunPhaseTimingReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) receipt_path: Option<PathBuf>,
+    /// Every distinct egress refusal the run hit, counted, with its reason and
+    /// remedy. Always present; empty when nothing was refused.
+    #[serde(default)]
+    pub(super) egress_denials: Vec<crate::commands::vm::egress_denials::DeniedDestination>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +100,17 @@ impl RunJsonSummary {
             outcome: ReceiptOutcome::from_exec_output(output),
             phase_timing: output.phase_timing.clone(),
             receipt_path,
+            egress_denials: Vec::new(),
         }
+    }
+
+    /// Attach the run's egress refusals.
+    pub(super) fn with_egress_denials(
+        mut self,
+        denials: Vec<crate::commands::vm::egress_denials::DeniedDestination>,
+    ) -> Self {
+        self.egress_denials = denials;
+        self
     }
 }
 

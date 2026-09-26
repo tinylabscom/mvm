@@ -334,7 +334,10 @@ impl EndpointNetworkProjection {
         };
         Self {
             gate: Arc::new(gate),
-            recorder: build_audit_recorder(&cfg.tenant_id).map(Arc::new),
+            // Attributed to this VM: the endpoint records unbound, and every
+            // machine on the host shares the tenant's chain.
+            recorder: build_audit_recorder(&cfg.tenant_id)
+                .map(|recorder| Arc::new(recorder.with_vm_name(&cfg.instance_id))),
         }
     }
 
@@ -584,6 +587,40 @@ mod tests {
             build_audit_recorder("local").is_some(),
             "signer key present ⇒ recorder attaches"
         );
+    }
+
+    /// The endpoint's refusals land in the tenant chain every machine on the
+    /// host shares, so each one must name the machine it refused for — or no
+    /// reader, live or after the fact, can say whose egress was blocked.
+    #[test]
+    fn the_endpoint_recorder_names_its_machine_on_every_entry() {
+        let dir = tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.instance_id = "denied-vm".into();
+
+        let projection = EndpointNetworkProjection::from_config(&cfg);
+        let recorder = projection.recorder().expect("signer key present");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(recorder.record_unbound(
+                crate::supervisor::audit_recorder::EventCategory::Host,
+                "host.flow.denied",
+                [("reason".to_string(), "policy_denied".to_string())],
+            ))
+            .unwrap();
+
+        let chain = std::fs::read_to_string(
+            mvm_core::config::mvm_audit_dir().join(format!("{}.jsonl", cfg.tenant_id)),
+        )
+        .unwrap();
+        assert!(chain.contains(r#""vm_name":"denied-vm""#), "{chain}");
     }
 
     #[test]

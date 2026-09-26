@@ -902,6 +902,10 @@ pub fn endpoint_config_for_identity(
 fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_json::Value {
     let mut cfg = serde_json::json!({
         "tenant_id": params.tenant,
+        // The machine this endpoint serves. It stamps every audit entry it
+        // records with it, so a reader of the shared tenant chain can tell
+        // whose egress decision each one was.
+        "instance_id": params.vm_name,
         "secrets": params.secrets,
         // Per-destination redaction policy from the signed plan; the endpoint
         // applies it to the cleartext it forwards. Default (all-off) is harmless.
@@ -2376,6 +2380,10 @@ mod tests {
         assert_eq!(cfg["egress_mode"], "wire");
         // Base fields carried through the extraction.
         assert_eq!(cfg["tenant_id"], "tenant-x");
+        assert_eq!(
+            cfg["instance_id"], "cfg-vm",
+            "the endpoint is told which machine its audit entries describe"
+        );
         assert_eq!(cfg["secrets"], serde_json::json!([]));
         assert_eq!(cfg["transport"]["kind"], "uds");
         // No remote resolver / binding_store_dir requested ⇒ the keys must be

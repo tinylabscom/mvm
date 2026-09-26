@@ -30,6 +30,9 @@ Last updated: 2026-09-26
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
+    - [ ] denial → policy draft selector (Grant / Skip)
+    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
