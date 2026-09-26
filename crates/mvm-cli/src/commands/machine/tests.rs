@@ -1403,6 +1403,7 @@ fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> Ma
         memory: None,
         mem_initial: None,
         profile,
+        policy: None,
         force: false,
         json: false,
     }
@@ -2121,6 +2122,7 @@ fn create_persists_machine_spec_under_data_dir() {
         memory: Some("1G".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Dev),
+        policy: None,
         force: false,
         json: false,
     };
@@ -2155,6 +2157,7 @@ fn create_auto_generates_a_name_when_omitted() {
         memory: None,
         mem_initial: None,
         profile: None,
+        policy: None,
         force: false,
         json: false,
     }
@@ -2206,6 +2209,7 @@ volumes = ["./state.img:/data:1G:rw"]
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Dev),
+        policy: None,
         force: false,
         json: false,
     }
@@ -2216,7 +2220,8 @@ volumes = ["./state.img:/data:1G:rw"]
     assert!(spec.net);
     assert!(spec.gpu);
     assert_eq!(spec.gpu_device, Some(1));
-    assert_eq!(spec.allow_host, vec!["api.example.com"]);
+    // Through the same policy fold `run` uses, so the host is canonical.
+    assert_eq!(spec.allow_host, vec!["api.example.com:443"]);
     assert_eq!(spec.cpus, 4);
     assert_eq!(spec.memory, "2G");
     assert_eq!(spec.mem_initial.as_deref(), Some("512M"));
@@ -2251,6 +2256,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         memory: None,
         mem_initial: None,
         profile: None,
+        policy: None,
         force: false,
         json: false,
     }
@@ -2286,6 +2292,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         memory: None,
         mem_initial: None,
         profile: None,
+        policy: None,
         force: false,
         json: false,
     }
@@ -2309,6 +2316,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Standard),
+        policy: None,
         force: false,
         json: false,
     }
@@ -2476,6 +2484,7 @@ fn create_rejects_unsafe_machine_name() {
         memory: Some("512M".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Standard),
+        policy: None,
         force: false,
         json: false,
     };
@@ -3978,4 +3987,83 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
         .expect("restrictive still takes a read-only registration");
     crate::commands::vm::volume::mount("open", "state", None, "/data/state", true)
         .expect("standard takes a writable registration");
+}
+
+/// One project, three verbs, one allow-list: the `[network] allow_hosts` and
+/// `[policy]` of an `mvm.toml` reach `run`, `machine run` and `machine create`
+/// through the same resolution and fold, alongside the same `--allow-host`.
+#[test]
+fn a_projects_allow_list_takes_effect_through_every_verb() {
+    let home = tempfile::tempdir().expect("scratch mvm home");
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let project = tempfile::tempdir().expect("project dir");
+    std::fs::write(
+        project.path().join("mvm.toml"),
+        "image = \"alpine:3.20\"\n[network]\nallow_hosts = [\"api.example.com\"]\n\
+         [policy]\nprofile = \"dev-network\"\n",
+    )
+    .expect("manifest");
+    let manifest = project.path().join("mvm.toml").display().to_string();
+    let sorted = |mut hosts: Vec<String>| {
+        hosts.sort();
+        hosts
+    };
+
+    let mut run = crate::commands::vm::exec::RunArgs {
+        manifest: Some(manifest.clone()),
+        allow_host: vec!["extra.test".into()],
+        ..crate::commands::vm::exec::RunArgs::default()
+    };
+    crate::commands::vm::run_policy::apply_run_policy(&mut run).expect("run resolves");
+    let through_run = sorted(run.allow_host);
+
+    let machine_run = match parse_owned(&[
+        "run".to_string(),
+        "--manifest".to_string(),
+        manifest.clone(),
+        "--allow-host".to_string(),
+        "extra.test".to_string(),
+        "--".to_string(),
+        "true".to_string(),
+    ])
+    .expect("machine run parses")
+    {
+        MachineAction::Run(args) => args,
+        other => panic!("expected run action, got {other:?}"),
+    };
+    let mut machine_run = machine_run.run;
+    crate::commands::vm::run_policy::apply_run_policy(&mut machine_run)
+        .expect("machine run resolves");
+    let through_machine_run = sorted(machine_run.allow_host);
+
+    let create = match parse_owned(&[
+        "create".to_string(),
+        "uniform".to_string(),
+        "--manifest".to_string(),
+        manifest,
+        "--allow-host".to_string(),
+        "extra.test".to_string(),
+    ])
+    .expect("create parses")
+    {
+        MachineAction::Create(args) => args,
+        other => panic!("expected create action, got {other:?}"),
+    };
+    let through_create = sorted(create.into_spec().expect("spec").allow_host);
+
+    assert!(
+        through_run.contains(&"api.example.com:443".to_string()),
+        "{through_run:?}"
+    );
+    assert!(
+        through_run.contains(&"pypi.org:443".to_string()),
+        "{through_run:?}"
+    );
+    assert!(
+        through_run.contains(&"extra.test:443".to_string()),
+        "{through_run:?}"
+    );
+    assert_eq!(through_run, through_machine_run);
+    assert_eq!(through_run, through_create);
 }

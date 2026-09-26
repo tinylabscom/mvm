@@ -196,9 +196,25 @@ The first match wins:
    [policy]
    profile = "agent-apis"            # a name or a path relative to mvm.toml
    include = ["./policy/extra.toml"] # extra groups
+
+   [network]
+   allow_hosts = ["api.example.com"] # the project's own needs
    ```
 
 4. Nothing: the run behaves exactly as its flags say.
+
+`--policy` replaces the project's `[policy]` table. The project's
+`[network] allow_hosts` still applies on top of it, as a project layer:
+allowed hosts union, and a block or deny from the profile still wins.
+
+This resolution is the same for every verb that names a project:
+`mvmctl run`, `mvmctl machine run`, `mvmctl machine create` and
+`mvmctl machine start --manifest`. So "add it to `mvm.toml`" is the same
+remedy whichever verb runs the workload. `machine create` and
+`machine start --manifest` record the resolved network and resource grants
+in the machine's spec. A spec cannot yet hold secrets, shares, re-admitted
+variables or endpoint routes, so a policy that carries any of those is
+refused there instead of being half applied.
 
 A reference is read three ways:
 
@@ -240,4 +256,7 @@ missing one.
 - Pack profiles (`namespace/name`) are refused.
 - Endpoint routes from a policy are refused on a persistent machine
   (`machine run --name`), the same as `--allow-endpoint`: they would not be
-  recorded beside the machine's spec.
+  recorded beside the machine's spec. `machine create` refuses a policy that
+  binds secrets, shares or re-admitted variables for the same reason.
+- `net = true` in `mvm.toml` still reaches only `machine create`. Name
+  destinations in `[network] allow_hosts` to have every verb apply them.

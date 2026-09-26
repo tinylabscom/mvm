@@ -2,9 +2,10 @@
 //! policy into a launch's own flags before anything else reads them.
 //!
 //! Resolution and the merge rules live in `mvm_client::profiles`. What this
-//! does is pick the source (`--plan`, then `--policy`, then the project
-//! manifest the run names), resolve it on this host and the backend the run
-//! will use, and write the result back into `RunArgs`. Every later step —
+//! does is pick the source (`--plan`; otherwise `--policy` and the project
+//! manifest the run names — its `[policy]` table and `[network] allow_hosts`),
+//! resolve it on this host and the backend the run will use, and write the
+//! result back into `RunArgs`. Every later step —
 //! grant resolution, route resolution, secret binding, the mount and env
 //! checks, plan synthesis, signing, admission — then runs on those flags
 //! exactly as if they had been typed, which is what makes a profile and the
@@ -12,7 +13,8 @@
 
 use anyhow::{Context, Result};
 use mvm_client::profiles::{
-    LaunchFlags, Platform, PolicySelection, PolicyStore, ResolvedManifest, fold, resolve,
+    LaunchFlags, Platform, PolicySelection, PolicyStore, ProjectPolicy, ResolvedManifest, fold,
+    resolve,
 };
 
 use super::exec::RunArgs;
@@ -34,23 +36,15 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
             notes: Vec::new(),
         }));
     }
-    let project = super::run_routes::project_manifest(args)?;
-    let selection = PolicySelection::choose(
-        args.policy.as_deref(),
-        project
-            .as_ref()
-            .map(|(path, manifest)| (path.clone(), &manifest.policy)),
-    )?;
-    let Some(selection) = selection else {
+    let project = super::run_routes::project_manifest(args)?
+        .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest));
+    let Some(selection) = PolicySelection::for_launch(args.policy.as_deref(), project)? else {
         return Ok(None);
     };
-    let label = match &selection {
-        PolicySelection::Profile(_) => {
-            format!("policy {}", args.policy.as_deref().unwrap_or("(unnamed)"))
-        }
-        PolicySelection::Project { manifest, .. } => {
-            format!("the [policy] table in {}", manifest.display())
-        }
+    let label = match (&args.policy, &selection.project) {
+        (Some(name), _) => format!("policy {name}"),
+        (None, Some(project)) => format!("the project policy in {}", project.manifest.display()),
+        (None, None) => "policy".to_string(),
     };
     let resolved = resolve(&PolicyStore::from_config(), &selection, run_platform(args))?;
     Ok(Some(Selected {
@@ -224,6 +218,24 @@ mod tests {
                 .allow_host
                 .contains(&"api.openai.com:443".to_string())
         );
+    }
+
+    #[test]
+    fn a_projects_network_allow_hosts_reach_the_run_without_any_policy() {
+        let (_env, _home) = isolated();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "flake = \".\"\n[network]\nallow_hosts = [\"api.example.com\"]\n",
+        )
+        .unwrap();
+        let mut args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            allow_host: vec!["b.test".into()],
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).unwrap();
+        assert_eq!(args.allow_host, ["api.example.com:443", "b.test:443"]);
     }
 
     #[test]

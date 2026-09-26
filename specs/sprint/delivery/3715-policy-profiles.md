@@ -41,6 +41,17 @@ admission path and compares the plans. `mvmctl policy resolve` writes the
 manifest; `run --plan FILE` reads it back, re-validates it, refuses a plan or
 signature inside it, and is exclusive with every policy flag.
 
+**One resolution for every verb.** The project's `[network] allow_hosts`
+used to reach only `machine create --manifest`; `run` and `machine run` never
+read it. It is now a project layer of the resolved policy, applied the same way
+by `run`, `machine run`, `machine create` and `machine start --manifest` —
+unioned with profiles and flags, under their blocks and denies. A test resolves
+one project through all three verbs and compares the allow lists. `machine
+create` records the network and resource result in its spec and refuses a
+policy carrying secrets, shares, re-admitted variables or routes rather than
+dropping them on restart. A `--allow-host` alongside a manifest's hosts now
+unions with them on `machine create` instead of replacing them.
+
 **CLI**: `mvmctl policy resolve|show [--format toml|json|plan]|validate
 [--strict]|diff|groups`; `--policy`/`--plan` on `run` and `machine run`.
 `policy` is now a top-level verb: it covers only a workload's own authored

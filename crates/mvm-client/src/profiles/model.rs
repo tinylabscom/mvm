@@ -84,6 +84,7 @@ impl NetworkSection {
 }
 
 /// `[secrets]`.
+// allow(secret-debug): secret names and destination hosts only; the schema has no field a value can occupy
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -104,6 +105,7 @@ impl SecretsSection {
 }
 
 /// One `[[secrets.bind]]` entry.
+// allow(secret-debug): secret names and destination hosts only; the schema has no field a value can occupy
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

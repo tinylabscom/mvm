@@ -51,43 +51,80 @@ impl Platform {
     }
 }
 
-/// Which policy a run uses, before anything is loaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PolicySelection {
-    /// `--policy NAME|PATH`: the user named it.
-    Profile(PolicyRef),
-    /// The project's `mvm.toml` `[policy]` table.
-    Project {
-        /// The manifest file, for relative references and error messages.
-        manifest: PathBuf,
-        profile: Option<String>,
-        include: Vec<String>,
-    },
+/// A project's contribution to a launch's policy, read from its `mvm.toml`:
+/// the `[policy]` table (a profile and extra groups) and the
+/// `[network] allow_hosts` list. Applied the same way by every verb that
+/// names the project — `run`, `machine run` and `machine create` — so "add it
+/// to mvm.toml" means the same thing whichever one runs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectPolicy {
+    /// The manifest file, for relative references and error messages.
+    pub manifest: PathBuf,
+    /// `[policy] profile`.
+    pub profile: Option<String>,
+    /// `[policy] include`.
+    pub include: Vec<String>,
+    /// `[network] allow_hosts`.
+    pub allow_hosts: Vec<String>,
+}
+
+impl ProjectPolicy {
+    /// What `manifest` (read from `path`) contributes.
+    #[must_use]
+    pub fn from_manifest(path: &Path, manifest: &mvm_core::manifest::Manifest) -> Self {
+        Self {
+            manifest: path.to_path_buf(),
+            profile: manifest.policy.profile.clone(),
+            include: manifest.policy.include.clone(),
+            allow_hosts: manifest.network.allow_hosts.clone(),
+        }
+    }
+
+    /// Whether the project contributes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.include.is_empty() && self.allow_hosts.is_empty()
+    }
+}
+
+/// Which policy a launch uses, before anything is loaded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicySelection {
+    /// `--policy NAME|PATH`. When set, it replaces the project's `[policy]`
+    /// table; the project's `[network] allow_hosts` still applies.
+    pub profile: Option<PolicyRef>,
+    /// The project the launch names, if any.
+    pub project: Option<ProjectPolicy>,
 }
 
 impl PolicySelection {
-    /// Precedence: an explicit `--policy` wins; otherwise the project's
-    /// `[policy]` table, if it says anything; otherwise none.
+    /// A named profile and nothing else.
+    #[must_use]
+    pub fn profile(reference: PolicyRef) -> Self {
+        Self {
+            profile: Some(reference),
+            project: None,
+        }
+    }
+
+    /// The selection for a launch: `--policy` if given, the project's
+    /// contribution if it has one, or `None` when neither says anything.
     ///
     /// # Errors
     ///
     /// A `--policy` value that is not a valid reference.
-    pub fn choose(
+    pub fn for_launch(
         cli: Option<&str>,
-        project: Option<(PathBuf, &mvm_core::manifest::ManifestPolicy)>,
+        project: Option<ProjectPolicy>,
     ) -> Result<Option<Self>, PolicyError> {
-        if let Some(raw) = cli {
-            let reference =
-                PolicyRef::parse(raw).map_err(|reason| PolicyError::new("--policy", reason))?;
-            return Ok(Some(PolicySelection::Profile(reference)));
+        let profile = cli
+            .map(|raw| PolicyRef::parse(raw).map_err(|reason| PolicyError::new("--policy", reason)))
+            .transpose()?;
+        let project = project.filter(|p| !p.is_empty());
+        if profile.is_none() && project.is_none() {
+            return Ok(None);
         }
-        Ok(project.and_then(|(manifest, section)| {
-            (!section.is_empty()).then(|| PolicySelection::Project {
-                manifest,
-                profile: section.profile.clone(),
-                include: section.include.clone(),
-            })
-        }))
+        Ok(Some(Self { profile, project }))
     }
 }
 
@@ -111,36 +148,47 @@ pub fn resolve(
         groups: Vec::new(),
         overrides: Vec::new(),
     };
-    match selection {
-        PolicySelection::Profile(reference) => {
-            let root = store.load_profile(reference, None, LayerOrigin::User, "--policy")?;
-            walker.walk(root, 0)?;
-        }
-        PolicySelection::Project {
-            manifest,
-            profile,
-            include,
-        } => {
-            let label = format!("[policy] in {}", manifest.display());
-            let virtual_root = ProfileFile {
-                extends: super::model::OneOrMany::Many(profile.iter().cloned().collect()),
-                groups: super::model::GroupSelection {
-                    include: include.clone(),
-                    exclude: Vec::new(),
+    if let Some(reference) = &selection.profile {
+        let root = store.load_profile(reference, None, LayerOrigin::User, "--policy")?;
+        walker.walk(root, 0)?;
+    }
+    if let Some(project) = &selection.project {
+        // An explicit --policy replaces the project's [policy] table; the
+        // project's own network needs still apply.
+        let replaced = selection.profile.is_some();
+        let virtual_root = ProfileFile {
+            extends: super::model::OneOrMany::Many(if replaced {
+                Vec::new()
+            } else {
+                project.profile.iter().cloned().collect()
+            }),
+            groups: super::model::GroupSelection {
+                include: if replaced {
+                    Vec::new()
+                } else {
+                    project.include.clone()
                 },
-                ..ProfileFile::default()
-            };
-            walker.walk(
-                Loaded {
-                    doc: virtual_root,
-                    file: Some(manifest.clone()),
-                    label,
-                    identity: format!("project:{}", manifest.display()),
-                    origin: LayerOrigin::Project,
+                exclude: Vec::new(),
+            },
+            overrides: PolicyBody {
+                network: super::model::NetworkSection {
+                    allow: project.allow_hosts.clone(),
+                    ..super::model::NetworkSection::default()
                 },
-                0,
-            )?;
-        }
+                ..PolicyBody::default()
+            },
+            ..ProfileFile::default()
+        };
+        walker.walk(
+            Loaded {
+                doc: virtual_root,
+                file: Some(project.manifest.clone()),
+                label: format!("project {}", project.manifest.display()),
+                identity: format!("project:{}", project.manifest.display()),
+                origin: LayerOrigin::Project,
+            },
+            0,
+        )?;
     }
     let mut layers: Vec<Layer> = walker.groups.into_iter().map(|g| g.layer).collect();
     layers.extend(walker.overrides);
@@ -165,7 +213,7 @@ pub fn resolve_file(
     if toml::from_str::<ProfileFile>(&text).is_ok() {
         return resolve(
             store,
-            &PolicySelection::Profile(PolicyRef::Path(path.to_path_buf())),
+            &PolicySelection::profile(PolicyRef::Path(path.to_path_buf())),
             platform,
         );
     }

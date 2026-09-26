@@ -218,6 +218,8 @@ Security-bearing gaps first, then the foundations the UX needs:
       is exclusive with every policy flag and refuses a supplied plan or
       signature; `ns/name` pack references are parsed and refused
 - [x] `mvm.toml [policy]`; user profiles under the config dir via `mvm-core::config`
+      — the project's `[policy]` and `[network] allow_hosts` resolve the same
+      way for `run`, `machine run`, `machine create` and `machine start`
 
 ### PS-06 — Signed packs and agent profiles (#3716)
 - [ ] pack manifest schema and keyless signing workflow in `mvm-templates`

@@ -15,7 +15,7 @@ use mvm_client::profiles::builtin;
 use mvm_client::profiles::model::{GroupFile, ProfileFile};
 use mvm_client::profiles::resolve::resolve_file;
 use mvm_client::profiles::{
-    Platform, PolicyBody, PolicyRef, PolicySelection, PolicyStore, ResolvedManifest,
+    Platform, PolicyBody, PolicySelection, PolicyStore, ProjectPolicy, ResolvedManifest,
     ResolvedPolicy, resolve,
 };
 use mvm_contract::protocol::vm_backend::BackendKind;
@@ -142,29 +142,37 @@ fn platform(backend: Option<BackendKind>) -> Platform {
     })))
 }
 
-/// Resolve the target: a named profile, or the project's `[policy]` table.
+/// Resolve the target the way a launch would: the named profile, if any,
+/// with the project's contribution (its `[policy]` table and
+/// `[network] allow_hosts`) from `--project`, or from `.` when no profile is
+/// named.
 fn resolve_target(target: &Target) -> Result<ResolvedPolicy> {
-    let store = PolicyStore::from_config();
-    let platform = platform(target.backend);
-    if let Some(raw) = &target.profile {
-        let reference = PolicyRef::parse(raw).map_err(|reason| anyhow::anyhow!("{reason}"))?;
-        return Ok(resolve(
-            &store,
-            &PolicySelection::Profile(reference),
-            platform,
-        )?);
-    }
-    let dir = target.project.clone().unwrap_or_else(|| PathBuf::from("."));
-    let manifest_path = mvm_core::manifest::manifest_in_dir(&dir)?.with_context(|| {
-        format!(
-            "no profile named and no mvm.toml in {}; name a profile or pass --project",
-            dir.display()
-        )
-    })?;
-    let manifest = mvm_core::manifest::Manifest::read_file(&manifest_path)?;
-    let selection = PolicySelection::choose(None, Some((manifest_path.clone(), &manifest.policy)))?
-        .with_context(|| format!("{} has no [policy] table", manifest_path.display()))?;
-    Ok(resolve(&store, &selection, platform)?)
+    let project_dir = match (&target.project, &target.profile) {
+        (Some(dir), _) => Some(dir.clone()),
+        (None, None) => Some(PathBuf::from(".")),
+        (None, Some(_)) => None,
+    };
+    let project = match &project_dir {
+        Some(dir) => match mvm_core::manifest::manifest_in_dir(dir)? {
+            Some(path) => {
+                let manifest = mvm_core::manifest::Manifest::read_file(&path)?;
+                Some(ProjectPolicy::from_manifest(&path, &manifest))
+            }
+            None if target.profile.is_none() => bail!(
+                "no profile named and no mvm.toml in {}; name a profile or pass --project",
+                dir.display()
+            ),
+            None => None,
+        },
+        None => None,
+    };
+    let selection = PolicySelection::for_launch(target.profile.as_deref(), project)?
+        .context("the project's mvm.toml has no [policy] table and no [network] allow_hosts")?;
+    Ok(resolve(
+        &PolicyStore::from_config(),
+        &selection,
+        platform(target.backend),
+    )?)
 }
 
 fn resolve_cmd(args: ResolveArgs) -> Result<()> {

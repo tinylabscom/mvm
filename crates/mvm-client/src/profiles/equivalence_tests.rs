@@ -124,7 +124,7 @@ fn a_profile_and_the_same_flags_admit_the_same_plan() {
     .unwrap();
     let resolved = resolve(
         &store,
-        &PolicySelection::Profile(PolicyRef::Name("agent".into())),
+        &PolicySelection::profile(PolicyRef::Name("agent".into())),
         Platform::default(),
     )
     .unwrap();
@@ -169,7 +169,7 @@ fn a_resolved_manifest_admits_the_same_plan_as_its_profile() {
     let store = PolicyStore::at(tempfile::tempdir().unwrap().path());
     let resolved = resolve(
         &store,
-        &PolicySelection::Profile(PolicyRef::Name("dev-network".into())),
+        &PolicySelection::profile(PolicyRef::Name("dev-network".into())),
         Platform::default(),
     )
     .unwrap();

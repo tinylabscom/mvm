@@ -37,7 +37,7 @@ impl Dir {
     ) -> Result<ResolvedPolicy, PolicyError> {
         resolve(
             &self.store,
-            &PolicySelection::Profile(PolicyRef::parse(reference).unwrap()),
+            &PolicySelection::profile(PolicyRef::parse(reference).unwrap()),
             platform,
         )
     }
@@ -314,48 +314,97 @@ fn a_predicate_on_an_unknown_backend_does_not_match() {
 
 // ---- discovery precedence -------------------------------------------------
 
+fn project(profile: Option<&str>, include: &[&str], allow_hosts: &[&str]) -> ProjectPolicy {
+    ProjectPolicy {
+        manifest: PathBuf::from("/p/mvm.toml"),
+        profile: profile.map(str::to_string),
+        include: include.iter().map(ToString::to_string).collect(),
+        allow_hosts: allow_hosts.iter().map(ToString::to_string).collect(),
+    }
+}
+
 #[test]
-fn an_explicit_policy_wins_over_the_project_table() {
-    let section = mvm_core::manifest::ManifestPolicy {
-        profile: Some("agent-apis".into()),
-        include: vec![],
-    };
-    let chosen = PolicySelection::choose(
-        Some("offline"),
-        Some((PathBuf::from("/p/mvm.toml"), &section)),
+fn a_launch_selects_a_flag_the_project_or_nothing() {
+    let chosen = PolicySelection::for_launch(Some("offline"), Some(project(Some("x"), &[], &[])))
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.profile, Some(PolicyRef::Name("offline".into())));
+
+    let chosen = PolicySelection::for_launch(None, Some(project(Some("x"), &[], &[])))
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.profile, None);
+    assert!(chosen.project.is_some());
+
+    assert_eq!(
+        PolicySelection::for_launch(None, Some(project(None, &[], &[]))).unwrap(),
+        None,
+        "a project that says nothing selects nothing"
+    );
+    assert_eq!(PolicySelection::for_launch(None, None).unwrap(), None);
+    assert!(PolicySelection::for_launch(Some("Bad Name"), None).is_err());
+}
+
+#[test]
+fn an_explicit_policy_replaces_the_project_table_but_keeps_its_network() {
+    let dir = Dir::new();
+    let selection = PolicySelection::for_launch(
+        Some("agent-apis"),
+        Some(project(Some("dev-network"), &[], &["project.test"])),
     )
+    .unwrap()
     .unwrap();
-    assert_eq!(
-        chosen,
-        Some(PolicySelection::Profile(PolicyRef::Name("offline".into())))
+    let hosts = allow(&resolve(&dir.store, &selection, Platform::default()).unwrap());
+    assert!(
+        hosts.contains(&"api.openai.com:443".to_string()),
+        "{hosts:?}"
     );
+    assert!(hosts.contains(&"project.test:443".to_string()), "{hosts:?}");
+    assert!(!hosts.contains(&"pypi.org:443".to_string()), "{hosts:?}");
+}
 
-    let chosen =
-        PolicySelection::choose(None, Some((PathBuf::from("/p/mvm.toml"), &section))).unwrap();
-    assert!(matches!(chosen, Some(PolicySelection::Project { .. })));
-
-    let empty = mvm_core::manifest::ManifestPolicy::default();
+#[test]
+fn a_projects_network_allow_hosts_apply_with_no_policy_at_all() {
+    let dir = Dir::new();
+    let selection =
+        PolicySelection::for_launch(None, Some(project(None, &[], &["api.example.com"])))
+            .unwrap()
+            .unwrap();
     assert_eq!(
-        PolicySelection::choose(None, Some((PathBuf::from("/p/mvm.toml"), &empty))).unwrap(),
-        None
+        allow(&resolve(&dir.store, &selection, Platform::default()).unwrap()),
+        ["api.example.com:443"]
     );
-    assert_eq!(PolicySelection::choose(None, None).unwrap(), None);
-    assert!(PolicySelection::choose(Some("Bad Name"), None).is_err());
+}
+
+#[test]
+fn a_blocked_profile_drops_the_projects_hosts() {
+    let dir = Dir::new();
+    let selection =
+        PolicySelection::for_launch(Some("offline"), Some(project(None, &[], &["a.test"])))
+            .unwrap()
+            .unwrap();
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert!(allow(&resolved).is_empty());
+    assert!(!resolved.notes.is_empty());
 }
 
 #[test]
 fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
     let dir = Dir::new();
-    let project = tempfile::tempdir().unwrap();
+    let dir_project = tempfile::tempdir().unwrap();
     std::fs::write(
-        project.path().join("extra.toml"),
+        dir_project.path().join("extra.toml"),
         "[network]\nallow = [\"project.test\"]\n",
     )
     .unwrap();
-    let selection = PolicySelection::Project {
-        manifest: project.path().join("mvm.toml"),
-        profile: Some("dev-network".into()),
-        include: vec!["./extra.toml".into()],
+    let selection = PolicySelection {
+        profile: None,
+        project: Some(ProjectPolicy {
+            manifest: dir_project.path().join("mvm.toml"),
+            profile: Some("dev-network".into()),
+            include: vec!["./extra.toml".into()],
+            allow_hosts: Vec::new(),
+        }),
     };
     let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
     assert!(allow(&resolved).contains(&"project.test:443".to_string()));
@@ -371,19 +420,36 @@ fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
 #[test]
 fn a_project_cannot_use_an_escape_hatch() {
     let dir = Dir::new();
-    let project = tempfile::tempdir().unwrap();
+    let dir_project = tempfile::tempdir().unwrap();
     std::fs::write(
-        project.path().join("hatch.toml"),
+        dir_project.path().join("hatch.toml"),
         "[env]\nreadmit = [\"LD_PRELOAD\"]\n",
     )
     .unwrap();
-    let selection = PolicySelection::Project {
-        manifest: project.path().join("mvm.toml"),
+    let selection = PolicySelection {
         profile: None,
-        include: vec!["./hatch.toml".into()],
+        project: Some(ProjectPolicy {
+            manifest: dir_project.path().join("mvm.toml"),
+            profile: None,
+            include: vec!["./hatch.toml".into()],
+            allow_hosts: Vec::new(),
+        }),
     };
     let err = resolve(&dir.store, &selection, Platform::default()).unwrap_err();
     assert_eq!(err.key.as_deref(), Some("env.readmit"));
+}
+
+#[test]
+fn project_policy_reads_the_policy_table_and_network_allow_hosts() {
+    let manifest = mvm_core::manifest::Manifest::from_toml_str(
+        "flake = \".\"\n[network]\nallow_hosts = [\"a.test\"]\n[policy]\nprofile = \"offline\"\ninclude = [\"g\"]\n",
+    )
+    .unwrap();
+    let project = ProjectPolicy::from_manifest(Path::new("/p/mvm.toml"), &manifest);
+    assert_eq!(project.profile.as_deref(), Some("offline"));
+    assert_eq!(project.include, ["g"]);
+    assert_eq!(project.allow_hosts, ["a.test"]);
+    assert!(!project.is_empty());
 }
 
 #[test]

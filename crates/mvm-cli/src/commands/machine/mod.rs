@@ -15,8 +15,10 @@
 //! the existing running-VM surfaces.
 
 mod checkpoint;
+mod create_policy;
 mod lifecycle;
 mod list;
+mod manifest_source;
 mod portable;
 pub(crate) mod prewarm;
 mod receipt;
@@ -36,7 +38,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
+use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
 
@@ -57,6 +59,7 @@ use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
+use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
 use receipt::{
@@ -728,6 +731,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Security profile for lifecycle starts.
     #[arg(long, value_enum)]
     pub profile: Option<RunProfile>,
+    /// Create under an authored policy profile (NAME or PATH).
+    #[arg(long, value_name = "NAME|PATH")]
+    pub policy: Option<String>,
     /// Overwrite an existing machine spec.
     #[arg(long)]
     pub force: bool,
@@ -1052,12 +1058,6 @@ struct MachineRemoveSummary {
     runtime_state_removed: bool,
 }
 
-#[derive(Debug)]
-struct MachineManifestSource {
-    workflow: ManifestMachineWorkflow,
-    base_dir: PathBuf,
-}
-
 /// Inputs required to build a persistent [`MachineSpec`]. Extracted so both
 /// `machine create` and `machine start --image ...` share one
 /// validation/construction path.
@@ -1082,6 +1082,10 @@ struct MachineSpecInputs<'a> {
     workflow: Option<&'a ManifestMachineWorkflow>,
     volumes: &'a [String],
     init: &'a [String],
+    /// `--policy NAME|PATH`.
+    policy: Option<&'a str>,
+    /// The manifest's contribution to the policy, when sourced from one.
+    project: Option<&'a mvm_client::profiles::ProjectPolicy>,
 }
 
 fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
@@ -1102,13 +1106,28 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         .gpu_device
         .or_else(|| workflow.and_then(|workflow| workflow.gpu_device));
     let gpu = inputs.gpu || gpu_device.is_some() || workflow.is_some_and(|workflow| workflow.gpu);
-    let allow_host = if inputs.allow_host.is_empty() {
-        workflow
-            .map(|workflow| workflow.allow_hosts.clone())
-            .unwrap_or_default()
-    } else {
-        inputs.allow_host.to_vec()
-    };
+    let cpus = inputs
+        .cpus
+        .or_else(|| workflow.map(|workflow| workflow.cpus))
+        .unwrap_or(2);
+    let memory = inputs
+        .memory
+        .map(String::from)
+        .or_else(|| workflow.map(|workflow| workflow.mem.clone()))
+        .unwrap_or_else(|| "512M".to_string());
+    // The manifest's `[network] allow_hosts` reaches the spec through the
+    // policy, the same way it reaches `run` and `machine run`.
+    let policy = create_policy::machine_policy(create_policy::MachinePolicyInputs {
+        policy: inputs.policy,
+        project: inputs.project,
+        allow_host: inputs.allow_host,
+        net,
+        cpu_limit: inputs.cpu_limit,
+        timeout: inputs.timeout,
+        cpus,
+        memory_mib: u64::from(mvm_core::util::parse_human_size(&memory)?),
+    })?;
+    let allow_host = policy.allow_host;
     let ai = inputs
         .ai
         .or(workflow.and_then(|workflow| workflow.ai.as_ref()));
@@ -1116,8 +1135,8 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: inputs.cpu_limit,
-        timeout_secs: inputs.timeout,
+        cpu_limit_millicores: policy.cpu_limit,
+        timeout_secs: policy.timeout,
         allow_host: &allow_host,
         peer: inputs.peer,
         net,
@@ -1127,18 +1146,9 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         config: &config,
         ai,
     })?;
-    let cpus = inputs
-        .cpus
-        .or_else(|| workflow.map(|workflow| workflow.cpus))
-        .unwrap_or(2);
     if cpus == 0 {
         bail!("machine CPUs must be >= 1");
     }
-    let memory = inputs
-        .memory
-        .map(String::from)
-        .or_else(|| workflow.map(|workflow| workflow.mem.clone()))
-        .unwrap_or_else(|| "512M".to_string());
     let mem_initial = inputs
         .mem_initial
         .map(String::from)
@@ -1233,92 +1243,14 @@ impl MachineCreateArgs {
             workflow,
             volumes: &volumes,
             init: &init,
+            policy: self.policy.as_deref(),
+            project: manifest_source.as_ref().map(|source| &source.project),
         })
     }
 }
 
 fn run_profile_name(profile: RunProfile) -> &'static str {
     profile.as_str()
-}
-
-fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
-    let manifest_path = resolve_manifest_config_path(arg)
-        .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
-    let manifest = Manifest::read_file(&manifest_path)
-        .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
-    if !manifest.network.routes.is_empty() {
-        bail!(
-            "{} declares [[network.routes]], which a persistent machine does not record yet; \
-             a restart would drop them. Run it transiently, or remove the routes",
-            manifest_path.display()
-        );
-    }
-    let workflow = manifest.machine_workflow().ok_or_else(|| {
-        anyhow!(
-            "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"
-        )
-    })?;
-    let base_dir = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    Ok(MachineManifestSource { workflow, base_dir })
-}
-
-fn absolutize_manifest_volume_spec(spec: &str, base_dir: &Path) -> Result<String> {
-    fn simplify_path(path: PathBuf) -> PathBuf {
-        let mut simplified = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    simplified.pop();
-                }
-                other => simplified.push(other.as_os_str()),
-            }
-        }
-        simplified
-    }
-
-    let absolute_host = |host: &str| -> String {
-        let path = Path::new(host);
-        if path.is_absolute() {
-            host.to_string()
-        } else {
-            simplify_path(base_dir.join(path))
-                .to_string_lossy()
-                .into_owned()
-        }
-    };
-
-    match super::shared::parse_volume_spec(spec)? {
-        super::shared::VolumeSpec::DirShare {
-            host_dir,
-            guest_mount,
-            read_only,
-        } => Ok(format!(
-            "{}:{guest_mount}:{}",
-            absolute_host(&host_dir),
-            if read_only { "ro" } else { "rw" }
-        )),
-        super::shared::VolumeSpec::Disk {
-            host,
-            guest,
-            size,
-            read_only,
-            encrypted,
-        } => {
-            let mut rendered = format!(
-                "{}:{guest}:{size}:{}",
-                absolute_host(&host),
-                if read_only { "ro" } else { "rw" }
-            );
-            if encrypted {
-                rendered.push_str(":enc");
-            }
-            Ok(rendered)
-        }
-    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
