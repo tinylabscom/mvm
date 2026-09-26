@@ -9,6 +9,12 @@ Last updated: 2026-09-26
       microVM / vsock / signed-plan security core and close every
       product-surface gap on top of it. One issue per workstream:
   - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+    - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
+    - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
+    - [x] `xtask check-no-cli-shellout`, in `check-all`
+    - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
+    - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
+    - [ ] command override / guest env / template sources in the in-process launcher; in-VM function dispatch; log follow; live-boot SDK scenario
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
     - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
     - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
@@ -601,10 +607,12 @@ Last updated: 2026-09-26
       executable example (#3258) is complete: one pinned native-agent recipe
       feeds both example flakes, signed Workload IR carries the `SecretRef`,
       `mvm.toml` admits only the model API, and the documented-surface suite
-      owns an offline live smoke witness and audit verification. Open: the
-      SDK's argv transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
-      with its versioned ABI and read-only machine methods; the bindings that
-      replace the argv transport are next), and the rest of WS-S. WS3's MCP
+      owns an offline live smoke witness and audit verification. The SDK's argv
+      transport (#3261) is gone: both SDKs load `libmvm_hostlib` in-process
+      (ABI 1.2, launch and streamed output included) and `xtask
+      check-no-cli-shellout` holds the line (#3711). Open: converging the
+      in-process launcher with the CLI's `machine run` front half, and the rest
+      of WS-S. WS3's MCP
       surface (#3262) is done: `mvmctl ops mcp stdio --machine <name>` binds
       the six `mvm.drive.*` tools to one machine's verified drive grant through
       `mvm_client::drive::LocalDrive`; they are not listed without the grant,

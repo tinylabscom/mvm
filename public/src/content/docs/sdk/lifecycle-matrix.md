@@ -24,11 +24,11 @@ keep a workflow documented as planned.
 
 | Operation | CLI | Python SDK | TypeScript SDK | Notes |
 | --- | --- | --- | --- | --- |
-| Create named sandbox | Shipped | Partial | Partial | SDK live mode calls `mvmctl machine run`; record mode records `Sandbox.create(...)`. |
+| Create named sandbox | Shipped | Partial | Partial | SDK live mode calls `machine.run` in `libmvm_hostlib`, in-process; record mode records `Sandbox.create(...)`. |
 | One-shot run | Shipped | Target | Target | `mvmctl run -- <cmd>` is current; SDK convenience helpers should preserve receipts and policy. |
 | Start command | Shipped | Partial | Partial | SDK exposes `commands.start(...)`; result capture is still a target. |
 | Command result capture | Shipped | Shipped | Shipped | `sandbox.exec(...)` / `shell(...)` returns a captured `ExecResult` (live mode only). There is no `commands.run(...)`. |
-| File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode shells to `mvmctl machine fs write`. |
+| File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode calls `guest.fs.write` in `libmvm_hostlib`. |
 | File read/list/remove | Shipped | Shipped | Shipped | `files.read/list/stat/mkdir/remove/move(...)`, live mode only. |
 | Logs | Shipped | Target | Target | SDK log helpers should keep payload redaction rules explicit. |
 | Port forwarding | Not claimed | Not claimed | Not claimed | Dynamic forwarding is retired. Ingress is declared before boot with `machine run --port HOST:GUEST`, or `network(ports=[...])` in a declaration; `mvmctl machine forward` and `sandbox.forward(...)` only explain the migration. |

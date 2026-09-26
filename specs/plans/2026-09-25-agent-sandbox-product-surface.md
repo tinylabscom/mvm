@@ -92,11 +92,39 @@ Security-bearing gaps first, then the foundations the UX needs:
 ## Workstreams
 
 ### PS-01 — SDKs in-process through mvm-hostlib (#3711)
-- [ ] hostlib dispatch covers create/boot/run, exec (streaming), files, sessions, stop/rm, logs
-- [ ] Python and TypeScript facades use hostlib; subprocess transport deleted
-- [ ] xtask gate: no SDK source spawns or resolves `mvmctl` (with its own fixtures)
-- [ ] `mvm-client` re-exports the embedder surface; Rust quickstart uses only `mvm-client`
-- [ ] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15)
+- [x] hostlib dispatch covers create/boot/run, exec (streaming), files, sessions, stop/rm, logs
+      — ABI 1.2: `machine.run`/`machine.create` through `LocalBackend::launch`
+      and its `LaunchRequest` validation, `machine.start`, `machine.inventory`
+      (persistent-machine sessions and attach, with fail-closed posture), and
+      `guest.proc.stream.{open,next,close}` (handle + poll output streaming on a
+      bounded reader); the existing `machine.*` and `guest.*` methods cover
+      files, stop/rm and logs
+- [x] Python and TypeScript facades use hostlib; subprocess transport deleted
+      (`_cli`/`_subprocess` gone, `Sandbox`/`Machine` rewritten, `MVM_NO_VM`
+      dispatch in-language; the Rust `mvm-sdk` subprocess clients deleted too)
+- [x] xtask gate: no SDK source spawns or resolves `mvmctl` (with its own fixtures)
+      — `xtask check-no-cli-shellout`, in `check-all`
+- [x] `mvm-client` re-exports the embedder surface; Rust quickstart uses only `mvm-client`
+      (`mvm_client::authoring`, `RootfsSource`, grants, guest payloads,
+      inventory records, plan types, error codes; `tests/embedder_surface.rs`)
+- [x] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15):
+      `MVM_HOSTLIB_PATH` → packaged in the SDK → beside `mvmctl`; `mvmctl run
+      --mode live` sets the variable to the library beside itself
+- [ ] the in-process launcher accepts a command override and guest
+      environment, so `Machine.run(command=...)`, `Sandbox.create(command=...)`
+      and the Obscura `BrowserSandbox` preset boot instead of refusing
+      (converge with the CLI's `machine run` front half; drive-plane plan WS2
+      "One admission path for every launcher")
+- [ ] template/manifest sources launch in-process, so a live `Sandbox.create`
+      and the Chromium/Chrome `BrowserSandbox` presets can name a built
+      template rather than only an image
+- [ ] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
+      references) into a microVM through the library — today it raises a
+      typed transport error, and `MVM_NO_VM=1` dispatches in-language; the
+      invoke path has to move from the CLI into `mvm-client` first
+- [ ] `machine.logs` follow as a stream, like `guest.proc.stream.*`
+- [ ] a live-boot scenario driving an SDK through the real library against a
+      real guest (the BDD suite records calls in-process)
 
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
@@ -201,7 +229,10 @@ apply goes through the protected-path gate.
 ### PS-15 — Packaging (#3724)
 - [ ] deb and rpm built and attested in the release workflow; AUR; nixpkgs-ready derivation
 - [ ] crates.io publish for the embeddable crates, ordered and idempotent
-- [ ] per-platform wheels and npm packages carrying `libmvm_hostlib`
+- [ ] per-platform wheels and npm packages carrying `libmvm_hostlib` — the
+      loaders already look in `mvm/_native/` (Python) and `native/` (npm) before
+      falling back to beside `mvmctl`; the release tarball also has to ship the
+      library beside `mvmctl`
 - [ ] per-artifact release smoke tests
 
 ### PS-16 — Nix developer experience (#3725)

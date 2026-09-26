@@ -1,58 +1,46 @@
-"""Warm-VM sessions for function-entrypoint workloads (plan-0010 W7).
+"""Sessions for function-entrypoint workloads.
 
-A session holds a single VM warm across multiple ``await f(...)`` calls
-so each call doesn't pay the cold-boot tax. The boundary is explicit in
-the SDK so callers understand state persists across calls within a
-session (per ADR-0009 / mvm M5).
-
-Both async-first and sync usage patterns are supported::
+A session is the explicit boundary inside which calls to one workload share
+state: on a microVM, a warm VM reused across ``await f(...)`` calls instead
+of one cold boot per call. Both async and sync forms are supported::
 
     async with mv.session("adder") as sess:
-        await add(2, 3)            # boots the VM, dispatches
-        await add(4, 5)            # reuses the warm VM
+        await add(2, 3)
+        await add(4, 5)
 
     with mv.session("adder") as sess:
         add.sync(2, 3)
         add.sync(4, 5)
 
-Outside a session, ``await f(...)`` shells out to ``mvmctl invoke``
-without ``--session``; the substrate decides whether to spin up a
-one-shot VM or fail fast.
+What a session is today follows from where calls run (see ``mvm._remote``).
+Under ``MVM_NO_VM=1`` calls run in this process, so a session is a local
+scope: it has an id of the form ``local-<hex>``, :func:`current_session_id`
+reports it inside the body, and there is no VM behind it to keep warm or to
+stop. Without ``MVM_NO_VM=1``, opening a session raises
+:class:`MvmTransportError`, for the same reason a call does: the host
+library has no session surface yet, and the SDK never starts a process to
+stand in for one.
+
+Because a session is only ever local, every method on :class:`Session` acts
+locally — ``set_timeout`` records the value, ``kill`` ends the scope, and
+``info`` reports what the SDK knows. None of them reach a host.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
-import re
-import warnings
-import weakref
+import secrets
 from typing import TYPE_CHECKING, Any
 
-from mvm._cli import resolve_cli_bin
+from mvm._remote import (
+    _check_emitting_context,
+    _check_id,
+    _dispatch_unavailable,
+    _no_vm,
+)
 
 if TYPE_CHECKING:
     from mvm._remote import RemoteFunction
-
-_VALID_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-
-
-def _check_id(label: str, value: str) -> None:
-    if not _VALID_ID.match(value):
-        raise ValueError(
-            f"{label} must match ^[a-z][a-z0-9-]{{0,62}}$ (got {value!r})"
-        )
-
-from mvm._subprocess import (
-    DEFAULT_MAX_OUTPUT_BYTES,
-    DEFAULT_SESSION_START_TIMEOUT_SEC,
-    DEFAULT_SESSION_STOP_TIMEOUT_SEC,
-    TransportOutputOverflow,
-    TransportTimeout,
-    env_float,
-    env_int,
-    run_capped,
-)
 
 __all__ = ["Session", "session", "current_session_id"]
 
@@ -67,138 +55,35 @@ def current_session_id() -> str | None:
     return _active_session.get()
 
 
-def _locate_mvmctl() -> str:
-    return resolve_cli_bin(
-        purpose="session management",
-        include_legacy_env=True,
-    )
-
-
-def _start(workload_id: str) -> str:
-    _check_id("workload_id", workload_id)
-    bin_path = _locate_mvmctl()
-    timeout = env_float(
-        "MVM_SESSION_START_TIMEOUT_SEC", DEFAULT_SESSION_START_TIMEOUT_SEC
-    )
-    cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    try:
-        proc = run_capped(
-            [bin_path, "session", "start", "--", workload_id],
-            input_bytes=None,
-            timeout=timeout,
-            max_output_bytes=cap,
-        )
-    except TransportTimeout as exc:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} timed out after {timeout}s"
-        ) from exc
-    except TransportOutputOverflow as exc:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} exceeded {cap}-byte output cap"
-        ) from exc
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} exited {proc.returncode}: "
-            f"{stderr or '(no stderr)'}"
-        )
-    sid = proc.stdout.decode("utf-8", errors="replace").strip()
-    if not sid:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} returned an empty session id"
-        )
-    return sid
-
-
-def _verb(session_id: str, verb: str, *extra_args: str, timeout_env: str = "MVM_SESSION_STOP_TIMEOUT_SEC", default_timeout: float = DEFAULT_SESSION_STOP_TIMEOUT_SEC) -> bytes:
-    """Dispatch ``mvmctl session <verb> <session_id> [extras...]`` synchronously.
-
-    Returns stdout bytes on success; raises ``RuntimeError`` on failure or
-    transport error. Used by ``stop|set-timeout|kill|info`` paths.
-    """
-    _check_id("session_id", session_id)
-    bin_path = _locate_mvmctl()
-    timeout = env_float(timeout_env, default_timeout)
-    cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    argv = [bin_path, "session", verb]
-    argv += list(extra_args)
-    argv += ["--", session_id]
-    try:
-        proc = run_capped(
-            argv,
-            input_bytes=None,
-            timeout=timeout,
-            max_output_bytes=cap,
-        )
-    except TransportTimeout as exc:
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} timed out after {timeout}s"
-        ) from exc
-    except TransportOutputOverflow as exc:
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} exceeded {cap}-byte output cap"
-        ) from exc
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} exited {proc.returncode}: "
-            f"{stderr or '(no stderr)'}"
-        )
-    return proc.stdout
-
-
-def _stop(session_id: str) -> None:
-    _verb(session_id, "stop")
-
-
-def _best_effort_stop(session_id: str) -> None:
-    """Best-effort teardown for abandonment finalizer; never raises."""
-    try:
-        _stop(session_id)
-    except Exception:
-        pass
-
-
 class Session:
-    """Typed handle for a warm-VM session.
+    """Typed handle for a session.
 
-    Use as a context manager — ``async with`` is the canonical form when
-    you're already in async code; ``with`` works for synchronous callers
-    that pair with :meth:`RemoteFunction.sync`. ``str(sess)`` returns the
-    underlying session id so logs/breadcrumbs stay readable.
+    Use as a context manager — ``async with`` when you're already in async
+    code; ``with`` for synchronous callers that pair with
+    :meth:`RemoteFunction.sync`. ``str(sess)`` returns the session id so
+    logs stay readable.
 
-    Within the ``with`` body, ``await f(...)`` and ``f.sync(...)`` calls
-    auto-attach to this session via context-vars.
+    Within the ``with`` body, :func:`current_session_id` returns this
+    session's id; the binding is a context variable, so it does not leak into
+    other threads or tasks.
 
     Cross-workload guard: :meth:`invoke` raises if the supplied
     ``RemoteFunction``'s ``workload_id`` doesn't match the session's.
-
-    Abandonment: if a ``Session`` is dropped without ``with``/``async
-    with`` lifecycle, a ``weakref.finalize`` fires a best-effort stop and
-    emits a :class:`ResourceWarning`. The canonical pattern is the
-    context-manager form.
     """
 
-    __slots__ = ("_workload_id", "_id", "_token", "_active", "_finalizer", "__weakref__")
+    __slots__ = ("_workload_id", "_id", "_token", "_active", "_timeout")
 
     def __init__(self, workload_id: str, session_id: str):
+        _check_id("session_id", session_id)
         self._workload_id = workload_id
         self._id = session_id
         self._token: contextvars.Token[str | None] | None = None
         self._active = True
-        # Finalizer fires on GC if the user dropped the handle without
-        # closing it. Best-effort stop + warning so leaked sessions
-        # don't pile up against the substrate's session-pool budget.
-        self._finalizer = weakref.finalize(
-            self,
-            _abandonment_finalizer,
-            workload_id,
-            session_id,
-        )
+        self._timeout: float | None = None
 
     @property
     def id(self) -> str:
-        """The substrate-issued session identifier."""
+        """The session identifier."""
         return self._id
 
     @property
@@ -220,7 +105,7 @@ class Session:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._reset_contextvar()
-        self._teardown()
+        self._active = False
 
     # --- async context-manager (for use with await f(...)) --------------
 
@@ -229,12 +114,8 @@ class Session:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        # Reset the contextvar in the same task that set it (Token must
-        # be reset in its originating Context — asyncio.to_thread runs in
-        # a different Context). The synchronous stop can safely run in a
-        # thread.
         self._reset_contextvar()
-        await asyncio.to_thread(self._teardown)
+        self._active = False
 
     def _reset_contextvar(self) -> None:
         if self._token is not None:
@@ -246,25 +127,10 @@ class Session:
                 pass
             self._token = None
 
-    def _teardown(self) -> None:
-        if not self._active:
-            return
-        self._active = False
-        # Detach the finalizer first so it doesn't double-fire.
-        self._finalizer.detach()
-        try:
-            _stop(self._id)
-        except RuntimeError:
-            # Teardown errors must not mask a body exception. The
-            # session-timeout reaper on the substrate side will reap
-            # the VM regardless. Tests assert teardown was *invoked*,
-            # not that it succeeded.
-            pass
-
     # --- explicit lifecycle methods ------------------------------------
 
     async def invoke(self, fn: "RemoteFunction", /, *args: Any, **kwargs: Any) -> Any:
-        """Dispatch ``fn`` against this session.
+        """Dispatch ``fn`` within this session.
 
         Equivalent to entering this session's context and calling
         ``await fn(*args, **kwargs)`` — surfaced as an explicit method
@@ -284,66 +150,45 @@ class Session:
             _active_session.reset(prev)
 
     async def set_timeout(self, seconds: float) -> None:
-        """Update the substrate-side idle timeout for this session."""
-        if seconds < 0:
-            raise ValueError("set_timeout seconds must be non-negative")
-        await asyncio.to_thread(_verb, self._id, "set-timeout", str(seconds))
+        """Record an idle timeout for this session.
+
+        Kept locally and reported by :meth:`info`; a local session has no VM
+        for an idle timeout to reap."""
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+            raise ValueError("set_timeout seconds must be a non-negative number")
+        self._timeout = float(seconds)
 
     async def kill(self) -> None:
-        """Terminate the session immediately. Inflight invokes resolve as failures."""
-        await asyncio.to_thread(_verb, self._id, "kill")
+        """End the session. Later :meth:`info` calls report it inactive."""
         self._active = False
 
     async def info(self) -> dict[str, Any]:
-        """Return substrate-reported metadata for the session."""
-        import json
-
-        out = await asyncio.to_thread(_verb, self._id, "info")
-        text = out.decode("utf-8", errors="replace").strip()
-        if not text:
-            return {}
-        try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"mvmctl session info {self._id} returned non-JSON: {text!r}"
-            ) from exc
-        if not isinstance(value, dict):
-            raise RuntimeError(
-                f"mvmctl session info {self._id} returned non-object: {value!r}"
-            )
-        return value
-
-
-def _abandonment_finalizer(workload_id: str, session_id: str) -> None:
-    warnings.warn(
-        f"Session(workload_id={workload_id!r}, id={session_id!r}) was not "
-        "closed via with/async-with; firing best-effort cleanup. Use "
-        "`async with mv.session(...)` (or `with mv.session(...)`) to bound "
-        "the session lifetime explicitly.",
-        ResourceWarning,
-        stacklevel=2,
-    )
-    _best_effort_stop(session_id)
+        """What the SDK knows about this session. ``local`` is always true
+        today: no session is backed by a VM yet."""
+        return {
+            "id": self._id,
+            "workload_id": self._workload_id,
+            "active": self._active,
+            "idle_timeout_secs": self._timeout,
+            "local": True,
+        }
 
 
 def session(workload_id: str) -> Session:
-    """Open a warm-VM session bound to ``workload_id``.
+    """Open a session bound to ``workload_id``.
 
     Returns a :class:`Session` you can use as either ``with`` or
-    ``async with``. Within the body, ``await f(...)`` and ``f.sync(...)``
-    auto-attach to this session via context-vars.
+    ``async with``. Under ``MVM_NO_VM=1`` this is a local scope; otherwise it
+    raises :class:`MvmTransportError` (see the module docstring).
 
-    Raises :class:`mvm.EmittingContextError` if called inside an
-    ``mvm emit`` subprocess (``MVM_EMITTING=1``). Layer-3
-    calls are dev-only by design (ADR-0010).
+    Raises :class:`mvm.EmittingContextError` if called while ``mvm emit`` is
+    running (``MVM_EMITTING=1``). Layer-3 calls are dev-only by design
+    (ADR-0010).
     """
-    # ADR-0010 §2 Layer-3 guard. Imported here to avoid a circular
-    # import between _session and _remote at module-load time.
-    from mvm._remote import _check_emitting_context
-
     _check_emitting_context("mv.session(...)")
     if not workload_id:
         raise ValueError("session(workload_id) requires a non-empty id")
-    sid = _start(workload_id)
-    return Session(workload_id, sid)
+    _check_id("workload_id", workload_id)
+    if not _no_vm():
+        raise _dispatch_unavailable(f"mv.session({workload_id!r})")
+    return Session(workload_id, f"local-{secrets.token_hex(8)}")

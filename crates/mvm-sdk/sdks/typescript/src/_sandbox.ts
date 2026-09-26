@@ -1,32 +1,24 @@
 /**
- * Sandbox — imperative runtime SDK. SDK port Phase 7c +
- * Plan 73 Followup H-live.
+ * Sandbox — the imperative runtime SDK.
  *
- * TypeScript mirror of `sdks/python/mvm/_sandbox.py`. The
- * decorator surface (`mvm.app({...})((fn))`) is static; the host
- * parses the source AST without running it. The runtime surface
- * (`Sandbox.create(...)`) is imperative: the host *does* run
- * the user's TypeScript module (per S2 in the SDK plan — a
- * documented departure), with the SDK reconfigured to either
- * record each method call into a {@link RuntimeRecording} or
- * shell each call to `mvmctl` against a real microVM,
+ * TypeScript mirror of `sdks/python/mvm/_sandbox.py`. The decorator surface
+ * (`mvm.app({...})((fn))`) is static; the host parses the source without
+ * running it. The runtime surface (`Sandbox.create(...)`) is imperative: the
+ * host *does* run the user's module, with the SDK configured either to record
+ * each call into a {@link RuntimeRecordingWire} or to drive a real microVM,
  * depending on the active mode.
  *
- * Two modes are live:
- *
- * - `MVM_SDK_MODE=record` (the original Phase 7c contract):
- *   every `Sandbox` call appends to an in-process recording;
- *   the Rust lowering at `mvm_sdk::runtime::compile_recording`
+ * - `MVM_SDK_MODE=record`: every `Sandbox` call appends to an in-process
+ *   recording; the Rust lowering at `mvm_sdk::runtime::compile_recording`
  *   produces a Workload.
- * - `MVM_SDK_MODE=live` (Plan 73 Followup H-live): every
- *   `Sandbox` call shells to `$MVM_CLI_BIN` (`mvmctl machine run`,
- *   `mvmctl machine proc start`, `mvmctl machine fs write`, `mvmctl machine stop`)
- *   against a real microVM. The shell is dispatched by
- *   {@link LiveTransport} below.
+ * - `MVM_SDK_MODE=live`: every `Sandbox` call goes to the host library,
+ *   loaded in-process (`machine.run`, `guest.proc.*`, `guest.fs.*`,
+ *   `machine.stop`). No process is spawned; {@link LiveTransport} below is the
+ *   only code that talks to the library.
  *
  * `MVM_SDK_MODE=plan` remains an error here — the host CLI's
- * `mvmctl run --mode plan` verb runs Sandbox scripts under that
- * transport; the SDK itself never enters "plan" mode directly.
+ * `mvmctl run --mode plan` verb runs Sandbox scripts under that transport;
+ * the SDK itself never enters "plan" mode directly.
  */
 
 import type { EnvValue, Network, PortForward, Resources } from "./ir/workload.js";
@@ -34,16 +26,37 @@ import type {
   RuntimeFsEntry,
   RuntimeFsStat,
 } from "./runtime/runtime.js";
-import { cliResolutionHint, resolveCliBin } from "./_cli.js";
+import {
+  fromBase64,
+  startGuestProcess,
+  toBase64,
+  waitGuestProcess,
+  type ReplyFailure,
+} from "./_guest.js";
+import { call } from "./_hostlib.js";
+import {
+  GUEST_CP,
+  GUEST_FS_LIST,
+  GUEST_FS_MKDIR,
+  GUEST_FS_READ,
+  GUEST_FS_REMOVE,
+  GUEST_FS_RENAME,
+  GUEST_FS_STAT,
+  GUEST_FS_WRITE,
+  GUEST_PROC_KILL,
+  GUEST_PROC_SIGNAL,
+  GUEST_PROC_STDIN,
+  MACHINE_INVENTORY,
+  MACHINE_RUN,
+  MACHINE_STOP,
+} from "./hostabi/methods.js";
 
 // This package is ESM ("type": "module"), so `require` does not exist at
 // runtime. These node builtins are imported statically; a lazy `require` here
 // throws `ReferenceError: require is not defined` for every consumer of the
 // built artifact.
-import * as child from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-export { MVM_CLI_BIN_ENV } from "./_cli.js";
 
 // ────────────────────────────────────────────────────────────────────
 // Wire types — mirror the Rust serde shape.
@@ -75,8 +88,9 @@ export interface RuntimeRecordingWire {
 // Errors.
 // ────────────────────────────────────────────────────────────────────
 
-/** Raised when `MVM_SDK_MODE` is unsupported by this build, or
- *  `MVM_SDK_MODE=live` is requested without a resolvable SDK CLI. */
+
+/** Raised when `MVM_SDK_MODE` is unsupported by this build, or a live-mode
+ *  request asks for something the in-process launch cannot do. */
 export class SandboxModeError extends Error {
   constructor(message: string) {
     super(message);
@@ -93,58 +107,32 @@ export class RecordingNotActiveError extends Error {
   }
 }
 
-/** Raised when a live-mode shell to `mvmctl` fails. Carries the
- *  failing argv, exit code, and captured stderr so user scripts
- *  can see exactly which verb refused and why. */
+/** Raised for a live-mode failure the SDK itself detects: a machine that is
+ *  not there, a reply the library should not have sent, an env value live
+ *  mode cannot forward. A failure the host library reports arrives instead
+ *  as the typed `HostLibraryError` subclass its `code` names. */
 export class SandboxLiveError extends Error {
-  readonly argv: string[];
-  readonly exitCode: number | null;
-  readonly stderr: string;
+  /** A short machine-readable reason, when the SDK has one. */
+  readonly code: string | undefined;
 
-  constructor(
-    message: string,
-    opts: { argv?: string[]; exitCode?: number | null; stderr?: string } = {},
-  ) {
-    // The captured stderr is the only place the refusing verb says *why*.
-    // Storing it on the error and rendering only the summary line was the
-    // same as not capturing it: a failing `mvmctl` shell surfaced as "failed
-    // with exit code 1" and nothing else, and the diagnosis had to be re-run
-    // by hand outside the SDK. Folded into the message so every reporter --
-    // `console.error`, an uncaught rejection, a test runner -- shows it,
-    // rather than only the ones that know to read `.stderr`.
-    const argv = opts.argv ?? [];
-    const stderr = (opts.stderr ?? "").trim();
-    const parts = [message];
-    if (argv.length > 0) {
-      parts.push(`command: ${argv.join(" ")}`);
-    }
-    if (stderr.length > 0) {
-      parts.push(`stderr:\n${stderr}`);
-    }
-    super(parts.join("\n"));
+  constructor(message: string, opts: { code?: string } = {}) {
+    super(message);
     this.name = "SandboxLiveError";
-    this.argv = argv;
-    this.exitCode = opts.exitCode ?? null;
-    this.stderr = opts.stderr ?? "";
+    this.code = opts.code;
   }
 }
 
-/** Raised when the SDK refuses a live-mode `commands.start` call
- *  because the resolved template is a *prod* template.
+/** Raised when the SDK refuses a DevOnly live operation because the machine
+ *  was admitted as production.
  *
- *  The guest agent's runtime profile and signed grant refuse DevOnly
- *  process-control requests in production. The agent itself fails closed,
- *  but the SDK refuses *before* any
- *  vsock traffic so a typo doesn't make a spurious round-trip.
- *  `commands.start` is the only Sandbox surface that hits
- *  `proc start`; `files.write` / `kill` route to verbs that are
- *  available in prod builds too. */
+ *  The guest agent's runtime profile and signed grant refuse DevOnly process
+ *  and filesystem requests in production, and the agent fails closed on its
+ *  own. The SDK refuses first, before any library call, so a sealed machine
+ *  never sees the attempt at all. `kill` routes to `machine.stop`, which is
+ *  available in production too. */
 export class SandboxDevOnly extends SandboxLiveError {
-  constructor(
-    message: string,
-    opts: { argv?: string[] } = {},
-  ) {
-    super(message, opts);
+  constructor(message: string) {
+    super(message, { code: "DEV_ONLY" });
     this.name = "SandboxDevOnly";
   }
 }
@@ -172,11 +160,18 @@ export class ProcessHandle {
     this.token = token;
   }
 
+  /** Collect the process's output until it ends. `onEvent` sees every chunk
+   *  in arrival order, before this settles. The work is synchronous; the
+   *  promise is kept so existing `await` and `.then` callers are unaffected. */
   wait(options: {
     timeout?: number;
     onEvent?: (event: ProcessStreamEvent) => void;
   } = {}): Promise<ProcessResult> {
-    return this.transport.processWait(this.token, options);
+    try {
+      return Promise.resolve(this.transport.processWait(this.token, options));
+    } catch (err) {
+      return Promise.reject(err);
+    }
   }
 
   sendStdin(data: Uint8Array | string): void {
@@ -292,14 +287,10 @@ function resolveMode(): SandboxMode {
     (typeof process !== "undefined" ? process.env[MVM_SDK_MODE_ENV] : undefined) ?? "record";
   const norm = raw.trim().toLowerCase();
   if (norm === "record") return "record";
-  if (norm === "live") {
-    try {
-      resolveCliBin("MVM_SDK_MODE=live");
-    } catch (err) {
-      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
-    }
-    return "live";
-  }
+  // Live mode needs the host library, but it is located on the first call
+  // rather than here: that call reports a missing library as a typed
+  // `MvmTransportError` naming every place it looked.
+  if (norm === "live") return "live";
   if (norm === "plan") {
     throw new SandboxModeError(
       "MVM_SDK_MODE=plan is not a SDK-side transport — the host CLI's `mvmctl run --mode plan` " +
@@ -421,20 +412,28 @@ function rejectLiveOption(name: string, reason: string): never {
   throw new SandboxModeError(`Sandbox live mode cannot represent \`${name}\` safely: ${reason}`);
 }
 
-function formatAllowHost(host: unknown, port: unknown): string {
-  const wildcards = new Set(["*", "0.0.0.0", "::", "0.0.0.0/0", "::/0"]);
+/** One admitted egress destination, as `machine.run` takes it. */
+interface EgressTarget {
+  host: string;
+  port: number;
+}
+
+function egressTarget(host: unknown, port: unknown): EgressTarget {
+  const wildcards = new Set(["*", "0.0.0.0", "::", "0.0.0.0/0", "::/0", "[::]"]);
   if (typeof host !== "string" || host.length === 0 || wildcards.has(host)) {
     return rejectLiveOption("network.egress", "allowlist hosts must be specific");
   }
   if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) {
     return rejectLiveOption("network.egress", "allowlist ports must be 1..65535");
   }
-  const renderedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `${renderedHost}:${String(port)}`;
+  // The library takes the bare address; brackets are only URL syntax.
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return { host: bare, port: port as number };
 }
 
-function lowerLiveOptions(options: SandboxCreateOptions): string[] {
-  const argv: string[] = [];
+/** Refuse what live mode cannot represent, and lower the egress allowlist. */
+function lowerLiveOptions(options: SandboxCreateOptions): EgressTarget[] {
+  const egress: EgressTarget[] = [];
   if (options.env !== undefined && Object.keys(options.env).length > 0) {
     rejectLiveOption(
       "env",
@@ -442,25 +441,25 @@ function lowerLiveOptions(options: SandboxCreateOptions): string[] {
     );
   }
   if (options.include && options.include.length > 0) {
-    rejectLiveOption("include", "the live CLI has no source-bundle equivalent");
+    rejectLiveOption("include", "the in-process launch has no source-bundle equivalent");
   }
   if (options.tags && Object.keys(options.tags).length > 0) {
-    rejectLiveOption("tags", "the live CLI has no tag equivalent");
+    rejectLiveOption("tags", "the in-process launch has no tag equivalent");
   }
   if (options.resources !== undefined) {
-    rejectLiveOption("resources", "rootfs_size_mb has no live CLI equivalent, so partial lowering is refused");
+    rejectLiveOption("resources", "rootfs_size_mb has no in-process launch equivalent, so partial lowering is refused");
   }
   const network = options.network;
-  if (network === undefined) return argv;
+  if (network === undefined) return egress;
   const known = new Set(["mode", "egress", "ports", "peers", "dns"]);
   const unknown = Object.keys(network).filter((key) => !known.has(key));
   if (unknown.length > 0) rejectLiveOption("network", `unknown fields: ${unknown.join(", ")}`);
   if ((network.mode ?? "none") !== "none") {
     rejectLiveOption("network.mode", "only the NIC-less `none` mode is supported");
   }
-  if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the live CLI has no peer equivalent");
-  if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the live CLI has no DNS equivalent");
-  if (network.egress === undefined || network.egress === null) return argv;
+  if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the in-process launch has no peer equivalent");
+  if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the in-process launch has no DNS equivalent");
+  if (network.egress === undefined || network.egress === null) return egress;
   if (Object.keys(network.egress).some((key) => key !== "allowlist") || !Array.isArray(network.egress.allowlist)) {
     rejectLiveOption("network.egress", "expected only an allowlist");
   }
@@ -468,9 +467,9 @@ function lowerLiveOptions(options: SandboxCreateOptions): string[] {
     if (Object.keys(entry).some((key) => key !== "host" && key !== "port")) {
       rejectLiveOption("network.egress", "entries must contain only host and port");
     }
-    argv.push("--allow-host", formatAllowHost(entry.host, entry.port));
+    egress.push(egressTarget(entry.host, entry.port));
   }
-  return argv;
+  return egress;
 }
 
 export interface SandboxCommandsStartOptions {
@@ -488,9 +487,9 @@ export interface SandboxExecOptions {
 
 /** Result of a one-shot {@link Sandbox.exec} call.
  *
- *  `exitCode` is the child's exit code (0 on success). `stdout`/`stderr`
- *  are captured strings — exec is a one-shot that *captures* the streams,
- *  the distinction from `commands.start` + `mvmctl machine proc wait`. */
+ *  `exitCode` is the process's exit code (0 on success; 128+N when killed by
+ *  signal N; 124 when the timeout stopped it). `stdout`/`stderr` are the
+ *  captured output decoded as UTF-8, with invalid sequences replaced. */
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -516,79 +515,41 @@ function requireRecording(): RuntimeRecordingWire {
   return recording;
 }
 
-/** Live-mode transport — shells each Sandbox call to the host's
- *  `mvmctl` binary.
+/** Live-mode transport: every call goes to the host library in-process.
  *
- *  Created by `Sandbox.create(...)` when `MVM_SDK_MODE=live`. Holds
- *  the resolved `mvmctl` path, the generated `vmId`, and the
- *  template's `build_mode` parsed from the `mvmctl machine run --up-json`
- *  envelope. The `build_mode` is what the SDK uses to enforce the
- *  W4.3 dev-only `proc start` rule client-side. */
+ *  Created by `Sandbox.create(...)` / `Sandbox.connect(...)` when live. Holds
+ *  the machine's name and the `build_mode` the library reported for it; the
+ *  SDK uses that to refuse DevOnly operations on a production machine before
+ *  any guest traffic. */
 export class LiveTransport {
-  static readonly SCHEMA_VERSION = 1;
-
-  readonly mvmCliBin: string;
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
   private killed = false;
-  constructor(opts: { mvmCliBin: string; vmId: string; buildMode: "dev" | "prod" }) {
-    this.mvmCliBin = opts.mvmCliBin;
+  private readonly fail: ReplyFailure = (message) => new SandboxLiveError(message);
+
+  constructor(opts: { vmId: string; buildMode: "dev" | "prod" }) {
     this.vmId = opts.vmId;
     this.buildMode = opts.buildMode;
   }
 
+  /** Boot a transient machine with `machine.run` and attach to it. */
   static forSource(opts: {
     source: BootSource;
     workloadId: string;
     ttlSeconds: number;
-    createArgs: string[];
+    egress: EgressTarget[];
     bootCommand: string[] | null;
     ports: PortForward[];
   }): LiveTransport {
-    let mvmCliBin: string;
-    try {
-      mvmCliBin = resolveCliBin("Sandbox live mode");
-    } catch (err) {
-      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
-    }
-    // Generate a short, validatable VM id. `mvmctl machine run` rejects
-    // names that don't match its validator; alphanumerics with a
-    // hyphen are safe.
-    const suffix = randomHex(4);
-    const slug = opts.workloadId
-      .slice(0, 24)
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, "-");
-    const vmId = `sdk-${slug}-${suffix}`;
-
-    const argv = ["machine", "run"];
-    if (opts.ports.length === 0) argv.push("-d");
-    const rawProfile = process.env[MVM_SDK_RUN_PROFILE_ENV];
-    const profile = rawProfile?.trim().toLowerCase();
-    if (
-      profile !== undefined &&
-      profile !== "restrictive" &&
-      profile !== "standard" &&
-      profile !== "dev" &&
-      profile !== "permissive"
-    ) {
+    if (opts.source.kind === "manifest") {
       throw new SandboxModeError(
-        `${MVM_SDK_RUN_PROFILE_ENV}=${JSON.stringify(profile)} is invalid — expected one of: ` +
-          "restrictive, standard, dev, permissive",
+        `Sandbox live mode boots an image, and ${JSON.stringify(opts.source.value)} names a ` +
+          "template: the in-process launch has no template source yet. Pass " +
+          "`{ image: <oci-ref | absolute path | flake:<ref>#<attr>> }` instead.",
       );
     }
-    argv.push(
-      "--up-json",
-      "--name",
-      vmId,
-      ...(profile === undefined ? [] : ["--profile", profile]),
-      opts.source.kind === "manifest" ? "--manifest" : "--image",
-      opts.source.value,
-      ...opts.createArgs,
-      "--ttl",
-      `${opts.ttlSeconds}s`,
-    );
-    for (const port of opts.ports) {
+    const profile = runProfile();
+    const ports = opts.ports.map((port) => {
       if (
         port.proto !== "tcp" ||
         port.transform !== "opaque" ||
@@ -599,345 +560,95 @@ export class LiveTransport {
           "Sandbox live mode currently accepts only opaque TCP ingress bound to host and guest 127.0.0.1",
         );
       }
-      argv.push("--port", `${port.host}:${port.guest}`);
-    }
-    if (opts.bootCommand !== null) argv.push("--", ...opts.bootCommand);
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(mvmCliBin, argv, {
-        encoding: "utf-8",
-      });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: [mvmCliBin, ...argv] },
-      );
-    }
-    if (result.error) {
-      throw new SandboxLiveError(
-        `failed to spawn \`${mvmCliBin}\`: ${result.error.message}`,
-        { argv: [mvmCliBin, ...argv] },
-      );
-    }
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine run\` failed with exit code ${result.status}`,
-        {
-          argv: [mvmCliBin, ...argv],
-          exitCode: result.status,
-          stderr: result.stderr ?? "",
-        },
-      );
-    }
-    const envelope = parseUpEnvelope(result.stdout ?? "", [mvmCliBin, ...argv]);
-    return new LiveTransport({
-      mvmCliBin,
-      vmId: envelope.vm_id,
-      buildMode: envelope.build_mode,
+      return `${port.host}:${port.guest}`;
     });
+    // A short name the launcher's validator accepts: lowercase alphanumerics
+    // and hyphens, unique per boot.
+    const slug = opts.workloadId
+      .slice(0, 24)
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+    const request: Record<string, unknown> = {
+      image: opts.source.value,
+      mode: "transient",
+      name: `sdk-${slug}-${randomHex(4)}`,
+      ttl_seconds: opts.ttlSeconds,
+    };
+    if (profile !== undefined) request.profile = profile;
+    if (ports.length > 0) request.ports = ports;
+    if (opts.egress.length > 0) request.egress = opts.egress;
+    if (opts.bootCommand !== null) request.command = opts.bootCommand;
+    const reply = call(MACHINE_RUN, request);
+    return new LiveTransport(parseRunReply(reply));
   }
 
-  /** Attach to an already-running machine by name. Shells
-   *  `mvmctl machine ls --json` and re-derives `build_mode` from the
-   *  listing entry (the attach path never boots, so there is no
-   *  `--up-json` envelope). Fails closed: only an explicit
-   *  `build_mode === "dev"` unlocks the dev-only exec path — a prod /
-   *  missing / unknown value resolves to `"prod"`. */
+  /** Attach to an already-running machine by name.
+   *
+   *  The attach path never boots, so `build_mode` comes from the host's
+   *  machine inventory. Fails closed: only an explicit `"dev"` unlocks the
+   *  DevOnly surface. */
   static forExisting(vmId: string): LiveTransport {
-    let mvmCliBin: string;
-    try {
-      mvmCliBin = resolveCliBin("Sandbox.connect");
-    } catch (err) {
-      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
-    }
-    const argv = ["machine", "ls", "--json"];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(mvmCliBin, argv, { encoding: "utf-8" });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: [mvmCliBin, ...argv] },
+    const records = call(MACHINE_INVENTORY);
+    return new LiveTransport({ vmId, buildMode: deriveAttachedBuildMode(records, vmId) });
+  }
+
+  private requireDev(operation: string): void {
+    if (this.buildMode !== "dev") {
+      throw new SandboxDevOnly(
+        `\`${operation}\` requires a dev-mode machine; ${JSON.stringify(this.vmId)} was admitted ` +
+          `with build_mode=${JSON.stringify(this.buildMode)}. The guest runtime profile and ` +
+          "signed grant refuse DevOnly process and filesystem control in production — boot a " +
+          "dev image, or stage inputs into the image instead.",
       );
     }
-    if (result.error) {
-      throw new SandboxLiveError(
-        `failed to spawn \`${mvmCliBin}\`: ${result.error.message}`,
-        { argv: [mvmCliBin, ...argv] },
-      );
-    }
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine ls --json\` failed with exit code ${result.status}`,
-        {
-          argv: [mvmCliBin, ...argv],
-          exitCode: result.status,
-          stderr: result.stderr ?? "",
-        },
-      );
-    }
-    const buildMode = deriveAttachedBuildMode(result.stdout ?? "", vmId, [
-      mvmCliBin,
-      ...argv,
-    ]);
-    return new LiveTransport({ mvmCliBin, vmId, buildMode });
   }
 
   commandsStart(argv: string[], env: Record<string, EnvValue | string> | undefined): ProcessHandle {
-    this.requireDev("commands.start", ["machine", "proc", "start", this.vmId, ...argv]);
-    const shell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
-    shell.push(...this.encodeEnvFlags(env, shell));
-    shell.push("--", ...argv);
-    return this.startProcess(shell);
-  }
-
-  private requireDev(operation: string, argv: string[]): void {
-    if (this.buildMode !== "dev") {
-      throw new SandboxDevOnly(
-        `\`${operation}\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. The guest policy refuses ` +
-          "this runtime operation on production templates.",
-        { argv },
-      );
-    }
-  }
-
-  private startProcess(shell: string[]): ProcessHandle {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine proc start\` failed with exit code ${result.status}`,
-        { argv: shell, exitCode: result.status, stderr: result.stderr ?? "" },
-      );
-    }
-    const token = (result.stdout ?? "").trim();
-    if (!token) {
-      throw new SandboxLiveError("`mvmctl machine proc start` produced no pid_token on stdout", {
-        argv: shell,
-        stderr: result.stderr ?? "",
-      });
-    }
+    this.requireDev("commands.start");
+    const token = startGuestProcess(this.vmId, argv, { env: literalEnv(env) }, this.fail);
     return new ProcessHandle(this, token);
+  }
+
+  /** One-shot exec: start `argv`, then collect it through its output stream. */
+  commandsExec(argv: string[], options: SandboxExecOptions = {}): ExecResult {
+    this.requireDev("exec");
+    const token = startGuestProcess(
+      this.vmId,
+      argv,
+      { env: literalEnv(options.env), cwd: options.cwd },
+      this.fail,
+    );
+    const result = waitGuestProcess(this.vmId, token, { timeout: options.timeout }, this.fail);
+    const decoder = new TextDecoder("utf-8");
+    return {
+      exitCode: result.exitCode,
+      stdout: decoder.decode(result.stdout),
+      stderr: decoder.decode(result.stderr),
+    };
   }
 
   processWait(
     token: string,
     options: { timeout?: number; onEvent?: (event: ProcessStreamEvent) => void } = {},
-  ): Promise<ProcessResult> {
-    this.requireDev("process wait", ["machine", "proc", "wait", this.vmId, token]);
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const shell = [this.mvmCliBin, "machine", "proc", "wait", this.vmId, token];
-    if (options.timeout !== undefined) shell.push("--timeout", String(Math.trunc(options.timeout)));
-    return new Promise((resolve, reject) => {
-      let proc: import("node:child_process").ChildProcessByStdio<
-        null,
-        import("node:stream").Readable,
-        import("node:stream").Readable
-      >;
-      try {
-        proc = child.spawn(shell[0], shell.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
-      } catch (err) {
-        reject(new SandboxLiveError(`failed to spawn: ${String(err)}`, { argv: shell }));
-        return;
-      }
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      proc.stdout.on("data", (chunk: Buffer) => {
-        stdout.push(chunk);
-        options.onEvent?.({ stream: "stdout", data: new Uint8Array(chunk) });
-      });
-      proc.stderr.on("data", (chunk: Buffer) => {
-        stderr.push(chunk);
-        options.onEvent?.({ stream: "stderr", data: new Uint8Array(chunk) });
-      });
-      proc.on("error", (error) => reject(new SandboxLiveError(`process wait failed: ${error.message}`, { argv: shell })));
-      proc.on("close", (code) => resolve({
-        exitCode: code ?? -1,
-        stdout: Buffer.concat(stdout),
-        stderr: Buffer.concat(stderr),
-      }));
-    });
+  ): ProcessResult {
+    this.requireDev("process wait");
+    return waitGuestProcess(this.vmId, token, options, this.fail);
   }
 
   processStdin(token: string, data: Uint8Array): void {
-    this.requireDev("process stdin", ["machine", "proc", "stdin", this.vmId, token]);
-    this.runBytes([this.mvmCliBin, "machine", "proc", "stdin", this.vmId, token], data);
+    this.requireDev("process stdin");
+    call(GUEST_PROC_STDIN, { id: this.vmId, token, data_b64: toBase64(data) });
   }
 
   processSignal(token: string, signum: number): void {
     if (!Number.isInteger(signum) || signum <= 0) throw new RangeError("signum must be a positive integer");
-    this.requireDev("process signal", ["machine", "proc", "signal", this.vmId, token]);
-    this.runShell([this.mvmCliBin, "machine", "proc", "signal", this.vmId, token, String(signum)]);
+    this.requireDev("process signal");
+    call(GUEST_PROC_SIGNAL, { id: this.vmId, token, signum });
   }
 
   processKill(token: string): void {
-    this.requireDev("process kill", ["machine", "proc", "kill", this.vmId, token]);
-    this.runShell([this.mvmCliBin, "machine", "proc", "kill", this.vmId, token]);
-  }
-
-  /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl machine proc start`,
-   *  rejecting non-literal (secret) values — live mode forwards only
-   *  literals; secrets are injected host-side via `--secret` on `machine run`. */
-  private encodeEnvFlags(
-    env: Record<string, EnvValue | string> | undefined,
-    shellForErr: string[],
-  ): string[] {
-    const flags: string[] = [];
-    if (!env) return flags;
-    for (const [key, value] of Object.entries(env)) {
-      if (typeof value === "string") {
-        flags.push("-e", `${key}=${value}`);
-      } else if (
-        typeof value === "object" &&
-        value !== null &&
-        (value as { kind?: string }).kind === "literal"
-      ) {
-        flags.push("-e", `${key}=${(value as { value: string }).value}`);
-      } else {
-        throw new SandboxLiveError(
-          `env ${JSON.stringify(key)} carries a non-literal value; live mode only ` +
-            "forwards literal env vars (secrets must be injected via the host keystore " +
-            "+ `--secret` on `mvmctl machine run`).",
-          { argv: shellForErr },
-        );
-      }
-    }
-    return flags;
-  }
-
-  /** One-shot exec: `mvmctl machine proc start ... -- argv` → pid_token, then
-   *  `mvmctl machine proc wait <token>` to capture stdout/stderr/exit. Refuses
-   *  with {@link SandboxDevOnly} on a prod template (claim 4). */
-  commandsExec(argv: string[], options: SandboxExecOptions = {}): ExecResult {
-    if (this.buildMode !== "dev") {
-      throw new SandboxDevOnly(
-        `\`exec\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. The guest runtime ` +
-          `profile and signed grant refuse DevOnly process control in prod — ` +
-          `re-build the template with \`mvmctl template build --dev <name>\`, ` +
-          `or use \`files.write\` to stage inputs into the running VM instead.`,
-        { argv: ["machine", "proc", "start", this.vmId, ...argv] },
-      );
-    }
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-
-    // 1) `machine proc start` → pid_token on stdout.
-    const startShell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
-    startShell.push(...this.encodeEnvFlags(options.env, startShell));
-    if (options.cwd !== undefined) startShell.push("--cwd", options.cwd);
-    startShell.push("--", ...argv);
-
-    let startResult;
-    try {
-      startResult = child.spawnSync(startShell[0], startShell.slice(1), {
-        encoding: "utf-8",
-      });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: startShell },
-      );
-    }
-    if (startResult.error) {
-      throw new SandboxLiveError(`failed to spawn: ${startResult.error.message}`, {
-        argv: startShell,
-      });
-    }
-    if (startResult.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine proc start\` failed with exit code ${startResult.status}`,
-        {
-          argv: startShell,
-          exitCode: startResult.status,
-          stderr: startResult.stderr ?? "",
-        },
-      );
-    }
-    const pidToken = (startResult.stdout ?? "").trim();
-    if (!pidToken) {
-      throw new SandboxLiveError(
-        "`mvmctl machine proc start` produced no pid_token on stdout",
-        { argv: startShell, stderr: startResult.stderr ?? "" },
-      );
-    }
-
-    // 2) `machine proc wait <token>` → captured stdout/stderr/exit.
-    const waitShell = [this.mvmCliBin, "machine", "proc", "wait", this.vmId, pidToken];
-    if (options.timeout !== undefined) {
-      waitShell.push("--timeout", String(Math.trunc(options.timeout)));
-    }
-    let waitResult;
-    try {
-      waitResult = child.spawnSync(waitShell[0], waitShell.slice(1), {
-        encoding: "utf-8",
-        // +5s slack so the agent's pgroup-kill (on --timeout overrun) lands
-        // before spawnSync gives up; the agent enforces first.
-        timeout:
-          options.timeout !== undefined ? (options.timeout + 5) * 1000 : undefined,
-      });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: waitShell },
-      );
-    }
-    if (waitResult.error) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine proc wait\` failed: ${waitResult.error.message}`,
-        { argv: waitShell },
-      );
-    }
-    return {
-      exitCode: waitResult.status ?? -1,
-      stdout: waitResult.stdout ?? "",
-      stderr: waitResult.stderr ?? "",
-    };
-  }
-
-  private runBytes(shell: string[], data: Uint8Array): void {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const result = child.spawnSync(shell[0], shell.slice(1), { input: Buffer.from(data) });
-    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
-    if (result.status !== 0) {
-      throw new SandboxLiveError(`\`${shell.join(" ")}\` failed with exit code ${result.status}`, {
-        argv: shell,
-        exitCode: result.status,
-        stderr: result.stderr ? result.stderr.toString("utf-8") : "",
-      });
-    }
-  }
-
-  private runJson(shell: string[]): unknown {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
-    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
-    if (result.status !== 0) {
-      throw new SandboxLiveError(`\`${shell.join(" ")}\` failed with exit code ${result.status}`, {
-        argv: shell,
-        exitCode: result.status,
-        stderr: result.stderr ?? "",
-      });
-    }
-    try {
-      return JSON.parse(result.stdout ?? "");
-    } catch (err) {
-      throw new SandboxLiveError(`\`${shell.join(" ")}\` returned invalid JSON`, {
-        argv: shell,
-        stderr: String(err),
-      });
-    }
+    this.requireDev("process kill");
+    call(GUEST_PROC_KILL, { id: this.vmId, token });
   }
 
   filesWrite(
@@ -945,252 +656,153 @@ export class LiveTransport {
     data: Uint8Array,
     options: { mode?: number; createParents?: boolean; followSymlinks?: boolean } = {},
   ): void {
-    this.requireDev("files.write", ["machine", "fs", "write", this.vmId, path]);
-    const shell = [this.mvmCliBin, "machine", "fs", "write", this.vmId, path, "--mode", String(options.mode ?? 0o644)];
-    if (options.createParents) shell.push("--create-parents");
-    if (options.followSymlinks) shell.push("--follow-symlinks");
-    this.runBytes(shell, data);
+    this.requireDev("files.write");
+    // Both flags are always sent, as the Python SDK sends them, so the two
+    // languages make byte-identical requests for the same write.
+    call(GUEST_FS_WRITE, {
+      id: this.vmId,
+      path,
+      data_b64: toBase64(data),
+      mode: options.mode ?? 0o644,
+      create_parents: options.createParents ?? false,
+      follow_symlinks: options.followSymlinks ?? false,
+    });
   }
 
   filesRead(path: string, offset = 0, length = 16 * 1024 * 1024): Uint8Array {
     if (offset < 0 || length < 0) throw new RangeError("offset and length must be non-negative");
-    this.requireDev("files.read", ["machine", "fs", "read", this.vmId, path]);
-    const shell = [this.mvmCliBin, "machine", "fs", "read", this.vmId, path, "--offset", String(offset), "--length", String(length)];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(shell[0], shell.slice(1));
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    if (result.error) {
-      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, {
-        argv: shell,
-      });
-    }
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine fs read\` failed with exit code ${result.status}`,
-        {
-          argv: shell,
-          exitCode: result.status,
-          stderr: result.stderr ? result.stderr.toString("utf-8") : "",
-        },
-      );
-    }
-    return new Uint8Array(result.stdout ?? Buffer.alloc(0));
+    this.requireDev("files.read");
+    const reply = call(GUEST_FS_READ, { id: this.vmId, path, offset, length });
+    return fromBase64(reply?.data_b64, "guest.fs.read's data_b64", this.fail);
   }
 
   filesList(path: string): FsEntry[] {
-    this.requireDev("files.list", ["machine", "fs", "ls", this.vmId, path]);
-    const parsed = this.runJson([this.mvmCliBin, "machine", "fs", "ls", this.vmId, path, "--json"]);
-    if (!Array.isArray(parsed)) throw new SandboxLiveError("filesystem listing must be an array");
-    return parsed as FsEntry[];
+    this.requireDev("files.list");
+    const reply = call(GUEST_FS_LIST, { id: this.vmId, path });
+    if (!Array.isArray(reply?.entries)) {
+      throw new SandboxLiveError("guest.fs.list returned no entries array");
+    }
+    return reply.entries as FsEntry[];
   }
 
   filesStat(path: string, followSymlinks = true): FsStat {
-    this.requireDev("files.stat", ["machine", "fs", "stat", this.vmId, path]);
-    const shell = [this.mvmCliBin, "machine", "fs", "stat", this.vmId, path, "--json"];
-    if (!followSymlinks) shell.push("--no-follow");
-    const parsed = this.runJson(shell);
-    if (typeof parsed !== "object" || parsed === null) throw new SandboxLiveError("filesystem stat must be an object");
-    return parsed as FsStat;
+    this.requireDev("files.stat");
+    const reply = call(GUEST_FS_STAT, { id: this.vmId, path, follow_symlinks: followSymlinks });
+    if (typeof reply !== "object" || reply === null || Array.isArray(reply)) {
+      throw new SandboxLiveError("guest.fs.stat must return an object");
+    }
+    return reply as FsStat;
   }
 
   filesMkdir(path: string, parents = false, mode = 0o755): void {
-    this.requireDev("files.mkdir", ["machine", "fs", "mkdir", this.vmId, path]);
-    const shell = [this.mvmCliBin, "machine", "fs", "mkdir", this.vmId, path, "--mode", String(mode)];
-    if (parents) shell.push("--parents");
-    this.runShell(shell);
+    this.requireDev("files.mkdir");
+    call(GUEST_FS_MKDIR, { id: this.vmId, path, mode, parents });
   }
 
   filesRemove(path: string, recursive = false): void {
-    this.requireDev("files.remove", ["machine", "fs", "rm", this.vmId, path]);
-    const shell = [this.mvmCliBin, "machine", "fs", "rm", this.vmId, path];
-    if (recursive) shell.push("--recursive");
-    this.runShell(shell);
+    this.requireDev("files.remove");
+    call(GUEST_FS_REMOVE, { id: this.vmId, path, recursive });
   }
 
   filesMove(source: string, destination: string): void {
-    this.requireDev("files.move", ["machine", "fs", "mv", this.vmId, source, destination]);
-    this.runShell([this.mvmCliBin, "machine", "fs", "mv", this.vmId, source, destination]);
+    this.requireDev("files.move");
+    call(GUEST_FS_RENAME, { id: this.vmId, from: source, to: destination });
   }
 
-  cp(source: string, destination: string): void {
-    this.requireDev("copy", ["machine", "cp", source, destination]);
-    const shell = [this.mvmCliBin, "machine", "cp", source, destination];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(shell[0], shell.slice(1));
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    if (result.error) {
-      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
-    }
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine cp\` failed with exit code ${result.status}`,
-        {
-          argv: shell,
-          exitCode: result.status,
-          stderr: result.stderr ? result.stderr.toString("utf-8") : "",
-        },
-      );
-    }
+  copy(direction: "host_to_guest" | "guest_to_host", hostPath: string, guestPath: string): void {
+    this.requireDev("copy");
+    call(GUEST_CP, { id: this.vmId, direction, host_path: hostPath, guest_path: guestPath });
   }
 
+  /** Stop the machine. Idempotent, and never throws: this is the cleanup
+   *  path, and a failure here usually means the TTL reaper got there first. */
   kill(): void {
     if (this.killed) return;
     this.killed = true;
-    // `--yes` skips the interactive confirmation prompt; the sandbox tears down
-    // non-interactively.
-    const shell = [this.mvmCliBin, "machine", "stop", this.vmId, "--yes"];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     try {
-      const result = child.spawnSync(shell[0], shell.slice(1), {
-        encoding: "utf-8",
-      });
-      if (result.status !== 0) {
-        // Don't throw — kill is the cleanup path; a failure here
-        // usually means the VM was already torn down by the
-        // orchestrator's TTL reaper.
-        // eslint-disable-next-line no-console
-        console.error(
-          `mvm-sdk live: \`mvmctl machine stop ${this.vmId}\` exited with ${result.status}: ${result.stderr ?? ""}`,
-        );
-      }
+      call(MACHINE_STOP, { id: this.vmId });
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`mvm-sdk live: failed to spawn \`mvmctl machine stop\`: ${String(err)}`);
-    }
-  }
-
-  private runShell(shell: string[]): void {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let result;
-    try {
-      result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    if (result.error) {
-      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, {
-        argv: shell,
-      });
-    }
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`${shell.join(" ")}\` failed with exit code ${result.status}`,
-        {
-          argv: shell,
-          exitCode: result.status,
-          stderr: result.stderr ?? "",
-        },
+      console.error(
+        `mvm-sdk live: stopping ${JSON.stringify(this.vmId)} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
 }
 
-/** Parse an `mvmctl machine run --up-json` stdout envelope. The envelope is
- *  a single JSON line; trailing newlines tolerated. Throws
- *  `SandboxLiveError` on any shape violation. Exported for tests. */
-export function parseUpEnvelope(
-  stdout: string,
-  argv: string[],
-): { vm_id: string; build_mode: "dev" | "prod" } {
-  const line = stdout.trim();
-  if (!line) {
-    throw new SandboxLiveError(
-      "`mvmctl machine run --up-json` produced empty stdout — expected a JSON envelope.",
-      { argv },
-    );
+/** Forward only literal env values; a secret must be bound on the host, and
+ *  handing its reference to a guest process would leak nothing useful and
+ *  hide the mistake. */
+function literalEnv(env: Record<string, EnvValue | string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!env) return out;
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "string") {
+      out[key] = value;
+    } else if (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { kind?: string }).kind === "literal"
+    ) {
+      out[key] = (value as { value: string }).value;
+    } else {
+      throw new SandboxLiveError(
+        `env ${JSON.stringify(key)} carries a non-literal value; live mode only forwards ` +
+          "literal env vars. Bind secrets on the host keystore so the substitution " +
+          "endpoint injects them, rather than passing them to a guest process.",
+      );
+    }
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch (err) {
-    throw new SandboxLiveError(
-      `\`mvmctl machine run --up-json\` stdout is not valid JSON: ${String(err)}`,
-      { argv, stderr: line },
-    );
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new SandboxLiveError(
-      "`mvmctl machine run --up-json` envelope must be a JSON object.",
-      { argv },
-    );
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (obj.schema_version !== LiveTransport.SCHEMA_VERSION) {
-    throw new SandboxLiveError(
-      `\`mvmctl machine run --up-json\` envelope schema_version=${JSON.stringify(obj.schema_version)}; ` +
-        `SDK supports ${LiveTransport.SCHEMA_VERSION}`,
-      { argv },
-    );
-  }
-  if (typeof obj.vm_id !== "string" || obj.vm_id.length === 0) {
-    throw new SandboxLiveError(
-      "`mvmctl machine run --up-json` envelope is missing a non-empty `vm_id` field.",
-      { argv },
-    );
-  }
-  if (obj.build_mode !== "dev" && obj.build_mode !== "prod") {
-    throw new SandboxLiveError(
-      `\`mvmctl machine run --up-json\` envelope build_mode=${JSON.stringify(obj.build_mode)}; ` +
-        "expected 'dev' or 'prod'.",
-      { argv },
-    );
-  }
-  return { vm_id: obj.vm_id, build_mode: obj.build_mode };
+  return out;
 }
 
-/** Re-derive `build_mode` for an attached machine from
- *  `mvmctl machine ls --json` output. The listing is a JSON array of
- *  machine entries matched on `name`. Fails closed: only an explicit
- *  `"dev"` returns `"dev"`; a `"prod"` / missing / unknown value
- *  returns `"prod"`, so a stale or hostile listing can never *open*
- *  the dev-only exec path. Throws `SandboxLiveError` when `vmId` is
- *  absent from the listing. Exported for tests. */
-export function deriveAttachedBuildMode(
-  stdout: string,
-  vmId: string,
-  argv: string[],
-): "dev" | "prod" {
-  const line = stdout.trim();
-  if (!line) {
-    throw new SandboxLiveError(
-      `\`mvmctl machine ls --json\` produced no output; cannot attach to ${JSON.stringify(vmId)}.`,
-      { argv },
+/** The security profile `mvmctl run` handed down, validated. */
+function runProfile(): string | undefined {
+  const raw = process.env[MVM_SDK_RUN_PROFILE_ENV];
+  const profile = raw?.trim().toLowerCase();
+  if (
+    profile !== undefined &&
+    profile !== "restrictive" &&
+    profile !== "standard" &&
+    profile !== "dev" &&
+    profile !== "permissive"
+  ) {
+    throw new SandboxModeError(
+      `${MVM_SDK_RUN_PROFILE_ENV}=${JSON.stringify(profile)} is invalid — expected one of: ` +
+        "restrictive, standard, dev, permissive",
     );
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch (err) {
+  return profile;
+}
+
+/** Read the machine name and build mode out of a `machine.run` reply.
+ *  Throws {@link SandboxLiveError} on any shape violation. Exported for tests. */
+export function parseRunReply(reply: unknown): { vmId: string; buildMode: "dev" | "prod" } {
+  if (typeof reply !== "object" || reply === null) {
+    throw new SandboxLiveError("machine.run returned no reply object");
+  }
+  const { machine, build_mode: buildMode } = reply as { machine?: unknown; build_mode?: unknown };
+  const name = (machine as { name?: unknown } | null | undefined)?.name;
+  if (typeof name !== "string" || name.length === 0) {
+    throw new SandboxLiveError("machine.run's reply names no machine");
+  }
+  if (buildMode !== "dev" && buildMode !== "prod") {
     throw new SandboxLiveError(
-      `\`mvmctl machine ls --json\` stdout is not valid JSON: ${String(err)}`,
-      { argv, stderr: line },
+      `machine.run's reply has build_mode=${JSON.stringify(buildMode)}; expected "dev" or "prod"`,
     );
   }
-  if (!Array.isArray(parsed)) {
-    throw new SandboxLiveError("`mvmctl machine ls --json` must be a JSON array.", {
-      argv,
-    });
+  return { vmId: name, buildMode };
+}
+
+/** Re-derive `build_mode` for an attached machine from `machine.inventory`
+ *  records, matched on `name`. Fails closed: only an explicit `"dev"` returns
+ *  `"dev"`, so a stale or hostile record can never *open* the DevOnly path.
+ *  Throws {@link SandboxLiveError} when `vmId` is absent. Exported for tests. */
+export function deriveAttachedBuildMode(records: unknown, vmId: string): "dev" | "prod" {
+  if (!Array.isArray(records)) {
+    throw new SandboxLiveError("machine.inventory must return an array");
   }
-  for (const entry of parsed) {
+  for (const entry of records) {
     if (
       typeof entry === "object" &&
       entry !== null &&
@@ -1200,8 +812,8 @@ export function deriveAttachedBuildMode(
     }
   }
   throw new SandboxLiveError(
-    `no machine named ${JSON.stringify(vmId)} in \`mvmctl machine ls\`; is it running?`,
-    { argv },
+    `no machine named ${JSON.stringify(vmId)} in the host's machine inventory; is it running?`,
+    { code: "NOT_FOUND" },
   );
 }
 
@@ -1223,8 +835,8 @@ function isLiveActive(): boolean {
  *
  *  Construct via `Sandbox.create(...)`. Under `MVM_SDK_MODE=record`
  *  the constructor sets up an in-process recording; under
- *  `MVM_SDK_MODE=live` it shells `mvmctl machine run` to boot a real
- *  microVM and stashes the resulting handle on
+ *  `MVM_SDK_MODE=live` it boots a real microVM through the host
+ *  library's `machine.run` and stashes the resulting handle on
  *  `this._live`. Use `[Symbol.dispose]` (TS 5.2+) for automatic
  *  cleanup, or call `sb.kill()` explicitly. */
 export class Sandbox {
@@ -1279,7 +891,7 @@ export class Sandbox {
         source,
         workloadId: wid,
         ttlSeconds,
-        createArgs: lowerLiveOptions(options),
+        egress: lowerLiveOptions(options),
         bootCommand: command ? [...command] : null,
         ports: options.network?.ports ?? [],
       });
@@ -1311,9 +923,9 @@ export class Sandbox {
 
   /** Attach to an already-running machine by name, from a fresh
    *  process. Unlike {@link Sandbox.create}, `connect` never boots a
-   *  VM — so it re-derives the machine's `build_mode` from
-   *  `mvmctl machine ls --json` (see {@link LiveTransport.forExisting})
-   *  rather than an `--up-json` envelope.
+   *  VM — so it re-derives the machine's `build_mode` from the host's
+   *  machine inventory (see {@link LiveTransport.forExisting}) rather
+   *  than a `machine.run` reply.
    *
    *  The dev-only exec guard is inherited unchanged: the derived
    *  `build_mode` is never defaulted to `"dev"` — a prod / missing /
@@ -1322,9 +934,8 @@ export class Sandbox {
    *  {@link SandboxDevOnly} exactly like the create path (security
    *  claim 4).
    *
-   *  Always a live operation: resolves the mvm CLI regardless of
-   *  `MVM_SDK_MODE`. Throws {@link SandboxLiveError} when no machine of
-   *  that name is listed. */
+   *  Always a live operation, regardless of `MVM_SDK_MODE`. Throws
+   *  {@link SandboxLiveError} when no machine of that name is listed. */
   static connect(id: string): Sandbox {
     if (typeof id !== "string" || id.length === 0) {
       throw new TypeError("Sandbox.connect requires a non-empty machine id");
@@ -1342,8 +953,8 @@ export class Sandbox {
 
   /** One-shot: run `argv` inside the sandbox, capturing stdout / stderr /
    *  exit into an {@link ExecResult}. Convenience over `commands.start` +
-   *  `mvmctl machine proc wait`. Refuses with `SandboxDevOnly` on a prod template
-   *  (claim 4).
+   *  `ProcessHandle.wait`. Refuses with `SandboxDevOnly` on a production
+   *  machine, before any guest traffic.
    *
    *  Live mode only: in record mode this throws `SandboxModeError` — the
    *  recording's lowering doesn't materialise return values, so use
@@ -1375,8 +986,8 @@ export class Sandbox {
 
   /** Copy a host file into the running sandbox at `guestPath`.
    *
-   *  Shells `mvmctl machine cp <hostPath> <vm>:<guestPath>` — the host file
-   *  streams into the guest over the agent fs RPC.
+   *  The host library reads the host file and writes it into the guest over
+   *  the agent's filesystem RPC (`guest.cp`, `host_to_guest`).
    *
    *  Live mode only: in record mode this throws `SandboxModeError`. To
    *  stage a file declaratively for a recorded workload, use
@@ -1394,13 +1005,13 @@ export class Sandbox {
           "use `files.write(path, content)` to stage a file declaratively.",
       );
     }
-    this._live.cp(hostPath, `${this._live.vmId}:${guestPath}`);
+    this._live.copy("host_to_guest", hostPath, guestPath);
   }
 
   /** Copy a file out of the running sandbox to `hostPath`.
    *
-   *  Shells `mvmctl machine cp <vm>:<guestPath> <hostPath>` — the guest file
-   *  streams back over the agent fs RPC.
+   *  The host library reads the guest file over the agent's filesystem RPC
+   *  and writes it to the host (`guest.cp`, `guest_to_host`).
    *
    *  Live mode only: pulling a file from a running VM has no record-mode
    *  meaning, so in record mode this throws `SandboxModeError`. */
@@ -1417,7 +1028,7 @@ export class Sandbox {
           "running VM and has no record-mode meaning.",
       );
     }
-    this._live.cp(`${this._live.vmId}:${guestPath}`, hostPath);
+    this._live.copy("guest_to_host", hostPath, guestPath);
   }
 
   /** Refuse dynamic ingress changes after admission.

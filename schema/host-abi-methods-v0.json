@@ -1,12 +1,18 @@
 {
   "abi_major": 1,
-  "abi_minor": 1,
+  "abi_minor": 2,
   "methods": [
     {
       "classification": "prod_safe",
       "key": "backend_capabilities",
       "name": "backend.capabilities",
       "summary": "Reports what the backend can do."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_create",
+      "name": "machine.create",
+      "summary": "Persists a machine definition without booting it."
     },
     {
       "classification": "prod_safe",
@@ -19,6 +25,12 @@
       "key": "machine_inspect",
       "name": "machine.inspect",
       "summary": "Inspects one machine."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_inventory",
+      "name": "machine.inventory",
+      "summary": "Lists every machine on this host with its dev/prod posture."
     },
     {
       "classification": "prod_safe",
@@ -37,6 +49,18 @@
       "key": "machine_rm",
       "name": "machine.rm",
       "summary": "Removes a machine, stopping it first when needed."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_run",
+      "name": "machine.run",
+      "summary": "Boots a machine through the admitted local launch."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_start",
+      "name": "machine.start",
+      "summary": "Boots a persisted machine definition."
     },
     {
       "classification": "prod_safe",
@@ -121,6 +145,24 @@
       "key": "guest_proc_stdin",
       "name": "guest.proc.stdin",
       "summary": "Writes a tracked process's stdin, base64-encoded."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_close",
+      "name": "guest.proc.stream.close",
+      "summary": "Closes a process output stream. Idempotent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_next",
+      "name": "guest.proc.stream.next",
+      "summary": "Returns the process output that has arrived, and how it ended."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_open",
+      "name": "guest.proc.stream.open",
+      "summary": "Opens a stream over a guest process's output."
     },
     {
       "classification": "dev_only",

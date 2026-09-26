@@ -154,11 +154,22 @@ describe("Sandbox.kill / dispose", () => {
 // ── modes ────────────────────────────────────────────────────────────
 
 describe("MVM_SDK_MODE", () => {
-  it("live mode without the host CLI throws", () => {
+  it("live mode without the host library throws a transport error", () => {
     process.env.MVM_SDK_MODE = "live";
-    delete process.env.MVM_CLI_BIN;
-    process.env.PATH = "";
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/mvmctl/);
+    const previous = process.env.MVM_HOSTLIB_PATH;
+    process.env.MVM_HOSTLIB_PATH = "/nonexistent/libmvm_hostlib.so";
+    try {
+      expect(() => mvm.Sandbox.create({ image: "alpine:3.20" })).toThrow(mvm.MvmTransportError);
+      expect(() => mvm.Sandbox.create({ image: "alpine:3.20" })).toThrow(/MVM_HOSTLIB_PATH names/);
+    } finally {
+      if (previous === undefined) delete process.env.MVM_HOSTLIB_PATH;
+      else process.env.MVM_HOSTLIB_PATH = previous;
+    }
+  });
+
+  it("live mode refuses a template source before looking for the library", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(mvm.SandboxModeError);
   });
 
   it("plan mode redirects to mvmctl run --mode plan", () => {

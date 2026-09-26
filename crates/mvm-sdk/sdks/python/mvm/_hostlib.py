@@ -7,10 +7,14 @@ not a helper standing in for it.
 
 Where the library comes from, in order:
 
-1. ``MVM_HOSTLIB_PATH``, the library file itself.
-2. Beside ``mvmctl`` on ``PATH``. The release ships them side by side; the
-   binary is located, never run.
-3. Otherwise [`MvmTransportError`], naming both.
+1. ``MVM_HOSTLIB_PATH``, the library file itself. When it is set and names
+   nothing, that is an error, not a reason to keep looking: an override that
+   silently fell through would load a library the caller did not choose.
+2. Packaged with the SDK, at ``mvm/_native/<library>``, so an installed
+   package that carries its own library needs nothing else on the host.
+3. Beside ``mvmctl`` on ``PATH``, and beside the file that path resolves to.
+   The release ships them side by side; the binary is located, never run.
+4. Otherwise [`MvmTransportError`], naming all three.
 
 Before the first call the binding tells the library which ABI it was built
 for, and the library refuses every call until that succeeds, so a binding
@@ -25,6 +29,7 @@ import sys
 import threading
 from typing import Any, Callable, List, Optional, Tuple
 
+from mvm._env.vars import MVM_HOSTLIB_PATH_ENV
 from mvm._errors.types import (
     CODE_ERRORS,
     STATUS_OK as _OK,
@@ -34,12 +39,12 @@ from mvm._errors.types import (
 )
 from mvm._hostabi.methods import ABI_MAJOR, ABI_MINOR
 
-#: Environment variable naming the library file.
-LIB_PATH_ENV = "MVM_HOSTLIB_PATH"
+#: Environment variable naming the library file. The name is owned by the
+#: Rust registry, so the CLI that sets it and the SDKs that read it agree.
+LIB_PATH_ENV = MVM_HOSTLIB_PATH_ENV
 
-#: The ABI this binding was written against, generated from the host
-#: registry (`mvm._hostabi.methods`). A library with another major, or an
-#: older minor, refuses it.
+#: Where a package that bundles the library keeps it, beside this module.
+PACKAGED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_native")
 
 
 def library_file_name(platform: str = sys.platform) -> str:
@@ -51,6 +56,7 @@ def candidate_paths(
     environ: Optional[dict] = None,
     which: Callable[[str], Optional[str]] = shutil.which,
     platform: str = sys.platform,
+    packaged_dir: str = PACKAGED_DIR,
 ) -> List[str]:
     """Where to look for the library, in order. Pure, for testing: it names
     paths and reads no files."""
@@ -59,10 +65,13 @@ def candidate_paths(
     if explicit:
         return [explicit]
     name = library_file_name(platform)
+    paths = [os.path.join(packaged_dir, name)]
     found = which("mvmctl")
     if not found:
-        return []
-    paths = [os.path.join(os.path.dirname(found), name)]
+        return paths
+    beside = os.path.join(os.path.dirname(found), name)
+    if beside not in paths:
+        paths.append(beside)
     # A package manager usually links `mvmctl` into its bin directory; the
     # library sits beside the real file.
     real = os.path.realpath(found)
@@ -77,10 +86,11 @@ def resolve_library_path(
     which: Callable[[str], Optional[str]] = shutil.which,
     exists: Callable[[str], bool] = os.path.isfile,
     platform: str = sys.platform,
+    packaged_dir: str = PACKAGED_DIR,
 ) -> str:
     """The first candidate that exists, or [`MvmTransportError`]."""
     env = os.environ if environ is None else environ
-    candidates = candidate_paths(env, which, platform)
+    candidates = candidate_paths(env, which, platform, packaged_dir)
     if env.get(LIB_PATH_ENV):
         path = candidates[0]
         if not exists(path):
@@ -91,8 +101,8 @@ def resolve_library_path(
             return path
     raise MvmTransportError(
         f"the host library {library_file_name(platform)} was not found: set "
-        f"{LIB_PATH_ENV} to its path, or put the directory holding it and mvmctl "
-        "on PATH"
+        f"{LIB_PATH_ENV} to its path, install an SDK package that bundles it "
+        f"under {packaged_dir}, or put the directory holding it and mvmctl on PATH"
     )
 
 

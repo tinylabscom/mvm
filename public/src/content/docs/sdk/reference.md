@@ -35,12 +35,18 @@ Methods not implemented in a language SDK should stay documented as planned, not
 
 ## Machine wrappers
 
-Python, TypeScript, and Rust also expose thin host-side wrappers for the
-beginner `mvmctl machine ...` surface. These wrappers shell through the CLI so
-OCI pull, admission, artifact verification, receipts, audit, networking, and
-persistent machine state stay owned by `mvmctl`; use `Machine.check_artifact`,
-`Machine.checkArtifact`, or Rust `MachineCheckArtifact` for the read-only
-`machine check-artifact` preview.
+Python and TypeScript also expose `Machine`, a host-side handle for
+machine lifecycle: `run` (boot a transient machine), `create` (persist a
+named definition), `start`, `stop`, `rm`, `inspect`, `logs`, `ls` (the host
+inventory, with each machine's dev/prod posture), and `exec` on a dev
+machine. Like `Sandbox`, each call goes to `libmvm_hostlib` in-process —
+OCI resolution, admission under a signed plan, audit, and persistent machine
+state stay owned by `mvm-client`, and the SDK never runs `mvmctl`. Rust
+programs use `mvm-client` directly; see the
+[Rust quickstart](/getting-started/rust-quickstart/).
+
+Artifact preview (`mvmctl machine check-artifact`) and interactive shells are
+CLI-only.
 
 ## Related references
 

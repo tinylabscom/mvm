@@ -17,8 +17,7 @@ pub mod error_codes;
 pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled
-// by `mvm-client` (which adds the in-process `LocalBackend`) and by `mvm-sdk`'s
-// `client-facade`.
+// by `mvm-client`, which adds the in-process `LocalBackend`.
 #[cfg(feature = "client")]
 pub mod client;
 pub mod config;

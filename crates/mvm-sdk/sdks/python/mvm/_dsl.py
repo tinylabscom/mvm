@@ -9,7 +9,7 @@ The SDK has two layers (per ADR-0003):
 Per ADR-0003, the v0 DSL uses keyword-argument style on a decorator. User code
 registers a single-app workload and emits IR via ``mvm.emit_json()`` (or
 by running ``mvm emit entry.py`` from the host, which honors ADR-0002's
-subprocess contract).
+emit contract).
 """
 
 from __future__ import annotations
@@ -525,8 +525,9 @@ def entrypoint_function(
     The image bakes ``mvm-runtime`` at ``/usr/lib/mvm/wrappers/runner``
     (with ``/etc/mvm/entrypoint`` pointing at it). At call time the runtime
     reads stdin, dispatches ``module:function`` per the declared ``format``,
-    and writes the return on stdout. The host SDK calls
-    ``mvmctl invoke <workload> --stdin <encoded>``.
+    and writes the return on stdout. On the host, calling the decorated
+    function encodes ``[args, kwargs]`` in that same format (see
+    ``mvm._remote``).
 
     ``language`` selects which Nix factory mvm dispatches to when
     compiling the entrypoint into a rootfs derivation (per ADR-0010 §4).

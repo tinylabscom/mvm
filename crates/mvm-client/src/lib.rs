@@ -12,6 +12,35 @@
 //! terms: the trait and transport live in `mvm-core`, this crate is the
 //! surface consumers import. [`stream_tracing`] republishes that stream into
 //! a consumer's `tracing` setup, behind the `tracing-bridge` feature.
+//!
+//! ## One library
+//!
+//! A Rust program that authors, launches or drives a workload depends on this
+//! crate alone. Everything it needs to name is re-exported here: the launch
+//! request and its parts ([`LaunchRequest`], [`RootfsSource`], [`Grants`],
+//! [`HostPort`]), the results ([`LaunchOutcome`], [`MachineState`], the
+//! [`inventory`] records), the guest operations and their payloads
+//! ([`guest`]), the typed errors and their stable codes ([`MvmError`],
+//! [`error_codes`]), signed plans ([`SignedExecutionPlan`]), and the workload
+//! authoring surface ([`authoring`]). The language SDKs reach the same surface
+//! through `libmvm_hostlib`, a C ABI over this crate.
+//!
+//! ```no_run
+//! use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, RootfsSource};
+//!
+//! # async fn demo() -> mvm_client::Result<()> {
+//! let image: RootfsSource = "docker.io/library/alpine:3.20".parse().expect("an OCI reference");
+//! let request = LaunchRequest::builder(LifecycleMode::Transient, image)
+//!     .name("hello")
+//!     .memory_mib(256)
+//!     .allow_egress("api.example.com", 443)
+//!     .ttl_seconds(600)
+//!     .build()?;
+//! let launched = LocalBackend::new().launch(request).await?;
+//! println!("{} admitted under plan {}", launched.machine.name, launched.plan_id);
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod admission;
 pub mod audit;
@@ -32,7 +61,12 @@ pub mod stream;
 pub mod stream_tracing;
 pub mod volume;
 
+/// The workload authoring surface: builders, constructors, IR emission.
+pub use mvm_sdk as authoring;
+
+pub use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 pub use mvm_contract::policy::approval;
+pub use mvm_contract::policy::network_policy::{HostPort, NetworkPreset};
 pub use mvm_contract::protocol::agent_session;
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
@@ -47,7 +81,10 @@ pub use mvm_core::client::{
     BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
     MvmClient, MvmError, Result,
 };
+pub use mvm_core::error_codes;
 pub use mvm_core::naming::validate_vm_name;
+pub use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+pub use mvm_core::rootfs_source::{RootfsSource, RootfsSourceParseError};
 
 pub use boot::{
     ResumeBootLocalRequest, ResumeBootLocalRequestBuilder, StartedVm, backend_is_running,
@@ -55,10 +92,12 @@ pub use boot::{
     resume_and_boot_local, start_prepared,
 };
 pub use connect::{Target, connect};
+pub use drive::{DriveError, LocalDrive};
 pub use grants::{enforced_grants_of, record_enforced_grants};
+pub use inventory::{MachineInventoryRecord, WorkloadPosture};
 pub use launch::{
-    ExitReport, LaunchNetworkPolicy, LaunchOutcome, LaunchRequest, LaunchRequestBuilder,
-    LaunchVolumeSpec, LifecycleMode, RemoveOptions,
+    AccessMode, ExitReport, LaunchNetworkPolicy, LaunchOutcome, LaunchRequest,
+    LaunchRequestBuilder, LaunchVolumeSpec, LifecycleMode, MachineSecretRef, RemoveOptions,
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
 pub use readiness::{readiness_of, record_readiness, touch_activity};

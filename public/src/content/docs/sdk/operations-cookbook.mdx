@@ -101,7 +101,7 @@ Security notes:
 - `using` calls the SDK cleanup path when the scope exits;
 - use static declarations instead of runtime scripts for untrusted deployable
   workload declarations;
-- live mode shells through the invoking `mvmctl` binary.
+- live mode calls the host library `libmvm_hostlib` in-process; it never runs `mvmctl`.
 
 Run modes:
 

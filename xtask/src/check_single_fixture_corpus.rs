@@ -1,16 +1,14 @@
 //! `xtask check-single-fixture-corpus`
 //!
-//! `tests/machine-fixtures/` is the one golden argv corpus binding the CLI and
-//! all three SDKs together. The CLI parses every fixture with the real clap
-//! parser and the Rust, Python and TypeScript builders each assert they
-//! reproduce it — which is what makes a fixture mean "argv `mvmctl` actually
-//! accepts".
+//! `tests/machine-fixtures/` is the one golden argv corpus of `mvmctl machine`
+//! invocations. The CLI parses every fixture with the real clap parser, which
+//! is what makes a fixture mean "argv `mvmctl` actually accepts".
 //!
 //! A second directory of the same name silently breaks that. It happened: a
-//! copy under `crates/tests/machine-fixtures/` was what the Python and
-//! TypeScript suites resolved to, so for two of three languages the corpus was
-//! unanchored and drifted — a diverged `run-admission` and a missing
-//! `start-image`. Nothing failed, because the shadow was self-consistent.
+//! copy under `crates/tests/machine-fixtures/` was what two suites resolved
+//! to, so the corpus they checked was unanchored and drifted — a diverged
+//! `run-admission` and a missing `start-image`. Nothing failed, because the
+//! shadow was self-consistent.
 //!
 //! This gate keeps the corpus singular. If you need fixtures for something
 //! else, give the directory a different name.
@@ -37,7 +35,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !canonical.is_dir() {
         bail!(
             "check-single-fixture-corpus: the canonical corpus is missing at {}.\n\
-             The CLI and all three SDKs resolve their golden argv fixtures there.",
+             The CLI parses its golden argv fixtures from there.",
             canonical.display()
         );
     }
@@ -57,8 +55,8 @@ pub fn run(workspace: &Path) -> Result<()> {
         bail!(
             "check-single-fixture-corpus: found {} shadow {} of `{CORPUS_DIR}`:\n{list}\n\n\
              There must be exactly one, at `{CANONICAL}`. A shadow copy is not \
-             parsed by the CLI and not asserted by the Rust SDK, so whichever \
-             suite resolves to it silently stops enforcing the argv contract. \
+             parsed by the CLI, so whichever suite resolves to it silently \
+             stops enforcing the argv contract. \
              Delete the copy and point the suite at the canonical corpus.",
             shadows.len(),
             if shadows.len() == 1 { "copy" } else { "copies" }

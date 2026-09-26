@@ -75,21 +75,31 @@ and runs the SDK script under the recording transport.
 
 ## Live mode
 
-Live mode shells SDK operations through the invoking `mvmctl` binary:
+Live mode drives a real microVM in-process, through the host library
+`libmvm_hostlib`:
 
 ```sh
 mvmctl run --mode live ./sandbox.py
 ```
 
-The CLI sets `MVM_SDK_MODE=live` and `MVM_CLI_BIN` for the child process. The SDK
-then uses the local CLI for operations such as (`machine proc` and `machine fs`
-are hidden advanced verbs — they work, but they do not appear in
-`mvmctl machine --help`):
+The CLI sets `MVM_SDK_MODE=live` for the child process, and `MVM_HOSTLIB_PATH`
+when the library is installed beside `mvmctl`. The SDK loads the library and
+calls it directly; it never runs `mvmctl`, and a live script run on its own
+(`MVM_SDK_MODE=live python sandbox.py`) behaves the same. Each `Sandbox`
+operation is one library call:
 
-- `mvmctl machine run --up-json --detach --name <generated-id> --manifest <template>`
-- `mvmctl machine fs write <vm> <path>`
-- `mvmctl machine proc start <vm> -- <argv>`
-- `mvmctl machine stop <vm>`
+| `Sandbox` operation | Library method |
+| --- | --- |
+| `Sandbox.create(image=...)` | `machine.run` — admitted under a signed plan before boot |
+| `Sandbox.connect(id)` | `machine.inventory` — reads the machine's dev/prod posture |
+| `commands.start`, `exec`, `shell` | `guest.proc.start`, then `guest.proc.stream.*` for the output |
+| `files.write` / `read` / `list` / `stat` / `mkdir` / `remove` / `move` | `guest.fs.*` |
+| `copy_in` / `copy_out` | `guest.cp` |
+| `kill()` | `machine.stop` |
+
+Output from `exec` and `ProcessHandle.wait` streams while the process runs:
+the library queues each chunk and the SDK polls for it, so an `on_event`
+callback sees output as it arrives rather than after the process ends.
 
 Live mode creates a real microVM. It should be used only when the caller is ready
 for runtime side effects: boot, file writes, command execution, logs, audit
@@ -105,7 +115,9 @@ Live mode is intentionally narrower than the target SDK contract:
 | TTL | Defaults to 30 minutes unless the caller sets `ttl`. |
 | Commands | `commands.start(...)` starts a command and returns a handle; `exec(...)` / `shell(...)` is the one-shot that returns a captured `ExecResult`. |
 | Files | `files.write(...)` stages bytes into the running VM; `read` / `list` / `stat` / `mkdir` / `remove` / `move` are live-mode only. |
-| Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` calls `mvmctl machine stop`. |
+| Source | `image=` (an OCI reference, a rootfs path, or `flake:<ref>#<attr>`). A template or manifest source is refused: the in-process launcher has no template slot yet. |
+| Boot command | `command=` is passed to the launcher, which refuses a command override today; the image's own entrypoint runs. |
+| Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` stops the machine. |
 | Secrets | Live command env forwarding accepts literal values only. Secret refs must use host-managed injection paths. |
 
 `commands.start(...)` is a developer-oriented command surface. Production-style
@@ -132,9 +144,9 @@ host code until it has been recorded, admitted, and launched.
 | Variable | Set by | Meaning |
 | --- | --- | --- |
 | `MVM_SDK_MODE=record` | CLI or caller | Record SDK operations without launching a VM. |
-| `MVM_SDK_MODE=live` | `mvmctl run --mode live` | Send SDK operations to a real VM through `mvmctl`. |
+| `MVM_SDK_MODE=live` | `mvmctl run --mode live`, or the caller | Send SDK operations to a real VM through the host library. |
 | `MVM_SDK_OUT_PATH` | CLI | Path where the SDK writes the recording JSON for the parent process. |
-| `MVM_CLI_BIN` | `mvmctl run --mode live` | Absolute path to the invoking `mvmctl` binary. |
+| `MVM_HOSTLIB_PATH` | `mvmctl run --mode live`, or the caller | The `libmvm_hostlib` file to load. Otherwise the SDK looks in its own package, then beside `mvmctl` on `PATH`. |
 
 Do not set `MVM_SDK_MODE=plan` in the SDK process. Plan mode is a CLI behavior
 that runs the SDK under record mode, then performs admission planning.

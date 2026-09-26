@@ -1,359 +1,183 @@
 /**
- * Machine-oriented host SDK wrappers.
+ * Machine lifecycle over the host library.
  *
- * These wrappers shell to `mvmctl machine ...` and deliberately avoid
- * reimplementing admission, policy, receipt, audit, OCI verification, or
- * persistent machine state in TypeScript.
+ * Every method is one call into `libmvm_hostlib`, loaded in-process; nothing
+ * here reimplements admission, policy, audit, OCI verification, or machine
+ * state. The library owns all of that and reports failures as the typed
+ * `HostLibraryError` subclass the error's `code` names, which propagate from
+ * these methods unchanged. {@link MachineError} is only for what the SDK
+ * refuses on its own: an argument it cannot send, or a reply it cannot read.
  */
 
-import { cliResolutionHint, resolveCliBin } from "./_cli.js";
-import { envFloat, envInt } from "./_env/read.js";
+import {
+  fromBase64,
+  startGuestProcess,
+  waitGuestProcess,
+  type ReplyFailure,
+} from "./_guest.js";
+import { call } from "./_hostlib.js";
+import {
+  MACHINE_CREATE,
+  MACHINE_INSPECT,
+  MACHINE_INVENTORY,
+  MACHINE_LOGS,
+  MACHINE_RM,
+  MACHINE_RUN,
+  MACHINE_START,
+  MACHINE_STOP,
+} from "./hostabi/methods.js";
 
-// Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
-// `_env/vars.ts`. Re-exported from this module so importers reach them where
-// the Python SDK puts them too.
-export { MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV } from "./_env/vars.js";
-import { MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV } from "./_env/vars.js";
+/** A machine as the library reports it (`id`, `name`, `status`, `backend`, …). */
+export type MachineState = Record<string, unknown>;
 
-// This package is ESM ("type": "module"), so `require` does not exist at
-// runtime. These node builtins are imported statically; a lazy `require` here
-// throws `ReferenceError: require is not defined` for every consumer of the
-// built artifact.
-import * as child from "node:child_process";
+/** One entry of the host-wide machine inventory (`name`, `build_mode`, `status`, …). */
+export type MachineInventoryRecord = Record<string, unknown>;
 
-/** Wall-clock budget for one `mvmctl machine` call, in seconds. */
-const DEFAULT_MACHINE_TIMEOUT_SEC = 60;
-
-/** Cap on captured output, per stream, in bytes. */
-const DEFAULT_MACHINE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-
-function machineTimeoutMs(): number {
-  const seconds = envFloat(MVM_MACHINE_TIMEOUT_ENV, DEFAULT_MACHINE_TIMEOUT_SEC);
-  const ms = Math.round(seconds * 1000);
-  // `spawnSync` treats 0 (and anything non-positive) as "no timeout", which
-  // inverts the meaning of a zero budget from "give up at once" — what the
-  // Python SDK does with the same value — into the unbounded wait this bound
-  // exists to remove. Floor it instead.
-  return Number.isFinite(ms) && ms > 0 ? ms : 1;
-}
-
-function machineMaxOutputBytes(): number {
-  const bytes = envInt(MVM_MACHINE_MAX_OUTPUT_ENV, DEFAULT_MACHINE_MAX_OUTPUT_BYTES);
-  return bytes > 0 ? bytes : DEFAULT_MACHINE_MAX_OUTPUT_BYTES;
-}
-
+/** A command run with {@link Machine.exec}: its exit code and decoded output. */
 export interface MachineResult {
   exitCode: number;
   stdout: string;
   stderr: string;
 }
 
-export interface MachineRunOptions {
-  image: string;
-  command: string[];
-  net?: boolean;
-  allowHosts?: string[];
+/** What {@link Machine.run} and {@link Machine.create} both describe. */
+interface MachineSpecOptions {
+  /** Command override for the image's entrypoint. */
+  command?: string[];
+  /** Guest environment. */
+  env?: Record<string, string>;
   cpus?: number;
-  memory?: string;
+  memoryMib?: number;
+  /** Security profile; the library defaults to `standard`. */
   profile?: string;
-  volumes?: string[];
-  env?: string[];
-  timeout?: number;
-  receipt?: string;
-  json?: boolean;
-  dryRun?: boolean;
+  /** Egress destinations, each `host:port` or `[v6-address]:port`. */
+  allowHosts?: string[];
+  /** Opaque TCP ingress, each `host:guest`. */
+  ports?: string[];
 }
 
-export interface MachineCreateOptions {
-  name: string;
-  image?: string;
-  manifest?: string;
-  net?: boolean;
-  allowHosts?: string[];
-  cpus?: number;
-  memory?: string;
-  memInitial?: string;
-  profile?: string;
+export interface MachineRunOptions extends MachineSpecOptions {
+  /** Name for the machine; the library generates one when absent. */
+  name?: string;
+  /** Seconds before the host reaps the machine. */
+  ttlSeconds?: number;
+}
+
+export interface MachineCreateOptions extends MachineSpecOptions {
+  /** Replace a same-name definition whose configuration differs. */
   force?: boolean;
-  json?: boolean;
-}
-
-export interface MachineCheckArtifactOptions {
-  path: string;
-  key?: string;
-  json?: boolean;
-}
-
-export interface MachineStartOptions {
-  /** Describe the machine to create when the named spec does not exist yet;
-   *  `machine start` auto-creates from these. */
-  image?: string;
-  cpus?: number;
-  memory?: string;
-  receipt?: string;
-  json?: boolean;
-  dryRun?: boolean;
 }
 
 export interface MachineExecOptions {
-  force?: boolean;
-}
-
-export interface MachineShellOptions {
-  force?: boolean;
-}
-
-export interface MachineLsOptions {
-  json?: boolean;
+  /** Wall-clock limit in seconds; the process is stopped on overrun (exit 124). */
+  timeout?: number;
+  /** Working directory for the process. */
+  cwd?: string;
+  env?: Record<string, string>;
 }
 
 export interface MachineLogsOptions {
-  follow?: boolean;
+  /** Return only the last `lines` lines. */
   lines?: number;
 }
 
-export interface MachineInspectOptions {
-  json?: boolean;
-}
-
-export interface MachineRmOptions {
-  names?: string[];
-  all?: boolean;
-  yes?: boolean;
-  json?: boolean;
-}
-
+/** A request the SDK refused before sending, or a reply it could not read. */
 export class MachineError extends Error {
-  readonly argv: string[];
-  readonly exitCode: number | null;
-  readonly stderr: string;
-
-  constructor(
-    message: string,
-    opts: { argv?: string[]; exitCode?: number | null; stderr?: string } = {},
-  ) {
+  constructor(message: string) {
     super(message);
     this.name = "MachineError";
-    this.argv = opts.argv ?? [];
-    this.exitCode = opts.exitCode ?? null;
-    this.stderr = opts.stderr ?? "";
   }
 }
 
-function cliBin(): string {
-  return resolveCliBin("Machine CLI commands");
-}
+const fail: ReplyFailure = (message) => new MachineError(message);
 
-function requireString(value: string, label: string): string {
+function requireString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new TypeError(`${label} must be a non-empty string`);
   }
   return value;
 }
 
-function requireStringArray(value: string[], label: string): string[] {
+function requireStringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || !value.every((v) => typeof v === "string" && v.length > 0)) {
-    throw new TypeError(`${label} must be a non-empty string[]`);
+    throw new TypeError(`${label} must be an array of non-empty strings`);
   }
   return [...value];
 }
 
-function appendRepeated(argv: string[], flag: string, values: string[] | undefined): void {
-  if (values === undefined) return;
-  for (const value of requireStringArray(values, flag)) {
-    argv.push(flag, value);
+function requireCount(value: unknown, label: string): number {
+  if (!Number.isInteger(value) || (value as number) <= 0) {
+    throw new RangeError(`${label} must be a positive integer`);
   }
+  return value as number;
 }
 
-function runMachine(argv: string[]): MachineResult {
-  let bin: string;
-  try {
-    bin = cliBin();
-  } catch (err) {
-    throw new MachineError(String(err instanceof Error ? err.message : err));
-  }
-  const full = [bin, "machine", ...argv];
-  const timeoutMs = machineTimeoutMs();
-  const maxBuffer = machineMaxOutputBytes();
-  let result;
-  try {
-    // The substrate may hang or return gigabytes. Bounding both here is what
-    // keeps a misbehaving machine from taking the caller down with it; the
-    // Python SDK bounds the same two things with the same two variables.
-    // Unlike Python's `run_capped`, `spawnSync` signals only the child, not
-    // its process group, so a grandchild that outlives the kill can still hold
-    // the pipes — the wait is bounded either way, the reap is best-effort.
-    result = child.spawnSync(bin, ["machine", ...argv], {
-      encoding: "utf-8",
-      timeout: timeoutMs,
-      maxBuffer,
-    });
-  } catch (err) {
-    throw new MachineError(`\`${bin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`, {
-      argv: full,
-    });
-  }
-  if (result.error) {
-    // `spawnSync` reports "could not start it", "it ran too long" and "it said
-    // too much" through the same field. Reading all three as a spawn failure
-    // sends the reader to look for a missing binary when the binary ran fine.
-    const code = (result.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") {
-      throw new MachineError(`\`${bin}\` did not exit within ${timeoutMs / 1000}s`, { argv: full });
+/**
+ * Parse one `host:port` egress destination. An IPv6 address carries a colon
+ * of its own, so it must be bracketed (`[::1]:443`) to be unambiguous; the
+ * library takes the bare address.
+ */
+export function parseAllowHost(entry: string): { host: string; port: number } {
+  const text = requireString(entry, "allowHosts entry");
+  let host: string;
+  let portText: string;
+  if (text.startsWith("[")) {
+    const close = text.indexOf("]:");
+    if (close < 0) throw new MachineError(`allowHosts entry ${JSON.stringify(text)} must be [address]:port`);
+    host = text.slice(1, close);
+    portText = text.slice(close + 2);
+  } else {
+    const colon = text.lastIndexOf(":");
+    if (colon < 0) throw new MachineError(`allowHosts entry ${JSON.stringify(text)} must be host:port`);
+    host = text.slice(0, colon);
+    portText = text.slice(colon + 1);
+    if (host.includes(":")) {
+      throw new MachineError(
+        `allowHosts entry ${JSON.stringify(text)} is ambiguous; bracket an IPv6 address as [address]:port`,
+      );
     }
-    if (code === "ENOBUFS") {
-      // Node does not say which stream overflowed, so — unlike Python, which
-      // caps each one itself and names it — this names the cap, not the side.
-      throw new MachineError(`\`${bin}\` exceeded ${maxBuffer} bytes on stdout or stderr`, {
-        argv: full,
-      });
-    }
-    throw new MachineError(`failed to spawn \`${bin}\`: ${result.error.message}`, {
-      argv: full,
-    });
   }
-  if (result.status !== 0) {
-    // A signalled child has no exit code, and "exit code null" names nothing.
-    const cause =
-      result.status === null && result.signal
-        ? `was killed by ${result.signal}`
-        : `failed with exit code ${result.status}`;
-    throw new MachineError(`\`mvmctl machine\` ${cause}`, {
-      argv: full,
-      exitCode: result.status,
-      stderr: result.stderr ?? "",
-    });
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (host.length === 0 || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new MachineError(`allowHosts entry ${JSON.stringify(text)} needs a host and a port in 1..65535`);
   }
-  return {
-    exitCode: result.status ?? 0,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+  return { host, port };
 }
 
-export function machineRunArgv(options: MachineRunOptions): string[] {
-  const command = requireStringArray(options.command, "command");
-  if (command.length === 0) throw new RangeError("command must be non-empty");
-  const argv = ["run", "--image", requireString(options.image, "image")];
-  if (options.net) argv.push("--net");
-  appendRepeated(argv, "--allow-host", options.allowHosts);
-  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
-  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
-  if (options.profile !== undefined) argv.push("--profile", requireString(options.profile, "profile"));
-  appendRepeated(argv, "--mount", options.volumes);
-  appendRepeated(argv, "--env", options.env);
-  if (options.timeout !== undefined) argv.push("--timeout", String(options.timeout));
-  if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
-  if (options.json) argv.push("--json");
-  if (options.dryRun) argv.push("--dry-run");
-  argv.push("--", ...command);
-  return argv;
-}
-
-export function machineCreateArgv(options: MachineCreateOptions): string[] {
-  const name = requireString(options.name, "name");
-  if (options.image !== undefined && options.manifest !== undefined) {
-    throw new TypeError("Machine.create accepts image OR manifest, not both");
+/** The request fields `machine.run` and `machine.create` share. Absent and
+ *  empty values are left out, so the library applies its own defaults. */
+function specFields(options: MachineSpecOptions): Record<string, unknown> {
+  const request: Record<string, unknown> = {};
+  if (options.command !== undefined) {
+    const command = requireStringArray(options.command, "command");
+    if (command.length > 0) request.command = command;
   }
-  const argv = ["create", name];
-  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
-  if (options.manifest !== undefined) {
-    argv.push("--manifest", requireString(options.manifest, "manifest"));
+  if (options.env !== undefined && Object.keys(options.env).length > 0) {
+    request.env = { ...options.env };
   }
-  if (options.net) argv.push("--net");
-  appendRepeated(argv, "--allow-host", options.allowHosts);
-  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
-  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
-  if (options.memInitial !== undefined) {
-    argv.push("--mem-initial", requireString(options.memInitial, "memInitial"));
+  if (options.cpus !== undefined) request.cpus = requireCount(options.cpus, "cpus");
+  if (options.memoryMib !== undefined) request.memory_mib = requireCount(options.memoryMib, "memoryMib");
+  if (options.profile !== undefined) request.profile = requireString(options.profile, "profile");
+  if (options.ports !== undefined) {
+    const ports = requireStringArray(options.ports, "ports");
+    if (ports.length > 0) request.ports = ports;
   }
-  if (options.profile !== undefined) argv.push("--profile", requireString(options.profile, "profile"));
-  if (options.force) argv.push("--force");
-  if (options.json) argv.push("--json");
-  return argv;
-}
-
-export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): string[] {
-  const argv = ["check-artifact", requireString(options.path, "path")];
-  if (options.key !== undefined) argv.push("--key", requireString(options.key, "key"));
-  if (options.json) argv.push("--json");
-  return argv;
-}
-
-export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
-  // `machine start` takes a positional name, not `--name`.
-  const argv = ["start", requireString(name, "name")];
-  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
-  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
-  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
-  if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
-  if (options.json) argv.push("--json");
-  if (options.dryRun) argv.push("--dry-run");
-  return argv;
-}
-
-export function machineExecArgv(
-  name: string,
-  command: string[],
-  options: MachineExecOptions = {},
-): string[] {
-  command = requireStringArray(command, "command");
-  if (command.length === 0) throw new RangeError("command must be non-empty");
-  // `machine exec` takes a positional name, not `--name`.
-  const argv = ["exec", requireString(name, "name")];
-  if (options.force) argv.push("--force");
-  argv.push("--", ...command);
-  return argv;
-}
-
-export function machineShellArgv(name: string, options: MachineShellOptions = {}): string[] {
-  // `machine shell` takes a positional name, not `--name`.
-  const argv = ["shell", requireString(name, "name")];
-  if (options.force) argv.push("--force");
-  return argv;
-}
-
-export function machineStopArgv(name: string): string[] {
-  // `machine stop` takes a positional name, not `--name` (the CLI rejects the
-  // flag form). See the shared `stop.argv` fixture. Pass `--yes` because the
-  // SDK runs the CLI non-interactively — without it `machine stop` prompts for
-  // y/n confirmation and aborts on no TTY.
-  return ["stop", requireString(name, "name"), "--yes"];
-}
-
-export function machineLsArgv(options: MachineLsOptions = {}): string[] {
-  const argv = ["ls"];
-  if (options.json) argv.push("--json");
-  return argv;
-}
-
-export function machineLogsArgv(name: string, options: MachineLogsOptions = {}): string[] {
-  const argv = ["logs", requireString(name, "name")];
-  if (options.follow) argv.push("--follow");
-  if (options.lines !== undefined) argv.push("--lines", String(options.lines));
-  return argv;
-}
-
-export function machineInspectArgv(name: string, options: MachineInspectOptions = {}): string[] {
-  const argv = ["inspect", requireString(name, "name")];
-  if (options.json) argv.push("--json");
-  return argv;
-}
-
-export function machineRmArgv(options: MachineRmOptions = {}): string[] {
-  const names = options.names ? requireStringArray(options.names, "names") : [];
-  // The CLI requires exactly one of names / --all (a clap ArgGroup).
-  if (Boolean(options.all) === names.length > 0) {
-    throw new TypeError("Machine.rm requires exactly one of names or all: true");
+  if (options.allowHosts !== undefined) {
+    const egress = requireStringArray(options.allowHosts, "allowHosts").map(parseAllowHost);
+    if (egress.length > 0) request.egress = egress;
   }
-  const argv = ["rm"];
-  if (options.all) argv.push("--all");
-  else argv.push(...names);
-  if (options.yes) argv.push("--yes");
-  if (options.json) argv.push("--json");
-  return argv;
+  return request;
 }
 
+function machineName(state: unknown, method: string): string {
+  const name = (state as { name?: unknown } | null | undefined)?.name;
+  if (typeof name !== "string" || name.length === 0) {
+    throw new MachineError(`${method} returned a machine with no name`);
+  }
+  return name;
+}
+
+/** A handle on one machine, by name. Constructing it makes no call. */
 export class Machine {
   readonly name: string;
 
@@ -361,48 +185,80 @@ export class Machine {
     this.name = requireString(name, "name");
   }
 
-  static run(options: MachineRunOptions): MachineResult {
-    return runMachine(machineRunArgv(options));
+  /** Boot a transient machine from `image` and return a handle on it. */
+  static run(image: string, options: MachineRunOptions = {}): Machine {
+    const request: Record<string, unknown> = {
+      image: requireString(image, "image"),
+      mode: "transient",
+    };
+    if (options.name !== undefined) request.name = requireString(options.name, "name");
+    Object.assign(request, specFields(options));
+    if (options.ttlSeconds !== undefined) request.ttl_seconds = requireCount(options.ttlSeconds, "ttlSeconds");
+    const reply = call(MACHINE_RUN, request);
+    return new Machine(machineName(reply?.machine, "machine.run"));
   }
 
-  static create(options: MachineCreateOptions): Machine {
-    runMachine(machineCreateArgv(options));
-    return new Machine(options.name);
+  /** Persist a machine definition without booting it; `start()` boots it. */
+  static create(name: string, image: string, options: MachineCreateOptions = {}): Machine {
+    const request: Record<string, unknown> = {
+      name: requireString(name, "name"),
+      image: requireString(image, "image"),
+      ...specFields(options),
+    };
+    if (options.force) request.force = true;
+    return new Machine(machineName(call(MACHINE_CREATE, request), "machine.create"));
   }
 
-  static checkArtifact(options: MachineCheckArtifactOptions): MachineResult {
-    return runMachine(machineCheckArtifactArgv(options));
+  /** Every machine on this host, with its dev/prod posture. */
+  static ls(): MachineInventoryRecord[] {
+    const records = call(MACHINE_INVENTORY);
+    if (!Array.isArray(records)) throw new MachineError("machine.inventory must return an array");
+    return records as MachineInventoryRecord[];
   }
 
-  static ls(options: MachineLsOptions = {}): MachineResult {
-    return runMachine(machineLsArgv(options));
+  /** Boot this persisted machine. */
+  start(): MachineState {
+    return call(MACHINE_START, { id: this.name }) as MachineState;
   }
 
-  start(options: MachineStartOptions = {}): MachineResult {
-    return runMachine(machineStartArgv(this.name, options));
+  /** Stop this machine. Stopping a stopped machine is not an error. */
+  stop(): void {
+    call(MACHINE_STOP, { id: this.name });
   }
 
+  /** Remove this machine. A running persistent machine must be stopped first. */
+  rm(): void {
+    call(MACHINE_RM, { id: this.name });
+  }
+
+  inspect(): MachineState {
+    return call(MACHINE_INSPECT, { id: this.name }) as MachineState;
+  }
+
+  /** Captured console output, decoded as UTF-8. */
+  logs(options: MachineLogsOptions = {}): string {
+    const request: Record<string, unknown> = { id: this.name };
+    if (options.lines !== undefined) request.tail_lines = requireCount(options.lines, "lines");
+    const reply = call(MACHINE_LOGS, request);
+    return new TextDecoder("utf-8").decode(fromBase64(reply?.data_b64, "machine.logs's data_b64", fail));
+  }
+
+  /**
+   * Run `command` in this machine and wait for it.
+   *
+   * This drives the guest agent's process control, which a machine admitted
+   * as production refuses; that refusal arrives as `MachineBackendError`.
+   */
   exec(command: string[], options: MachineExecOptions = {}): MachineResult {
-    return runMachine(machineExecArgv(this.name, command, options));
-  }
-
-  shell(options: MachineShellOptions = {}): MachineResult {
-    return runMachine(machineShellArgv(this.name, options));
-  }
-
-  stop(): MachineResult {
-    return runMachine(machineStopArgv(this.name));
-  }
-
-  logs(options: MachineLogsOptions = {}): MachineResult {
-    return runMachine(machineLogsArgv(this.name, options));
-  }
-
-  inspect(options: MachineInspectOptions = {}): MachineResult {
-    return runMachine(machineInspectArgv(this.name, options));
-  }
-
-  rm(options: { yes?: boolean; json?: boolean } = {}): MachineResult {
-    return runMachine(machineRmArgv({ names: [this.name], yes: options.yes, json: options.json }));
+    const argv = requireStringArray(command, "command");
+    if (argv.length === 0) throw new RangeError("command must be non-empty");
+    const token = startGuestProcess(this.name, argv, { env: options.env, cwd: options.cwd }, fail);
+    const result = waitGuestProcess(this.name, token, { timeout: options.timeout }, fail);
+    const decoder = new TextDecoder("utf-8");
+    return {
+      exitCode: result.exitCode,
+      stdout: decoder.decode(result.stdout),
+      stderr: decoder.decode(result.stderr),
+    };
   }
 }

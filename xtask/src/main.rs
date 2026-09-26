@@ -53,6 +53,7 @@ mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_nextest_groups;
+mod check_no_cli_shellout;
 mod check_no_display_on_secret_types;
 mod check_no_guest_tool_client;
 mod check_no_host_nix;
@@ -228,6 +229,10 @@ fn main() -> Result<()> {
         Some("check-guest-agent-runtime-free") => {
             let workspace = workspace_root();
             check_guest_agent_runtime_free::run(&workspace)
+        }
+        Some("check-no-cli-shellout") => {
+            let workspace = workspace_root();
+            check_no_cli_shellout::run(&workspace)
         }
         Some("check-sdk-transport-free") => {
             let workspace = workspace_root();
@@ -534,7 +539,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -572,6 +577,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-public-function-names            Ratchet public f/f_with_* sibling pairs down module by module"
+            );
+            eprintln!(
+                "  check-no-cli-shellout                   Assert no SDK source spawns a process or resolves mvmctl to run it"
             );
             eprintln!(
                 "  check-sdk-transport-free                Assert mvm-sdk's default build (the cdylib closure) pulls no mvm-http/rustls/ring/tokio"
