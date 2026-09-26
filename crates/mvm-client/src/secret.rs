@@ -37,6 +37,7 @@
 pub mod audit;
 pub mod input;
 pub mod refs;
+pub mod source;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,6 +53,7 @@ pub use input::SecretValueInput;
 pub use mvm_contract::ir::{AuthType, Sigv4Params};
 pub use mvm_hostd::keyholder::SecretBindingMeta;
 pub use refs::{MachineSecretRef, MachineSecretRefSet};
+pub use source::{SecretSource, SourceError, SourceResolver};
 
 /// Typed refusals and failures for secret lifecycle operations. Never
 /// carries secret material — every variant names scopes, names, hosts,

@@ -603,6 +603,29 @@ impl SecretStore for AutoSecretStore {
     }
 }
 
+/// Read one generic-password item from the operator's own OS keychain —
+/// the default keychain on macOS, the Secret Service on Linux — by its
+/// service and account.
+///
+/// This reads an item the operator put there with their own tools, which is
+/// why it does not go through [`KeyringSecretStore`]: that store owns a fixed
+/// service name and keychain of its own. The error names the item, never its
+/// value.
+pub fn read_os_keychain_item(service: &str, account: &str) -> Result<SecretBox<String>> {
+    let entry = keyring::Entry::new(service, account).with_context(|| {
+        format!("opening keychain item service {service:?} account {account:?}")
+    })?;
+    match entry.get_password() {
+        Ok(value) => Ok(SecretBox::new(Box::new(value))),
+        Err(keyring::Error::NoEntry) => {
+            anyhow::bail!("no keychain item with service {service:?} and account {account:?}")
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!("reading keychain item service {service:?} account {account:?}")
+        }),
+    }
+}
+
 fn is_missing_secret_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
