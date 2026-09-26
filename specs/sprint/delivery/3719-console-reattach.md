@@ -96,3 +96,47 @@ session running and reports that it was displaced. It does not send
 - CLI: escape filter (`~d`, `~.`), guest-close classification, and help and
   parse tests in `tests/cli.rs`. `tests/audit_total_coverage.rs` classifies
   `machine detach`.
+
+## Live verification
+
+These runs used a debug `just embed` build, the macOS 26 Apple Silicon HVF
+backend, and `machine run --image alpine --name cr-live --profile dev -d`. A
+Python pty harness drove the console.
+
+- **Open and detach.** `echo FIRST-42` ran. A background job was started to
+  print later, then `~d` detached with exit 0. `--list` reported
+  `detached 18s, 127 B`.
+- **Reattach.** The replay showed `FIRST-42` and `WHILE-DETACHED-25`, which
+  was printed while nobody was attached. The shell's job table survived, and
+  it reported `[1]+ Done`.
+- **Busy and take-over.** A second attach while one was live was refused and
+  named `--force` and `machine detach`. `--force` took the session over, and
+  the displaced client printed that it was disconnected and exited 0 without
+  ending the shell. `machine detach` did the same from another process, and
+  said so when nobody was attached.
+- **End with `~.`.** The session was listed as `exited (129)` (SIGHUP). The
+  next `machine console` opened session 2, and `exit` there recorded
+  `exited (0)`.
+- **Window size.** `stty size` read `30 100` when the session was opened at
+  100x30 and `50 132` after reattaching at 132x50.
+- **Killed client.** SIGKILL of the client left the session `detached`.
+- **Dedicated session.** `machine exec -t -- echo hi` was refused while the
+  shared shell ran ("console session 3 is already running").
+- **Detach timeout.** With `--detach-timeout 3`, the session went from
+  `detached 0s, ends at 3s` to `exited (129)` within 5 s.
+- **Grant gate.** The same VM booted without `--profile dev` (restricted
+  ProdSafe grant) refused `console-list` with "verb console-list not
+  authorized by the session's verb grant".
+- **Audit log.** `~/.mvm/state/log/audit.jsonl` carried `verb=console-list`,
+  `console-attach`, `console-open`, and `console-close` inbound records, along
+  with `console_session_start` (`attach=open|reattach`) and
+  `console_session_end` (`outcome=detached|terminated`).
+
+Separately, on the Linux KVM box, the full `mvm-agentd` suite passed (857 lib
+tests), including the Linux-only PTY end-to-end test.
+
+The first boot failed with `VerbNotAuthorized { activate-environment }`. That
+failure predates this change and is unrelated to it. The run's verb grant was
+minted before a 446 s cold build of the guest runtime and had expired
+(`verb grant expired` in the guest console) by the time the guest checked it.
+With the runtime cached, a re-run booted normally.
