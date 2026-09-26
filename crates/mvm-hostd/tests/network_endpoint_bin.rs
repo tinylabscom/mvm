@@ -117,6 +117,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
                 provider: None,
+                approve: Default::default(),
             },
         )
         .unwrap();
@@ -164,6 +165,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         session_marker: None,
         session_ready_socket: None,
         connector_uds_path: Some(connector.clone()),
+        approval_socket: None,
         flowmux_identity: None,
     };
 
@@ -238,6 +240,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
                 provider: None,
+                approve: Default::default(),
             },
         )
         .unwrap();
@@ -278,6 +281,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         session_marker: None,
         session_ready_socket: None,
         connector_uds_path: None,
+        approval_socket: None,
         flowmux_identity: None,
     };
 
@@ -363,6 +367,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         session_marker: Some(session_marker.clone()),
         session_ready_socket: Some(session_ready_socket.clone()),
         connector_uds_path: None,
+        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
@@ -469,6 +474,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
         resolver: ResolverBackend::default(),
         session_marker: None,
         connector_uds_path: None,
+        approval_socket: None,
         session_ready_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "shared-limit".into(),
@@ -568,6 +574,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         session_marker: None,
         session_ready_socket: None,
         connector_uds_path: None,
+        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "invalid-limit".into(),
             host_signing_key_base64: b64.encode([23u8; 32]),
