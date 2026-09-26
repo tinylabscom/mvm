@@ -760,6 +760,17 @@ pub(in crate::commands) fn run_secure_with_source(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
+    // Egress refusals print as they happen, except where a stray line would
+    // corrupt the session (a raw-mode PTY) or the caller asked for one JSON
+    // document. Armed by the admission below, once the machine has a name.
+    let denials = std::rc::Rc::new(super::egress_denials::PendingWatch::new(
+        if args.json || args.pty {
+            super::egress_denials::Live::Quiet
+        } else {
+            super::egress_denials::Live::Notices
+        },
+    ));
+    let denials_for_admit = std::rc::Rc::clone(&denials);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
@@ -770,6 +781,7 @@ pub(in crate::commands) fn run_secure_with_source(
             assets,
             volumes,
         } = inputs;
+        denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             outputs: admit_outputs.clone(),
@@ -881,6 +893,10 @@ pub(in crate::commands) fn run_secure_with_source(
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
+        let refused = denials.finish();
+        if !json_requested {
+            super::egress_denials::print_summary(&refused, &super::host_notices::Stderr);
+        }
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
@@ -891,7 +907,8 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested && let Some(timing) = output.phase_timing.as_ref() {
             eprintln!("{}", timing.render_table());
         }
-        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path);
+        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path)
+            .with_egress_denials(refused.destinations());
         if let Some(path) = summary.receipt_path.as_deref() {
             write_run_receipt(path, receipt_input, &output)?;
         }
@@ -924,6 +941,7 @@ pub(in crate::commands) fn run_secure_with_source(
             backend: &receipt_backend,
             oci_provenance: &oci_provenance,
             outputs: &outputs,
+            denials: &denials,
         },
     )
 }
@@ -1032,6 +1050,8 @@ struct RunAudit<'a> {
     /// Output grants whose disks the run attaches and whose collection is
     /// recorded once it exits.
     outputs: &'a super::outputs::PreparedOutputs,
+    /// The run's egress refusals, summarized once it exits.
+    denials: &'a super::egress_denials::PendingWatch,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -1076,6 +1096,9 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
+    // Before the outputs are collected and before a nonzero exit ends the
+    // process: the summary is the last thing the run has to say about egress.
+    super::egress_denials::print_summary(&audit.denials.finish(), &super::host_notices::Stderr);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
@@ -2629,6 +2652,10 @@ mod tests {
         assert!(json.contains("\"total_ms\":28.0"));
         assert!(!json.contains("sensitive stdout"));
         assert!(!json.contains("sensitive stderr"));
+        // Present and empty when nothing was refused, so a consumer reads one
+        // shape whether or not the run hit the gate.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["egress_denials"], serde_json::json!([]));
     }
 
     #[test]

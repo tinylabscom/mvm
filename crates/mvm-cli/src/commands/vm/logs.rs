@@ -78,7 +78,8 @@ pub(in crate::commands) struct Args {
     /// Name of the VM
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
-    /// Follow log output (like tail -f)
+    /// Follow log output (like tail -f), printing each egress refusal as it
+    /// happens
     #[arg(long, short = 'f')]
     pub follow: bool,
     /// Number of recorded output records to replay before following. A record
@@ -130,6 +131,22 @@ fn execute(args: Args) -> Result<()> {
     if args.hypervisor {
         return show_hypervisor_log(&args);
     }
+    // A follow is the user watching the machine now, so its egress refusals
+    // print as they happen. Started before the stream opens, so none recorded
+    // while it opens is missed.
+    let denials = args
+        .follow
+        .then(|| {
+            super::egress_denials::watch_machine(&args.name, super::egress_denials::Live::Notices)
+        })
+        .flatten();
+    let shown = open_and_show(&args);
+    super::egress_denials::finish_and_summarize(denials);
+    shown
+}
+
+/// Open the machine's output and drain it.
+fn open_and_show(args: &Args) -> Result<()> {
     let stream = match open_vm_output(&args.name, args.request()) {
         Ok(stream) => stream,
         Err(StreamError::NoCapture {
@@ -171,7 +188,7 @@ fn execute(args: Args) -> Result<()> {
                 .with_context(|| format!("Reading output for microVM {:?}", args.name));
         }
     };
-    show(&args, stream)
+    show(args, stream)
 }
 
 /// How many recorded records `machine run`'s attach replays before it starts

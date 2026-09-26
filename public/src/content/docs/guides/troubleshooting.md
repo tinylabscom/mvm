@@ -375,6 +375,30 @@ mvmctl machine logs <name>  # guest-side boot + networking errors
 Remember networking is deny-by-default: a transient `machine run` needs
 `--net` or `--allow-host` before outbound traffic works at all.
 
+### A request fails inside the guest and the host prints `egress blocked`
+
+The host refused the destination, and the line names why and what to do:
+
+```text
+[mvm] egress blocked: api.example.com:443 (not in the allow-list) — allow with --allow-host api.example.com:443
+```
+
+Re-run with the flag it names. The exit summary collects every such flag into
+one line. When the line says `never reachable from a workload` (cloud metadata,
+loopback, link-local) or names the SSH port, no flag admits it and none is
+offered: the refusal is the boundary working, not a missing grant. A private
+address is denied by default and admitted only by naming the exact address.
+
+No line at all? A run with no egress whatsoever — the default: no `--net`, no
+`--allow-host`, no `--secret`, no published port — starts no network endpoint,
+so the guest has no channel to ask for a destination on and the host never
+decides anything to report. The guest's own error (`Could not resolve host`)
+is the signal there; add `--allow-host HOST:PORT`. Otherwise, notices print
+only for a foreground run and for `mvmctl machine logs -f`; a `--json` run
+carries them in its `egress_denials` array instead. For a run that already ended, `mvmctl explain <run>` lists its
+refusals. The full reason table is in
+[Network egress policy](/guides/network-egress-policy/#when-a-destination-is-refused).
+
 ### Can't access project files inside microVM
 
 The Firecracker microVM has an **isolated filesystem** and there's no shell into the builder VM to bridge it. Pass host shares explicitly with `--mount HOST:GUEST[:rw]` (see [Sandboxed Exec](/guides/exec/)).
