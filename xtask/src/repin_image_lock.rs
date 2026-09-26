@@ -41,6 +41,9 @@ struct Pin {
     manifest_sha256: Sha256Hex,
     guest_agent_protocol: (u32, u32),
     builder_cache_contract: u32,
+    /// Absent when the root predates the field, and then absent from the lock
+    /// too: the lock copies what the root declares, and does not invent a 0.
+    builder_boot_abi: Option<u32>,
     stage0: Vec<(GuestArch, MemberArtifact)>,
 }
 
@@ -61,6 +64,7 @@ impl Pin {
             manifest_sha256: Sha256Hex::from_bytes(bytes),
             guest_agent_protocol: (protocol.min(), protocol.max()),
             builder_cache_contract: manifest.compatibility.builder_cache_contract,
+            builder_boot_abi: manifest.compatibility.builder_boot_abi.map(|abi| abi.get()),
             stage0,
         })
     }
@@ -117,6 +121,13 @@ fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
     ] {
         text = set_value(&text, section, key, &value)?;
     }
+    text = set_optional_value(
+        &text,
+        "compatibility",
+        "builder_boot_abi",
+        "builder_cache_contract",
+        pin.builder_boot_abi.map(|abi| abi.to_string()),
+    )?;
     for (arch, artifact) in &pin.stage0 {
         let section = format!("stage0_kernel.artifact.{arch}");
         text = set_value(&text, &section, "name", &quoted(artifact.name.as_str()))?;
@@ -156,6 +167,67 @@ fn set_value(text: &str, section: &str, key: &str, value: &str) -> Result<String
     }
 }
 
+/// Set an optional `key` inside `[section]`: replace it when present, insert
+/// it after `after_key` when absent, and remove it when `value` is `None`.
+fn set_optional_value(
+    text: &str,
+    section: &str,
+    key: &str,
+    after_key: &str,
+    value: Option<String>,
+) -> Result<String> {
+    let header = format!("[{section}]");
+    let present = section_assigns(text, &header, key);
+    match (value, present) {
+        (Some(value), true) => set_value(text, section, key, &value),
+        (Some(value), false) => {
+            let mut in_section = false;
+            let mut inserted = false;
+            let mut out = Vec::new();
+            for line in text.split_inclusive('\n') {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') {
+                    in_section = trimmed == header;
+                }
+                out.push(line.to_string());
+                if in_section && !inserted && assigns(trimmed, after_key) {
+                    out.push(format!("{key} = {value}\n"));
+                    inserted = true;
+                }
+            }
+            if !inserted {
+                bail!("{LOCK} has no `{after_key}` under [{section}] to place `{key}` after");
+            }
+            Ok(out.concat())
+        }
+        (None, true) => {
+            let mut in_section = false;
+            Ok(text
+                .split_inclusive('\n')
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') {
+                        in_section = trimmed == header;
+                    }
+                    !(in_section && assigns(trimmed, key))
+                })
+                .collect())
+        }
+        (None, false) => Ok(text.to_string()),
+    }
+}
+
+fn section_assigns(text: &str, header: &str, key: &str) -> bool {
+    let mut in_section = false;
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == header;
+        }
+        in_section && assigns(trimmed, key)
+    })
+}
+
 fn assigns(line: &str, key: &str) -> bool {
     line.strip_prefix(key)
         .is_some_and(|rest| rest.trim_start().starts_with('='))
@@ -171,6 +243,7 @@ fn check_reads_back(text: &str, pin: &Pin) -> Result<()> {
     let protocol = lock.compatibility.guest_agent_protocol;
     if (protocol.min(), protocol.max()) != pin.guest_agent_protocol
         || lock.compatibility.builder_cache_contract != pin.builder_cache_contract
+        || lock.compatibility.builder_boot_abi.map(|abi| abi.get()) != pin.builder_boot_abi
     {
         bail!("the rewritten lock does not carry the candidate's compatibility");
     }
@@ -206,6 +279,14 @@ mod tests {
     /// A root with the published shape: its Stage 0 members, and one
     /// architecture-independent member whose `target` is a bare string.
     fn root(tag: &str, stage0: [(&str, &str, &str); 2]) -> Vec<u8> {
+        root_with_abi(tag, stage0, None)
+    }
+
+    fn root_with_abi(
+        tag: &str,
+        stage0: [(&str, &str, &str); 2],
+        builder_boot_abi: Option<u32>,
+    ) -> Vec<u8> {
         let mut members = stage0
             .iter()
             .map(|(arch, name, sha)| stage0_member(arch, name, sha))
@@ -227,11 +308,52 @@ mod tests {
                 "source_commit": "1b08fbc104d0a3e0ac9dd9d74ec5db3c38ff3f38"
             },
             "mvm_source_commit": "fa6d5c1b271382684f9387eed61850c299e1ade5",
-            "compatibility": {"guest_agent_protocol": {"min": 2, "max": 3}, "builder_cache_contract": 5},
+            "compatibility": compatibility(builder_boot_abi),
             "nix_inputs": {"flake_locks": [], "source_revisions": []},
             "members": members,
         }))
         .expect("serialize root")
+    }
+
+    fn compatibility(builder_boot_abi: Option<u32>) -> serde_json::Value {
+        let mut compatibility =
+            json!({"guest_agent_protocol": {"min": 2, "max": 3}, "builder_cache_contract": 5});
+        if let Some(abi) = builder_boot_abi {
+            compatibility["builder_boot_abi"] = json!(abi);
+        }
+        compatibility
+    }
+
+    fn stage0_pins() -> [(&'static str, &'static str, String); 2] {
+        [
+            ("aarch64", "stage0-vmlinux-aarch64", "1".repeat(64)),
+            ("x86_64", "stage0-vmlinux-x86_64", "2".repeat(64)),
+        ]
+    }
+
+    /// A root declaring the builder boot ABI carries it into the lock; a later
+    /// root without it takes it back out rather than leaving a stale value.
+    #[test]
+    fn the_builder_boot_abi_follows_the_root() {
+        let pins = stage0_pins();
+        let pins = [
+            (pins[0].0, pins[0].1, pins[0].2.as_str()),
+            (pins[1].0, pins[1].1, pins[1].2.as_str()),
+        ];
+        let with_abi = root_with_abi("image-set/v0.2.0", pins, Some(1));
+        let text = repin(&checked_in_lock(), &with_abi).expect("repin with an ABI");
+        let lock = ImageTrainLock::parse(&text).unwrap();
+        assert_eq!(
+            lock.compatibility.builder_boot_abi.map(|abi| abi.get()),
+            Some(1)
+        );
+        assert_eq!(repin(&text, &with_abi).unwrap(), text, "idempotent");
+
+        let without = root_with_abi("image-set/v0.3.0", pins, None);
+        let text = repin(&text, &without).expect("repin without an ABI");
+        let lock = ImageTrainLock::parse(&text).unwrap();
+        assert_eq!(lock.compatibility.builder_boot_abi, None);
+        assert!(!text.contains("builder_boot_abi"), "{text}");
     }
 
     fn next_root() -> Vec<u8> {

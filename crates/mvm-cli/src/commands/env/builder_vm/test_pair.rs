@@ -316,7 +316,8 @@ impl Pair {
             "mvm_source_commit": checkouts.mvm.commit,
             "compatibility": {
                 "guest_agent_protocol": {"min": 2, "max": 2},
-                "builder_cache_contract": 1
+                "builder_cache_contract": 1,
+                "builder_boot_abi": 0
             },
             "nix_inputs": {
                 "flake_locks": [{

@@ -8,6 +8,7 @@ use std::fmt;
 
 use mvm_contract::guest_libc::GuestLibc;
 
+use super::BuilderBootAbiRange;
 use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
@@ -200,6 +201,9 @@ fn check_local_fields(
             });
         }
     }
+    if manifest.compatibility.builder_boot_abi.is_none() {
+        return Err(ImageSetError::LocalSetPredatesBuilderBootAbi);
+    }
     if manifest.mvm_source_commit != local.mvm.commit {
         return Err(ImageSetError::LocalMvmCommitMismatch {
             declared: manifest.mvm_source_commit.clone(),
@@ -336,6 +340,10 @@ pub fn require_complete(
 pub struct HostProtocolSupport {
     pub guest_agent_protocol: ProtocolRange,
     pub builder_cache_contract: u32,
+    /// The builder boot ABIs this host can boot: through the legacy ABI only
+    /// when it has no boot payload to hand a builder, through the payload ABI
+    /// when it has.
+    pub builder_boot_abi: BuilderBootAbiRange,
 }
 
 /// Refuse a set whose declared protocols this host cannot speak.
@@ -368,6 +376,13 @@ pub fn check_declared_protocol_compatibility(
         return Err(ImageSetError::BuilderCacheContractMismatch {
             set: declared.builder_cache_contract,
             host: host.builder_cache_contract,
+        });
+    }
+    let abi = declared.builder_boot_abi_or_legacy();
+    if !host.builder_boot_abi.contains(abi) {
+        return Err(ImageSetError::BuilderBootAbiUnsupported {
+            set: abi,
+            host: host.builder_boot_abi,
         });
     }
     Ok(())

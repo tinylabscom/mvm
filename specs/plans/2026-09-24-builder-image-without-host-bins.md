@@ -796,6 +796,18 @@ Taken on 2026-09-24.
 2. **Schema field.** The boot ABI gets its own `builder_boot_abi` field in the
    signed image-set `[compatibility]` section, so a Nix-only change can bump
    `builder_cache_contract` without claiming an ABI change.
+   - Landed on the `mvm` side: `ImageSetCompatibility::builder_boot_abi`
+     (`Option<BuilderBootAbi>`), `HostProtocolSupport::builder_boot_abi` (the
+     range this host boots: `0..=1` with a registered payload source,
+     `0..=0` without), refusal of an ABI outside that range at acquisition,
+     and `xtask repin-image-lock` copying the field into `images.lock`. A
+     **release** set without the field means ABI 0 (published before it
+     existed). A **local** set without it is refused by name
+     (`LocalSetPredatesBuilderBootAbi`): its emitter always writes the field,
+     so its absence means a stale emitter, and reading it as ABI 0 could take
+     the baked-binaries path against an image with none. `mvm-images`'
+     `emit-local-manifest.py` must therefore write `builder_boot_abi` (0 while
+     its flake still bakes) before pair builds work against this `mvm`.
 3. **Legacy ABI 0 support window.** Marker-less images stay accepted for one
    release cycle: until the `image-set` carrying `builder_boot_abi = 1` is the
    only pinned set and the W7 window of the cutover plan has closed.
