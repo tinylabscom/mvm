@@ -105,6 +105,9 @@ ext4-view = { workspace = true }
 # its tags are also in this crate's re-exported public surface.
 mvm-contract = { workspace = true }
 thiserror = { workspace = true }
+# The approval broker's webhook backend. Already in this crate's closure
+# through mvm-hostd, so the direct edge adds no crates.
+mvm-http = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }

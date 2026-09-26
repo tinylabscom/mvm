@@ -6,6 +6,7 @@
 // flushes them first.
 #![deny(clippy::exit)]
 
+pub mod approval;
 pub mod bench;
 pub mod bootstrap;
 pub mod commands;

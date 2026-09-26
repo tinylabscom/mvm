@@ -1,8 +1,9 @@
-//! The endpoint routes a launch carries: the project manifest's
-//! `[[network.routes]]` and the `--allow-endpoint` flags.
+//! The endpoint routes a launch carries — the project manifest's
+//! `[[network.routes]]` and the `--allow-endpoint` flags — and who answers
+//! the ones that ask: `--approval` and the manifest's `[approval]`.
 //!
-//! Resolution lives in `mvm_client::admission::run_routes`; this reads the
-//! project manifest the run names, if it names one on this host.
+//! Route resolution lives in `mvm_client::admission::run_routes`; this reads
+//! the project manifest the run names, if it names one on this host.
 
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use anyhow::{Context, Result};
 use mvm_client::admission::run_routes::{RunRoutes, resolve_run_routes};
 
 use super::exec::RunArgs;
+use crate::approval::{ApprovalChoice, ApprovalInputs};
 
 /// Resolve the launch's routes before anything boots.
 pub(in crate::commands) fn launch_routes(args: &RunArgs) -> Result<RunRoutes> {
@@ -17,6 +19,17 @@ pub(in crate::commands) fn launch_routes(args: &RunArgs) -> Result<RunRoutes> {
         .map(|manifest| manifest.network.routes)
         .unwrap_or_default();
     resolve_run_routes(&args.allow_endpoint, &manifest_routes)
+}
+
+/// Resolve who answers the launch's `ask` decisions.
+pub(in crate::commands) fn launch_approval(args: &RunArgs) -> Result<ApprovalChoice> {
+    let manifest = project_manifest(args)?;
+    ApprovalChoice::resolve(ApprovalInputs {
+        flags: &args.approval,
+        flag_mode: args.approval_mode,
+        manifest: manifest.as_ref().map(|m| &m.approval),
+        operator_at_terminal: crate::approval::operator_at_terminal(),
+    })
 }
 
 /// The manifest `--manifest` points at, or the one in a local `--flake`
@@ -33,7 +46,7 @@ fn project_manifest(args: &RunArgs) -> Result<Option<mvm_core::manifest::Manifes
     };
     path.map(|path| {
         mvm_core::manifest::Manifest::read_file(&path)
-            .with_context(|| format!("reading {} for its network routes", path.display()))
+            .with_context(|| format!("reading {}", path.display()))
     })
     .transpose()
 }
@@ -61,6 +74,34 @@ mod tests {
         assert_eq!(
             routes.with_allow_host(&["api.github.com:443".into()]),
             ["api.github.com:443", "example.com:443"]
+        );
+    }
+
+    #[test]
+    fn the_manifest_approval_table_is_read_and_a_flag_replaces_it() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "flake = \".\"\n[approval]\nbackends = [\"deny\"]\n",
+        )
+        .unwrap();
+        let args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            launch_approval(&args).unwrap().backends(),
+            [crate::approval::ApprovalSpec::Deny]
+        );
+        let args = RunArgs {
+            approval: vec!["webhook=https://a.example/h".parse().unwrap()],
+            ..args
+        };
+        assert_eq!(
+            launch_approval(&args).unwrap().backends(),
+            [crate::approval::ApprovalSpec::Webhook(
+                "https://a.example/h".into()
+            )]
         );
     }
 

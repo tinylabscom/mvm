@@ -3060,6 +3060,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-http",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
