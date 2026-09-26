@@ -124,9 +124,16 @@ pub(in crate::commands) enum MachineAction {
     /// Show console logs from a running VM
     #[command(display_order = 12)]
     Logs(super::vm::logs::Args),
-    /// Open a PTY console for a development image
-    #[command(display_order = 13)]
+    /// Attach to a development VM's console session, or start one
+    #[command(
+        display_order = 13,
+        visible_alias = "attach",
+        after_help = super::vm::console::CONSOLE_SESSION_HELP
+    )]
     Console(super::vm::console::Args),
+    /// Disconnect the client attached to a VM's console; the session keeps running
+    #[command(display_order = 13)]
+    Detach(super::vm::console::DetachArgs),
     /// Verify a portable `.mvm` artifact without booting
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
@@ -179,6 +186,7 @@ impl MachineAction {
             | MachineAction::SetTimeout(_)
             | MachineAction::Logs(_)
             | MachineAction::Console(_)
+            | MachineAction::Detach(_)
             | MachineAction::CheckArtifact(_) => "machine",
             MachineAction::Timeline(_) => "timeline",
             MachineAction::Revert(_) => "revert",
@@ -904,7 +912,9 @@ pub(in crate::commands) struct MachineShellArgs {
     /// Persistent machine name.
     #[arg(value_name = "NAME")]
     pub name: String,
-    /// Bypass the sealed-image accessibility check.
+    /// Take the console session over from a client already attached to it
+    /// (that client is detached; the shell keeps running). Never bypasses the
+    /// sealed-image refusal.
     #[arg(long)]
     pub force: bool,
 }
@@ -1573,6 +1583,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
+        MachineAction::Detach(detach_args) => super::vm::console::run_detach(detach_args),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
         MachineAction::Timeline(a) => super::vm::checkpoint::run_timeline(a),
         MachineAction::Revert(a) => {

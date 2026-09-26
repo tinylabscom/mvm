@@ -51,10 +51,10 @@ pub use framing::{
 pub use request::{DriveFileOperation, GuestRequest, StageFile};
 pub use request_policy::RequestClass;
 pub use response::{
-    BootTimingReport, ComponentState, DriveRefusal, GuestCapability, GuestResponse,
-    ProtocolNegotiation, ProtocolUpgradeAction, ReadinessReport, ReseedShortfall, ResponseContract,
-    ResponseKind, ResponseVariant, RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind,
-    VolumeMountResult, protocol_hello_response, supported_capabilities,
+    BootTimingReport, ComponentState, ConsoleSessionInfo, DriveRefusal, GuestCapability,
+    GuestResponse, ProtocolNegotiation, ProtocolUpgradeAction, ReadinessReport, ReseedShortfall,
+    ResponseContract, ResponseKind, ResponseVariant, RunEntrypointError, TrafficPlane, Verb,
+    VolumeMountErrorKind, VolumeMountResult, protocol_hello_response, supported_capabilities,
 };
 pub use response_payloads::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsChange, FsChangeKind, FsEntry, FsEntryKind,

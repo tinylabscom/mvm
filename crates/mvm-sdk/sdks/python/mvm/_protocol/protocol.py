@@ -114,6 +114,17 @@ ComponentState = Union[
 
 
 @dataclass
+class ConsoleSessionInfo:
+    attached: bool
+    command: str
+    scrollback_bytes: int
+    session_id: int
+    detach_timeout_secs: Optional[int] = None
+    detached_secs: Optional[int] = None
+    exit_code: Optional[int] = None
+
+
+@dataclass
 class Read:
     length: int
     path: str
@@ -576,6 +587,7 @@ class ConsoleOpen:
     cols: int
     rows: int
     argv: Optional[List[str]] = None
+    detach_timeout_secs: Optional[int] = None
     env: Optional[List[List[str]]] = field(default_factory=lambda: [])
 
 
@@ -585,12 +597,39 @@ class GuestRequest23:
 
 
 @dataclass
+class ConsoleAttach:
+    cols: int
+    rows: int
+    session_id: int
+    take_over: bool
+
+
+@dataclass
+class GuestRequest24:
+    ConsoleAttach: ConsoleAttach
+
+
+@dataclass
+class ConsoleDetach:
+    session_id: int
+
+
+@dataclass
+class GuestRequest25:
+    ConsoleDetach: ConsoleDetach
+
+
+class GuestRequest26(Enum):
+    ConsoleList = 'ConsoleList'
+
+
+@dataclass
 class ConsoleClose:
     session_id: int
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest27:
     ConsoleClose: ConsoleClose
 
 
@@ -602,15 +641,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest28:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest26(Enum):
+class GuestRequest29(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest27(Enum):
+class GuestRequest30(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -623,7 +662,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest31:
     FsRead: FsRead
 
 
@@ -639,7 +678,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest32:
     FsWrite: FsWrite
 
 
@@ -650,7 +689,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest33:
     FsList: FsList
 
 
@@ -661,7 +700,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest34:
     FsStat: FsStat1
 
 
@@ -673,7 +712,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest35:
     FsMkdir: FsMkdir
 
 
@@ -685,7 +724,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest36:
     FsRemove: FsRemove
 
 
@@ -697,7 +736,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest37:
     FsMove: FsMove
 
 
@@ -711,11 +750,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest38:
     ProcStart: ProcStart
 
 
-class GuestRequest36(Enum):
+class GuestRequest39(Enum):
     ProcList = 'ProcList'
 
 
@@ -726,7 +765,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest40:
     ProcSignal: ProcSignal
 
 
@@ -737,7 +776,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest41:
     ProcSendInput: ProcSendInput
 
 
@@ -748,7 +787,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest42:
     ProcWait: ProcWait
 
 
@@ -758,7 +797,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest43:
     ProcKill: ProcKill
 
 
@@ -770,7 +809,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest41:
+class GuestRequest44:
     MountVolume: MountVolume
 
 
@@ -781,7 +820,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest42:
+class GuestRequest45:
     UnmountVolume: UnmountVolume
 
 
@@ -791,7 +830,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest46:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -802,12 +841,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest44:
+class GuestRequest47:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest46:
+class GuestRequest49:
     CloseStreamInput: CloseInput
 
 
@@ -1014,13 +1053,56 @@ class GuestResponse29:
 
 
 @dataclass
+class ConsoleAttached:
+    data_port: int
+    replay_bytes: int
+    session_id: int
+
+
+@dataclass
+class GuestResponse30:
+    ConsoleAttached: ConsoleAttached
+
+
+@dataclass
+class ConsoleBusy:
+    session_id: int
+
+
+@dataclass
+class GuestResponse31:
+    ConsoleBusy: ConsoleBusy
+
+
+@dataclass
+class ConsoleDetached:
+    session_id: int
+    was_attached: bool
+
+
+@dataclass
+class GuestResponse32:
+    ConsoleDetached: ConsoleDetached
+
+
+@dataclass
+class ConsoleSessions:
+    sessions: List[ConsoleSessionInfo]
+
+
+@dataclass
+class GuestResponse33:
+    ConsoleSessions: ConsoleSessions
+
+
+@dataclass
 class ConsoleExited:
     exit_code: int
     session_id: int
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse34:
     ConsoleExited: ConsoleExited
 
 
@@ -1030,7 +1112,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse35:
     ConsoleResized: ConsoleResized
 
 
@@ -1042,7 +1124,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse36:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -1053,7 +1135,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse38:
+class GuestResponse42:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1654,7 +1736,7 @@ class GuestRequest18:
 
 
 @dataclass
-class GuestRequest45:
+class GuestRequest48:
     StreamInput: InputFrame
 
 
@@ -1716,27 +1798,27 @@ class GuestResponse27:
 
 
 @dataclass
-class GuestResponse33:
+class GuestResponse37:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse34:
+class GuestResponse38:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse36:
+class GuestResponse40:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse37:
+class GuestResponse41:
     VolumeMountResult: VolumeMountResult
 
 
 @dataclass
-class GuestResponse39:
+class GuestResponse43:
     StreamInputResult: StreamInputResult
 
 
@@ -1846,7 +1928,7 @@ class GuestResponse15:
 
 
 @dataclass
-class GuestResponse35:
+class GuestResponse39:
     ProcResult: ProcResult
 
 
@@ -1890,6 +1972,10 @@ GuestResponse = Union[
     GuestResponse37,
     GuestResponse38,
     GuestResponse39,
+    GuestResponse40,
+    GuestResponse41,
+    GuestResponse42,
+    GuestResponse43,
 ]
 
 
@@ -1962,6 +2048,9 @@ GuestRequest = Union[
     GuestRequest44,
     GuestRequest45,
     GuestRequest46,
+    GuestRequest47,
+    GuestRequest48,
+    GuestRequest49,
 ]
 
 

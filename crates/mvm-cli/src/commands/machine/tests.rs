@@ -116,6 +116,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::SetTimeout(_) => "set-timeout",
         MachineAction::Logs(_) => "logs",
         MachineAction::Console(_) => "console",
+        MachineAction::Detach(_) => "detach",
         MachineAction::CheckArtifact(_) => "check-artifact",
         MachineAction::Timeline(_) => "timeline",
         MachineAction::Revert(_) => "revert",

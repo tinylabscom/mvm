@@ -153,8 +153,16 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
 
 ### PS-09 — Detachable sessions (#3719)
-- [ ] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
-- [ ] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+- [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
+      — the guest agent keeps one console session per VM alive across client
+      disconnects (1 MiB replay ring, fresh data port per attach, typed
+      `ConsoleBusy`, explicit `take_over`, optional detach timeout); new verbs
+      `ConsoleAttach`/`ConsoleDetach`/`ConsoleList` are DevOnly like
+      `ConsoleOpen`; `~d` detaches, `~.` ends
+- [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+      — `machine attach` (alias of `console`) and `machine detach` join the
+      existing `ps`, `logs -f`, `stop`; `inspect` still covers persistent
+      machine specs only
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)

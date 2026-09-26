@@ -21,6 +21,9 @@ Last updated: 2026-09-26
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
+    - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
+    - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+    - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
   - [x] PS-12 environment hygiene denylist — #3722
