@@ -518,6 +518,15 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
 
+      # Instruction-file provenance: the keyless half verifies a real Sigstore
+      # bundle only under `manifest-verify`, and the committed policy schema is
+      # checked against the Rust types only under `schema`. Neither feature is
+      # on in the default lane, so without this step both compile to nothing.
+      - name: instruction provenance tests (manifest-verify + schema)
+        run: |
+          cargo nextest run -p mvm-client --features manifest-verify,schema -E 'test(/instruction/)'
+          cargo check -p mvm-client --features schema --bins
+
       # `addons` is off by default so the sealed agent's request path stays
       # synchronous and tokio-free (`check-guest-agent-runtime-free` enforces
       # that, so this must stay a feature rather than move into default). But
