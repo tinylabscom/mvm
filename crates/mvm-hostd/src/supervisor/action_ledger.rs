@@ -137,15 +137,24 @@ impl ActionLedger {
     /// refuses the next action in this dimension.
     pub fn record(&self, dim: ActionDimension, n: u64) -> RecordOutcome {
         let idx = dim.index();
-        // fetch_update (not fetch_add): a raw fetch_add wraps on overflow,
-        // which would let a hostile workload roll a total back under its
-        // ceiling. saturating_add keeps every total monotonically increasing.
-        let total = self.counters[idx]
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
-                Some(cur.saturating_add(n))
-            })
-            .map(|previous| previous.saturating_add(n))
-            .expect("the update closure never returns None");
+        // A raw fetch_add wraps on overflow, which would let a hostile
+        // workload roll a total back under its ceiling. A compare-exchange
+        // loop with saturating_add keeps every total monotonically
+        // increasing on every toolchain (fetch_update is deprecated on the
+        // nightly CI lanes and try_update is not on the stable floor).
+        let mut current = self.counters[idx].load(Ordering::SeqCst);
+        let total = loop {
+            let next = current.saturating_add(n);
+            match self.counters[idx].compare_exchange_weak(
+                current,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break next,
+                Err(actual) => current = actual,
+            }
+        };
         if self.exceeded[idx].load(Ordering::SeqCst) {
             return RecordOutcome::AlreadyExceeded;
         }
