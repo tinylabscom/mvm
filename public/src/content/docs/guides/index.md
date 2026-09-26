@@ -28,6 +28,7 @@ policy decision, or troubleshooting path.
 | [Policy Profiles](/guides/policy-profiles/) | You need repeatable security defaults for sandbox classes. |
 | [Secrets and Credentials](/guides/secrets-and-credentials/) | You need to pass sensitive values without widening exposure. |
 | [Network Egress Policy](/guides/network-egress-policy/) | You need explicit outbound network policy and auditability. |
+| [Runtime Approvals](/guides/runtime-approvals/) | Some requests or secret uses need a person, or a webhook, to say yes first. |
 | [Persistent Workspaces](/guides/persistent-workspaces/) | You need state that survives across sandbox sessions. |
 | [Audit and Receipts](/guides/audit-and-receipts/) | You need evidence for what built, ran, changed, and exited. |
 
