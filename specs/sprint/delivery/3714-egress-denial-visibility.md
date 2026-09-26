@@ -24,8 +24,8 @@ endpoint's recorder stamps `vm_name` on every entry it writes
 
 ## Reasons and remedies
 
-Every label the endpoint records on this tree, plus the route outcomes an open
-PR adds, maps to a description and a remedy. Restricted-address classes are
+Every label the endpoint records — flow, lookup, secret-path and endpoint-route
+refusals alike — maps to a description and a remedy. Restricted-address classes are
 read through the gate's own `RestrictedClass` (now with `ALL` and
 `from_label`), so the CLI and the gate cannot name a class differently. Metadata, loopback, link-local and the other absolute classes, and
 TCP/22, get no remedy at all. Private ranges (and the other re-admittable
