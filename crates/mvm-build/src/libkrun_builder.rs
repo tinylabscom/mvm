@@ -3912,6 +3912,15 @@ mod tests {
         // rather than short-circuiting on `NotYetImplemented`, which
         // is what this test exists to guarantee. The test must NOT
         // require a specific host environment.
+        //
+        // `run_build` resolves its image through `ensure_builder_vm_image`,
+        // which seeds from `$HOME/.mvm/cache` on a miss. Without its own HOME
+        // this test read whatever builder image the developer had built, and
+        // shared one cache with every sibling test process doing the same.
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let scratch = TempDir::new().unwrap();
         let spec_path = scratch.path().join("spec.json");
         std::fs::write(&spec_path, b"{}").unwrap();
@@ -3968,6 +3977,15 @@ mod tests {
         // Bad input → validation error from `validate_mounts` /
         // `validate_job`, before run_build reaches the libkrun
         // availability check or the image cache.
+        //
+        // `run_build` resolves its image through `ensure_builder_vm_image`,
+        // which seeds from `$HOME/.mvm/cache` on a miss. Without its own HOME
+        // this test read whatever builder image the developer had built, and
+        // shared one cache with every sibling test process doing the same.
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let scratch = TempDir::new().unwrap();
         let host_bins = scratch.path().join("host-bins");
         std::fs::create_dir_all(&host_bins).unwrap();
@@ -4012,6 +4030,15 @@ mod tests {
         // Nix-build failure is what `mvmctl bootstrap` reports to operators with
         // a populated cache; the first three are what `mvmctl bootstrap`
         // reports before the Stage 0 bootstrap completes.
+        //
+        // `run_build` resolves its image through `ensure_builder_vm_image`,
+        // which seeds from `$HOME/.mvm/cache` on a miss. Without its own HOME
+        // this test read whatever builder image the developer had built, and
+        // shared one cache with every sibling test process doing the same.
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let scratch = TempDir::new().unwrap();
         let mounts = ok_mounts(&scratch);
         let err = LibkrunBuilderVm::default()
