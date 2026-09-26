@@ -45,9 +45,20 @@ pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
 pub(crate) use bootstrap::selected_local_checkout;
 
+/// The `cmdline.txt` recorded beside a fetched builder image. No backend boots
+/// from it — every builder boot composes the builder boot contract's own line
+/// — so it is written from that contract, for a boot without a payload, to
+/// keep the cache's shape and to say what the image would boot with alone.
 #[cfg(any(feature = "release-artifact-bootstrap", test))]
-pub(super) const SYNTHESIZED_BUILDER_VM_CMDLINE: &str = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 \
-     loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n";
+pub(super) fn synthesized_builder_vm_cmdline() -> String {
+    use mvm_build::builder_boot::{
+        BuilderBoot, LIBKRUN_BUILDER_CONSOLE_BASE, builder_boot_cmdline,
+    };
+    format!(
+        "{}\n",
+        builder_boot_cmdline(LIBKRUN_BUILDER_CONSOLE_BASE, &BuilderBoot::Baked, false)
+    )
+}
 
 /// Run `f` with the launch-time pair artifact source when a checkout is
 /// selected, or `None` when the selector is unset. The build closure runs

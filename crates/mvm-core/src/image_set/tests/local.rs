@@ -38,7 +38,8 @@ const EMITTED: &str = r#"{
       "min": 2,
       "max": 3
     },
-    "builder_cache_contract": 1
+    "builder_cache_contract": 1,
+    "builder_boot_abi": 0
   },
   "nix_inputs": {
     "flake_locks": [
@@ -130,6 +131,7 @@ fn local_manifest() -> ImageSetManifest {
     manifest.producer = ImageSetProducer::LocalCheckouts(local);
     manifest.set_version = version("0.0.0-local");
     manifest.revocation_channel = None;
+    manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::LEGACY);
     manifest
         .members
         .retain(|member| member.target.admits(GuestArch::Aarch64));
@@ -193,6 +195,46 @@ fn stage_raw(manifest_bytes: &[u8]) -> Staged {
     Staged {
         dir: tempfile::tempdir().unwrap(),
         manifest_bytes: manifest_bytes.to_vec(),
+    }
+}
+
+mod builder_boot_abi {
+    use super::*;
+
+    /// Until the image emitter writes the field, every existing local set
+    /// omits it, and those sets still bake their binaries. Reading a missing
+    /// ABI as the legacy one keeps them usable through the transition.
+    #[test]
+    fn a_local_set_without_one_reads_as_the_legacy_abi() {
+        let mut manifest = local_manifest();
+        manifest.compatibility.builder_boot_abi = None;
+        stage(manifest.clone())
+            .verify_fresh()
+            .expect("a local set without the field is accepted");
+        assert_eq!(
+            manifest.compatibility.builder_boot_abi_or_legacy(),
+            BuilderBootAbi::LEGACY
+        );
+    }
+
+    #[test]
+    fn a_local_set_declaring_one_is_accepted() {
+        for abi in [BuilderBootAbi::LEGACY, BuilderBootAbi::PAYLOAD] {
+            let mut manifest = local_manifest();
+            manifest.compatibility.builder_boot_abi = Some(abi);
+            stage(manifest).verify_fresh().unwrap();
+        }
+    }
+
+    /// The emitted fixture carries the field the image repository's emitter
+    /// writes.
+    #[test]
+    fn the_emitted_shape_declares_its_abi() {
+        let manifest: ImageSetManifest = serde_json::from_str(EMITTED).unwrap();
+        assert_eq!(
+            manifest.compatibility.builder_boot_abi,
+            Some(BuilderBootAbi::LEGACY)
+        );
     }
 }
 
@@ -756,6 +798,11 @@ mod local_path {
         let host = HostProtocolSupport {
             guest_agent_protocol: ProtocolRange::new(5, 6).unwrap(),
             builder_cache_contract: 4,
+            builder_boot_abi: BuilderBootAbiRange::new(
+                BuilderBootAbi::LEGACY,
+                BuilderBootAbi::PAYLOAD,
+            )
+            .unwrap(),
         };
         let err = verify_local_image_set(
             &LocalImageSetVerification::new(

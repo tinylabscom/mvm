@@ -29,6 +29,10 @@ mod builderd_protocol;
 #[path = "../builderd.rs"]
 mod builderd;
 
+#[cfg(target_os = "linux")]
+#[path = "../builder_guest_paths.rs"]
+mod builder_guest_paths;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {

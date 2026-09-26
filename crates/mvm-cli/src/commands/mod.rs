@@ -623,6 +623,11 @@ fn declare_embedded_host_binaries() {
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
     );
+    // Every builder boot carries this binary's own builder binaries as its
+    // boot payload, whether the image bakes older copies or none at all.
+    mvm_build::builder_boot::register_boot_payload_source(Box::new(
+        crate::host_binaries::extract::EmbeddedBootPayload,
+    ));
 }
 
 #[cfg(not(feature = "builder-vm"))]
@@ -642,30 +647,32 @@ fn register_inhouse_builder() {
         type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
         match choice {
             Choice::Hvf => Some(
-                crate::commands::build::hvf_builder_image::resolve_hvf_builder_image().map(
-                    |(kernel, rootfs, closure_nar)| {
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
                         Box::new(
                             DriverBuilderVm::new(
                                 mvm_backends::driver::hvf::HvfDriver::new(),
-                                kernel,
-                                rootfs,
+                                image.kernel,
+                                image.rootfs,
                             )
-                            .with_closure_nar(closure_nar),
+                            .with_closure_nar(image.closure_nar),
                         ) as Boxed
                     },
                 ),
             ),
             Choice::Firecracker => Some(
-                crate::commands::build::fc_builder_image::resolve_fc_builder_image().map(|image| {
-                    Box::new(
-                        DriverBuilderVm::new(
-                            mvm_backends::driver::fc::FcDriver::new(),
-                            image.kernel,
-                            image.rootfs,
-                        )
-                        .with_closure_nar(image.closure_nar),
-                    ) as Boxed
-                }),
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
+                        Box::new(
+                            DriverBuilderVm::new(
+                                mvm_backends::driver::fc::FcDriver::new(),
+                                image.kernel,
+                                image.rootfs,
+                            )
+                            .with_closure_nar(image.closure_nar),
+                        ) as Boxed
+                    },
+                ),
             ),
             Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
         }

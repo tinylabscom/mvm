@@ -177,6 +177,7 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
         compatibility: ImageSetCompatibility {
             guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
             builder_cache_contract: 4,
+            builder_boot_abi: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {
@@ -255,7 +256,13 @@ fn host() -> HostProtocolSupport {
     HostProtocolSupport {
         guest_agent_protocol: ProtocolRange::new(2, 3).unwrap(),
         builder_cache_contract: 4,
+        builder_boot_abi: payload_capable(),
     }
+}
+
+/// A host that can hand builder boots the boot payload.
+fn payload_capable() -> BuilderBootAbiRange {
+    BuilderBootAbiRange::new(BuilderBootAbi::LEGACY, BuilderBootAbi::PAYLOAD).unwrap()
 }
 
 fn digest(manifest: &ImageSetManifest) -> Sha256Hex {
@@ -1141,6 +1148,76 @@ mod protocol {
         }
     }
 
+    /// A release published before the field existed carries none, and meant
+    /// the legacy image that bakes its own builder binaries.
+    #[test]
+    fn a_release_without_a_builder_boot_abi_is_the_legacy_abi() {
+        let manifest = manifest();
+        assert_eq!(manifest.compatibility.builder_boot_abi, None);
+        assert_eq!(
+            manifest.compatibility.builder_boot_abi_or_legacy(),
+            BuilderBootAbi::LEGACY
+        );
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+        let baked_only = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::new(
+                BuilderBootAbi::LEGACY,
+                BuilderBootAbi::LEGACY,
+            )
+            .unwrap(),
+            ..host()
+        };
+        check_protocol_compatibility(&manifest, &baked_only).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_builder_boot_abi_is_refused() {
+        let mut manifest = manifest();
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::new(7));
+        let error = check_protocol_compatibility(&manifest, &host()).unwrap_err();
+        assert!(
+            matches!(error, ImageSetError::BuilderBootAbiUnsupported { set, .. } if set == BuilderBootAbi::new(7)),
+            "{error}"
+        );
+        assert_eq!(error.stage(), ImageSetStage::ProtocolCompatibility);
+        assert!(error.to_string().contains("0..=1"), "{error}");
+    }
+
+    /// An image with no builder binaries of its own needs a host that can
+    /// supply them in the boot payload.
+    #[test]
+    fn a_payload_abi_set_is_refused_by_a_host_without_a_payload() {
+        let mut manifest = manifest();
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+        let baked_only = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::new(
+                BuilderBootAbi::LEGACY,
+                BuilderBootAbi::LEGACY,
+            )
+            .unwrap(),
+            ..host()
+        };
+        assert!(matches!(
+            check_protocol_compatibility(&manifest, &baked_only),
+            Err(ImageSetError::BuilderBootAbiUnsupported { set, .. }) if set == BuilderBootAbi::PAYLOAD
+        ));
+    }
+
+    #[test]
+    fn the_builder_boot_abi_round_trips_as_a_bare_integer() {
+        let mut declared = manifest();
+        declared.compatibility.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        let json = serde_json::to_value(&declared.compatibility).unwrap();
+        assert_eq!(json["builder_boot_abi"], serde_json::json!(1));
+        let back: ImageSetCompatibility = serde_json::from_value(json).unwrap();
+        assert_eq!(back, declared.compatibility);
+        // Absent stays absent rather than being written back as a 0 the set
+        // never declared.
+        let legacy = serde_json::to_value(&manifest().compatibility).unwrap();
+        assert!(legacy.get("builder_boot_abi").is_none(), "{legacy}");
+    }
+
     #[test]
     fn refuses_a_builder_cache_contract_that_is_not_equal() {
         let manifest = manifest();
@@ -1730,6 +1807,7 @@ mod verification {
         let incompatible = HostProtocolSupport {
             guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
             builder_cache_contract: 4,
+            builder_boot_abi: payload_capable(),
         };
 
         verify_checked(&set.request(), accept_signature)

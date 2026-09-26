@@ -624,14 +624,14 @@ pub(in crate::commands) mod attested_builder_pack {
         HostCapability, LocalPackPolicy, PackBackend, PackKind, host_pack_policy_hash,
     };
 
+    #[cfg(feature = "manifest-verify")]
+    use super::builder_vm_artifact_names;
     #[cfg(any(
         feature = "manifest-verify",
         feature = "release-artifact-bootstrap",
         test
     ))]
-    use super::SYNTHESIZED_BUILDER_VM_CMDLINE;
-    #[cfg(feature = "manifest-verify")]
-    use super::builder_vm_artifact_names;
+    use super::synthesized_builder_vm_cmdline;
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
         write_builder_vm_cache_sidecars,
@@ -1025,7 +1025,7 @@ pub(in crate::commands) mod attested_builder_pack {
             std::fs::copy(&cmdline, dest.join("cmdline.txt"))
                 .context("copying builder pack cmdline.txt")?;
         } else {
-            std::fs::write(dest.join("cmdline.txt"), SYNTHESIZED_BUILDER_VM_CMDLINE)
+            std::fs::write(dest.join("cmdline.txt"), synthesized_builder_vm_cmdline())
                 .context("writing synthesized builder pack cmdline.txt")?;
         }
         let name = mvm_build::builder_pack::CLOSURE_FILE;

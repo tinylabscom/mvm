@@ -12,7 +12,7 @@ authors.workspace = true
 # aarch64-unknown-linux-musl by crates/mvm-cli/build.rs and embedded.
 # Linux-gated in source (stub main() elsewhere) so non-Linux workspace
 # builds stay green. Bin names are load-bearing: build.rs +
-# host_binaries/manifest.rs + nix/lib/mvm-host-binaries.nix all key on them.
+# src/host_payload_manifest.rs + nix/lib/mvm-host-binaries.nix all key on them.
 [[bin]]
 name = "mvm-host-vm-init"
 path = "src/bin/mvm-host-vm-init.rs"
@@ -20,15 +20,6 @@ path = "src/bin/mvm-host-vm-init.rs"
 [[bin]]
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
-
-# Self-hosting builder-rootfs bootstrap patcher: PID 1 from an initramfs on the
-# hvf VMM. Mounts the target rootfs read-write and injects the freshly built
-# mvm host binaries per /payload/manifest, then powers off. Cross-compiled to
-# static aarch64-musl; never installed in a VM rootfs (initramfs-only, absent
-# from the host-binaries sync gate).
-[[bin]]
-name = "mvm-rootfs-patcher"
-path = "src/bin/mvm-rootfs-patcher.rs"
 
 # PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
 # static aarch64-musl + embedded by mvm-cli/build.rs (via SEED_BINARIES),
@@ -42,7 +33,7 @@ path = "src/bin/stage0-init.rs"
 # listener over the typed `builderd_protocol`; `#[path]`-includes the
 # daemon modules so it cross-compiles to static aarch64-musl without the
 # full mvm-build lib, same as the other builder bins. Embedded into the
-# builder/dev VM rootfs at /sbin/mvm-builderd via host_binaries/manifest.rs
+# builder/dev VM rootfs at /sbin/mvm-builderd via src/host_payload_manifest.rs
 # + nix/lib/mvm-host-binaries.nix (the name is load-bearing for build.rs).
 [[bin]]
 name = "mvm-builderd"
@@ -71,6 +62,9 @@ mvm-contract.workspace = true
 mvm-core.workspace = true
 mvm-http.workspace = true
 mvm-fs.workspace = true
+# Reads a builder image's boot ABI marker off the ext4 image on the host.
+# Already in the closure through mvm-fs.
+ext4-view.workspace = true
 mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` implements the optional backend's network seam.
 mvm-net = { workspace = true, optional = true }

@@ -217,6 +217,9 @@ pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocol
         )
         .expect("the compiled guest-agent protocol range must be ordered"),
         builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+        // Payload ABIs only when this process can hand a builder the payload;
+        // an image with no builder binaries of its own is unbootable without.
+        builder_boot_abi: crate::builder_boot::supported_image_abis(),
     }
 }
 
@@ -555,6 +558,7 @@ mod tests {
         let incompatible = mvm_core::image_set::ImageSetCompatibility {
             guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
             builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+            builder_boot_abi: None,
         };
         let fetcher = FakeFetcher::new(b"must not be fetched");
         let host = current_image_set_protocol_support();

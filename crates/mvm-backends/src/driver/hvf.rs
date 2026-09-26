@@ -185,8 +185,8 @@ fn relay_supervisor_config_with_handoff(
     };
 
     // An empty spec cmdline means "use the supervisor's workload default"
-    // (`init=/init`); a non-empty one (e.g. the builder rootfs's
-    // `init=/sbin/mvm-host-vm-init`) is threaded through verbatim.
+    // (`init=/init`); a non-empty one (e.g. the builder boot contract's line)
+    // is threaded through verbatim.
     let cmdline = {
         let c = spec.cmdline.trim();
         (!c.is_empty()).then(|| c.to_string())

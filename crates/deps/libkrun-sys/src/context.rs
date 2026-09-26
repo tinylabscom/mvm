@@ -117,12 +117,20 @@ pub struct KrunContext {
     pub kernel_format: KernelFormat,
     /// Root ext4 image. `Some` together with [`Self::kernel_path`] for
     /// the steady-state builder VM and runtime microVM path. Mutually
-    /// exclusive with `initramfs_path` and `root_dir`.
+    /// exclusive with `root_dir`.
     #[serde(default)]
     pub rootfs_path: Option<String>,
+    /// Attach [`Self::rootfs_path`] read-only at the VMM. The builder sets it:
+    /// its root is a cached image every builder boot shares, so the guest's
+    /// own `ro` mount is not the only thing standing between a guest and the
+    /// cache.
+    #[serde(default)]
+    pub rootfs_read_only: bool,
     /// Optional initial ramdisk. When `Some`, libkrun passes the
-    /// path to `krun_set_kernel`'s `c_initramfs` arg. Mutually
-    /// exclusive with `rootfs_path` and `root_dir`.
+    /// path to `krun_set_kernel`'s `c_initramfs` arg. Alone it is the
+    /// guest's whole root; beside `rootfs_path` its `/init` runs first and
+    /// mounts the disk itself, which is how the builder boot payload works.
+    /// Mutually exclusive with `root_dir`.
     #[serde(default)]
     pub initramfs_path: Option<String>,
     /// Host directory libkrun mounts as the guest root over virtiofs
@@ -259,6 +267,7 @@ impl KrunContext {
             kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: Some(rootfs_path.into()),
+            rootfs_read_only: false,
             initramfs_path: None,
             root_dir: None,
             guest_entrypoint: None,
@@ -290,6 +299,7 @@ impl KrunContext {
             kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: None,
+            rootfs_read_only: false,
             initramfs_path: Some(initramfs_path.into()),
             root_dir: None,
             guest_entrypoint: None,
@@ -324,6 +334,7 @@ impl KrunContext {
             kernel_source: KrunKernelSource::External,
             kernel_format: KernelFormat::Raw,
             rootfs_path: None,
+            rootfs_read_only: false,
             initramfs_path: None,
             root_dir: Some(root_dir.into()),
             guest_entrypoint: Some(GuestEntrypoint {
@@ -420,6 +431,19 @@ impl KrunContext {
     }
 
     /// Set the kernel format passed to libkrun.
+    /// Load `initramfs` beside the rootfs disk: the kernel runs the
+    /// initramfs `/init`, which mounts the disk itself.
+    pub fn with_boot_initramfs(mut self, initramfs: impl Into<String>) -> Self {
+        self.initramfs_path = Some(initramfs.into());
+        self
+    }
+
+    /// Attach the rootfs disk read-only at the VMM.
+    pub fn with_read_only_rootfs(mut self) -> Self {
+        self.rootfs_read_only = true;
+        self
+    }
+
     pub fn with_kernel_format(mut self, format: KernelFormat) -> Self {
         self.kernel_format = format;
         self

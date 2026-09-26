@@ -126,7 +126,7 @@ const BUILDER_LISTEN_TOKENS: &[&str] = &["TcpListener::bind(", "UdpSocket::bind(
 /// never reappear in one.
 const RETIRED_BUILDER_BINARIES: &[&str] = &["mvm-egress-proxy"];
 const BUILDER_BINARY_MANIFESTS: &[&str] = &[
-    "crates/mvm-cli/src/host_binaries/manifest.rs",
+    "crates/mvm-build/src/host_payload_manifest.rs",
     "nix/lib/mvm-host-binaries.nix",
 ];
 

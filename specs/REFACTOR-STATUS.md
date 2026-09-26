@@ -32,6 +32,17 @@ Last updated: 2026-09-25
   - [ ] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
   - [ ] PS-21 CLI thin over `mvm-client` — #3730
+- [ ] **Builder image without baked host binaries.**
+      `specs/plans/2026-09-24-builder-image-without-host-bins.md`. Done: W0
+      (the key folds only baked binaries), W1 (deterministic boot payload),
+      W2 (stage 1 in `mvm-host-vm-init`), W3 (one boot-contract cmdline), W4
+      (every backend boots the payload; libkrun and QEMU roots read-only at
+      the VMM), W5 (persistent-builder payload staleness), W6 (HVF patcher
+      deleted; HVF and Firecracker resolve through `ensure_builder_vm_image`),
+      W11 (ADR-004/030/018 amendments); `builder_boot_abi` in the signed
+      image-set compatibility section. W9 (`mvm-setpriv` leaf) and W10 (per-role pair key) are in #3741.
+      Open: W7 (`mvm-images`), W8 (cut-over), W12 (measurement).
+
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by

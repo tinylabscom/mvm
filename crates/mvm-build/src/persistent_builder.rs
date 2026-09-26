@@ -783,71 +783,17 @@ pub struct SessionRecord {
     /// down an upgraded user's existing builder immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_unix_secs: Option<u64>,
+    /// Digest of the builder boot payload the session booted with. Absent for
+    /// a session that booted its image's baked binaries, or that an `mvmctl`
+    /// predating the payload started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_payload_digest: Option<String>,
 }
 
-/// Why the invocation-driven keeper should stop the persistent builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuilderSessionTeardownReason {
-    /// `MVM_RESIDENCY=cold` means no resident builder should remain alive.
-    ColdPolicy,
-    /// Policy requested a parked snapshot after idle, but this libkrun-backed
-    /// persistent-builder session has no memory snapshot primitive.
-    SnapshotUnavailable,
-}
-
-/// Pure decision for a live persistent-builder session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuilderSessionPolicyDecision {
-    Keep,
-    Teardown(BuilderSessionTeardownReason),
-}
-
-/// Decide what the keeper should do with a live persistent-builder session.
-///
-/// A real snapshot path for the HVF dev-builder is not wired yet; this hidden
-/// `persistent-builder` session is currently libkrun-backed, so a policy-level
-/// `Park` decision degrades to teardown rather than pretending a snapshot was
-/// captured.
-pub fn decide_builder_session_policy(
-    record: &SessionRecord,
-    policy: &mvm_core::residency::ResidencyPolicy,
-    now_unix_secs: u64,
-) -> BuilderSessionPolicyDecision {
-    if matches!(policy.kind(), mvm_core::residency::ResidencyKind::Cold) {
-        return BuilderSessionPolicyDecision::Teardown(BuilderSessionTeardownReason::ColdPolicy);
-    }
-
-    let Some(threshold) = builder_session_idle_threshold(policy) else {
-        return BuilderSessionPolicyDecision::Keep;
-    };
-    let idle = session_idle_duration(record, now_unix_secs);
-    match mvm_core::residency::decide_builder_residency_action(policy.kind(), idle, threshold) {
-        mvm_core::residency::BuilderResidencyAction::Keep => BuilderSessionPolicyDecision::Keep,
-        mvm_core::residency::BuilderResidencyAction::Park => {
-            BuilderSessionPolicyDecision::Teardown(
-                BuilderSessionTeardownReason::SnapshotUnavailable,
-            )
-        }
-        mvm_core::residency::BuilderResidencyAction::Teardown => {
-            BuilderSessionPolicyDecision::Teardown(BuilderSessionTeardownReason::ColdPolicy)
-        }
-    }
-}
-
-fn builder_session_idle_threshold(
-    policy: &mvm_core::residency::ResidencyPolicy,
-) -> Option<Duration> {
-    match policy.kind() {
-        mvm_core::residency::ResidencyKind::Cold => Some(Duration::ZERO),
-        mvm_core::residency::ResidencyKind::Parked => Some(Duration::ZERO),
-        mvm_core::residency::ResidencyKind::Warm => policy.idle_timeout(),
-    }
-}
-
-fn session_idle_duration(record: &SessionRecord, now_unix_secs: u64) -> Duration {
-    let last = record.last_activity_unix_secs.unwrap_or(now_unix_secs);
-    Duration::from_secs(now_unix_secs.saturating_sub(last))
-}
+pub use crate::persistent_builder_policy::{
+    BuilderSessionPolicyDecision, BuilderSessionTeardownReason, decide_builder_session_policy,
+    session_payload_is_current,
+};
 
 /// On-disk location of the session record. Returns `None` only if
 /// `$HOME` isn't set, which would be a misconfigured environment.
@@ -977,6 +923,10 @@ fn wait_for_started_session(marker: &Path) -> SessionAcquisition {
 /// active session, fall back to single-shot" signals as far as
 /// the routing layer is concerned. Never errors: a stale record
 /// shouldn't break the user's build.
+///
+/// A live session running other builder binaries than this process's boot
+/// payload is stopped and not returned, so the caller starts a fresh one (or
+/// falls back to a single-shot builder) instead of dispatching into stale code.
 pub fn read_active_session() -> Option<SessionRecord> {
     let path = session_record_path()?;
     let body = std::fs::read(&path).ok()?;
@@ -984,7 +934,31 @@ pub fn read_active_session() -> Option<SessionRecord> {
     if !supervisor_alive(record.supervisor_pid) {
         return None;
     }
+    let current = crate::builder_boot::current_payload_digest();
+    if !session_payload_is_current(
+        record.boot_payload_digest.as_deref(),
+        current.as_ref().map(|digest| digest.as_str()),
+    ) {
+        tracing::info!(
+            session = %record.session_id,
+            booted_with = record.boot_payload_digest.as_deref().unwrap_or("its image's own binaries"),
+            "stopping a persistent builder that runs other builder binaries than this mvmctl"
+        );
+        stop_session(&record);
+        return None;
+    }
     Some(record)
+}
+
+/// Stop a live session and forget it: ask its dispatch loop to shut down,
+/// signal its supervisor, and remove the record.
+pub fn stop_session(record: &SessionRecord) {
+    let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path);
+    let _ = supervisor.shutdown();
+    terminate_supervisor(record.supervisor_pid);
+    if let Some(path) = session_record_path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Mark the active session as used. Best-effort: a failed touch should not make
@@ -1024,12 +998,7 @@ pub fn enforce_active_session_policy(
         return None;
     };
 
-    let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path);
-    let _ = supervisor.shutdown();
-    terminate_supervisor(record.supervisor_pid);
-    if let Some(path) = session_record_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    stop_session(&record);
     Some(reason)
 }
 
@@ -1100,10 +1069,15 @@ pub fn stage_flake_dispatch_job(
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)?;
     let out_dir = guest_artifact_dir(transport, &job_id);
+    // The boot payload's copy when the session booted with one, else the copy
+    // a legacy image baked.
+    let payload_host_vm_init = crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR;
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
          OUT_DIR='{out_dir}'\n\
+         HOST_VM_INIT='{payload_host_vm_init}/mvm-host-vm-init'\n\
+         [ -x \"$HOST_VM_INIT\" ] || HOST_VM_INIT=/sbin/mvm-host-vm-init\n\
          mkdir -p \"$OUT_DIR\"\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
@@ -1123,7 +1097,7 @@ pub fn stage_flake_dispatch_job(
          cp -L \"$STORE_PATH/rootfs.ext4\" \"$BUILD_HOOK_ROOTFS\"\n\
          echo 'mvm-host-vm-init: running before_build hook' >&2\n\
          set +e\n\
-         /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
+         \"$HOST_VM_INIT\" run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
          hook_rc=$?\n\
          set -e\n\
          if [ \"$hook_rc\" -ne 0 ]; then\n\
@@ -1518,12 +1492,33 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: None,
         };
         let json = serde_json::to_vec(&record).unwrap();
         let back: SessionRecord = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.session_id, "abc");
         assert_eq!(back.supervisor_pid, 4242);
         assert_eq!(back.last_activity_unix_secs, Some(1234567890));
+    }
+
+    #[test]
+    fn a_session_records_the_payload_it_booted_with() {
+        let json = r#"{
+            "session_id": "abc",
+            "dispatch_socket_path": "/tmp/sock",
+            "job_dir": "/tmp/jobs",
+            "workspace_root": "/work",
+            "supervisor_pid": 4242,
+            "boot_payload_digest": "15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0"
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            record.boot_payload_digest.as_deref(),
+            Some("15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0")
+        );
+        let back: SessionRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(back.boot_payload_digest, record.boot_payload_digest);
     }
 
     #[test]
@@ -1578,6 +1573,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1599,6 +1595,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1620,6 +1617,7 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1000),
+            boot_payload_digest: None,
         };
         assert_eq!(
             decide_builder_session_policy(
@@ -1647,6 +1645,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: std::process::id(),
             last_activity_unix_secs: Some(1),
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
@@ -1678,6 +1677,7 @@ mod tests {
             // This process: alive by construction.
             supervisor_pid: std::process::id(),
             last_activity_unix_secs: None,
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
@@ -1763,6 +1763,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: DEFINITELY_DEAD_PID,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
@@ -1819,15 +1820,20 @@ mod tests {
         .expect("stage");
         let body = std::fs::read_to_string(job_dir.join(&job_id).join("cmd.sh")).expect("read");
         assert!(
-            body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),
+            body.contains("\"$HOST_VM_INIT\" run-before-build-hook"),
             "missing before_build hook runner invocation in:\n{body}"
+        );
+        assert!(
+            body.contains("HOST_VM_INIT='/run/mvm/host-bins/mvm-host-vm-init'\n")
+                && body.contains("|| HOST_VM_INIT=/sbin/mvm-host-vm-init\n"),
+            "the hook runner must prefer the boot payload's copy in:\n{body}"
         );
         assert!(
             body.contains("/tmp/mvm-rootfs-before-build.ext4"),
             "missing writable temp rootfs path in:\n{body}"
         );
         let hook_idx = body
-            .find("/sbin/mvm-host-vm-init run-before-build-hook")
+            .find("\"$HOST_VM_INIT\" run-before-build-hook")
             .expect("hook runner present");
         let journal_idx = body
             .find("/sbin/e2fsck -p -f \"$OUT_DIR/rootfs.ext4\"")
@@ -1859,12 +1865,12 @@ mod tests {
         );
         assert!(
             body.contains(
-                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+                "set +e\n\"$HOST_VM_INIT\" run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
             ),
             "the hook's real exit status must be captured before testing it in:\n{body}"
         );
         assert!(
-            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            !body.contains("if ! \"$HOST_VM_INIT\" run-before-build-hook"),
             "negating the hook command loses its real exit status in:\n{body}"
         );
         assert!(
@@ -1881,7 +1887,7 @@ mod tests {
             "an artifact that cannot be made writable for repair must be removed in:\n{body}"
         );
         assert!(
-            !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
+            !body.contains("\"$HOST_VM_INIT\" seal-rootfs-journal"),
             "source-rendered jobs must remain compatible with published builder binaries that predate the seal subcommand"
         );
     }

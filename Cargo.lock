@@ -2946,6 +2946,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "ext4-view",
  "flate2",
  "hex",
  "libc",

@@ -352,13 +352,7 @@ condition = "persistent builder dispatch loop"
 
 [[launch_edge]]
 producer = "mvm-build/stage0-init"
-launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
-anchor = "SEED_BINARIES"
-activation = "seed"
-
-[[launch_edge]]
-producer = "mvm-build/mvm-rootfs-patcher"
-launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
+launcher = "crates/mvm-build/src/host_payload_manifest.rs"
 anchor = "SEED_BINARIES"
 activation = "seed"
 

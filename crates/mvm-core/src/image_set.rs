@@ -21,6 +21,7 @@ use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 
+mod boot_abi;
 mod checkout;
 mod error;
 mod identity;
@@ -31,6 +32,7 @@ mod trust_tier;
 mod validate;
 mod verify;
 
+pub use boot_abi::{BuilderBootAbi, BuilderBootAbiRange};
 pub use checkout::{LocalCheckouts, RepoIdentity, WorktreeState};
 pub use error::{ImageSetError, ImageSetStage};
 pub use identity::{
@@ -233,6 +235,22 @@ pub struct ImageSetCompatibility {
     /// The builder image cache layout. Exact rather than a range: a builder
     /// image laid out under a different contract is unusable, not degraded.
     pub builder_cache_contract: u32,
+    /// What the set's builder image promises the `mvmctl` that boots it; see
+    /// [`BuilderBootAbi`]. A release published before the field existed omits
+    /// it and means the legacy ABI 0. A locally built set must declare it:
+    /// its emitter always writes it, so one without it predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_boot_abi: Option<BuilderBootAbi>,
+}
+
+impl ImageSetCompatibility {
+    /// The builder boot ABI the set's builder image declares, reading an
+    /// absent field as the legacy ABI a release published before the field
+    /// meant. A local set without it is refused before this is asked.
+    #[must_use]
+    pub fn builder_boot_abi_or_legacy(&self) -> BuilderBootAbi {
+        self.builder_boot_abi.unwrap_or(BuilderBootAbi::LEGACY)
+    }
 }
 
 /// The Nix inputs every member was built from, using the pack model's input

@@ -16,9 +16,15 @@ pub mod base_image_scan;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
+/// The builder boot contract: the payload of mvm's own builder binaries every
+/// builder boot carries beside its image, the image's boot ABI, and the one
+/// kernel command line every builder backend boots with.
+pub mod builder_boot;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
 mod builder_egress_process;
+/// Where a running builder guest finds mvm's own builder binaries.
+pub mod builder_guest_paths;
 mod builder_host_binaries;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
@@ -69,6 +75,8 @@ pub mod guest_elf;
 /// Which libc a materialized guest rootfs carries, observed while the tree is
 /// still a directory the host can read.
 pub mod guest_libc;
+/// Which of this crate's binaries `mvmctl` embeds as its Linux host payload.
+pub mod host_payload_manifest;
 pub mod image_source;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
@@ -88,6 +96,8 @@ pub mod packed_artifact;
 /// libkrun creates; spawning the libkrun VM itself lives in
 /// `LibkrunPersistentHostVm`.
 pub mod persistent_builder;
+/// Whether a live persistent builder session is kept, stopped, or reused.
+pub mod persistent_builder_policy;
 pub mod persistent_builder_transport;
 /// Build-provenance recorder: content-addresses produced artifacts into the
 /// signed plan's `BuildProvenance`.
@@ -96,8 +106,7 @@ pub mod provenance_mark;
 /// OCI-unpacked tree to ext4 rootfs image. The host only allocates the
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
-/// Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
-/// into a rootfs via an initramfs patcher on the hvf VMM (no legacy builder).
+/// In-process newc cpio writer for host-assembled initramfs archives.
 pub mod rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.

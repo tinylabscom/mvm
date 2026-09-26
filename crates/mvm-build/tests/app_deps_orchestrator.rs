@@ -476,6 +476,8 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
         BuilderVmError::CliSpawnRefused(refused) => {
             BuilderVmError::CliSpawnRefused(refused.clone())
         }
+        // Carries an I/O error, which is not `Clone`; the mock never raises it.
+        BuilderVmError::BootStaging(e) => BuilderVmError::ExtractionFailed(e.to_string()),
     }
 }
 

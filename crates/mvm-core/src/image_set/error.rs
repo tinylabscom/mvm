@@ -8,7 +8,10 @@ use super::identity::{
     WorkflowPath,
 };
 use super::validate::RequiredMember;
-use super::{ArtifactFormat, BootProtocol, GuestDeviceRequirement, ImageSetRole, MemberTarget};
+use super::{
+    ArtifactFormat, BootProtocol, BuilderBootAbi, BuilderBootAbiRange, GuestDeviceRequirement,
+    ImageSetRole, MemberTarget,
+};
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
 
@@ -132,6 +135,14 @@ pub enum ImageSetError {
     },
     #[error("builder cache contract {set} declared by the set is not the host's {host}")]
     BuilderCacheContractMismatch { set: u32, host: u32 },
+    #[error(
+        "builder boot ABI {set} declared by the set is not one this mvmctl boots ({host}); \
+         update mvmctl, or use an image set built for it"
+    )]
+    BuilderBootAbiUnsupported {
+        set: BuilderBootAbi,
+        host: BuilderBootAbiRange,
+    },
     #[error("backend cannot run {arch} guests")]
     ArchitectureUnsupportedByBackend { arch: GuestArch },
     #[error("image set has no {role} for {requested}; it has {}", join(.available))]
@@ -350,9 +361,9 @@ impl ImageSetError {
             | Self::SigningRefMismatch { .. }
             | Self::SetVersionMismatch { .. } => ImageSetStage::LockMatch,
             Self::Incomplete { .. } => ImageSetStage::Completeness,
-            Self::GuestAgentProtocolDisjoint { .. } | Self::BuilderCacheContractMismatch { .. } => {
-                ImageSetStage::ProtocolCompatibility
-            }
+            Self::GuestAgentProtocolDisjoint { .. }
+            | Self::BuilderCacheContractMismatch { .. }
+            | Self::BuilderBootAbiUnsupported { .. } => ImageSetStage::ProtocolCompatibility,
             Self::ArtifactMissing { .. }
             | Self::ArtifactNotRegularFile { .. }
             | Self::ArtifactUnreadable { .. }

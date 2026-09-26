@@ -43,6 +43,12 @@ regardless of what the host happens to have installed.
    opt-out, mvm-published GitHub-release prebuilts are an end-user,
    non-source-checkout path only.
 
+   The builder image carries no binary from `mvmctl`'s embedded payload that
+   a builder boot runs. Those binaries are supplied at every boot from the
+   running `mvmctl` (ADR-004's builder boot payload), so they are never a
+   downloaded, published artifact on any channel — including when the image
+   itself was fetched.
+
 ## Consequences
 
 Deterministic behavior across contributor machines: a contributor with

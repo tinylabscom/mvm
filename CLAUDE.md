@@ -166,6 +166,19 @@ halt defers to the on-disk build result); it is reachable only via an explicit
 
 The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
+**mvm's builder binaries travel beside the builder image, not inside it.**
+Every builder boot on every backend carries a *builder boot payload*: an
+initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init` and
+`mvm-builderd`, digest-checked by the guest before it pivots into the
+read-only image and runs them from `/run/mvm/host-bins`. The image and the
+payload agree on a versioned builder boot ABI (`/etc/mvm/builder-boot-abi`;
+`builder_boot_abi` in a signed image set): 0 is a legacy image that bakes the
+binaries (the payload's copies still win), 1 is an image that carries none.
+The contract lives in `mvm_build::builder_boot` and is recorded in ADR-004;
+`builder_boot_cmdline` is the one kernel command line every backend boots
+with, and `stage_builder_boot` decides each boot. A persistent builder booted
+with other builder binaries is stopped rather than reused.
+
 Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
 ## Architecture

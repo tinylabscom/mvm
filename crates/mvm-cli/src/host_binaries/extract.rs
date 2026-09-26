@@ -7,6 +7,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use mvm_build::builder_boot::{BootPayloadError, BootPayloadSource, BuilderBootPayload};
+
 use super::source::{PayloadBinary, host_payload};
 
 /// The refusal, naming the rebuild for *this* binary's profile.
@@ -66,6 +68,51 @@ fn extract_payload(payload: &[PayloadBinary], cache_root: &Path) -> std::io::Res
     Ok(target)
 }
 
+/// Where this process extracts its payload: `~/.mvm/cache/host-bins`.
+pub fn host_bin_cache_root() -> PathBuf {
+    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins")
+}
+
+/// The builder boot payload source `mvmctl` registers with `mvm-build`, which
+/// cannot reach the embedded binaries itself.
+pub struct EmbeddedBootPayload;
+
+impl BootPayloadSource for EmbeddedBootPayload {
+    fn boot_payload(&self) -> Result<BuilderBootPayload, BootPayloadError> {
+        let cache_root = host_bin_cache_root();
+        builder_boot_payload(&cache_root).map_err(|source| BootPayloadError::Io {
+            op: "extracting mvmctl's embedded builder binaries into",
+            path: cache_root,
+            source,
+        })
+    }
+}
+
+/// The builder boot payload for this process.
+///
+/// Built from the extracted payload, and each builder binary is held to the
+/// SHA-256 this `mvmctl` was compiled with a second time as it is read in, so
+/// the chain from compiled-in digest to the bytes a builder guest executes has
+/// no unchecked step.
+pub fn builder_boot_payload(cache_root: &Path) -> std::io::Result<BuilderBootPayload> {
+    boot_payload_from(host_payload()?, cache_root)
+}
+
+fn boot_payload_from(
+    payload: &[PayloadBinary],
+    cache_root: &Path,
+) -> std::io::Result<BuilderBootPayload> {
+    let dir = extract_payload(payload, cache_root)?;
+    payload
+        .iter()
+        .fold(
+            BuilderBootPayload::builder().host_bin_dir(dir),
+            |builder, bin| builder.expected_sha256(&bin.name, &bin.sha256_hex),
+        )
+        .build()
+        .map_err(std::io::Error::other)
+}
+
 pub struct BootHostBinaries {
     pub dir: PathBuf,
     pub stage0_init: Vec<u8>,
@@ -119,8 +166,42 @@ fn rand_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{combined_hash_hex, no_payload_message};
-    use crate::host_binaries::source::{CompiledIn, PayloadSource};
+    use super::{boot_payload_from, combined_hash_hex, no_payload_message};
+    use crate::host_binaries::source::{CompiledIn, PayloadBinary, PayloadSource};
+
+    fn sha(bytes: &[u8]) -> String {
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes))
+    }
+
+    fn fake_payload() -> Vec<PayloadBinary> {
+        [
+            ("mvm-host-vm-init", b"INIT".as_slice()),
+            ("mvm-builderd", b"BUILDERD".as_slice()),
+            ("stage0-init", b"SEED".as_slice()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| PayloadBinary::compiled_in(name, &sha(bytes), bytes))
+        .collect()
+    }
+
+    #[test]
+    fn the_boot_payload_carries_the_builder_binaries_only() {
+        let cache = tempfile::tempdir().unwrap();
+        let payload = boot_payload_from(&fake_payload(), cache.path()).unwrap();
+        let names: Vec<&str> = payload.manifest().members().map(|(n, _)| n).collect();
+        assert_eq!(names, ["mvm-builderd", "mvm-host-vm-init"]);
+    }
+
+    /// A payload entry whose bytes do not hash to the digest compiled beside
+    /// them never reaches a builder guest: extraction refuses it first.
+    #[test]
+    fn a_tampered_payload_binary_is_refused() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut payload = fake_payload();
+        payload[0] = PayloadBinary::compiled_in("mvm-host-vm-init", &sha(b"INIT"), b"TAMPERED");
+        let err = boot_payload_from(&payload, cache.path()).unwrap_err();
+        assert!(err.to_string().contains("mvm-host-vm-init"), "{err}");
+    }
 
     #[test]
     fn combined_hash_is_sha256_hex() {

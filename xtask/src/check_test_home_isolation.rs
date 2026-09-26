@@ -108,6 +108,33 @@ const SEED_ANCHORS: &[&str] = &[
     "attach_universal_initramfs",
 ];
 
+/// Builders that resolve their own image through `ensure_builder_vm_image`
+/// when asked to run, paired with the entry points that do it and the name a
+/// finding reports. A test body constructing one of these builders and calling
+/// one of its run entry points seeds from the real `$HOME` exactly as a direct
+/// `ensure_builder_vm_image` call does. The pairing is what keeps the rule
+/// narrow: `run_build` alone is a trait method a stub or a driver-backed
+/// builder with an explicit image also has, and a test that only validates a
+/// job on one of these builders never resolves an image.
+const IMAGE_RESOLVING_RUNS: &[(&str, &str, &str)] = &[
+    (
+        "LibkrunBuilderVm",
+        ".run_build(",
+        "LibkrunBuilderVm::run_build",
+    ),
+    (
+        "LibkrunBuilderVm",
+        ".run_shell_script(",
+        "LibkrunBuilderVm::run_shell_script",
+    ),
+    ("QemuBuilderVm", ".run_build(", "QemuBuilderVm::run_build"),
+    (
+        "QemuBuilderVm",
+        ".run_shell_script(",
+        "QemuBuilderVm::run_shell_script",
+    ),
+];
+
 /// Files exempt from `test-home-isolation`, with the reason.
 const ISOLATION_EXEMPT: &[(&str, &str)] = &[(
     "crates/mvm-core/src/config.rs",
@@ -268,6 +295,12 @@ fn called_seed_anchor(body: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|anchor| body_calls(body, anchor))
+        .or_else(|| {
+            IMAGE_RESOLVING_RUNS
+                .iter()
+                .find(|(builder, entry, _)| body_calls(body, builder) && body_calls(body, entry))
+                .map(|(_, _, name)| *name)
+        })
 }
 
 /// A call, not a mention: skip comment lines so the rule reads code only.
@@ -632,6 +665,39 @@ mod tests {
             test_fn_name("#[test]\n    fn some_case_name() {\n"),
             Some("some_case_name")
         );
+    }
+
+    /// A build run on a builder that resolves its own image seeds from the
+    /// real `$HOME` as surely as a direct resolver call: that is how a test
+    /// sharing one `MVM_HOME` with its siblings read a half-copied image.
+    #[test]
+    fn flags_a_build_run_on_an_image_resolving_builder() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    fn gaps() {{\n\
+             let err = LibkrunBuilderVm::default()\n            .run_build(&job, &mounts);\n    }}\n}}\n"
+        );
+        let hits = scan_source("crates/mvm-build/src/thing.rs", &src);
+        assert!(
+            hits.iter().any(|h| h.contains("seed-caller-isolation")
+                && h.contains("LibkrunBuilderVm::run_build")),
+            "expected a seed-caller hit, got {hits:?}"
+        );
+    }
+
+    /// Validating a job, or running a stub or a driver-backed builder handed
+    /// an explicit image, resolves nothing.
+    #[test]
+    fn a_run_without_an_image_resolving_builder_is_not_flagged() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    fn stub() {{\n\
+             let err = StubBuilderVm.run_build(&job, &mounts);\n    }}\n\
+             #[test]\n    fn validate() {{\n\
+             LibkrunBuilderVm::default().validate_job(&job);\n    }}\n}}\n"
+        );
+        let hits = scan_source("crates/mvm-build/src/thing.rs", &src);
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]

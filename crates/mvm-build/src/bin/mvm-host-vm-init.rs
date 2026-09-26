@@ -102,6 +102,12 @@ mod workload;
 #[path = "mvm-host-vm-init/workload_proxy.rs"]
 mod workload_proxy;
 
+/// How this PID 1 got here — from the boot payload (stage 1, then stage 2)
+/// or straight from an image's baked copy — and what that leaves to mount.
+#[cfg(any(target_os = "linux", test))]
+#[path = "mvm-host-vm-init/boot_stage.rs"]
+mod boot_stage;
+
 /// Builder-VM lifecycle hook runner. Mounts a workload rootfs and runs
 /// `/etc/mvm/hooks/before_build.sh` inside a chroot. Linux-only; the
 /// module is compiled on other hosts only for workspace ergonomics.
@@ -150,7 +156,7 @@ fn main() -> ExitCode {
 
     #[cfg(target_os = "linux")]
     {
-        linux::run()
+        boot_stage::run_pid1()
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1616,8 +1622,8 @@ mod linux {
         }
     }
 
-    pub fn run() -> ExitCode {
-        eprintln!("mvm-host-vm-init: pid 1 starting");
+    pub fn run(pseudo_fs: crate::boot_stage::PseudoFs) -> ExitCode {
+        eprintln!("mvm-host-vm-init: pid 1 starting ({pseudo_fs:?})");
         append_init_breadcrumb("run_enter", "pid1");
 
         // The Linux kernel doesn't pass a PATH to PID 1, so without
@@ -1636,10 +1642,7 @@ mod linux {
         // SAFETY: PID 1 is single-threaded until we spawn the fan-out
         // tracks below; no other thread can be reading the env yet.
         unsafe {
-            std::env::set_var(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin",
-            );
+            std::env::set_var("PATH", crate::boot_stage::pid1_path());
         }
 
         // Anchor the boot-timings clock as close
@@ -1653,7 +1656,7 @@ mod linux {
         // Pseudofs mounts must complete before anything else —
         // every subsequent phase needs /proc, /sys, /dev to be
         // readable.
-        if let Err(e) = mount_pseudofs() {
+        if let Err(e) = mount_pseudofs(pseudo_fs) {
             eprintln!("mvm-host-vm-init: mount_pseudofs failed: {e}");
             write_result(2, &format!("mount_pseudofs failed: {e}"));
             stamp(&timings, |t| {
@@ -2132,7 +2135,7 @@ mod linux {
     /// failure is logged and the builder VM continues serving the legacy
     /// dispatch channel, so an old daemon-less image degrades gracefully.
     fn spawn_builderd() {
-        match Command::new("/sbin/mvm-builderd").spawn() {
+        match Command::new(mvm_build::builder_boot::guest_host_binary("mvm-builderd")).spawn() {
             Ok(child) => eprintln!(
                 "mvm-host-vm-init: spawned mvm-builderd (pid {})",
                 child.id()
@@ -2913,20 +2916,15 @@ mod linux {
         }
     }
 
-    fn mount_pseudofs() -> Result<(), String> {
+    fn mount_pseudofs(pseudo_fs: crate::boot_stage::PseudoFs) -> Result<(), String> {
         // Standard init filesystems. libkrun's kernel mounts
         // devtmpfs (and sometimes /proc /sys) before handing off to
         // init, so EBUSY here means "already mounted by an earlier
         // stage" — that's success for our purposes. Anything else
         // is fatal.
-        mount_fs_idempotent("proc", "/proc", "proc")?;
-        mount_fs_idempotent("sysfs", "/sys", "sysfs")?;
-        mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
-        mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
-        // `/run` must be a tmpfs: the rootfs is mounted read-only and
-        // runtime state (locks, sockets, pid files) lives there.
-        // mkGuest's /init does the equivalent for the dev image's boot path.
-        mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
+        for (source, target, fstype) in crate::boot_stage::base_pseudofs_mounts(pseudo_fs) {
+            mount_fs_idempotent(source, target, fstype)?;
+        }
         // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
         // `make-ext4-fs.nix` runs `mkfs.ext4` under faketime for
         // deterministic timestamps, and faketime opens a POSIX named
@@ -4186,7 +4184,7 @@ mod linux {
         Ok(())
     }
 
-    fn power_off() -> ExitCode {
+    pub(crate) fn power_off() -> ExitCode {
         use nix::sys::reboot::{RebootMode, reboot};
         let _ = Command::new("/bin/sync").status();
         // `reboot(RB_POWER_OFF)` returns `Infallible` on success
