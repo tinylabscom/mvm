@@ -1391,3 +1391,85 @@ fn run_with_a_destination_outside_the_binding_refuses_before_boot() {
         "a refusal never echoes the value: {stderr}"
     );
 }
+
+fn mvmctl_help(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(args)
+        .output()
+        .expect("run mvmctl --help");
+    assert!(
+        out.status.success(),
+        "{args:?} must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The console help states what each escape does to the session, so an
+/// operator knows before pressing it whether the shell survives.
+#[test]
+fn machine_console_help_states_detach_and_terminate_semantics() {
+    let help = mvmctl_help(&["machine", "console", "--help"]);
+    for needle in [
+        "~d   detach: the shell keeps running",
+        "~.   end the session",
+        "--list",
+        "--detach-timeout <SECONDS>",
+        "--force",
+        "machine detach <name>",
+    ] {
+        assert!(help.contains(needle), "missing {needle:?} in:\n{help}");
+    }
+}
+
+/// `attach` is the lifecycle-surface name for the console verb.
+#[test]
+fn machine_attach_is_an_alias_for_console() {
+    let help = mvmctl_help(&["machine", "attach", "--help"]);
+    assert!(help.contains("~d   detach"), "{help}");
+    assert!(
+        help.starts_with("Attach to a development VM's console session"),
+        "`attach` must resolve to the console verb:\n{help}"
+    );
+    let listing = mvmctl_help(&["machine", "--help"]);
+    assert!(listing.contains("\n  detach "), "{listing}");
+}
+
+#[test]
+fn machine_detach_takes_a_vm_name() {
+    let help = mvmctl_help(&["machine", "detach", "--help"]);
+    assert!(help.contains("session keeps running"), "{help}");
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "detach"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a VM name is required");
+}
+
+#[test]
+fn machine_console_rejects_conflicting_session_flags() {
+    for args in [
+        &["machine", "console", "dev", "--list", "--force"][..],
+        &["machine", "console", "dev", "--command", "id", "--list"],
+        &[
+            "machine",
+            "console",
+            "dev",
+            "--command",
+            "id",
+            "--detach-timeout",
+            "60",
+        ],
+        &["machine", "console", "dev", "--detach-timeout", "0"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?} must be refused by the parser"
+        );
+        assert_eq!(out.status.code(), Some(2), "{args:?} is a usage error");
+    }
+}

@@ -64,18 +64,49 @@ fn hvf_console_arm_enabled(name: &str) -> bool {
     !matches!(mvm_runtime::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
 }
 
+/// How the interactive console's local escapes and disconnects behave. Shown
+/// under `machine console --help` so the difference between ending a session
+/// and leaving it is stated where the flag is.
+pub(in crate::commands) const CONSOLE_SESSION_HELP: &str = "\
+SESSIONS:
+    A console session outlives its client. `machine console <name>` attaches to
+    the VM's running session, replaying its recent output, or starts one if
+    there is none. One client is attached at a time.
+
+    Escapes (press Enter first; handled by mvmctl, never sent to the guest):
+        ~d   detach: the shell keeps running; run `machine console <name>`
+             again to reattach
+        ~.   end the session: the shell is hung up and the console exits
+
+    Closing the terminal or losing the connection also detaches. A session ends
+    when its shell exits, when it is ended with `~.`, after --detach-timeout
+    with no client attached, or when the VM stops.
+
+    `machine console <name> --list` shows the session. `machine detach <name>`
+    disconnects whoever is attached, and `--force` takes the session over
+    from them.";
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     /// Name of the VM
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
     /// Run a single command instead of an interactive shell
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["list", "detach_timeout"])]
     pub command: Option<String>,
-    /// Attempt the attach even when legacy metadata is incomplete. This never
-    /// bypasses a sealed-image refusal.
+    /// Take the session over when another client is attached: that client is
+    /// detached and the shell keeps running. Never bypasses a sealed-image
+    /// refusal.
     #[arg(long)]
     pub force: bool,
+    /// List the VM's console sessions instead of attaching
+    #[arg(long, conflicts_with = "force")]
+    pub list: bool,
+    /// When this attach starts a new session, end it after it has had no
+    /// client attached for this many seconds. Without it a detached session
+    /// runs until its shell exits or the VM stops
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "list")]
+    pub detach_timeout: Option<u64>,
     /// Extra KEY=VALUE environment entries for the guest dev shell/session.
     #[arg(skip)]
     pub env: Vec<(String, String)>,
@@ -84,16 +115,32 @@ pub(in crate::commands) struct Args {
     pub pty_argv: Vec<String>,
 }
 
+/// `machine detach <name>`: disconnect the client attached to a VM's console.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct DetachArgs {
+    /// Name of the VM
+    #[arg(value_parser = clap_vm_name)]
+    pub name: String,
+}
+
 /// Composable inputs for one interactive console session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::commands) struct ConsoleSessionOptions {
     env: Vec<(String, String)>,
     argv: Vec<String>,
+    take_over: bool,
+    detach_timeout_secs: Option<u64>,
 }
 
 impl ConsoleSessionOptions {
     pub(in crate::commands) fn builder() -> ConsoleSessionOptionsBuilder {
         ConsoleSessionOptionsBuilder::default()
+    }
+
+    /// A session with its own program or environment is started for this
+    /// caller alone; only the default shell is shared and reattached to.
+    fn needs_dedicated_session(&self) -> bool {
+        !self.argv.is_empty() || !self.env.is_empty()
     }
 }
 
@@ -101,6 +148,8 @@ impl ConsoleSessionOptions {
 pub(in crate::commands) struct ConsoleSessionOptionsBuilder {
     env: Vec<(String, String)>,
     argv: Vec<String>,
+    take_over: bool,
+    detach_timeout_secs: Option<u64>,
 }
 
 impl ConsoleSessionOptionsBuilder {
@@ -116,10 +165,28 @@ impl ConsoleSessionOptionsBuilder {
         self
     }
 
+    /// Hang up a client already attached to the shared session and attach in
+    /// its place.
+    #[must_use]
+    pub(in crate::commands) fn take_over(mut self, take_over: bool) -> Self {
+        self.take_over = take_over;
+        self
+    }
+
+    /// End a session this attach creates once it has had no client for this
+    /// many seconds.
+    #[must_use]
+    pub(in crate::commands) fn detach_timeout_secs(mut self, secs: Option<u64>) -> Self {
+        self.detach_timeout_secs = secs;
+        self
+    }
+
     pub(in crate::commands) fn build(self) -> ConsoleSessionOptions {
         ConsoleSessionOptions {
             env: self.env,
             argv: self.argv,
+            take_over: self.take_over,
+            detach_timeout_secs: self.detach_timeout_secs,
         }
     }
 }
@@ -147,6 +214,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let command = args.command.as_deref();
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     enforce_accessible_gate(name, args.force)?;
+    if args.list {
+        return list_console_sessions(name);
+    }
     // A console attach (one-shot exec or interactive PTY) is guest activity;
     // refresh idle tracking so an in-use session isn't idle-slept underneath
     // the user. Best-effort.
@@ -201,6 +271,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         let options = ConsoleSessionOptions::builder()
             .env(args.env)
             .argv(args.pty_argv)
+            .take_over(args.force)
+            .detach_timeout_secs(args.detach_timeout)
             .build();
         let exit_code = console_interactive(name, options)?;
         if exit_code != 0 {
@@ -279,52 +351,32 @@ pub(in crate::commands) fn console_interactive(
     name: &str,
     options: ConsoleSessionOptions,
 ) -> Result<i32> {
-    let ConsoleSessionOptions { env, argv } = options;
     let (cols, rows) = get_terminal_size();
-
-    ui::info(&format!(
-        "Opening console to VM {:?} ({}x{})...",
-        name, cols, rows
-    ));
-
     let transport = pick_console_transport(name)?;
 
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    mvm_agentd::vsock::require_capabilities(
-        &mut stream,
-        &[mvm_agentd::vsock::GuestCapability::Console],
-    )?;
-    let req = mvm_agentd::vsock::GuestRequest::ConsoleOpen {
-        cols,
-        rows,
-        env,
-        argv,
+    let attached = if options.needs_dedicated_session() {
+        ui::info(&format!(
+            "Opening console to VM {name:?} ({cols}x{rows})..."
+        ));
+        open_session(&transport, name, &options, (cols, rows))?
+    } else {
+        attach_or_open(&transport, name, &options, (cols, rows))?
     };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let (session_id, data_port) = match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
-        mvm_agentd::vsock::GuestResponse::ConsoleOpened {
-            session_id,
-            data_port,
-        } => (session_id, data_port),
-        other => {
-            anyhow::bail!("Unexpected response: {other:?}");
-        }
-    };
-
-    ui::info(&format!(
-        "Console session {} opened, connecting to data port {}...",
-        session_id, data_port
-    ));
+    let session_id = attached.session_id;
 
     // Small delay to let the guest agent bind the data port.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let data_stream = transport
-        .connect(data_port)
+        .connect(attached.data_port)
         .context("Failed to connect to console data port")?;
 
-    mvm_core::audit_emit!(ConsoleSessionStart, vm: name, "session_id={session_id}");
+    mvm_core::audit_emit!(
+        ConsoleSessionStart,
+        vm: name,
+        "session_id={session_id} attach={}",
+        attached.kind.audit_label()
+    );
 
     // Set up SIGWINCH handler to forward terminal resizes
     let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
@@ -339,33 +391,392 @@ pub(in crate::commands) fn console_interactive(
     drop(raw_terminal);
     drop(resize_sender);
 
-    mvm_core::audit_emit!(ConsoleSessionEnd, vm: name, "session_id={session_id}");
-
-    match result? {
-        ConsoleRelayExit::GuestClosed => {
-            let completion = console_exit_code(&transport, session_id);
-            let machine_stopped = completion.is_err() && wait_for_console_machine_stop(name);
-            let exit_code = classify_console_completion(completion, machine_stopped)?;
+    let ending = finish_session(&transport, name, session_id, result?);
+    let outcome = match &ending {
+        Ok(ending) => ending.audit_label(),
+        Err(_) => "error",
+    };
+    mvm_core::audit_emit!(
+        ConsoleSessionEnd,
+        vm: name,
+        "session_id={session_id} outcome={outcome}"
+    );
+    match ending? {
+        SessionEnding::Exited(exit_code) => {
             println!("\nConsole session ended.");
             Ok(exit_code)
         }
-        ConsoleRelayExit::LocalEscape => {
+        SessionEnding::Terminated => {
             println!("\nConsole session ended.");
+            Ok(0)
+        }
+        SessionEnding::Detached => {
+            println!(
+                "\nDetached from console session {session_id}; it keeps running. \
+                 Reattach with `mvmctl machine console {name}`."
+            );
+            Ok(0)
+        }
+        SessionEnding::Displaced => {
+            println!(
+                "\nDisconnected from console session {session_id}: another client took it over \
+                 or it was detached. The session keeps running."
+            );
             Ok(0)
         }
     }
 }
 
-fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Result<i32> {
+/// How this client came to be attached, recorded in the audit entry that
+/// opens its console span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachKind {
+    Opened,
+    Reattached,
+    TookOver,
+}
+
+impl AttachKind {
+    fn audit_label(self) -> &'static str {
+        match self {
+            Self::Opened => "open",
+            Self::Reattached => "reattach",
+            Self::TookOver => "take-over",
+        }
+    }
+}
+
+/// A session this client holds the attach reservation for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttachedSession {
+    session_id: u32,
+    data_port: u32,
+    kind: AttachKind,
+}
+
+/// How an interactive console span finished, from this client's side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnding {
+    /// The shell exited with this code.
+    Exited(i32),
+    /// This client ended the session with `~.`.
+    Terminated,
+    /// This client detached with `~d`; the shell runs on.
+    Detached,
+    /// The guest hung this client up while the shell ran on: another client
+    /// took over, or `machine detach` was used.
+    Displaced,
+}
+
+impl SessionEnding {
+    fn audit_label(self) -> &'static str {
+        match self {
+            Self::Exited(_) => "exited",
+            Self::Terminated => "terminated",
+            Self::Detached => "detached",
+            Self::Displaced => "displaced",
+        }
+    }
+}
+
+/// A control-channel connection that has confirmed the agent serves consoles.
+fn console_control(transport: &Arc<dyn VsockTransport>) -> Result<std::os::unix::net::UnixStream> {
     let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     mvm_agentd::vsock::require_capabilities(
         &mut stream,
         &[mvm_agentd::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_agentd::vsock::GuestRequest::ConsoleClose { session_id };
-    match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
-        mvm_agentd::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
+    Ok(stream)
+}
+
+/// Send one console request, audited through the same inbound-RPC record every
+/// host→guest verb gets.
+fn console_call(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    req: &mvm_agentd::vsock::GuestRequest,
+) -> Result<mvm_agentd::vsock::GuestResponse> {
+    let mut stream = console_control(transport)?;
+    super::shared::emit_vsock_rpc_audit(name, req);
+    match mvm_agentd::vsock::call_unary(&mut stream, req)? {
         mvm_agentd::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
+        other => Ok(other),
+    }
+}
+
+fn open_session(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    options: &ConsoleSessionOptions,
+    (cols, rows): (u16, u16),
+) -> Result<AttachedSession> {
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleOpen {
+        cols,
+        rows,
+        env: options.env.clone(),
+        argv: options.argv.clone(),
+        detach_timeout_secs: options.detach_timeout_secs,
+    };
+    match console_call(transport, name, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleOpened {
+            session_id,
+            data_port,
+        } => {
+            ui::info(&format!(
+                "Console session {session_id} opened, connecting to data port {data_port}..."
+            ));
+            Ok(AttachedSession {
+                session_id,
+                data_port,
+                kind: AttachKind::Opened,
+            })
+        }
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// Attach to the VM's running console session, or start one when it has none.
+fn attach_or_open(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    options: &ConsoleSessionOptions,
+    size: (u16, u16),
+) -> Result<AttachedSession> {
+    let running = fetch_sessions(transport, name)?
+        .into_iter()
+        .find(|session| session.exit_code.is_none());
+    let Some(session) = running else {
+        ui::info(&format!(
+            "Opening console to VM {name:?} ({}x{})...",
+            size.0, size.1
+        ));
+        return open_session(transport, name, options, size);
+    };
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleAttach {
+        session_id: session.session_id,
+        cols: size.0,
+        rows: size.1,
+        take_over: options.take_over,
+    };
+    match console_call(transport, name, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleAttached {
+            session_id,
+            data_port,
+            replay_bytes,
+        } => {
+            ui::info(&format!(
+                "Reattaching to console session {session_id} on VM {name:?} \
+                 (replaying {replay_bytes} bytes of scrollback)..."
+            ));
+            Ok(AttachedSession {
+                session_id,
+                data_port,
+                kind: if session.attached {
+                    AttachKind::TookOver
+                } else {
+                    AttachKind::Reattached
+                },
+            })
+        }
+        mvm_agentd::vsock::GuestResponse::ConsoleBusy { session_id } => {
+            Err(busy_refusal(name, session_id))
+        }
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+fn busy_refusal(name: &str, session_id: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "console session {session_id} on VM {name:?} already has a client attached. \
+         Pass --force to take it over (that client is detached; the shell keeps running), \
+         or disconnect it with `mvmctl machine detach {name}`."
+    )
+}
+
+fn fetch_sessions(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+) -> Result<Vec<mvm_agentd::vsock::ConsoleSessionInfo>> {
+    match console_call(
+        transport,
+        name,
+        &mvm_agentd::vsock::GuestRequest::ConsoleList,
+    )? {
+        mvm_agentd::vsock::GuestResponse::ConsoleSessions { sessions } => Ok(sessions),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// Settle what the relay's exit means for the session.
+fn finish_session(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    session_id: u32,
+    exit: ConsoleRelayExit,
+) -> Result<SessionEnding> {
+    match exit {
+        ConsoleRelayExit::Detach => Ok(SessionEnding::Detached),
+        ConsoleRelayExit::Terminate => {
+            terminate_console(transport, name, session_id)?;
+            Ok(SessionEnding::Terminated)
+        }
+        ConsoleRelayExit::InputClosed => {
+            let exit_code = terminate_console(transport, name, session_id)?;
+            Ok(SessionEnding::Exited(exit_code))
+        }
+        ConsoleRelayExit::GuestClosed => {
+            let status = session_status(transport, name, session_id);
+            let machine_stopped = status.is_err() && wait_for_console_machine_stop(name);
+            classify_guest_close(status, machine_stopped)
+        }
+    }
+}
+
+/// End the session and return the shell's exit code. A VM that stopped
+/// underneath the request has ended the session just as surely.
+fn terminate_console(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    session_id: u32,
+) -> Result<i32> {
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleClose { session_id };
+    let completion = console_call(transport, name, &req).and_then(|response| match response {
+        mvm_agentd::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    });
+    let machine_stopped = completion.is_err() && wait_for_console_machine_stop(name);
+    classify_console_completion(completion, machine_stopped)
+}
+
+/// What the guest says about `session_id` after it closed this client's stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStatus {
+    Exited(i32),
+    Running,
+    Gone,
+}
+
+fn session_status(
+    transport: &Arc<dyn VsockTransport>,
+    name: &str,
+    session_id: u32,
+) -> Result<SessionStatus> {
+    let sessions = fetch_sessions(transport, name)?;
+    Ok(match sessions.iter().find(|s| s.session_id == session_id) {
+        Some(session) => session
+            .exit_code
+            .map_or(SessionStatus::Running, SessionStatus::Exited),
+        None => SessionStatus::Gone,
+    })
+}
+
+/// The guest closed this client's stream. Either the shell exited — the guest
+/// records its code before hanging up, so it is there to read — or the
+/// session is still running and this client was displaced.
+fn classify_guest_close(
+    status: Result<SessionStatus>,
+    machine_stopped: bool,
+) -> Result<SessionEnding> {
+    match status {
+        Ok(SessionStatus::Exited(exit_code)) => Ok(SessionEnding::Exited(exit_code)),
+        Ok(SessionStatus::Running) => Ok(SessionEnding::Displaced),
+        Ok(SessionStatus::Gone) => {
+            anyhow::bail!("the console session disappeared from the guest agent")
+        }
+        Err(error) => {
+            classify_console_completion(Err(error), machine_stopped).map(SessionEnding::Exited)
+        }
+    }
+}
+
+/// `machine console <name> --list`.
+fn list_console_sessions(name: &str) -> Result<()> {
+    let transport = pick_console_transport(name)?;
+    let sessions = fetch_sessions(&transport, name)?;
+    if sessions.is_empty() {
+        println!("No console sessions on VM {name:?}.");
+        return Ok(());
+    }
+    println!(
+        "{:<8} {:<20} {:<32} SCROLLBACK",
+        "SESSION", "COMMAND", "STATE"
+    );
+    for session in &sessions {
+        println!(
+            "{:<8} {:<20} {:<32} {}",
+            session.session_id,
+            session.command,
+            session_state_label(session),
+            format_bytes(session.scrollback_bytes)
+        );
+    }
+    Ok(())
+}
+
+fn session_state_label(session: &mvm_agentd::vsock::ConsoleSessionInfo) -> String {
+    if let Some(exit_code) = session.exit_code {
+        return format!("exited ({exit_code})");
+    }
+    if session.attached {
+        return "attached".to_string();
+    }
+    let detached = match session.detached_secs {
+        Some(secs) => format!("detached {secs}s"),
+        None => "detached".to_string(),
+    };
+    match session.detach_timeout_secs {
+        Some(timeout) => format!("{detached}, ends at {timeout}s"),
+        None => detached,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    }
+}
+
+/// `machine detach <name>`: hang up whichever client is attached to the VM's
+/// running console session. Authorized exactly like an attach.
+pub(in crate::commands) fn run_detach(args: DetachArgs) -> Result<()> {
+    let name = &args.name;
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {name:?}"))?;
+    enforce_accessible_gate(name, false)?;
+    let transport = pick_console_transport(name)?;
+    let Some(session) = fetch_sessions(&transport, name)?
+        .into_iter()
+        .find(|session| session.exit_code.is_none())
+    else {
+        anyhow::bail!("VM {name:?} has no running console session");
+    };
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleDetach {
+        session_id: session.session_id,
+    };
+    match console_call(&transport, name, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleDetached {
+            session_id,
+            was_attached: true,
+        } => {
+            mvm_core::audit_emit!(
+                ConsoleSessionEnd,
+                vm: name,
+                "session_id={session_id} outcome=detached-remotely"
+            );
+            println!(
+                "Detached the client from console session {session_id} on VM {name:?}; \
+                 the session keeps running."
+            );
+            Ok(())
+        }
+        mvm_agentd::vsock::GuestResponse::ConsoleDetached {
+            session_id,
+            was_attached: false,
+        } => {
+            println!("Console session {session_id} on VM {name:?} has no client attached.");
+            Ok(())
+        }
         other => anyhow::bail!("Unexpected response: {other:?}"),
     }
 }
@@ -446,25 +857,17 @@ fn setup_sigwinch_handler(
             let (cols, rows) = get_terminal_size();
 
             // Send ConsoleResize via the control channel (best-effort).
-            let _ = transport
-                .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            let _ = console_control(&transport).ok().and_then(|mut stream| {
+                mvm_agentd::vsock::send_request(
+                    &mut stream,
+                    &mvm_agentd::vsock::GuestRequest::ConsoleResize {
+                        session_id,
+                        cols,
+                        rows,
+                    },
+                )
                 .ok()
-                .and_then(|mut stream| {
-                    mvm_agentd::vsock::require_capabilities(
-                        &mut stream,
-                        &[mvm_agentd::vsock::GuestCapability::Console],
-                    )
-                    .ok()?;
-                    mvm_agentd::vsock::send_request(
-                        &mut stream,
-                        &mvm_agentd::vsock::GuestRequest::ConsoleResize {
-                            session_id,
-                            cols,
-                            rows,
-                        },
-                    )
-                    .ok()
-                });
+            });
         }
     });
 
@@ -531,13 +934,29 @@ impl Drop for RawTerminalGuard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsoleRelayExit {
+    /// The guest closed the data stream.
     GuestClosed,
-    LocalEscape,
+    /// Local stdin reached end of file.
+    InputClosed,
+    /// The operator typed `~d`.
+    Detach,
+    /// The operator typed `~.`.
+    Terminate,
 }
 
-/// Recognizes the documented SSH-style local detach without sending it through
-/// the guest channel. A leading `~` is held until the next byte so `~.` can span
-/// terminal reads; every other sequence is forwarded byte-for-byte.
+/// A local escape the operator typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleEscape {
+    /// `~d`: leave the session running.
+    Detach,
+    /// `~.`: end the session.
+    Terminate,
+}
+
+/// Recognizes the documented SSH-style local escapes without sending them
+/// through the guest channel. A leading `~` is held until the next byte so an
+/// escape can span terminal reads; every other sequence is forwarded
+/// byte-for-byte.
 struct ConsoleEscapeFilter {
     at_line_start: bool,
     pending_tilde: bool,
@@ -551,13 +970,16 @@ impl ConsoleEscapeFilter {
         }
     }
 
-    /// Append bytes for the guest to `forwarded`; return true on local detach.
-    fn filter(&mut self, input: &[u8], forwarded: &mut Vec<u8>) -> bool {
+    /// Append bytes for the guest to `forwarded`; return the escape, if one
+    /// was typed. Bytes after an escape in the same read are not forwarded.
+    fn filter(&mut self, input: &[u8], forwarded: &mut Vec<u8>) -> Option<ConsoleEscape> {
         for &byte in input {
             if self.pending_tilde {
                 self.pending_tilde = false;
-                if byte == b'.' {
-                    return true;
+                match byte {
+                    b'.' => return Some(ConsoleEscape::Terminate),
+                    b'd' => return Some(ConsoleEscape::Detach),
+                    _ => {}
                 }
                 forwarded.push(b'~');
                 self.at_line_start = false;
@@ -569,15 +991,15 @@ impl ConsoleEscapeFilter {
             forwarded.push(byte);
             self.at_line_start = matches!(byte, b'\r' | b'\n');
         }
-        false
+        None
     }
 }
 
 /// Relay raw bytes between stdin/stdout and a vsock data stream.
 ///
 /// Exits when the guest closes the connection (e.g. `exit` or Ctrl+D
-/// in the shell) or when the user types the `~.` escape sequence
-/// (Enter, then `~.`, same as SSH).
+/// in the shell), when stdin ends, or when the user types an escape after
+/// Enter: `~d` to detach, `~.` to end the session (same shape as SSH's).
 ///
 fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<ConsoleRelayExit> {
     use std::io::{Read, Write};
@@ -628,17 +1050,23 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
         if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             let mut inbuf = [0u8; 1024];
             match std::io::stdin().read(&mut inbuf) {
-                Ok(0) => break ConsoleRelayExit::GuestClosed,
+                Ok(0) => break ConsoleRelayExit::InputClosed,
                 Ok(n) => {
                     let mut forwarded = Vec::with_capacity(n);
-                    let detach = escape.filter(&inbuf[..n], &mut forwarded);
+                    let typed = escape.filter(&inbuf[..n], &mut forwarded);
                     if !forwarded.is_empty() && writer.write_all(&forwarded).is_err() {
                         break ConsoleRelayExit::GuestClosed;
                     }
                     let _ = writer.flush();
-                    if detach {
+                    if let Some(typed) = typed {
+                        // Either way this client leaves the data stream; the
+                        // guest treats that as a detach, and `~.` then ends
+                        // the session explicitly over the control channel.
                         let _ = writer.shutdown(std::net::Shutdown::Both);
-                        break ConsoleRelayExit::LocalEscape;
+                        break match typed {
+                            ConsoleEscape::Detach => ConsoleRelayExit::Detach,
+                            ConsoleEscape::Terminate => ConsoleRelayExit::Terminate,
+                        };
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -696,9 +1124,26 @@ mod console_relay_tests {
         let mut escape = ConsoleEscapeFilter::new();
         let mut forwarded = Vec::new();
 
-        assert!(!escape.filter(b"echo ready\r~", &mut forwarded));
-        assert!(escape.filter(b".", &mut forwarded));
+        assert_eq!(escape.filter(b"echo ready\r~", &mut forwarded), None);
+        assert_eq!(
+            escape.filter(b".", &mut forwarded),
+            Some(ConsoleEscape::Terminate)
+        );
         assert_eq!(forwarded, b"echo ready\r");
+    }
+
+    #[test]
+    fn tilde_d_detaches_and_tilde_dot_terminates() {
+        let mut forwarded = Vec::new();
+        assert_eq!(
+            ConsoleEscapeFilter::new().filter(b"~d", &mut forwarded),
+            Some(ConsoleEscape::Detach)
+        );
+        assert_eq!(
+            ConsoleEscapeFilter::new().filter(b"ls\n~.", &mut forwarded),
+            Some(ConsoleEscape::Terminate)
+        );
+        assert_eq!(forwarded, b"ls\n", "neither escape reaches the guest");
     }
 
     #[test]
@@ -706,8 +1151,8 @@ mod console_relay_tests {
         let mut escape = ConsoleEscapeFilter::new();
         let mut forwarded = Vec::new();
 
-        assert!(!escape.filter(b"printf '~.'\r", &mut forwarded));
-        assert_eq!(forwarded, b"printf '~.'\r");
+        assert_eq!(escape.filter(b"printf '~.' ~d\r", &mut forwarded), None);
+        assert_eq!(forwarded, b"printf '~.' ~d\r");
     }
 
     #[test]
@@ -715,8 +1160,109 @@ mod console_relay_tests {
         let mut escape = ConsoleEscapeFilter::new();
         let mut forwarded = Vec::new();
 
-        assert!(!escape.filter(b"\r~x", &mut forwarded));
+        assert_eq!(escape.filter(b"\r~x", &mut forwarded), None);
         assert_eq!(forwarded, b"\r~x");
+    }
+
+    #[test]
+    fn a_guest_close_after_the_shell_exited_reports_its_code() {
+        let ending = classify_guest_close(Ok(SessionStatus::Exited(7)), false).unwrap();
+        assert_eq!(ending, SessionEnding::Exited(7));
+    }
+
+    #[test]
+    fn a_guest_close_while_the_shell_runs_is_a_displacement_not_an_exit() {
+        // Another client took over, or `machine detach` ran. This client must
+        // not end the session it was displaced from.
+        let ending = classify_guest_close(Ok(SessionStatus::Running), false).unwrap();
+        assert_eq!(ending, SessionEnding::Displaced);
+    }
+
+    #[test]
+    fn a_guest_close_with_the_session_gone_is_an_error() {
+        assert!(classify_guest_close(Ok(SessionStatus::Gone), false).is_err());
+    }
+
+    #[test]
+    fn a_guest_close_on_a_stopped_machine_is_a_clean_end() {
+        let ending =
+            classify_guest_close(Err(anyhow::anyhow!("Failed to read frame length")), true)
+                .unwrap();
+        assert_eq!(ending, SessionEnding::Exited(0));
+    }
+
+    #[test]
+    fn every_ending_has_a_distinct_audit_outcome() {
+        let labels: std::collections::BTreeSet<_> = [
+            SessionEnding::Exited(0),
+            SessionEnding::Terminated,
+            SessionEnding::Detached,
+            SessionEnding::Displaced,
+        ]
+        .into_iter()
+        .map(SessionEnding::audit_label)
+        .collect();
+        assert_eq!(labels.len(), 4);
+        assert_eq!(AttachKind::Reattached.audit_label(), "reattach");
+        assert_eq!(AttachKind::TookOver.audit_label(), "take-over");
+        assert_eq!(AttachKind::Opened.audit_label(), "open");
+    }
+
+    #[test]
+    fn only_the_default_shell_is_shared_between_clients() {
+        assert!(!ConsoleSessionOptions::default().needs_dedicated_session());
+        assert!(
+            ConsoleSessionOptions::builder()
+                .argv(vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "make".to_string()
+                ])
+                .build()
+                .needs_dedicated_session()
+        );
+        assert!(
+            ConsoleSessionOptions::builder()
+                .env(vec![("K".to_string(), "v".to_string())])
+                .build()
+                .needs_dedicated_session()
+        );
+        assert!(
+            !ConsoleSessionOptions::builder()
+                .take_over(true)
+                .detach_timeout_secs(Some(60))
+                .build()
+                .needs_dedicated_session()
+        );
+    }
+
+    #[test]
+    fn session_states_read_as_the_operator_needs_them() {
+        let mut info = mvm_agentd::vsock::ConsoleSessionInfo {
+            session_id: 1,
+            command: "/bin/sh".to_string(),
+            attached: true,
+            exit_code: None,
+            scrollback_bytes: 2048,
+            detached_secs: None,
+            detach_timeout_secs: None,
+        };
+        assert_eq!(session_state_label(&info), "attached");
+        info.attached = false;
+        info.detached_secs = Some(40);
+        info.detach_timeout_secs = Some(600);
+        assert_eq!(session_state_label(&info), "detached 40s, ends at 600s");
+        info.exit_code = Some(0);
+        assert_eq!(session_state_label(&info), "exited (0)");
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert_eq!(format_bytes(12), "12 B");
+    }
+
+    #[test]
+    fn a_busy_refusal_names_both_ways_out() {
+        let message = busy_refusal("dev", 3).to_string();
+        assert!(message.contains("--force"), "{message}");
+        assert!(message.contains("mvmctl machine detach dev"), "{message}");
     }
 
     #[test]

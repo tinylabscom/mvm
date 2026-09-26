@@ -170,6 +170,8 @@ fn run_persistent_post_start(
                 name: name.to_string(),
                 command: Some(machine_exec_command(&args.run.argv)),
                 force: false,
+                list: false,
+                detach_timeout: None,
                 env: Vec::new(),
                 pty_argv: Vec::new(),
             },

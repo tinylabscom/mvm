@@ -4,65 +4,115 @@
 //! dedicated vsock data port. The host connects to the data port for raw
 //! byte streaming — no JSON framing, no Ed25519 signing on the data channel.
 //!
-//! Security: Console sessions are dev-mode only and authenticated via the
-//! control channel (the `ConsoleOpen` request goes through the normal
-//! authenticated vsock protocol).
+//! A session outlives its client. When the host disconnects — deliberately or
+//! not — the shell keeps running and its output collects in a bounded
+//! scrollback ring ([`scrollback`]), replayed to the next client that attaches.
+//! Only an explicit close ends the shell, besides the shell exiting on its own,
+//! an optional detach timeout, and the VM stopping. One client is attached at a
+//! time ([`registry`]).
+//!
+//! Security: console sessions are dev-mode only. Opening, attaching, detaching,
+//! listing and closing are all control-channel requests, so every one passes
+//! the same profile and signed-grant gates before it reaches this module, and
+//! the data port accepts only the host CID.
 
+pub mod registry;
+pub mod scrollback;
+
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use crate::vsock::{CONSOLE_PORT_BASE, HOST_CID};
+pub use registry::{AttachRefusal, AttachTicket, SessionSummary};
+pub use scrollback::SCROLLBACK_CAP_BYTES;
 
-/// Tracks the active console session. Only one session at a time.
-static CONSOLE_ACTIVE: AtomicBool = AtomicBool::new(false);
-static CONSOLE_SESSION_ID: AtomicU32 = AtomicU32::new(0);
-static COMPLETED_SESSION_ID: AtomicU32 = AtomicU32::new(0);
-static COMPLETED_EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-/// Active PTY master fd for resize support. -1 when no session is active.
-static CONSOLE_MASTER_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-/// Active session's shell pid, so an explicit close can end it. -1 when idle.
-static CONSOLE_CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+use crate::vsock::HOST_CID;
+use registry::{AttachOutcome, ConsoleSink, Registry, SpawnedSession};
 
-/// How long an explicit close waits for the session to finish winding down.
-///
-/// The host sends `ConsoleClose` the instant its relay sees EOF, which the
-/// guest produces *before* it reaps the shell and joins its relay threads — so
-/// the request routinely arrives while the session is still tearing itself
-/// down. Waiting is what turns that race into the exit code the host asked for.
-pub const CLOSE_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long an explicit close waits for the shell to go after each signal.
+pub const CLOSE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Result of opening a console session.
-pub struct ConsoleSession {
-    pub session_id: u32,
-    pub data_port: u32,
-    pub master_fd: RawFd,
-    pub child_pid: i32,
+/// How long an attach waits for the host to dial its data port before the
+/// reservation lapses and the session counts as detached again.
+pub const ATTACH_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long one write to an attached client may block. A client that cannot
+/// take output for this long is detached, so a stalled host can never stall
+/// the shell behind it — its output goes to scrollback instead.
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the output pump wakes with nothing to read, to notice an exited
+/// shell and an expired detach timeout.
+const PUMP_TICK: Duration = Duration::from_millis(250);
+
+/// Every console session on this agent.
+static SESSIONS: Mutex<Registry> = Mutex::new(Registry::new(SCROLLBACK_CAP_BYTES));
+
+fn lock(registry: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
+    // The registry holds no invariant a panicking holder could half-apply
+    // that is worse than refusing every console request for the VM's life.
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// What a new session runs and how it behaves while detached.
+#[derive(Debug, Clone, Default)]
+pub struct OpenRequest {
+    pub cols: u16,
+    pub rows: u16,
+    pub env: Vec<(String, String)>,
+    /// Empty runs the default interactive shell.
+    pub argv: Vec<String>,
+    /// End the shell once it has had no client for this long. `None` keeps it
+    /// until it exits, is closed, or the VM stops.
+    pub detach_timeout: Option<Duration>,
 }
 
 /// Errors from console operations.
 #[derive(Debug)]
 pub enum ConsoleError {
-    AlreadyActive,
+    AlreadyActive(u32),
     InvalidCommand(String),
     OpenPtyFailed,
     ForkFailed,
     BindFailed(u32),
+    NoSuchSession(u32),
+    Busy(u32),
+    DidNotTerminate(u32),
 }
 
 impl std::fmt::Display for ConsoleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyActive => write!(f, "a console session is already active"),
+            Self::AlreadyActive(id) => write!(
+                f,
+                "console session {id} is already running; attach to it or close it first"
+            ),
             Self::InvalidCommand(message) => write!(f, "invalid console command: {message}"),
             Self::OpenPtyFailed => write!(f, "openpty() failed"),
             Self::ForkFailed => write!(f, "fork() failed"),
             Self::BindFailed(port) => write!(f, "failed to bind vsock port {port}"),
+            Self::NoSuchSession(id) => write!(f, "no console session {id}"),
+            Self::Busy(id) => write!(f, "console session {id} already has an attached client"),
+            Self::DidNotTerminate(id) => write!(f, "console session {id} did not terminate"),
         }
     }
 }
 
 impl std::error::Error for ConsoleError {}
+
+impl From<AttachRefusal> for ConsoleError {
+    fn from(refusal: AttachRefusal) -> Self {
+        match refusal {
+            AttachRefusal::NoSuchSession(id) => Self::NoSuchSession(id),
+            AttachRefusal::Busy(id) => Self::Busy(id),
+        }
+    }
+}
 
 // FFI declarations for PTY operations
 unsafe extern "C" {
@@ -78,6 +128,8 @@ unsafe extern "C" {
     fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
     fn fork() -> i32;
     fn close(fd: i32) -> i32;
+    fn chdir(path: *const u8) -> i32;
+    #[cfg(all(test, target_os = "linux"))]
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
@@ -92,15 +144,15 @@ unsafe extern "C" {
 const AF_VSOCK: i32 = 40;
 const SOCK_STREAM: i32 = 1;
 const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
+const SIGKILL: i32 = 9;
 const SIGTERM: i32 = 15;
-/// Sent to an interactive shell on explicit close: a hangup is what a terminal
-/// going away looks like, so job-control shells clean up their children.
+/// Sent to end a session: a hangup is what a terminal going away looks like,
+/// so job-control shells clean up their children.
 const SIGHUP: i32 = 1;
 
 fn console_peer_is_authorized(cid: u32) -> bool {
     cid == HOST_CID
 }
-
 /// ioctl request for setting window size (Linux).
 #[cfg(target_os = "linux")]
 const TIOCSWINSZ: u64 = 0x5414;
@@ -169,38 +221,177 @@ const _: () = {
     assert!(offset_of!(Winsize, ws_ypixel) == 6);
 };
 
-/// Open a PTY console session.
+/// Start a new session and reserve its first attach.
 ///
-/// Allocates a PTY pair, forks a shell process attached to the slave,
-/// and returns the master fd + session info. The caller is responsible
-/// for starting the vsock data relay.
-pub fn open_session(
+/// The data listener is bound before the shell is forked and before this
+/// returns, so the host can dial the port the moment it has the ticket.
+pub fn open_session(request: &OpenRequest) -> Result<AttachTicket, ConsoleError> {
+    open_session_in(&SESSIONS, request)
+}
+
+fn open_session_in(
+    sessions: &'static Mutex<Registry>,
+    request: &OpenRequest,
+) -> Result<AttachTicket, ConsoleError> {
+    let command_argv = build_console_argv(&request.argv)?;
+    let command = command_argv[0].to_string_lossy().into_owned();
+
+    let mut registry = lock(sessions);
+    registry.ensure_can_open()?;
+    let (attach_id, data_port) = registry.allocate_attach();
+    let listener = bind_data_listener(data_port)?;
+    let (child_pid, master) = spawn_shell(request, &command_argv)?;
+    // Registered before anything waits on it, so the PID-1 orphan reaper
+    // publishes this shell's status instead of discarding it.
+    let owned = crate::child_wait::OwnedChild::new(child_pid as u32);
+    let master = Arc::new(master);
+    let ticket = registry.insert(
+        SpawnedSession {
+            child_pid,
+            master: Some(Arc::clone(&master)),
+            command,
+            detach_timeout: request.detach_timeout,
+        },
+        attach_id,
+    );
+    drop(registry);
+
+    let pump_master = Arc::clone(&master);
+    std::thread::spawn(move || {
+        let _owned = owned;
+        pump_output(sessions, ticket.session_id, child_pid, &pump_master);
+    });
+    std::thread::spawn(move || serve_attach(sessions, ticket, listener, Some(master)));
+    Ok(ticket)
+}
+
+/// Attach a new client to `session_id`, replaying its scrollback first.
+///
+/// Refused as [`ConsoleError::Busy`] when a client is attached, unless
+/// `take_over` is set, in which case that client is hung up and the shell is
+/// left exactly as it was. The window size is applied immediately, so a
+/// full-screen program redraws for the new terminal.
+pub fn attach_session(
+    session_id: u32,
     cols: u16,
     rows: u16,
-    extra_env: &[(String, String)],
-    argv: &[String],
-) -> Result<ConsoleSession, ConsoleError> {
-    let command_argv = build_console_argv(argv)?;
-    let command_path = command_argv[0].as_ptr().cast::<u8>();
-    let mut command_argv_ptrs: Vec<*const u8> = command_argv
-        .iter()
-        .map(|c| c.as_ptr().cast::<u8>())
-        .collect();
-    command_argv_ptrs.push(std::ptr::null());
+    take_over: bool,
+) -> Result<AttachTicket, ConsoleError> {
+    attach_session_in(&SESSIONS, session_id, (cols, rows), take_over)
+}
 
-    // Only one session at a time
-    if CONSOLE_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Err(ConsoleError::AlreadyActive);
+fn attach_session_in(
+    sessions: &'static Mutex<Registry>,
+    session_id: u32,
+    (cols, rows): (u16, u16),
+    take_over: bool,
+) -> Result<AttachTicket, ConsoleError> {
+    let mut registry = lock(sessions);
+    let ticket = registry.attach(session_id, take_over)?;
+    let listener = match bind_data_listener(ticket.data_port) {
+        Ok(listener) => listener,
+        Err(error) => {
+            registry.release(ticket.attach_id, Instant::now());
+            return Err(error);
+        }
+    };
+    if let Some(fd) = registry.master_fd(session_id) {
+        resize_pty(fd, cols, rows);
     }
+    let master = registry.master(session_id);
+    drop(registry);
+    std::thread::spawn(move || serve_attach(sessions, ticket, listener, master));
+    Ok(ticket)
+}
 
-    let session_id = CONSOLE_SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
-    let data_port = CONSOLE_PORT_BASE + session_id;
-    COMPLETED_SESSION_ID.store(0, Ordering::SeqCst);
-    COMPLETED_EXIT_CODE.store(0, Ordering::SeqCst);
+/// Hang up the client attached to `session_id`, leaving the shell running.
+/// Returns whether a client was attached.
+pub fn detach_session(session_id: u32) -> Result<bool, ConsoleError> {
+    Ok(lock(&SESSIONS).detach(session_id, Instant::now())?)
+}
+
+/// The sessions this agent holds: the running one, or the last to exit.
+pub fn list_sessions() -> Vec<SessionSummary> {
+    lock(&SESSIONS).summaries(Instant::now())
+}
+
+/// Resize `session_id`'s PTY window. Returns whether the session is running.
+pub fn resize_session(session_id: u32, cols: u16, rows: u16) -> bool {
+    match lock(&SESSIONS).master_fd(session_id) {
+        Some(fd) => {
+            resize_pty(fd, cols, rows);
+            true
+        }
+        None => false,
+    }
+}
+
+/// End `session_id` and return the shell's exit code.
+///
+/// A session that already exited answers from its recorded code. A running one
+/// is hung up — foreground job and shell both — and, if it ignores that, killed.
+/// Each signal gets `timeout` to take effect.
+pub fn terminate_session(session_id: u32, timeout: Duration) -> Result<i32, ConsoleError> {
+    terminate_session_in(&SESSIONS, session_id, timeout)
+}
+
+fn terminate_session_in(
+    sessions: &Mutex<Registry>,
+    session_id: u32,
+    timeout: Duration,
+) -> Result<i32, ConsoleError> {
+    let (child_pid, master) = {
+        let registry = lock(sessions);
+        if let Some(exit_code) = registry.exit_code(session_id) {
+            return Ok(exit_code);
+        }
+        match registry.running_child(session_id) {
+            Some(pid) => (pid, registry.master(session_id)),
+            None => return Err(ConsoleError::NoSuchSession(session_id)),
+        }
+    };
+    signal_session(child_pid, master.as_deref(), SIGHUP);
+    drop(master);
+    if let Some(exit_code) = wait_for_recorded_exit(sessions, session_id, timeout) {
+        return Ok(exit_code);
+    }
+    // SAFETY: `kill` takes no pointers; `child_pid` is this session's shell.
+    unsafe {
+        kill(child_pid, SIGKILL);
+    }
+    wait_for_recorded_exit(sessions, session_id, timeout)
+        .ok_or(ConsoleError::DidNotTerminate(session_id))
+}
+
+fn wait_for_recorded_exit(
+    sessions: &Mutex<Registry>,
+    session_id: u32,
+    timeout: Duration,
+) -> Option<i32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(exit_code) = lock(sessions).exit_code(session_id) {
+            return Some(exit_code);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Fork `argv` onto a new PTY. Returns the child pid and the PTY master.
+fn spawn_shell(
+    request: &OpenRequest,
+    argv: &[std::ffi::CString],
+) -> Result<(i32, File), ConsoleError> {
+    let command_path = argv[0].as_ptr().cast::<u8>();
+    let mut argv_ptrs: Vec<*const u8> = argv.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
+    argv_ptrs.push(std::ptr::null());
 
     let ws = Winsize {
-        ws_row: rows,
-        ws_col: cols,
+        ws_row: request.rows,
+        ws_col: request.cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -221,7 +412,6 @@ pub fn open_session(
         )
     };
     if rc != 0 {
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         return Err(ConsoleError::OpenPtyFailed);
     }
 
@@ -232,7 +422,7 @@ pub fn open_session(
     // functions. `putenv`/`execvp` can `malloc` — if another thread held the
     // allocator lock at fork time the child would deadlock — so we build a
     // fixed `envp` here and hand it to `execve` (async-signal-safe) instead.
-    let resolved = build_shell_env_with(extra_env);
+    let resolved = build_shell_env_with(&request.env);
     let shell_env = resolved.to_envp();
     let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
     envp.push(std::ptr::null());
@@ -255,7 +445,6 @@ pub fn open_session(
             close(master_fd);
             close(slave_fd);
         }
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         return Err(ConsoleError::ForkFailed);
     }
 
@@ -288,40 +477,307 @@ pub fn open_session(
 
             // Exec the prepared absolute command path. There is no PATH search
             // here because the post-fork child must avoid allocation.
-            execve(command_path, command_argv_ptrs.as_ptr(), envp.as_ptr());
+            execve(command_path, argv_ptrs.as_ptr(), envp.as_ptr());
 
-            std::process::exit(127);
+            libc::_exit(127);
         }
     }
 
-    // Parent — close slave fd, store master fd for resize.
     // SAFETY: `slave_fd` is the valid fd from openpty; the child has its own
-    // copy, so closing the parent's does not affect it.
-    unsafe {
+    // copy, so closing the parent's does not affect it. `master_fd` is the
+    // PTY master openpty returned, and this File becomes its only owner.
+    let master = unsafe {
         close(slave_fd);
-    }
-    CONSOLE_MASTER_FD.store(master_fd, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_CHILD_PID.store(pid, std::sync::atomic::Ordering::SeqCst);
-
-    Ok(ConsoleSession {
-        session_id,
-        data_port,
-        master_fd,
-        child_pid: pid,
-    })
+        File::from_raw_fd(master_fd)
+    };
+    Ok((pid, master))
 }
 
-/// Resize the active console session's PTY window.
-///
-/// Called from the guest agent when it receives a `ConsoleResize` request.
-/// Uses the globally tracked master fd.
-pub fn resize_active_session(cols: u16, rows: u16) -> bool {
-    let fd = CONSOLE_MASTER_FD.load(std::sync::atomic::Ordering::SeqCst);
+/// Bind and listen on the vsock data port for one attach.
+fn bind_data_listener(port: u32) -> Result<OwnedFd, ConsoleError> {
+    // SAFETY: socket takes only integer arguments and returns a fd or -1.
+    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
     if fd < 0 {
-        return false;
+        return Err(ConsoleError::BindFailed(port));
     }
-    resize_pty(fd, cols, rows);
-    true
+    // SAFETY: `fd` is the socket just created and nothing else owns it.
+    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
+    let addr = SockAddrVm {
+        svm_family: AF_VSOCK as u16,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: VMADDR_CID_ANY,
+        svm_flags: 0,
+        svm_zero: [0; 3],
+    };
+    // SAFETY: `listener` is an open socket; `addr` points to the live
+    // `SockAddrVm` and the length matches its size.
+    let bound = unsafe {
+        bind(
+            listener.as_raw_fd(),
+            (&raw const addr).cast::<core::ffi::c_void>(),
+            std::mem::size_of::<SockAddrVm>() as u32,
+        )
+    };
+    // SAFETY: `listener` is the bound socket fd; listen takes no pointers.
+    if bound != 0 || unsafe { listen(listener.as_raw_fd(), 1) } != 0 {
+        return Err(ConsoleError::BindFailed(port));
+    }
+    Ok(listener)
+}
+
+/// Wait up to `timeout` for the host to dial `listener`, and accept it only if
+/// it really is the host. A guest-local process must not be able to win the
+/// race for this raw PTY channel after the authenticated control request
+/// allocated it.
+fn accept_host(listener: OwnedFd, timeout: Duration) -> std::io::Result<UnixStream> {
+    let mut ready = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `ready` is one live pollfd and the count says one.
+    let polled = unsafe { libc::poll(&mut ready, 1, timeout_ms) };
+    if polled == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+    }
+    if polled < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut peer = SockAddrVm {
+        svm_family: 0,
+        svm_reserved1: 0,
+        svm_port: 0,
+        svm_cid: 0,
+        svm_flags: 0,
+        svm_zero: [0; 3],
+    };
+    let expected_peer_len =
+        u32::try_from(std::mem::size_of::<SockAddrVm>()).expect("vsock address size fits u32");
+    let mut peer_len = expected_peer_len;
+    // SAFETY: `peer` is correctly sized for AF_VSOCK and `peer_len` bounds the
+    // kernel write into it.
+    let conn_fd = unsafe {
+        accept(
+            listener.as_raw_fd(),
+            (&raw mut peer).cast::<core::ffi::c_void>(),
+            &raw mut peer_len,
+        )
+    };
+    // Closing the listener stops further connections on this port.
+    drop(listener);
+    if conn_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `conn_fd` is the connected socket accept just returned, owned by
+    // nothing else.
+    let conn = unsafe { OwnedFd::from_raw_fd(conn_fd) };
+    let peer_known = peer_len >= expected_peer_len && peer.svm_family == AF_VSOCK as u16;
+    if !peer_known || !console_peer_is_authorized(peer.svm_cid) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "rejected non-host data peer (cid={}, family={})",
+                peer.svm_cid, peer.svm_family
+            ),
+        ));
+    }
+    Ok(UnixStream::from(conn))
+}
+
+/// The vsock data stream as a [`ConsoleSink`].
+struct StreamSink {
+    stream: UnixStream,
+}
+
+impl StreamSink {
+    fn new(conn: &UnixStream) -> std::io::Result<Self> {
+        let stream = conn.try_clone()?;
+        stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
+        Ok(Self { stream })
+    }
+}
+
+impl ConsoleSink for StreamSink {
+    fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.stream.write_all(bytes)?;
+        self.stream.flush()
+    }
+
+    fn hang_up(&mut self) {
+        // Shutting down (rather than just dropping this clone) also wakes the
+        // input thread blocked reading the same socket.
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Serve one attach: take the host's connection, replay, then forward its
+/// keystrokes to the shell until it goes away.
+fn serve_attach(
+    sessions: &'static Mutex<Registry>,
+    ticket: AttachTicket,
+    listener: OwnedFd,
+    master: Option<Arc<File>>,
+) {
+    let conn = match accept_host(listener, ATTACH_ACCEPT_TIMEOUT) {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!(
+                "console: attach {} to session {} on port {} failed: {error}",
+                ticket.attach_id, ticket.session_id, ticket.data_port
+            );
+            lock(sessions).release(ticket.attach_id, Instant::now());
+            return;
+        }
+    };
+    let sink = match StreamSink::new(&conn).and_then(|sink| {
+        configure_console_input(&conn)?;
+        Ok(sink)
+    }) {
+        Ok(sink) => sink,
+        Err(error) => {
+            eprintln!("console: failed to configure the data stream: {error}");
+            lock(sessions).release(ticket.attach_id, Instant::now());
+            return;
+        }
+    };
+    let outcome = lock(sessions).complete_attach(ticket.attach_id, Box::new(sink), Instant::now());
+    eprintln!(
+        "console: attach {} to session {}: {outcome:?}",
+        ticket.attach_id, ticket.session_id
+    );
+    if outcome != AttachOutcome::Live {
+        return;
+    }
+    if let Some(master) = master {
+        forward_input(conn, &master);
+    }
+    // The client is gone; the shell is not.
+    lock(sessions).release(ticket.attach_id, Instant::now());
+}
+
+/// Host keystrokes → shell, until the host stops sending.
+fn forward_input(mut conn: UnixStream, master: &File) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match conn.read(&mut buf) {
+            Ok(0) => break,
+            Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+            Ok(n) => {
+                let mut pty = master;
+                if pty.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Shell output → scrollback and the attached client, for the whole life of
+/// the session, whether or not anyone is attached. Records the exit code when
+/// the shell goes.
+fn pump_output(sessions: &Mutex<Registry>, session_id: u32, child_pid: i32, master: &File) {
+    let mut buf = [0u8; 4096];
+    let mut idle_hangup_sent = false;
+    let exit_code = loop {
+        if pty_readable(master, PUMP_TICK) {
+            let mut pty = master;
+            match pty.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    lock(sessions).record_output(session_id, &buf[..n], Instant::now());
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                // EOF, or EIO once every holder of the slave side has closed
+                // it: the terminal is gone, so the session is over.
+                _ => break reap_after_hangup(child_pid),
+            }
+        }
+        if !idle_hangup_sent && lock(sessions).expired_child(Instant::now()) == Some(child_pid) {
+            eprintln!("console: session {session_id} passed its detach timeout; hanging up");
+            signal_session(child_pid, Some(master), SIGHUP);
+            idle_hangup_sent = true;
+        }
+        // The shell can exit while a background job still holds the terminal
+        // open, so the pty never reports EOF; the exit is what ends a session.
+        match crate::child_wait::try_wait_pid(child_pid) {
+            Ok(None) => {}
+            Ok(Some(raw)) => {
+                drain_output(sessions, session_id, master, &mut buf);
+                break decode_wait_status(raw);
+            }
+            Err(error) => {
+                eprintln!("console: lost track of session {session_id}'s shell: {error}");
+                drain_output(sessions, session_id, master, &mut buf);
+                break -1;
+            }
+        }
+    };
+    lock(sessions).record_exit(session_id, exit_code);
+    eprintln!("console: session {session_id} ended, exit code {exit_code}");
+}
+
+/// Collect whatever the shell wrote before it exited.
+fn drain_output(sessions: &Mutex<Registry>, session_id: u32, master: &File, buf: &mut [u8]) {
+    while pty_readable(master, Duration::ZERO) {
+        let mut pty = master;
+        match pty.read(buf) {
+            Ok(n) if n > 0 => lock(sessions).record_output(session_id, &buf[..n], Instant::now()),
+            _ => return,
+        }
+    }
+}
+
+fn pty_readable(master: &File, timeout: Duration) -> bool {
+    let mut ready = libc::pollfd {
+        fd: master.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `ready` is one live pollfd and the count says one.
+    let polled = unsafe { libc::poll(&mut ready, 1, timeout_ms) };
+    polled > 0 && ready.revents != 0
+}
+
+/// The terminal is gone: make sure the shell is too, then collect its status.
+fn reap_after_hangup(child_pid: i32) -> i32 {
+    let mut signalled = false;
+    let deadline = Instant::now() + CLOSE_SETTLE_TIMEOUT;
+    loop {
+        match crate::child_wait::try_wait_pid(child_pid) {
+            Ok(Some(raw)) => return decode_wait_status(raw),
+            Ok(None) => {}
+            Err(_) => return -1,
+        }
+        let signal = if !signalled {
+            Some(SIGTERM)
+        } else if Instant::now() >= deadline {
+            Some(SIGKILL)
+        } else {
+            None
+        };
+        if let Some(signal) = signal {
+            // SAFETY: `kill` takes no pointers; `child_pid` is this session's
+            // shell, not yet reaped (the wait above just said so).
+            unsafe {
+                kill(child_pid, signal);
+            }
+            signalled = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A raw `waitpid` status as a shell-style exit code.
+fn decode_wait_status(status: i32) -> i32 {
+    if status & 0x7f == 0 {
+        (status >> 8) & 0xff
+    } else {
+        128 + (status & 0x7f)
+    }
 }
 
 /// Make `slave_fd` the controlling terminal of the calling session, so an
@@ -356,268 +812,20 @@ pub fn resize_pty(master_fd: RawFd, cols: u16, rows: u16) {
     }
 }
 
-/// Close a console session — kill the shell and clean up.
-pub fn close_session(session: &ConsoleSession) -> i32 {
-    // Kill the shell process.
-    // SAFETY: `child_pid` is the pid open_session forked; kill takes no
-    // pointers. A stale pid at worst returns ESRCH, which we ignore.
-    unsafe {
-        kill(session.child_pid, SIGTERM);
-    }
-
-    // Wait for it to exit.
-    let mut status: i32 = 0;
-    // SAFETY: `status` is a live `i32` out-param waitpid writes the exit
-    // status into; `child_pid` is the forked child.
-    let _ = unsafe { waitpid(session.child_pid, &mut status, 0) };
-
-    // Close the master fd.
-    // SAFETY: `master_fd` is the PTY master openpty returned and that no
-    // owning `File` has taken over in this path.
-    unsafe {
-        close(session.master_fd);
-    }
-
-    // Extract exit code
-    let exit_code = if status & 0x7f == 0 {
-        (status >> 8) & 0xff // normal exit
-    } else {
-        128 + (status & 0x7f) // signal
-    };
-    // Recorded before the active flag clears, for the reason given in
-    // `run_console_relay`'s teardown.
-    record_completed_session(session.session_id, exit_code);
-    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_CHILD_PID.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-    exit_code
-}
-
-/// Start the vsock data relay for a console session.
-///
-/// Binds a vsock listener on `session.data_port`, accepts one connection,
-/// and relays raw bytes between the vsock socket and the PTY master fd.
-/// Blocks until the session ends (shell exits or connection drops).
-///
-/// Returns the shell exit code.
-pub fn run_console_relay(session: &ConsoleSession) -> i32 {
-    // Bind vsock listener on data_port.
-    // SAFETY: socket takes only integer arguments and returns a fd or -1.
-    let listen_fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
-    if listen_fd < 0 {
-        eprintln!("console: failed to create vsock socket");
-        return close_session(session);
-    }
-
-    let addr = SockAddrVm {
-        svm_family: AF_VSOCK as u16,
-        svm_reserved1: 0,
-        svm_port: session.data_port,
-        svm_cid: VMADDR_CID_ANY,
-        svm_flags: 0,
-        svm_zero: [0; 3],
-    };
-
-    // SAFETY: `listen_fd` is the socket just created; `addr` points to the
-    // live `SockAddrVm` and the length matches its size.
-    let rc = unsafe {
-        bind(
-            listen_fd,
-            &addr as *const SockAddrVm as *const core::ffi::c_void,
-            std::mem::size_of::<SockAddrVm>() as u32,
-        )
-    };
-    if rc != 0 {
-        eprintln!("console: failed to bind vsock port {}", session.data_port);
-        // SAFETY: `listen_fd` is the open socket; no owning wrapper holds it.
-        unsafe {
-            close(listen_fd);
-        }
-        return close_session(session);
-    }
-
-    // SAFETY: `listen_fd` is the bound socket fd; listen takes no pointers.
-    if unsafe { listen(listen_fd, 1) } != 0 {
-        eprintln!(
-            "console: failed to listen on vsock port {}",
-            session.data_port
-        );
-        // SAFETY: `listen_fd` is the open socket; no owning wrapper holds it.
-        unsafe {
-            close(listen_fd);
-        }
-        return close_session(session);
-    }
-
-    eprintln!(
-        "console: waiting for host connection on vsock port {}",
-        session.data_port
-    );
-
-    // Accept one host connection and capture its CID. A guest-local process
-    // must not be able to win the race for this raw PTY channel after the
-    // authenticated control request allocates it.
-    let mut peer = SockAddrVm {
-        svm_family: 0,
-        svm_reserved1: 0,
-        svm_port: 0,
-        svm_cid: 0,
-        svm_flags: 0,
-        svm_zero: [0; 3],
-    };
-    let expected_peer_len =
-        u32::try_from(std::mem::size_of::<SockAddrVm>()).expect("vsock address size fits u32");
-    let mut peer_len = expected_peer_len;
-    // SAFETY: `peer` is correctly sized for AF_VSOCK and `peer_len` bounds the
-    // kernel write into it.
-    let conn_fd = unsafe {
-        accept(
-            listen_fd,
-            (&raw mut peer).cast::<core::ffi::c_void>(),
-            &raw mut peer_len,
-        )
-    };
-    // SAFETY: `listen_fd` is the open listening socket; no owning wrapper
-    // holds it. Closing it stops further connections.
-    unsafe {
-        close(listen_fd);
-    }
-    if conn_fd < 0 {
-        eprintln!("console: accept failed");
-        return close_session(session);
-    }
-    let peer_known = peer_len >= expected_peer_len && peer.svm_family == AF_VSOCK as u16;
-    if !peer_known || !console_peer_is_authorized(peer.svm_cid) {
-        eprintln!(
-            "console: rejected non-host data peer (cid={}, family={})",
-            peer.svm_cid, peer.svm_family
-        );
-        // SAFETY: `conn_fd` is the accepted socket and no owner wraps it yet.
-        unsafe {
-            close(conn_fd);
-        }
-        return close_session(session);
-    }
-
-    eprintln!("console: host connected, starting PTY relay");
-
-    // Relay: PTY master ↔ vsock connection using raw byte I/O
-    // Two threads: vsock→pty and pty→vsock
-    let master_fd = session.master_fd;
-    let child_pid = session.child_pid;
-
-    // SAFETY: `conn_fd` is the connected socket accept just returned; we
-    // transfer sole ownership of it to this UnixStream.
-    let mut vsock_read = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd as RawFd) };
-    let Ok(mut vsock_write) = vsock_read.try_clone() else {
-        eprintln!("console: failed to clone vsock stream");
-        return close_session(session);
-    };
-
-    // Output-only programs remain interactive: a lack of keyboard input must
-    // never silently retire the only thread capable of forwarding Ctrl-C.
-    if let Err(error) = configure_console_input(&vsock_read) {
-        eprintln!("console: failed to configure input stream: {error}");
-        return close_session(session);
-    }
-
-    // SAFETY: `master_fd` is the PTY master from openpty; we transfer sole
-    // ownership of it to this File.
-    let mut pty_read = unsafe { std::fs::File::from_raw_fd(master_fd) };
-    let Ok(mut pty_write) = pty_read.try_clone() else {
-        eprintln!("console: failed to clone PTY fd");
-        std::mem::forget(pty_read);
-        return close_session(session);
-    };
-
-    // vsock → PTY (host input → shell)
-    let h1 = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match vsock_read.read(&mut buf) {
-                Ok(0) => break,
-                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-                Ok(n) => {
-                    if pty_write.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // A host disconnect or local escape ends the console session. Terminate
-        // the PTY foreground process group so the output pump cannot remain
-        // blocked forever on a command such as `top`.
-        terminate_console_processes(child_pid, pty_write.as_raw_fd());
-        // SAFETY: `conn_fd` is the socket underlying `vsock_read`; shutdown
-        // wakes the cloned writer without taking ownership from either thread.
-        unsafe {
-            shutdown(conn_fd, SHUT_RDWR);
-        }
-    });
-
-    // PTY → vsock (shell output → host)
-    let h2 = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match pty_read.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if vsock_write.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                    let _ = vsock_write.flush();
-                }
-            }
-        }
-    });
-
-    // Wait for PTY output to end (shell exited), then shut down the vsock
-    // so the host sees EOF and h1 stops waiting for input.
-    let _ = h2.join();
-    // SAFETY: `conn_fd` is still open — the UnixStream that owns it lives in
-    // the `h1` thread, which has not yet returned. shutdown only wakes its
-    // blocked read; closing remains the stream's job on drop.
-    unsafe {
-        shutdown(conn_fd, SHUT_RDWR);
-    }
-    let _ = h1.join();
-
-    // Wait for child and get exit code.
-    let mut status: i32 = 0;
-    // SAFETY: `child_pid` is the forked shell; `status` is a live `i32`
-    // out-param waitpid writes into. kill takes no pointers.
-    unsafe {
-        kill(child_pid, SIGTERM);
-        waitpid(child_pid, &mut status, 0);
-    }
-
-    // Don't call close_session — we already waited and the fds are owned
-    // by the File/UnixStream objects which will drop.
-    let exit_code = if status & 0x7f == 0 {
-        (status >> 8) & 0xff
-    } else {
-        128 + (status & 0x7f)
-    };
-    // Record before clearing the active flag, never after: a close waiting on
-    // that flag would otherwise read the previous session's exit code.
-    record_completed_session(session.session_id, exit_code);
-    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_CHILD_PID.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-    exit_code
-}
-
-fn configure_console_input(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+fn configure_console_input(stream: &UnixStream) -> std::io::Result<()> {
     stream.set_read_timeout(None)
 }
 
-fn terminate_console_processes(child_pid: i32, pty_fd: RawFd) {
+/// Deliver `signal` to the session: its foreground job first, then the shell.
+fn signal_session(child_pid: i32, master: Option<&File>, signal: i32) {
     // The interactive shell may have placed its current job in a distinct
     // foreground process group. Signal that group first, then the shell/session
     // leader itself. ESRCH is expected when either already exited.
-    let foreground = unsafe { libc::tcgetpgrp(pty_fd) };
+    let foreground = master.map_or(-1, |master| {
+        // SAFETY: `tcgetpgrp` takes a fd and no pointers; `master` is a live
+        // PTY master borrowed for the duration of the call.
+        unsafe { libc::tcgetpgrp(master.as_raw_fd()) }
+    });
     for target in console_signal_targets(child_pid, foreground)
         .into_iter()
         .flatten()
@@ -625,7 +833,7 @@ fn terminate_console_processes(child_pid: i32, pty_fd: RawFd) {
         // SAFETY: a negative target addresses the PTY foreground process group;
         // a positive target is the child created for this console session.
         unsafe {
-            kill(target, SIGTERM);
+            kill(target, signal);
         }
     }
 }
@@ -636,74 +844,6 @@ fn console_signal_targets(child_pid: i32, foreground: i32) -> [Option<i32>; 2] {
         (foreground != child_pid).then_some(child_pid),
     ]
 }
-
-/// Check if a console session is currently active.
-pub fn is_active() -> bool {
-    CONSOLE_ACTIVE.load(Ordering::SeqCst)
-}
-
-/// Block until no session is active, or `timeout` elapses. Returns whether the
-/// session settled.
-fn wait_until_idle(timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while is_active() {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    true
-}
-
-/// End the active console session and return the shell's exit code.
-///
-/// Two callers arrive here and both must be served. The common one is a host
-/// that already saw its relay EOF and only wants the exit code — its session is
-/// mid-teardown, so the first wait is all it needs. The other is a host that
-/// wants a still-running session gone, which takes a `SIGHUP` to the shell:
-/// that closes the PTY, ends the relay, and the same teardown path records the
-/// exit code.
-///
-/// Returns `None` only if the session outlives both waits (`timeout` each),
-/// which means the relay is wedged rather than merely slow.
-pub fn close_active_session(timeout: std::time::Duration) -> Option<i32> {
-    if !wait_until_idle(timeout) {
-        let pid = CONSOLE_CHILD_PID.load(Ordering::SeqCst);
-        if pid > 0 {
-            // SAFETY: `kill` takes no pointers. `pid` is the shell forked by
-            // `open_session`; if it has already been reaped this returns ESRCH,
-            // which is exactly the case the wait below then observes.
-            unsafe {
-                kill(pid, SIGHUP);
-            }
-        }
-        if !wait_until_idle(timeout) {
-            return None;
-        }
-    }
-    Some(COMPLETED_EXIT_CODE.load(Ordering::SeqCst))
-}
-
-fn record_completed_session(session_id: u32, exit_code: i32) {
-    COMPLETED_EXIT_CODE.store(exit_code, Ordering::SeqCst);
-    COMPLETED_SESSION_ID.store(session_id, Ordering::SeqCst);
-}
-
-pub fn completed_exit_code(session_id: u32) -> Option<i32> {
-    if COMPLETED_SESSION_ID.load(Ordering::SeqCst) == session_id {
-        Some(COMPLETED_EXIT_CODE.load(Ordering::SeqCst))
-    } else {
-        None
-    }
-}
-
-// FFI for chdir / shutdown
-unsafe extern "C" {
-    fn chdir(path: *const u8) -> i32;
-    fn shutdown(sockfd: i32, how: i32) -> i32;
-}
-
-const SHUT_RDWR: i32 = 2;
 
 /// The console session's environment, resolved through the one shared
 /// resolver so an interactive shell lands in exactly the environment the
@@ -773,14 +913,6 @@ where
 mod tests {
     use super::*;
 
-    static CONSOLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn console_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        CONSOLE_TEST_LOCK
-            .lock()
-            .expect("console-test mutex not poisoned")
-    }
-
     // `Winsize`'s layout is pinned by the `const _` contract next to the
     // struct: a compile-time assertion that also covers alignment and every
     // field offset, and that holds for cross-compiled targets which never
@@ -790,8 +922,8 @@ mod tests {
     #[test]
     fn test_console_error_display() {
         assert_eq!(
-            ConsoleError::AlreadyActive.to_string(),
-            "a console session is already active"
+            ConsoleError::AlreadyActive(2).to_string(),
+            "console session 2 is already running; attach to it or close it first"
         );
         assert_eq!(ConsoleError::OpenPtyFailed.to_string(), "openpty() failed");
         assert_eq!(ConsoleError::ForkFailed.to_string(), "fork() failed");
@@ -802,6 +934,14 @@ mod tests {
         assert_eq!(
             ConsoleError::BindFailed(20001).to_string(),
             "failed to bind vsock port 20001"
+        );
+        assert_eq!(
+            ConsoleError::from(AttachRefusal::Busy(4)).to_string(),
+            "console session 4 already has an attached client"
+        );
+        assert_eq!(
+            ConsoleError::from(AttachRefusal::NoSuchSession(9)).to_string(),
+            "no console session 9"
         );
     }
 
@@ -940,78 +1080,80 @@ mod tests {
         );
     }
 
-    /// The reported bug: `mvmctl machine run -it` printed
-    /// "explicit close not yet supported" on every clean logout. The host
-    /// sends its close as soon as the relay EOFs, which the guest emits
-    /// before it reaps the shell — so the close lands on a session that is
-    /// still active and must wait for it, not refuse it.
-    #[test]
-    fn close_waits_out_a_session_that_is_still_tearing_down() {
-        let _guard = console_test_lock();
-        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
-        let completion = std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            record_completed_session(7, 42);
-            CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-        });
-
-        let result = close_active_session(std::time::Duration::from_secs(5));
-        completion.join().expect("completion thread");
-        assert_eq!(result, Some(42));
+    /// A test registry with one running session whose shell is `child_pid`.
+    fn registry_with_running_session(child_pid: i32) -> (&'static Mutex<Registry>, AttachTicket) {
+        let sessions: &'static Mutex<Registry> = Box::leak(Box::new(Mutex::new(Registry::new(64))));
+        let ticket = {
+            let mut registry = lock(sessions);
+            let (attach_id, _) = registry.allocate_attach();
+            registry.insert(
+                SpawnedSession {
+                    child_pid,
+                    master: None,
+                    command: "/bin/sh".to_string(),
+                    detach_timeout: None,
+                },
+                attach_id,
+            )
+        };
+        (sessions, ticket)
     }
 
-    /// A wedged relay is the one case that still fails, and it fails as a
-    /// refusal rather than by blocking the agent forever.
+    /// A close that arrives after the shell exited answers from the record and
+    /// signals nothing — the pid may already belong to someone else.
+    #[test]
+    fn closing_an_exited_session_returns_its_recorded_code() {
+        let (sessions, AttachTicket { session_id: id, .. }) = registry_with_running_session(-1);
+        lock(sessions).record_exit(id, 42);
+        assert_eq!(
+            terminate_session_in(sessions, id, Duration::from_millis(10)).unwrap(),
+            42
+        );
+    }
+
+    /// The close waits for the pump to record the exit its signal caused.
+    #[test]
+    fn close_waits_for_the_exit_to_be_recorded() {
+        // A pid that cannot exist: the signals land nowhere, and the exit is
+        // recorded by this thread standing in for the pump.
+        let (sessions, AttachTicket { session_id: id, .. }) =
+            registry_with_running_session(i32::MAX);
+        let pump = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            lock(sessions).record_exit(id, 129);
+        });
+        let result = terminate_session_in(sessions, id, Duration::from_secs(5));
+        pump.join().expect("stand-in pump");
+        assert_eq!(result.unwrap(), 129);
+    }
+
+    /// A session that never goes is reported, not waited on forever.
     #[test]
     fn close_reports_a_session_that_never_terminates() {
-        let _guard = console_test_lock();
-        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
-        // No shell pid is recorded, so the SIGHUP escalation has nothing to
-        // signal and both waits lapse.
-        CONSOLE_CHILD_PID.store(-1, Ordering::SeqCst);
-
-        assert_eq!(
-            close_active_session(std::time::Duration::from_millis(50)),
-            None
-        );
-
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+        let (sessions, AttachTicket { session_id: id, .. }) =
+            registry_with_running_session(i32::MAX);
+        assert!(matches!(
+            terminate_session_in(sessions, id, Duration::from_millis(20)),
+            Err(ConsoleError::DidNotTerminate(got)) if got == id
+        ));
     }
 
-    /// An idle agent answers immediately from the recorded exit code.
     #[test]
-    fn close_returns_the_recorded_code_when_no_session_is_active() {
-        let _guard = console_test_lock();
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-        record_completed_session(3, 130);
-
-        assert_eq!(close_active_session(CLOSE_SETTLE_TIMEOUT), Some(130));
-        assert_eq!(completed_exit_code(3), Some(130));
-        assert_eq!(
-            completed_exit_code(4),
-            None,
-            "other sessions must not match"
-        );
+    fn closing_an_unknown_session_is_refused() {
+        let (sessions, AttachTicket { session_id: id, .. }) =
+            registry_with_running_session(i32::MAX);
+        assert!(matches!(
+            terminate_session_in(sessions, id + 1, Duration::from_millis(10)),
+            Err(ConsoleError::NoSuchSession(_))
+        ));
     }
 
-    /// The exit code has to be on record before the active flag clears, or a
-    /// close released by that flag reads whatever the previous session left.
     #[test]
-    fn the_exit_code_is_recorded_before_the_active_flag_clears() {
-        let _guard = console_test_lock();
-        record_completed_session(1, 9);
-        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
-        let observer = std::thread::spawn(|| {
-            while is_active() {
-                std::hint::spin_loop();
-            }
-            COMPLETED_EXIT_CODE.load(Ordering::SeqCst)
-        });
-
-        record_completed_session(2, 55);
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-
-        assert_eq!(observer.join().unwrap(), 55);
+    fn wait_statuses_decode_to_shell_exit_codes() {
+        assert_eq!(decode_wait_status(3 << 8), 3);
+        assert_eq!(decode_wait_status(0), 0);
+        assert_eq!(decode_wait_status(SIGHUP), 128 + SIGHUP);
+        assert_eq!(decode_wait_status(SIGKILL), 128 + SIGKILL);
     }
 
     #[test]
@@ -1038,27 +1180,31 @@ mod tests {
     }
 
     #[test]
-    fn open_session_rejects_invalid_argv_before_marking_active() {
-        let _guard = console_test_lock();
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-        let err = match open_session(80, 24, &[], &["sh".to_string()]) {
-            Ok(_) => panic!("relative command should be rejected before PTY allocation"),
-            Err(err) => err,
+    fn open_session_rejects_invalid_argv_before_reserving_anything() {
+        let sessions: &'static Mutex<Registry> = Box::leak(Box::new(Mutex::new(Registry::new(64))));
+        let request = OpenRequest {
+            argv: vec!["sh".to_string()],
+            ..OpenRequest::default()
         };
+        let err = open_session_in(sessions, &request)
+            .expect_err("relative command should be rejected before PTY allocation");
         assert!(
             err.to_string().contains("absolute path"),
             "unexpected error: {err}"
         );
-        assert!(
-            !is_active(),
-            "invalid argv must not leave the console marked active"
+        let mut registry = lock(sessions);
+        assert!(registry.summaries(Instant::now()).is_empty());
+        assert_eq!(
+            registry.allocate_attach().0,
+            1,
+            "a refused open must not consume a data port"
         );
     }
 
     #[test]
     fn test_data_port_calculation() {
-        assert_eq!(CONSOLE_PORT_BASE + 1, 20001);
-        assert_eq!(CONSOLE_PORT_BASE + 42, 20042);
+        assert_eq!(crate::vsock::CONSOLE_PORT_BASE + 1, 20001);
+        assert_eq!(crate::vsock::CONSOLE_PORT_BASE + 42, 20042);
     }
 
     #[test]
@@ -1070,13 +1216,6 @@ mod tests {
                 "CID {cid} must be rejected"
             );
         }
-    }
-
-    #[test]
-    fn test_is_active_default() {
-        let _guard = console_test_lock();
-        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-        assert!(!is_active());
     }
 
     // This exercises Linux guest controlling-terminal semantics. macOS host
@@ -1173,5 +1312,57 @@ mod tests {
             [None, Some(42)],
             "fall back to the session child when the PTY has no foreground group"
         );
+    }
+
+    /// End to end on a real PTY: output written while nobody is attached is
+    /// kept, the exit is recorded, and a client attaching afterwards receives
+    /// the whole transcript and then a clean end.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_nobody_attached_to_keeps_its_output_and_exit_code() {
+        #[derive(Clone, Default)]
+        struct Collect(Arc<Mutex<(Vec<u8>, bool)>>);
+        impl ConsoleSink for Collect {
+            fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+                self.0.lock().unwrap().0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn hang_up(&mut self) {
+                self.0.lock().unwrap().1 = true;
+            }
+        }
+
+        let request = OpenRequest {
+            cols: 80,
+            rows: 24,
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf 'while-detached'; exit 3".to_string(),
+            ],
+            ..OpenRequest::default()
+        };
+        let argv = build_console_argv(&request.argv).expect("argv");
+        let (child_pid, master) = spawn_shell(&request, &argv).expect("spawn shell on a pty");
+        let (sessions, ticket) = registry_with_running_session(child_pid);
+        let id = ticket.session_id;
+
+        pump_output(sessions, id, child_pid, &master);
+
+        // The first attach's reservation was taken at open; its client is only
+        // now connecting, after the shell has already gone.
+        let client = Collect::default();
+        let mut registry = lock(sessions);
+        assert_eq!(registry.exit_code(id), Some(3));
+        assert_eq!(
+            registry.complete_attach(ticket.attach_id, Box::new(client.clone()), Instant::now()),
+            AttachOutcome::Ended
+        );
+        let (received, hung_up) = client.0.lock().unwrap().clone();
+        assert!(
+            String::from_utf8_lossy(&received).contains("while-detached"),
+            "replay: {received:?}"
+        );
+        assert!(hung_up);
     }
 }

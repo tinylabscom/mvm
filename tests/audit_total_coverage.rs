@@ -246,6 +246,13 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("logs", AuditPosture::ReadOnly),
     ("display", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
+    // Hangs up the client attached to a console session. The guest request is
+    // recorded as an inbound RPC (`verb=console-detach`), and a detach that
+    // disconnected someone closes their span with `ConsoleSessionEnd`.
+    (
+        "detach",
+        AuditPosture::Emits("NetworkPolicyAllow(verb=console-detach)+ConsoleSessionEnd"),
+    ),
     // Read-only lineage navigator over the checkpoint + image DAGs. Verifies
     // each hop against the signed chain but makes no trust decision and writes
     // nothing — no audit-chain emission.
@@ -782,6 +789,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Top-level + per-subgroup mutation kinds:
         "CachePrune",
         "ConfigChange",
+        "ConsoleSessionEnd",
         "DepsAudit",
         "Kill",
         "ManifestAliasRemove",

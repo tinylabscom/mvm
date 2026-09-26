@@ -3525,9 +3525,13 @@ fn test_console_with_command() {
             name,
             command,
             force,
+            list,
+            detach_timeout,
             env,
             pty_argv,
         }) => {
+            assert!(!list);
+            assert_eq!(detach_timeout, None);
             assert_eq!(name, "myvm");
             assert_eq!(command.as_deref(), Some("ls"));
             assert!(!force, "default --force is off");

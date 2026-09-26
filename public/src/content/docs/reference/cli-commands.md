@@ -369,10 +369,22 @@ never the token value.
 
 ## Console
 
-| Command                                         | Description                                                                                         |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `mvmctl machine console <name>`                 | Dev-only interactive PTY shell into a running VM (vsock, no SSH; refused for sealed/production VMs) |
-| `mvmctl machine console <name> --command <cmd>` | Dev-only one-shot command in the VM (refused for sealed/production VMs)                             |
+| Command                                                 | Description                                                                                                                                                                   |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mvmctl machine console <name>`                         | Dev-only interactive PTY shell into a running VM (vsock, no SSH; refused for sealed/production VMs). Attaches to the running session, replaying its scrollback, or starts one |
+| `mvmctl machine attach <name>`                          | Alias for `machine console`                                                                                                                                                   |
+| `mvmctl machine console <name> --force`                 | Take the session over from the client attached to it; that client is detached and the shell keeps running                                                                     |
+| `mvmctl machine console <name> --list`                  | List the VM's console session: attached, detached (and for how long), or exited with its code                                                                                 |
+| `mvmctl machine console <name> --detach-timeout <secs>` | When this attach starts the session, end it after that many seconds with no client attached                                                                                   |
+| `mvmctl machine detach <name>`                          | Disconnect whoever is attached to the VM's console; the session keeps running                                                                                                 |
+| `mvmctl machine console <name> --command <cmd>`         | Dev-only one-shot command in the VM (refused for sealed/production VMs)                                                                                                       |
+
+In an interactive console, press Enter and then `~d` to detach (the shell keeps
+running) or `~.` to end the session. Closing the terminal or losing the
+connection detaches rather than ending the shell. One client is attached at a
+time; a second `machine console` is refused until the first detaches, unless it
+passes `--force`. Reattaching is authorized exactly like the first attach:
+sealed VMs refuse all of these verbs.
 
 ## One-shot Run (transient runner)
 
