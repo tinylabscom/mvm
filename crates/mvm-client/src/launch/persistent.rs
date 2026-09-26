@@ -216,6 +216,7 @@ pub fn start_persistent_oci_machine(
     let resolved_secrets = crate::admission::secrets::resolve_machine_secrets(name)?;
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: preflight_network(),
             tenant: "local",
