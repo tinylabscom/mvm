@@ -53,6 +53,7 @@ impl TopLevelCommand for Commands {
             Commands::Secret(a) => ops::secret::run(cli, a, cfg),
             Commands::Bundle(a) => bundle::run(cli, a, cfg),
             Commands::Trust(a) => trust::run(cli, a, cfg),
+            Commands::Policy(a) => policy::run(cli, a, cfg),
             Commands::AgentSession(a) => agent_session::run(cli, a, cfg),
             Commands::Deps(a) => deps::run(cli, a, cfg),
             Commands::Capture(a) => capture::run(cli, a, cfg),

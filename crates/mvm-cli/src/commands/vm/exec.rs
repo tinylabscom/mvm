@@ -320,7 +320,34 @@ pub(in crate::commands) struct RunArgs {
     /// Select the VMM (firecracker, hvf, libkrun, qemu, or web-linux).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
+    /// Run under an authored policy profile (NAME or PATH).
+    #[arg(long = "policy", value_name = "NAME|PATH", conflicts_with = "plan")]
+    pub policy: Option<String>,
+    /// Run under a resolved manifest from `mvmctl policy resolve`.
+    #[arg(long = "plan", value_name = "FILE", conflicts_with_all = PLAN_EXCLUDES)]
+    pub plan: Option<PathBuf>,
+    /// Internal (not a CLI flag): endpoint routes an authored policy
+    /// contributes, merged with `--allow-endpoint` where routes resolve.
+    #[arg(skip)]
+    pub policy_routes: Vec<mvm_contract::policy::routes::EgressRoute>,
 }
+
+/// Every flag that authors policy. A resolved manifest is the whole policy,
+/// so `--plan` stands alone: mixing it with any of these would leave two
+/// answers to one question.
+const PLAN_EXCLUDES: [&str; 11] = [
+    "policy",
+    "net",
+    "network_preset",
+    "allow_host",
+    "allow_endpoint",
+    "peer",
+    "cpu_limit",
+    "grants_file",
+    "mounts",
+    "allow_env",
+    "secret",
+];
 
 /// The SDK transport surface, carried by `mvmctl run` alone.
 ///
@@ -363,76 +390,6 @@ pub(in crate::commands) struct TransientRunArgs {
     pub run: RunArgs,
     #[command(flatten)]
     pub sdk: SdkTransportArgs,
-}
-
-/// The same values clap fills in when a flag is absent.
-///
-/// Two consumers want a `RunArgs` without spelling thirty fields: the
-/// `machine` dispatch sites that build one programmatically, and the tests.
-/// Writing them out by hand meant every new field edited every one of those
-/// sites, so they drifted toward whatever the author happened to type rather
-/// than toward what the CLI actually does.
-///
-/// The risk this introduces is that these values and the `#[arg(default_value)]`
-/// attributes above disagree. `parsed_defaults_match_the_default_impl` is the
-/// witness: it parses a bare `run -- x` and compares the result field by field.
-impl Default for RunArgs {
-    fn default() -> Self {
-        Self {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            detected_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
-            manifest: None,
-            image: None,
-            flake: None,
-            flake_profile: None,
-            deployment: None,
-            warm_pool_size: 0,
-            gpu: false,
-            gpu_device: None,
-            pty: false,
-            vm_name: None,
-            runtime_pack: false,
-            runtime: None,
-            no_detect: false,
-            net: false,
-            network_preset: None,
-            allow_host: Vec::new(),
-            allow_endpoint: Vec::new(),
-            approval: Vec::new(),
-            approval_mode: None,
-            ai_token_budget: None,
-            peer: Vec::new(),
-            // Must track the clap default, which is resolved from the backend
-            // this host selects — a test pins the two together, because a
-            // `Default` that disagrees with the parsed default is a silent
-            // difference between constructing args and parsing them.
-            cpus: crate::commands::shared::default_vcpus(),
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
-            profile: RunProfile::Standard,
-            mounts: Vec::new(),
-            env: Vec::new(),
-            allow_env: Vec::new(),
-            secret: Vec::new(),
-            timeout: None,
-            receipt: None,
-            caller_commitment: None,
-            assets: Vec::new(),
-            outputs: Vec::new(),
-            json: false,
-            dry_run: false,
-            launch_plan: None,
-            from_workload_ir: None,
-            prod: false,
-            argv: Vec::new(),
-            agent_verb: Vec::new(),
-            host_service: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-        }
-    }
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -544,6 +501,7 @@ pub(in crate::commands) fn run_transient(
     // with `machine run`, where `-d` boots with no command.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
+    super::run_policy::apply_run_policy(&mut args.run)?;
     let image_supplies_entrypoint =
         args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
     if args.run.argv.is_empty() && args.run.launch_plan.is_none() && !image_supplies_entrypoint {
@@ -1260,6 +1218,7 @@ struct RunReceiptSignature {
 pub(in crate::commands) mod env_args;
 mod preflight;
 mod receipt_verify;
+mod run_args_default;
 use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;

@@ -610,11 +610,12 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
-    if !args.run.allow_endpoint.is_empty() {
+    if !args.run.allow_endpoint.is_empty() || !args.run.policy_routes.is_empty() {
         bail!(
-            "--allow-endpoint is not yet supported on a persistent machine: its routes \
-             would not be recorded beside the spec, so a restart would drop them. Use a \
-             transient `run`/`machine run` without --name, or --allow-host"
+            "endpoint routes (--allow-endpoint, or [[network.routes]] in the policy) are not \
+             yet supported on a persistent machine: they would not be recorded beside the \
+             spec, so a restart would drop them. Use a transient `run`/`machine run` without \
+             --name, or --allow-host"
         );
     }
     let config = mvm_core::user_config::load(None);

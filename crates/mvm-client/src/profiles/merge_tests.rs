@@ -466,3 +466,21 @@ fn the_committed_schema_matches_the_policy_types() {
         crate::profiles::model::SCHEMA_PATH
     );
 }
+
+/// The docs publish the schema verbatim; the page must carry the generated
+/// text, not a copy someone edited.
+#[cfg(feature = "schema")]
+#[test]
+fn the_published_schema_page_carries_the_generated_schema() {
+    let page = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../public/src/content/docs/reference/policy-schema.md"),
+    )
+    .expect("the schema reference page exists");
+    let block = page
+        .split("```json\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n```").next())
+        .expect("the page has a json block");
+    assert_eq!(block, crate::profiles::model::json_schema_pretty());
+}
