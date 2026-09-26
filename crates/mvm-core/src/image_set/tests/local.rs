@@ -201,21 +201,19 @@ fn stage_raw(manifest_bytes: &[u8]) -> Staged {
 mod builder_boot_abi {
     use super::*;
 
-    /// A local set is a cache entry its emitter writes in full, so a missing
-    /// ABI means a manifest from an emitter that predates the field. Reading
-    /// it as the legacy ABI would take the baked-binaries path against an
-    /// image that may carry none.
+    /// Until the image emitter writes the field, every existing local set
+    /// omits it, and those sets still bake their binaries. Reading a missing
+    /// ABI as the legacy one keeps them usable through the transition.
     #[test]
-    fn a_local_set_without_one_is_refused_by_name() {
+    fn a_local_set_without_one_reads_as_the_legacy_abi() {
         let mut manifest = local_manifest();
         manifest.compatibility.builder_boot_abi = None;
-        let err = stage(manifest).verify_fresh().unwrap_err();
-        assert_eq!(err, ImageSetError::LocalSetPredatesBuilderBootAbi);
-        assert_eq!(err.stage(), ImageSetStage::Structure);
-        let message = err.to_string();
-        assert!(
-            message.contains("builder_boot_abi") && message.contains("regenerated"),
-            "{message}"
+        stage(manifest.clone())
+            .verify_fresh()
+            .expect("a local set without the field is accepted");
+        assert_eq!(
+            manifest.compatibility.builder_boot_abi_or_legacy(),
+            BuilderBootAbi::LEGACY
         );
     }
 

@@ -201,9 +201,6 @@ fn check_local_fields(
             });
         }
     }
-    if manifest.compatibility.builder_boot_abi.is_none() {
-        return Err(ImageSetError::LocalSetPredatesBuilderBootAbi);
-    }
     if manifest.mvm_source_commit != local.mvm.commit {
         return Err(ImageSetError::LocalMvmCommitMismatch {
             declared: manifest.mvm_source_commit.clone(),

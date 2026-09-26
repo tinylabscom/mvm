@@ -731,6 +731,12 @@ the Stage 0 flake reference follows W8's re-pointing.
       drop the builder job's host-binary build, drop `--impure` for the builder
       attribute, add `builder_boot_abi` to `assemble-release.py` and the
       manifest schema, and publish.
+- [ ] **W8a — refuse a local set without `builder_boot_abi`.** After
+      mvm-images#31 (the emitter writes the field) has landed, a local image
+      set that omits it is refused by name, with a message saying the
+      manifest predates the builder boot ABI and must be regenerated. One
+      condition in `validate_local` plus its test. Releases published before
+      the field existed keep reading as ABI 0.
 - [ ] **W8 — `mvm` cut-over.** Pin the new set. Remove fingerprint layer 2
       and the unembedded `BootstrapPreflight` path. Remove the in-tree bake
       (unless already deleted by the cutover plan's W8),
@@ -823,12 +829,13 @@ Taken on 2026-09-24.
      `0..=0` without), refusal of an ABI outside that range at acquisition,
      and `xtask repin-image-lock` copying the field into `images.lock`. A
      **release** set without the field means ABI 0 (published before it
-     existed). A **local** set without it is refused by name
-     (`LocalSetPredatesBuilderBootAbi`): its emitter always writes the field,
-     so its absence means a stale emitter, and reading it as ABI 0 could take
-     the baked-binaries path against an image with none. `mvm-images`'
-     `emit-local-manifest.py` must therefore write `builder_boot_abi` (0 while
-     its flake still bakes) before pair builds work against this `mvm`.
+     existed). A **local** set without it also reads as ABI 0 for
+     now. `ImageSetCompatibility` denies unknown fields, so `mvm` has to know
+     the field before `mvm-images`' emitter can write it (mvm-images#31), and
+     refusing its absence before then would break every existing local set.
+     Once the emitter writes it, a local set without the field means a stale
+     emitter, and reading it as ABI 0 could take the baked-binaries path
+     against an image with none, so W8 refuses it by name.
 3. **Legacy ABI 0 support window.** Marker-less images stay accepted for one
    release cycle: until the `image-set` carrying `builder_boot_abi = 1` is the
    only pinned set and the W7 window of the cutover plan has closed.

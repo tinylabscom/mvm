@@ -38,8 +38,9 @@ side of the `builder_boot_abi` image-set field.
   removes `builder-vm/hvf/`.
 - **The payload manifest moved** to `crates/mvm-build/src/host_payload_manifest.rs`,
   so `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone.
-- **Image sets** carry `builder_boot_abi`. A release without it means ABI 0; a
-  local set without it is refused (`LocalSetPredatesBuilderBootAbi`).
+- **Image sets** carry `builder_boot_abi`. A set without it means ABI 0, local
+  or release, until mvm-images#31 makes the emitter write it; W8a then refuses
+  a local set that omits it.
 - **ADR-004** records the builder boot contract; ADR-030 and ADR-018 point at it.
 
 ## What did not change, and why
