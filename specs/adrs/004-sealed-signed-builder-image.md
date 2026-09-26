@@ -53,13 +53,61 @@ directory. A contributor who edits one of these binaries' source rebuilds
 `mvmctl` to pick up the change; there is no separate runtime build step to
 keep in sync.
 
-**Three VMM backends implement the `BuilderVm` trait, and they produce
-byte-identical artifacts from the same flake.** libkrun, QEMU, and HVF each
-drive `nix build` against the builder-VM flake and hand back the same
-kernel-and-rootfs pair regardless of which one ran. Selection auto-detects
-by platform — macOS 26+ Apple Silicon uses HVF, native Linux uses QEMU,
-everything else uses libkrun — and is overridable per invocation. Which VMM
-ran a given build is never visible in the output.
+**Four VMM backends implement the `BuilderVm` trait, and they produce
+byte-identical artifacts from the same flake.** HVF, Firecracker, libkrun and
+QEMU each drive `nix build` against the builder-VM flake and hand back the
+same kernel-and-rootfs pair regardless of which one ran. Selection
+auto-detects by platform — Apple Silicon macOS uses HVF, Linux with KVM uses
+Firecracker, every other host uses QEMU — and is overridable per invocation;
+libkrun runs only when named. Which VMM ran a given build is never visible in
+the output.
+
+**mvm's own builder binaries travel beside the builder image, not inside
+it.** At every builder boot, `mvmctl` assembles a deterministic initramfs —
+the *builder boot payload* — from its embedded builder binaries
+(`mvm-host-vm-init`, `mvm-builderd`), each re-verified against the SHA-256
+compiled into `mvmctl`. The VMM loads it the way it loads the kernel. Its
+`/init` mounts the image read-only, copies the binaries to a tmpfs, pivots,
+and continues as the builder's PID 1. The payload digest travels on the
+kernel command line, and the guest refuses a payload that does not match
+it. That check catches host-side mix-ups; a malicious host is outside this
+ADR's threat model, and a host that can rewrite the payload can rewrite the
+command line too.
+
+**The image declares a builder boot ABI, and the payload refuses an image
+outside its supported range.** The contract is versioned, and each version's
+meaning is fixed once released:
+
+- *Where it lives.* The image declares an integer in
+  `/etc/mvm/builder-boot-abi`; a published image set repeats it as
+  `builder_boot_abi` in its signed `[compatibility]` section, and
+  `images.lock` copies it. The payload side is `mvm_build::builder_boot`: the
+  payload format, the command line every backend boots with, the ABIs a
+  payload supports, and the stage-1 checks the guest runs.
+- *ABI 0* is the legacy image: no marker, and it bakes the builder binaries
+  at `/sbin`. It boots with the payload, whose binaries then win and whose
+  baked copies are never executed, or without one on a host that has none.
+  A published set published before the field existed omits it and means 0.
+  A locally built set must declare it; one that does not is refused.
+- *ABI 1* is an image that carries no binary from `mvmctl`'s payload. It
+  boots only with the payload.
+- *What every ABI promises the payload:* `/run` is a mount point; busybox,
+  `nix`, `iptables` and `/usr/bin/firecracker` sit at their paths; the
+  builder uid 902 exists; the persistent store lives on `/dev/vdb`; the root
+  is ext4 on `/dev/vda`. Changing any of these is a new ABI number, never a
+  reinterpretation of an old one.
+- *What the host guarantees:* every builder boot carries the payload of the
+  running `mvmctl`, whatever the image's ABI; the payload is assembled per
+  boot into the booting VM's own state directory, never a shared cache; the
+  image is attached read-only at the VMM on every backend; a host that
+  cannot supply a payload refuses an image above ABI 0 before booting it,
+  naming both numbers; and a persistent builder booted with other builder
+  binaries is stopped rather than reused.
+
+Only the payload's digest and the image's ABI cross the boundary. In a
+release, the builder's host binaries are authenticated by the `mvmctl`
+archive signature rather than by the image set, and they always match the
+running CLI.
 
 **Building an artifact is two phases, and only one of them has to happen
 inside a VM.** Evaluating and running Nix build logic — fetching sources,
@@ -76,9 +124,11 @@ writer can't yet faithfully represent.
 **The builder VM's own rootfs is not dm-verity sealed.** Verity is a
 property mvm applies to sealed workload rootfs, not to the builder itself.
 The builder's trust rests on being deterministically reconstructible from
-the hash-pinned seed and on content-addressed caching keyed to the
-workspace, the embedded-binary content hash, and the flake — not on a
-block-level integrity check at its own boot.
+the hash-pinned seed and on content-addressed caching keyed to the flake and
+the Nix and Rust sources it compiles — not on a block-level integrity check
+at its own boot. While the in-tree flake still bakes the builder binaries
+(ABI 0), the key also folds the digests of the binaries it bakes; that term
+leaves the key when the builder images move to ABI 1.
 
 **Published release artifacts are cosign-signed, and the signed manifest —
 not the artifacts individually — is the trust anchor.** A release's
@@ -105,7 +155,12 @@ reachability, no separate release artifacts for Linux binaries, no drift
 between what a contributor's `mvmctl` was built with and what it hands to
 the builder VM's flake.
 
-Three backends producing byte-identical artifacts means switching which VMM
+A Rust-only change to `mvmctl` no longer needs a new builder image to reach
+the builder: the next boot carries it. Once the builder images declare ABI 1
+and the cache key drops the baked-binary term, such a change no longer
+rebuilds the image either.
+
+Four backends producing byte-identical artifacts means switching which VMM
 builds on a given host is invisible to everything downstream, but it also
 means a divergence between backends is a correctness bug by definition, not
 a tolerated difference — there is no "backend-specific" artifact shape to
