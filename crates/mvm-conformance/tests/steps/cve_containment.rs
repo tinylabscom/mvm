@@ -350,18 +350,30 @@ fn run_victim(world: &mut CliWorld) {
         .expect("a Given step must stage the exploit before the victim runs");
 
     let vmlinux_pin = pin("kernel", "vmlinux_sha256").unwrap_or_default();
+    let vmlinuz_pin = pin("kernel", "vmlinuz_sha256").unwrap_or_default();
+    let backend = containment::VictimBackend::parse(
+        &std::env::var("MVM_BDD_CVE_HYPERVISOR").unwrap_or_default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let boot = containment::resolve_victim_boot(
         &vmlinux_pin,
+        &vmlinuz_pin,
         staged_kernel_candidate(),
         staged_initramfs(),
+        backend,
     )
     .unwrap_or_else(|e| panic!("{e}"));
     eprintln!(
         "[cve-containment] victim boot mode: {}",
-        if boot.is_target_kernel() {
-            "target kernel (low-level Firecracker driver)"
-        } else {
-            "admitted (mvmctl machine run)"
+        match &boot {
+            containment::VictimBoot::Admitted => "admitted (mvmctl machine run)".to_string(),
+            containment::VictimBoot::TargetKernel { backend, .. } => format!(
+                "target kernel (low-level {} driver)",
+                match backend {
+                    containment::VictimBackend::Firecracker => "Firecracker",
+                    containment::VictimBackend::Qemu => "QEMU/KVM",
+                }
+            ),
         }
     );
 
@@ -370,8 +382,12 @@ fn run_victim(world: &mut CliWorld) {
 
     match &boot {
         VictimBoot::Admitted => run_victim_admitted(world, &exploit),
-        VictimBoot::TargetKernel { kernel, initramfs } => {
-            run_victim_target_kernel(world, kernel, initramfs);
+        VictimBoot::TargetKernel {
+            kernel,
+            initramfs,
+            backend,
+        } => {
+            run_victim_target_kernel(world, kernel, initramfs, *backend);
         }
     }
     world.cve_victim_boot = Some(boot);
@@ -405,18 +421,24 @@ fn run_victim_admitted(world: &mut CliWorld, exploit: &Path) {
     });
 }
 
-/// The pinned-kernel victim boot: the low-level Firecracker driver boots the
-/// staged, digest-verified target kernel on a staged initramfs that runs the
-/// exploit, with no NIC, no vsock channels, and no admission machinery — the
-/// guest's only observable output is its serial console, captured by the
-/// driver under the victim's state dir.
+/// The pinned-kernel victim boot: the low-level driver boots the staged,
+/// digest-verified target kernel on a staged initramfs that runs the exploit,
+/// with no NIC, no vsock channels, and no admission machinery — the guest's
+/// only observable output is its serial console, captured by the driver under
+/// the victim's state dir. The backend is Firecracker by default; QEMU/KVM is
+/// selectable for PoCs proven under QEMU (see the suite README's boot modes).
 ///
 /// This boot bypasses admission on purpose: the admitted path cannot boot an
 /// arbitrary kernel, and the destructive-lab risk ceiling is what fences the
 /// consequence. Which assertions still bind this mode, and on what evidence,
 /// is scoped in the suite README.
-fn run_victim_target_kernel(world: &mut CliWorld, kernel: &Path, initramfs: &Path) {
-    use mvm_runtime::driver::{ConsoleCapture, FcDriver, KernelImage, VmmDriver, VmmSpec};
+fn run_victim_target_kernel(
+    world: &mut CliWorld,
+    kernel: &Path,
+    initramfs: &Path,
+    backend: containment::VictimBackend,
+) {
+    use mvm_runtime::driver::{ConsoleCapture, KernelImage, RunningVm, VmmDriver, VmmSpec};
 
     // The driver resolves its state dir from the process MVM_HOME; hold it on
     // the lab home so the victim's state lands next to the sibling's and the
@@ -435,7 +457,11 @@ fn run_victim_target_kernel(world: &mut CliWorld, kernel: &Path, initramfs: &Pat
         cmdline: "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string(),
         vcpus: 2,
         cpu_grant: None,
-        memory_mib: 1024,
+        // The PoC's reference VM is 2 CPUs / 4096 MB (its vm/config.env); its
+        // direct-map refinement is calibrated to that physical map. With less
+        // RAM the refinement finds no RAM run and every pc-hijack attempt
+        // fails — observed on the first lab run at 1024 MiB.
+        memory_mib: 4096,
         mem_initial_mib: None,
         // No block devices and no vsock channels: the guest's whole reachable
         // world is its initramfs, and its only host-visible channel is the
@@ -455,13 +481,25 @@ fn run_victim_target_kernel(world: &mut CliWorld, kernel: &Path, initramfs: &Pat
         kernel.display(),
         initramfs.display()
     );
-    let driver = FcDriver::new();
+    let vm: Box<dyn RunningVm> = match backend {
+        containment::VictimBackend::Firecracker => {
+            use mvm_runtime::driver::FcDriver;
+            FcDriver::new().boot(&spec).unwrap_or_else(|e| {
+                let console = state_dir.join("console.log");
+                let log = std::fs::read_to_string(&console).unwrap_or_default();
+                panic!("the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}");
+            })
+        }
+        containment::VictimBackend::Qemu => {
+            use mvm_runtime::driver::QemuDriver;
+            QemuDriver::new().boot(&spec).unwrap_or_else(|e| {
+                let console = state_dir.join("console.log");
+                let log = std::fs::read_to_string(&console).unwrap_or_default();
+                panic!("the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}");
+            })
+        }
+    };
     let started = std::time::Instant::now();
-    let vm = driver.boot(&spec).unwrap_or_else(|e| {
-        let console = state_dir.join("console.log");
-        let log = std::fs::read_to_string(&console).unwrap_or_default();
-        panic!("the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}");
-    });
 
     // Wait out the detonation. The guest serves no agent and dials no host
     // channel, so no completion event exists to block on; reconcile against
@@ -485,7 +523,12 @@ fn run_victim_target_kernel(world: &mut CliWorld, kernel: &Path, initramfs: &Pat
     }
 
     let stdout = std::fs::read_to_string(&console_log).unwrap_or_default();
-    let stderr = std::fs::read_to_string(state_dir.join("firecracker.log")).unwrap_or_default();
+    // The VMM's own log: firecracker.log or qemu.log, whichever this backend
+    // wrote (both drivers log under the victim's state dir).
+    let stderr = ["firecracker.log", "qemu.log"]
+        .iter()
+        .find_map(|name| std::fs::read_to_string(state_dir.join(name)).ok())
+        .unwrap_or_default();
     world.cve_victim_name = Some(VICTIM_NAME.to_string());
     world.cve_victim_launch = Some(crate::world::LaunchRecord {
         exit_code: containment::exit_marker_code(&stdout).unwrap_or(-1),

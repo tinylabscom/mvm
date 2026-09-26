@@ -45,3 +45,7 @@ target_version = "7.0.0-31-generic"
 # MVM_BDD_CVE_KERNEL + MVM_BDD_CVE_INITRAMFS and re-verifies this digest
 # before boot.
 vmlinux_sha256 = "e4f4486afd398740007df6680e0128e9c8511f035bf82363880fd1f18693e388"
+# The distro bzImage from the same index-verified .deb, for the QEMU boot mode
+# (QEMU's -kernel does not load a bare ELF; MVM_BDD_CVE_HYPERVISOR=qemu boots
+# this and verifies it against this pin). See the README's "Boot modes".
+vmlinuz_sha256 = "19fd789cd5e6b4adfe18c9c6b92a1ce8c8b2eef6ff88456cef80ee2dca9b3f72"

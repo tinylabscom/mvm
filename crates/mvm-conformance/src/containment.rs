@@ -157,6 +157,33 @@ pub const BOOT_MARKER_PREFIX: &str = "CVE-LAB-BOOT:";
 /// host-side wait: a guest that reaches it ran the PoC to completion.
 pub const EXIT_MARKER_PREFIX: &str = "CVE-LAB-EXIT:";
 
+/// Which low-level VMM boots the target kernel. The default is Firecracker;
+/// QEMU/KVM is the fallback for PoCs written against a QEMU reference
+/// environment (this PoC's prefetch timing oracle observed no timing
+/// separation under Firecracker's CPU model; QEMU's `-cpu host` is the
+/// environment the exploit was proven in). The containment posture is
+/// identical: both drivers attach no NIC and wire no vsock egress channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VictimBackend {
+    /// Low-level Firecracker driver (boots the uncompressed vmlinux).
+    Firecracker,
+    /// Low-level QEMU driver (boots the distro bzImage with `-cpu host`).
+    Qemu,
+}
+
+impl VictimBackend {
+    /// Parse the operator's selection (the `MVM_BDD_CVE_HYPERVISOR` value).
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "fc" | "firecracker" => Ok(Self::Firecracker),
+            "qemu" => Ok(Self::Qemu),
+            other => Err(format!(
+                "unknown MVM_BDD_CVE_HYPERVISOR '{other}': expected 'fc' or 'qemu'"
+            )),
+        }
+    }
+}
+
 /// How the victim guest boots, decided by the suite's kernel pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VictimBoot {
@@ -166,16 +193,19 @@ pub enum VictimBoot {
     /// expected and never fails the scenario.
     Admitted,
     /// `kernel.vmlinux_sha256` is pinned: the victim boots that exact kernel
-    /// through the low-level Firecracker driver — NIC-less, agentless, and
+    /// through the low-level driver — NIC-less, agentless, and
     /// deliberately outside admission — from a staged initramfs that runs the
     /// exploit. Booting the PoC's exact target kernel makes the in-guest
     /// canary load-bearing: its absence is a witnessed non-compromise, and
     /// the scenario fails (see [`require_witnessed_compromise`]).
     TargetKernel {
-        /// The staged vmlinux, digest-verified against the pin.
+        /// The staged kernel image, digest-verified against the pin
+        /// (vmlinux for Firecracker, the distro bzImage for QEMU).
         kernel: PathBuf,
         /// The staged detonation initramfs carrying the exploit.
         initramfs: PathBuf,
+        /// Which low-level VMM performs the boot.
+        backend: VictimBackend,
     },
 }
 
@@ -230,10 +260,18 @@ pub struct KernelCandidate {
 /// set one demands both staged artifacts and a kernel whose observed digest
 /// matches the pin. A mismatch refuses the boot: detonating on an unreviewed
 /// kernel would witness nothing about the pinned one.
+///
+/// The Firecracker driver boots the uncompressed vmlinux, verified against
+/// `vmlinux_pin`. The QEMU driver boots the distro bzImage instead (QEMU's
+/// `-kernel` does not load a bare ELF), verified against `vmlinuz_pin` — the
+/// bzImage is covered by the same index-verified .deb the vmlinux was
+/// extracted from.
 pub fn resolve_victim_boot(
     vmlinux_pin: &str,
+    vmlinuz_pin: &str,
     kernel: Option<KernelCandidate>,
     initramfs: Option<PathBuf>,
+    backend: VictimBackend,
 ) -> Result<VictimBoot, String> {
     if vmlinux_pin.trim().is_empty() {
         return Ok(VictimBoot::Admitted);
@@ -241,15 +279,28 @@ pub fn resolve_victim_boot(
     let kernel = kernel.ok_or_else(|| {
         "pins.toml kernel.vmlinux_sha256 is pinned but MVM_BDD_CVE_KERNEL is unset. \
          Stage the target kernel with scripts/stage-cve-2026-80521-lab.sh and export \
-         the produced vmlinux path. See features/suites/s37_cve_containment/README.md."
+         the produced kernel path. See features/suites/s37_cve_containment/README.md."
             .to_string()
     })?;
-    if !digest_matches_pin(vmlinux_pin, &kernel.sha256) {
+    let expected_pin = match backend {
+        VictimBackend::Firecracker => vmlinux_pin.trim().to_string(),
+        VictimBackend::Qemu => {
+            if vmlinuz_pin.trim().is_empty() {
+                return Err(
+                    "MVM_BDD_CVE_HYPERVISOR=qemu boots the distro bzImage, but pins.toml \
+                     kernel.vmlinuz_sha256 is empty. The staging script prints the bzImage \
+                     digest after extracting the pinned .deb; record it first."
+                        .to_string(),
+                );
+            }
+            vmlinuz_pin.trim().to_string()
+        }
+    };
+    if !digest_matches_pin(&expected_pin, &kernel.sha256) {
         return Err(format!(
             "staged kernel digest does not match the pin.\n  pinned:   {}\n  observed: {}\n\
              Refusing to boot a kernel that is not the reviewed one.",
-            vmlinux_pin.trim(),
-            kernel.sha256
+            expected_pin, kernel.sha256
         ));
     }
     let initramfs = initramfs.ok_or_else(|| {
@@ -262,6 +313,7 @@ pub fn resolve_victim_boot(
     Ok(VictimBoot::TargetKernel {
         kernel: kernel.path,
         initramfs,
+        backend,
     })
 }
 
@@ -443,7 +495,8 @@ mod tests {
     #[test]
     fn an_empty_kernel_pin_keeps_the_admitted_boot() {
         for pin in ["", "   ", "\n"] {
-            let boot = resolve_victim_boot(pin, None, None).expect("empty pin admits");
+            let boot = resolve_victim_boot(pin, "", None, None, VictimBackend::Firecracker)
+                .expect("empty pin admits");
             assert_eq!(boot, VictimBoot::Admitted);
             assert!(!boot.is_target_kernel());
         }
@@ -455,8 +508,10 @@ mod tests {
         // are transcript context there, not a boot input.
         let boot = resolve_victim_boot(
             "",
+            "",
             Some(candidate("aa")),
             Some(PathBuf::from("/lab/initrd")),
+            VictimBackend::Firecracker,
         )
         .expect("empty pin admits");
         assert_eq!(boot, VictimBoot::Admitted);
@@ -464,8 +519,14 @@ mod tests {
 
     #[test]
     fn a_pinned_kernel_without_a_staged_vmlinux_fails_fast_with_staging_instructions() {
-        let err = resolve_victim_boot("aa", None, Some(PathBuf::from("/lab/initrd")))
-            .expect_err("a pinned kernel demands MVM_BDD_CVE_KERNEL");
+        let err = resolve_victim_boot(
+            "aa",
+            "",
+            None,
+            Some(PathBuf::from("/lab/initrd")),
+            VictimBackend::Firecracker,
+        )
+        .expect_err("a pinned kernel demands MVM_BDD_CVE_KERNEL");
         assert!(err.contains("MVM_BDD_CVE_KERNEL"), "got: {err}");
         assert!(err.contains("stage-cve-2026-80521-lab.sh"), "got: {err}");
     }
@@ -474,8 +535,10 @@ mod tests {
     fn a_pinned_kernel_with_a_digest_mismatch_is_refused() {
         let err = resolve_victim_boot(
             "aa",
+            "",
             Some(candidate("bb")),
             Some(PathBuf::from("/lab/initrd")),
+            VictimBackend::Firecracker,
         )
         .expect_err("a mismatched staged kernel must not boot");
         assert!(err.contains("does not match the pin"), "got: {err}");
@@ -483,8 +546,14 @@ mod tests {
 
     #[test]
     fn a_pinned_kernel_without_a_staged_initramfs_fails_fast() {
-        let err = resolve_victim_boot("aa", Some(candidate("aa")), None)
-            .expect_err("a pinned kernel demands MVM_BDD_CVE_INITRAMFS");
+        let err = resolve_victim_boot(
+            "aa",
+            "",
+            Some(candidate("aa")),
+            None,
+            VictimBackend::Firecracker,
+        )
+        .expect_err("a pinned kernel demands MVM_BDD_CVE_INITRAMFS");
         assert!(err.contains("MVM_BDD_CVE_INITRAMFS"), "got: {err}");
     }
 
@@ -492,8 +561,10 @@ mod tests {
     fn a_pinned_kernel_with_verified_staged_artifacts_selects_the_target_kernel_boot() {
         let boot = resolve_victim_boot(
             "  AA \n",
+            "",
             Some(candidate("aa")),
             Some(PathBuf::from("/lab/initrd.cpio.gz")),
+            VictimBackend::Firecracker,
         )
         .expect("verified staged artifacts select the target-kernel boot");
         assert_eq!(
@@ -501,9 +572,73 @@ mod tests {
             VictimBoot::TargetKernel {
                 kernel: PathBuf::from("/lab/vmlinux"),
                 initramfs: PathBuf::from("/lab/initrd.cpio.gz"),
+                backend: VictimBackend::Firecracker,
             }
         );
         assert!(boot.is_target_kernel());
+    }
+
+    #[test]
+    fn the_qemu_backend_verifies_the_bzimage_against_its_own_pin() {
+        let boot = resolve_victim_boot(
+            "aa",
+            "  BB \n",
+            Some(candidate("bb")),
+            Some(PathBuf::from("/lab/initrd.cpio.gz")),
+            VictimBackend::Qemu,
+        )
+        .expect("a verified bzImage selects the qemu target-kernel boot");
+        assert_eq!(
+            boot,
+            VictimBoot::TargetKernel {
+                kernel: PathBuf::from("/lab/vmlinux"),
+                initramfs: PathBuf::from("/lab/initrd.cpio.gz"),
+                backend: VictimBackend::Qemu,
+            }
+        );
+    }
+
+    #[test]
+    fn the_qemu_backend_requires_the_bzimage_pin() {
+        let err = resolve_victim_boot(
+            "aa",
+            "",
+            Some(candidate("aa")),
+            Some(PathBuf::from("/lab/initrd")),
+            VictimBackend::Qemu,
+        )
+        .expect_err("qemu mode without a bzImage pin must refuse");
+        assert!(err.contains("vmlinuz_sha256"), "got: {err}");
+    }
+
+    #[test]
+    fn the_qemu_backend_refuses_a_bzimage_digest_mismatch() {
+        let err = resolve_victim_boot(
+            "aa",
+            "bb",
+            Some(candidate("cc")),
+            Some(PathBuf::from("/lab/initrd")),
+            VictimBackend::Qemu,
+        )
+        .expect_err("a mismatched bzImage must not boot");
+        assert!(err.contains("does not match the pin"), "got: {err}");
+    }
+
+    #[test]
+    fn backend_parsing_accepts_documented_spellings_and_rejects_the_rest() {
+        assert_eq!(
+            VictimBackend::parse("").expect("empty defaults"),
+            VictimBackend::Firecracker
+        );
+        assert_eq!(
+            VictimBackend::parse("FC").expect("case-insensitive"),
+            VictimBackend::Firecracker
+        );
+        assert_eq!(
+            VictimBackend::parse(" qemu ").expect("trimmed"),
+            VictimBackend::Qemu
+        );
+        assert!(VictimBackend::parse("kvm").is_err());
     }
 
     #[test]
@@ -516,6 +651,7 @@ mod tests {
         let target = VictimBoot::TargetKernel {
             kernel: PathBuf::from("/lab/vmlinux"),
             initramfs: PathBuf::from("/lab/initrd"),
+            backend: VictimBackend::Firecracker,
         };
         let basis = target.egress_evidence();
         assert!(basis.contains("no NIC"), "got: {basis}");
@@ -545,6 +681,7 @@ mod tests {
         let boot = VictimBoot::TargetKernel {
             kernel: PathBuf::from("/lab/vmlinux"),
             initramfs: PathBuf::from("/lab/initrd"),
+            backend: VictimBackend::Firecracker,
         };
         let err = require_witnessed_compromise(
             &boot,
