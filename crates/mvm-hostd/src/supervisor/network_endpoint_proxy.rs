@@ -36,6 +36,7 @@ mod pinned_dns;
 mod pipeline;
 mod prepare;
 mod redaction;
+mod routing;
 mod sign;
 
 /// Host-side AF_VSOCK listener for the QEMU (`vhost-vsock`) guest→host
@@ -106,6 +107,9 @@ pub struct SubstitutionService {
     /// The addresses the egress gate admitted for each destination, shared
     /// with the forward leg's resolver so it connects to nothing else.
     admitted: Arc<pinned_dns::AdmittedAddresses>,
+    /// Answers `ask` route decisions. [`crate::supervisor::egress_approval::NoApprovalBackend`]
+    /// until an approval backend is configured, which refuses every one.
+    approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
 }
 
 #[cfg(test)]

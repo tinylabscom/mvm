@@ -15,6 +15,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use mvm_contract::peer::{PeerBinding, PeerName};
 use mvm_contract::policy::restricted_address::{RestrictedClass, classify, grant_readmits};
+use mvm_contract::policy::routes::{RouteDecision, RouteSet};
 use mvm_core::policy::dns_guard::dns_answer_forbidden;
 use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
@@ -271,6 +272,10 @@ pub struct EgressGate {
     /// the default and admits nothing, so east-west inherits claim-10's posture
     /// rather than needing its own.
     peers: Vec<PeerBinding>,
+    /// Endpoint routes from the signed plan: what a request to a destination
+    /// may do, by method and path. Decided only where the endpoint reads the
+    /// request; see [`Self::decide_route`].
+    routes: RouteSet,
 }
 
 impl EgressGate {
@@ -281,6 +286,7 @@ impl EgressGate {
             egress: CanonicalEgress::Rules(Vec::new()),
             pins: DnsPinRegistry::new(),
             peers: Vec::new(),
+            routes: RouteSet::default(),
         }
     }
 
@@ -290,6 +296,7 @@ impl EgressGate {
             egress,
             pins: DnsPinRegistry::new(),
             peers: Vec::new(),
+            routes: RouteSet::default(),
         }
     }
 
@@ -305,11 +312,17 @@ impl EgressGate {
         pins: &mvm_core::policy::dns_pin::DnsPinRegistry,
         now: &str,
     ) -> Self {
+        let routes = match RouteSet::new(policy.routes().to_vec()) {
+            Ok(routes) => routes,
+            // A route set that does not validate decides nothing safely.
+            Err(_) => return Self::default_deny(),
+        };
         match mvm_core::policy::projection::canonicalize_network_policy(policy, pins, now) {
             Ok(canon) => Self {
                 egress: canon,
                 pins: pins.clone(),
                 peers: Vec::new(),
+                routes,
             },
             Err(_) => Self::default_deny(),
         }
@@ -322,6 +335,43 @@ impl EgressGate {
     pub fn with_peers(mut self, peers: Vec<PeerBinding>) -> Self {
         self.peers = peers;
         self
+    }
+
+    /// Attach endpoint routes. The set is already validated.
+    #[must_use]
+    pub fn with_routes(mut self, routes: RouteSet) -> Self {
+        self.routes = routes;
+        self
+    }
+
+    /// Decide one HTTP request to `host:port` against the plan's endpoint
+    /// routes. `None` when no route names the destination: the allow-list
+    /// alone has already decided it. Called only where the endpoint reads the
+    /// request, which is every typed and every terminated flow.
+    #[must_use]
+    pub fn decide_route(
+        &self,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+    ) -> Option<RouteDecision> {
+        self.routes.decide(host, port, method, path)
+    }
+
+    /// Whether a request to `host:port` must be read to be decided — a route
+    /// there has rules, or refuses by default. An opaque flow to such a
+    /// destination cannot be decided and is refused.
+    #[must_use]
+    pub fn requires_inspection(&self, host: &str, port: u16) -> bool {
+        self.routes.needs_inspection(host, port)
+    }
+
+    /// Whether the plan grants terminating `host:port` to enforce its routes,
+    /// independently of any secret bound there.
+    #[must_use]
+    pub fn grants_interception(&self, host: &str, port: u16) -> bool {
+        self.routes.grants_interception(host, port)
     }
 
     /// Decide a guest connect to `host:port`, whichever namespace it is in.

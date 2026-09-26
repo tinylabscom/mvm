@@ -109,6 +109,18 @@ impl FlowMuxSession {
             if let Some(reason) = self
                 .substitution
                 .as_ref()
+                .and_then(|service| service.route_refusal_reason(&flow.host, flow.port))
+            {
+                self.send_refused(
+                    stream_id,
+                    "destination has endpoint rules; the plan must grant interception to enforce them",
+                )?;
+                self.deny_flow(stream_id, &flow, reason);
+                return Ok(());
+            }
+            if let Some(reason) = self
+                .substitution
+                .as_ref()
                 .and_then(|service| service.opaque_refusal_reason(&flow.host))
             {
                 self.send_refused(stream_id, reason)?;
@@ -629,6 +641,18 @@ mod tests {
         Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>,
         tempfile::TempDir,
     ) {
+        substitution_binding_routed(bound_host, with_intermediate, Vec::new())
+    }
+
+    /// [`substitution_binding`] whose service gate carries `routes`.
+    fn substitution_binding_routed(
+        bound_host: &str,
+        with_intermediate: bool,
+        routes: Vec<mvm_contract::policy::routes::EgressRoute>,
+    ) -> (
+        Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>,
+        tempfile::TempDir,
+    ) {
         use crate::keyholder::substitution::SubstitutionRegistry;
         use crate::keyholder::{LocalResolver, SecretResolver};
         use crate::supervisor::network_endpoint_proxy::{
@@ -683,7 +707,9 @@ mod tests {
             Arc::new(registry),
             resolver,
             Arc::new(UnusedForwarder),
-            Arc::new(EgressGate::default_deny()),
+            Arc::new(EgressGate::default_deny().with_routes(
+                mvm_contract::policy::routes::RouteSet::new(routes).expect("test routes validate"),
+            )),
         );
         if with_intermediate {
             service = service.with_tls_intermediate(
@@ -1007,6 +1033,56 @@ mod tests {
 
         drop(guest);
         host.join().unwrap().unwrap();
+    }
+
+    /// A destination whose route has endpoint rules, on a plan that does not
+    /// grant interception, is refused at open rather than relayed opaquely:
+    /// the rules could not be enforced on a flow the host never reads.
+    #[test]
+    fn an_opaque_flow_to_a_route_with_ungranted_rules_is_refused_and_audited() {
+        let addr = tcp_echo_server();
+        let route = mvm_contract::policy::routes::EgressRoute {
+            id: "local".into(),
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            rules: vec![mvm_contract::policy::routes::EndpointRule {
+                id: None,
+                method: Some("GET".into()),
+                path: "/**".into(),
+                outcome: mvm_contract::policy::routes::RouteOutcome::Allow,
+            }],
+            otherwise: mvm_contract::policy::routes::RouteOutcome::Deny,
+            intercept: false,
+        };
+        let (service, _dir) = substitution_binding_routed("bound.example", true, vec![route]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let gate = gate_allowing_addr(addr.ip(), addr.port(), None);
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_substitution(Some(service))
+                    .with_recorder(Some(recorder))
+            });
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Refused);
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        assert!(chain.contains("endpoint_rules_unenforceable"), "{chain}");
+        assert!(!chain.contains("host.flow.allowed"), "{chain}");
     }
 
     #[test]

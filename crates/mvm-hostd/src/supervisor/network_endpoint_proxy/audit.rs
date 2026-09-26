@@ -158,6 +158,51 @@ impl SubstitutionService {
         }
     }
 
+    /// Record one route decision: `host.route.decided` with the route, the
+    /// rule that decided (or `otherwise` / `ambiguous_path`), the outcome, the
+    /// destination, a fixed-set method label, and — for a refusal — its fixed
+    /// reason. No path, header or body byte is recorded.
+    pub(super) async fn audit_route_decision(
+        &self,
+        decision: &mvm_contract::policy::routes::RouteDecision,
+        destination: &str,
+        method: &'static str,
+        refused: Option<&'static str>,
+    ) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        let mut labels = vec![
+            ("route".to_string(), decision.route_id.clone()),
+            ("rule".to_string(), decision.decided_by.label()),
+            ("outcome".to_string(), decision.outcome.label().to_string()),
+            ("destination".to_string(), destination.to_string()),
+            ("method".to_string(), method.to_string()),
+            (
+                "verdict".to_string(),
+                if refused.is_some() {
+                    "refused"
+                } else {
+                    "forwarded"
+                }
+                .to_string(),
+            ),
+        ];
+        if let Some(reason) = refused {
+            labels.push(("reason".to_string(), reason.to_string()));
+        }
+        if let Err(e) = recorder
+            .record_unbound(
+                crate::supervisor::audit_recorder::EventCategory::Host,
+                "host.route.decided",
+                labels,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "host.route.decided audit emit failed");
+        }
+    }
+
     /// Emit one `secret.placeholder_dropped { destination }` when the endpoint
     /// refuses a placeholder-bearing request bound for a destination the secret
     /// isn't allowed to reach (claim 12 — metadata only, never the value or the
