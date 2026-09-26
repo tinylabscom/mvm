@@ -115,6 +115,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },
       { label: "Persistent Workspaces", slug: "guides/persistent-workspaces" },
       { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
+      { label: "Provenance for Instruction Files", slug: "guides/instruction-provenance" },
       { label: "Workload Output Streaming", slug: "guides/workload-output-streaming" },
       { label: "Workload Input", slug: "guides/workload-input" },
       { label: "Fleet Stream Edges", slug: "guides/fleet-stream-edges" },

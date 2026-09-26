@@ -27,6 +27,11 @@ Last updated: 2026-09-26
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
+    - [x] trust policy (keyless/keyed publishers, blocklist, deny/warn/audit, project only tightens)
+    - [x] `mvmctl trust instructions init|sign|verify|policy`; `sign-instructions.yml` keyless workflow
+    - [x] pre-boot scan wired into admission; every verdict chain-audited
+    - [ ] block-device volumes (incl. `machine volume mount --host`) are not scanned
+    - [ ] mvm-scout indicator scan (tinylabscom/mvm-assurance#202, in review)
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
   - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724

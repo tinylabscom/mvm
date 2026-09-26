@@ -27,7 +27,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `build <sub>`              | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
-| `trust <sub>`              | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit`                                                                                                        |
+| `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
 | Already-grouped top-level  | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                           |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
@@ -225,6 +225,26 @@ removes the installed `mvmctl` and its host binaries too.
 | `mvmctl trust audit receipts export [--tenant <t>] [--plan-id <id>] [--json]`                            | Derive signed `ExecutionReceipt`s from the chain-signed audit log. Entries with no receipt mapping (egress decisions, stream attach/input grants, sealed-transcript anchors) are reported as citations rather than dropped                                                                                                                                              |
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
+
+## Instruction-file provenance
+
+Sign and verify agent instruction files (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`,
+`.claude/**/*.md`, …) and manage the policy every boot verifies them against.
+Status: Preview. See [Provenance for instruction files](/guides/instruction-provenance/)
+for the policy format, merge rules, audit entries, and limits.
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust instructions init [--enforcement deny\|warn\|audit] [--force]` | Write the user policy at `$MVM_HOME/config/instruction-trust.toml`, trusting this host's signing key. Refuses to overwrite without `--force` |
+| `mvmctl trust instructions init --project <DIR> [--enforcement <mode>]` | Write a project policy at `<DIR>/.mvm/instruction-trust.toml`. It can only tighten the user policy; alone it is advisory |
+| `mvmctl trust instructions sign <PATH>... [--key <FILE>] [--policy <FILE>]` | Write `<file>.mvmsig.json` beside each named file, and beside each instruction file under a named directory. Signs with the host key unless `--key` names a raw 32-byte Ed25519 secret key |
+| `mvmctl trust instructions sign --dry-run <PATH>...` | Print the files that would be signed, one per line, and sign nothing |
+| `mvmctl trust instructions verify [PATH] [--policy <FILE>] [--json]` | Verify the instruction files under `PATH` (default `.`) the way admission does. Exits nonzero when the effective policy is `deny` and any file fails |
+| `mvmctl trust instructions policy [--project <DIR>] [--policy <FILE>] [--json]` | Print the effective policy after merging the user and project policies |
+
+`--policy <FILE>` reads that file as the user policy instead of the configured
+one. Keyless (`<file>.sigstore.json`) signatures are produced in CI by
+`cosign sign-blob --new-bundle-format`; see `.github/workflows/sign-instructions.yml`.
 
 ## Local Secrets
 
