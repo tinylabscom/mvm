@@ -20,7 +20,7 @@ use super::abi::{
     payload_supported_abis,
 };
 use super::cmdline::{BuilderBoot, builder_boot_cmdline};
-use super::payload::{BootPayloadError, BuilderBootPayload};
+use super::payload::{BootPayloadError, BuilderBootPayload, PayloadDigest};
 use crate::builder_vm::BuilderVmImage;
 
 /// The payload's file name inside a booting VM's own state directory.
@@ -48,6 +48,26 @@ pub fn supported_image_abis() -> mvm_core::image_set::BuilderBootAbiRange {
     } else {
         baked_only_abis()
     }
+}
+
+/// The digest of the payload this process hands builder boots, or `None`
+/// when it has no payload source (or cannot assemble one, which the next boot
+/// reports on its own). Computed once: the embedded binaries cannot change
+/// under a running process.
+pub fn current_payload_digest() -> Option<PayloadDigest> {
+    static CURRENT: OnceLock<Option<PayloadDigest>> = OnceLock::new();
+    CURRENT
+        .get_or_init(|| {
+            let source = SOURCE.get()?;
+            match source.boot_payload() {
+                Ok(payload) => Some(payload.digest()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot assemble the builder boot payload");
+                    None
+                }
+            }
+        })
+        .clone()
 }
 
 /// Why a builder boot could not be staged.

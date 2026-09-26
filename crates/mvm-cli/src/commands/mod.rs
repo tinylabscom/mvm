@@ -623,6 +623,11 @@ fn declare_embedded_host_binaries() {
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
     );
+    // Every builder boot carries this binary's own builder binaries as its
+    // boot payload, whether the image bakes older copies or none at all.
+    mvm_build::builder_boot::register_boot_payload_source(Box::new(
+        crate::host_binaries::extract::EmbeddedBootPayload,
+    ));
 }
 
 #[cfg(not(feature = "builder-vm"))]

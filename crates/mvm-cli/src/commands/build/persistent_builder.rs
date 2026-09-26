@@ -139,6 +139,10 @@ struct SessionRecord {
     /// with older session records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_activity_unix_secs: Option<u64>,
+    /// Digest of the builder boot payload the session booted with. Absent for a
+    /// session an `mvmctl` predating the payload started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot_payload_digest: Option<String>,
 }
 
 fn session_record_path() -> PathBuf {
@@ -236,7 +240,7 @@ fn run_start(args: StartArgs) -> Result<()> {
     // folded into `MVM_BUILDER_BACKEND` at startup, so the env reflects it).
     let backend = persistent_backend(resolve_env_override())?;
 
-    if read_session_record().is_ok() {
+    if current_session_record().is_some() {
         bail!(
             "a persistent-builder session is already running. \
              Stop it with `mvmctl persistent-builder stop` before starting a new one."
@@ -274,7 +278,7 @@ pub(crate) fn start_session_for_contended_build()
 -> Result<mvm_build::persistent_builder::SessionRecord> {
     // Another process may have published a record between `mvm-build`'s check
     // and this call.
-    if let Ok(existing) = read_session_record() {
+    if let Some(existing) = current_session_record() {
         return Ok(as_build_record(&existing));
     }
 
@@ -301,13 +305,34 @@ fn as_build_record(record: &SessionRecord) -> mvm_build::persistent_builder::Ses
         disk_transport: record.disk_transport.clone(),
         supervisor_pid: record.supervisor_pid,
         last_activity_unix_secs: record.last_activity_unix_secs,
+        boot_payload_digest: record.boot_payload_digest.clone(),
     }
+}
+
+/// The session this command may use, if there is one. A session left by an
+/// `mvmctl` with other builder binaries is stopped rather than reused: it would
+/// keep running the binaries it booted with.
+fn current_session_record() -> Option<SessionRecord> {
+    let record = read_session_record().ok()?;
+    let current = mvm_build::builder_boot::current_payload_digest();
+    if mvm_build::persistent_builder::session_payload_is_current(
+        record.boot_payload_digest.as_deref(),
+        current.as_ref().map(|digest| digest.as_str()),
+    ) {
+        return Some(record);
+    }
+    eprintln!(
+        "stopping persistent builder {}: it runs other builder binaries than this mvmctl",
+        record.session_id
+    );
+    mvm_build::persistent_builder::stop_session(&as_build_record(&record));
+    None
 }
 
 /// Extract the host-vm binaries a persistent builder receives at `/mvm-bins`,
 /// and make the tree traversable while the raw input tar is packed.
 fn ensure_persistent_host_bins() -> Result<PathBuf> {
-    let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
+    let host_bin_cache = crate::host_binaries::extract::host_bin_cache_root();
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
         .context("extracting host-vm binaries for persistent builder")?;
     #[cfg(unix)]
@@ -368,6 +393,7 @@ fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRe
             .supervisor_pid()
             .unwrap_or_else(|| read_supervisor_pid(session.state_dir())),
         last_activity_unix_secs: Some(current_unix_secs()),
+        boot_payload_digest: session.boot_payload_digest().map(str::to_string),
     };
     // Same reason as the libkrun path: the supervisor must outlive this
     // command, so the handle is leaked rather than dropped.
@@ -399,6 +425,7 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
         workspace_root: workspace,
         supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
         last_activity_unix_secs: Some(current_unix_secs()),
+        boot_payload_digest: handle.boot_payload_digest().map(str::to_string),
     };
     leak_handle(handle);
     Ok(record)
@@ -1156,11 +1183,18 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: Some("a".repeat(64)),
         };
         let json = serde_json::to_vec(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_slice(&json).expect("deserialize");
         assert_eq!(back.session_id, "abc123");
         assert_eq!(back.dispatch_socket_path, PathBuf::from("/tmp/sock"));
         assert_eq!(back.supervisor_pid, 4242);
+        // The digest survives into the copy `mvm-build` reads, which is the
+        // one that decides whether a build may dispatch into the session.
+        assert_eq!(
+            as_build_record(&back).boot_payload_digest,
+            Some("a".repeat(64))
+        );
     }
 }
