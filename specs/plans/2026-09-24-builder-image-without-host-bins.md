@@ -723,8 +723,9 @@ the Stage 0 flake reference follows W8's re-pointing.
         used to check only that `vmlinux` and `rootfs.ext4` existed, so a
         stale or contract-mismatched cache booted on HVF and Firecracker
         while libkrun and QEMU refused it. `cache prune` removes
-        `builder-vm/hvf/`. The boot-overhead measurement is recorded in the
-        delivery note only if a live boot was possible; see there.
+        `builder-vm/hvf/`. Boot overhead was measured on HVF only (about 1 ms
+        of initramfs unpack and 5 ms of stage 1); Firecracker is still to
+        measure. See `specs/sprint/delivery/builder-boot-payload.md`.
 - [ ] **W7 — the `mvm-images` side** (a PR in that repository). Stop consuming
       `hostBinaries`/`MVM_HOST_BIN_DIR`, write `/etc/mvm/builder-boot-abi`,
       drop the builder job's host-binary build, drop `--impure` for the builder
