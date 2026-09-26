@@ -178,10 +178,29 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
-- [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
-- [ ] `mvmctl trust init|sign|verify` for instruction files; keyless signing workflow for our repos
-- [ ] pre-boot scan of workspace inputs wired into admission; files read-only in the guest; audited
+- [x] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
+      — `mvm_client::instruction_trust::policy`; user policy at
+      `<MVM_HOME>/config/instruction-trust.toml`, project policy at
+      `<project>/.mvm/instruction-trust.toml` (advisory alone); schema generated
+      from the Rust types at `schema/instruction-trust-policy-v0.json`
+- [x] `mvmctl trust instructions init|sign|verify|policy`; keyless signing workflow for our repos
+      — `.github/workflows/sign-instructions.yml` signs this repository's files
+      on a path-filtered push to `main` or dispatch, verifies the bundles through
+      the in-process verifier, and uploads them as an artifact (no commit). Other
+      repositories copy it rather than call it: a reusable workflow's certificate
+      names the called file, whoever called it
+- [x] pre-boot scan of `--mount` sources, `--asset` trees and the local workload
+      directory wired into admission; every verdict chain-audited
+      (`trust.instruction_verified` / `_unsigned` / `_blocked`); `deny` refuses
+      with `plan.admission_refused` stage `instruction_provenance`
+- [ ] files read-only in the guest: holds for `--mount` (read-only by default, a
+      per-launch snapshot, scanned at every admission). Open: volumes attached as
+      block devices are not scanned — including `machine volume mount --host DIR`,
+      whose directory is re-snapshotted at the next start after a host edit, and
+      whose `--rw` private copy keeps in-guest edits across restarts
 - [ ] mvm-scout static scan for injection indicators in instruction files
+      — in review: tinylabscom/mvm-assurance#202 (`SCOUT-PROMPT-002`, one shared
+      instruction-file surface definition)
 
 ### PS-12 — Environment hygiene (#3722)
 - [x] one shared denylist filter (loader, shell, interpreter, password-manager session variables)

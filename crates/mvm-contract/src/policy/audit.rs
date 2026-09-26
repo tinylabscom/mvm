@@ -230,6 +230,12 @@ pub enum LocalAuditKind {
     /// `mvmctl trust remove <key_id>` — un-enrolled a publisher.
     /// Detail: `key_id=<32hex>`.
     TrustRemove,
+    /// `mvmctl trust instructions init` — wrote an instruction-file trust
+    /// policy. Detail: `path=<policy path>,enforcement=<mode>`.
+    TrustInstructionsInit,
+    /// `mvmctl trust instructions sign` — wrote a keyed signature beside an
+    /// instruction file. Detail: `path=<file>,sha256=<64hex>,key_id=<32hex>`.
+    TrustInstructionsSign,
     /// `mvmctl bundle install <source>` — verified + atomically
     /// extracted a `.mvmpkg` archive into `~/.mvm/bundles/<sha>/`.
     /// Detail: `bundle_sha256=<64hex>,key_id=<32hex>,source=<source>`, where
@@ -1219,6 +1225,8 @@ mod tests {
             // Trust-store mutations.
             LocalAuditKind::TrustAdd,
             LocalAuditKind::TrustRemove,
+            LocalAuditKind::TrustInstructionsInit,
+            LocalAuditKind::TrustInstructionsSign,
             // Bundle registry mutations.
             LocalAuditKind::BundleInstall,
             LocalAuditKind::BundleGc,
@@ -1269,6 +1277,14 @@ mod tests {
             // Trust-store mutations.
             (LocalAuditKind::TrustAdd, "trust_add"),
             (LocalAuditKind::TrustRemove, "trust_remove"),
+            (
+                LocalAuditKind::TrustInstructionsInit,
+                "trust_instructions_init",
+            ),
+            (
+                LocalAuditKind::TrustInstructionsSign,
+                "trust_instructions_sign",
+            ),
             // Bundle registry mutations.
             (LocalAuditKind::BundleInstall, "bundle_install"),
             (LocalAuditKind::BundleGc, "bundle_gc"),

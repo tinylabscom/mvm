@@ -307,6 +307,16 @@ gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry ca
 required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
 
 [[binary]]
+package = "mvm-client"
+name = "emit_instruction_trust_schema"
+source = "crates/mvm-client/src/bin/emit_instruction_trust_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
 package = "mvm-contract"
 name = "emit_assurance_schema"
 source = "crates/mvm-contract/src/bin/emit_assurance_schema.rs"

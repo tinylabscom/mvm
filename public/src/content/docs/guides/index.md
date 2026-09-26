@@ -30,6 +30,7 @@ policy decision, or troubleshooting path.
 | [Network Egress Policy](/guides/network-egress-policy/) | You need explicit outbound network policy and auditability. |
 | [Persistent Workspaces](/guides/persistent-workspaces/) | You need state that survives across sandbox sessions. |
 | [Audit and Receipts](/guides/audit-and-receipts/) | You need evidence for what built, ran, changed, and exited. |
+| [Provenance for instruction files](/guides/instruction-provenance/) | You need the `CLAUDE.md`/`AGENTS.md`/`SKILL.md` files a workload's agent reads to be signed by someone you trust. |
 
 ## Agent integration guides
 
