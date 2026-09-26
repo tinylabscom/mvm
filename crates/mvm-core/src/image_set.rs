@@ -311,6 +311,10 @@ pub enum ImageSetRole {
     SdkSidecar(GuestLibc),
     Stage0BootstrapKernel,
     QemuWasmSmokePack,
+    /// The universal initramfs a sealed boot starts from. It carries the
+    /// guest agent, so it is published per architecture like the runtime
+    /// overlay; a backend loads it beside a kernel rather than booting it.
+    Initramfs,
 }
 
 impl ImageSetRole {
@@ -341,6 +345,7 @@ impl fmt::Display for ImageSetRole {
             Self::SdkSidecar(libc) => write!(f, "sdk_sidecar_{libc}"),
             Self::Stage0BootstrapKernel => f.write_str("stage0_bootstrap_kernel"),
             Self::QemuWasmSmokePack => f.write_str("qemu_wasm_smoke_pack"),
+            Self::Initramfs => f.write_str("initramfs"),
         }
     }
 }
