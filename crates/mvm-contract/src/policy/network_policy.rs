@@ -312,6 +312,12 @@ pub enum NetworkPolicy {
         /// forgot it would leave a plan promising a route the runtime denies.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<crate::peer::PeerBinding>,
+        /// Endpoint routes: what the workload may do at a destination, by
+        /// HTTP method and path. Carried here for the same reason as `peers`.
+        /// See [`crate::policy::routes`]; validated into a
+        /// [`crate::policy::routes::RouteSet`] wherever it is decided on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<crate::policy::routes::EgressRoute>,
     },
     /// Explicit allowlist of host:port pairs.
     AllowList {
@@ -331,6 +337,12 @@ pub enum NetworkPolicy {
         /// forgot it would leave a plan promising a route the runtime denies.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<crate::peer::PeerBinding>,
+        /// Endpoint routes: what the workload may do at a destination, by
+        /// HTTP method and path. Carried here for the same reason as `peers`.
+        /// See [`crate::policy::routes`]; validated into a
+        /// [`crate::policy::routes::RouteSet`] wherever it is decided on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<crate::policy::routes::EgressRoute>,
     },
 }
 
@@ -341,6 +353,23 @@ impl NetworkPolicy {
         match self {
             Self::Preset { peers, .. } | Self::AllowList { peers, .. } => peers,
         }
+    }
+
+    /// Endpoint routes this policy carries, unvalidated. Build a
+    /// [`crate::policy::routes::RouteSet`] to decide on them.
+    pub fn routes(&self) -> &[crate::policy::routes::EgressRoute] {
+        match self {
+            Self::Preset { routes, .. } | Self::AllowList { routes, .. } => routes,
+        }
+    }
+
+    /// Attach endpoint routes, replacing any already present.
+    #[must_use]
+    pub fn with_routes(mut self, new_routes: Vec<crate::policy::routes::EgressRoute>) -> Self {
+        match &mut self {
+            Self::Preset { routes, .. } | Self::AllowList { routes, .. } => *routes = new_routes,
+        }
+        self
     }
 
     /// Attach peer routes, replacing any already present.
@@ -358,6 +387,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -379,6 +409,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -388,6 +419,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -397,6 +429,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -408,23 +441,27 @@ impl NetworkPolicy {
                 preset,
                 egress_mode,
                 peers,
+                routes,
                 ..
             } => Self::Preset {
                 preset,
                 egress_mode,
                 ai,
                 peers,
+                routes,
             },
             Self::AllowList {
                 rules,
                 egress_mode,
                 peers,
+                routes,
                 ..
             } => Self::AllowList {
                 rules,
                 egress_mode,
                 ai,
                 peers,
+                routes,
             },
         }
     }
@@ -434,20 +471,30 @@ impl NetworkPolicy {
     pub fn with_egress_mode(self, mode: EgressMode) -> Self {
         match self {
             Self::Preset {
-                preset, ai, peers, ..
+                preset,
+                ai,
+                peers,
+                routes,
+                ..
             } => Self::Preset {
                 preset,
                 egress_mode: Some(mode),
                 ai,
                 peers,
+                routes,
             },
             Self::AllowList {
-                rules, ai, peers, ..
+                rules,
+                ai,
+                peers,
+                routes,
+                ..
             } => Self::AllowList {
                 rules,
                 egress_mode: Some(mode),
                 ai,
                 peers,
+                routes,
             },
         }
     }
@@ -1459,6 +1506,7 @@ mod tests {
             egress_mode: None,
             ai: Some(AiPolicy::metered().with_total_budget(1_000_000)),
             peers: Vec::new(),
+            routes: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: NetworkPolicy = serde_json::from_str(&json).unwrap();

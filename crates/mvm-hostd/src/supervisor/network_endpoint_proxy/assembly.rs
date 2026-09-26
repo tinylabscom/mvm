@@ -88,7 +88,18 @@ impl SubstitutionService {
             instance_id: None,
             instance_metrics: None,
             admitted: Arc::default(),
+            approver: Arc::new(crate::supervisor::egress_approval::NoApprovalBackend),
         }
+    }
+
+    /// Answer `ask` route decisions with `approver`.
+    #[must_use]
+    pub fn with_approver(
+        mut self,
+        approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
+    ) -> Self {
+        self.approver = approver;
+        self
     }
 
     /// Share `admitted` with the forward leg built over it.

@@ -455,6 +455,19 @@ jobs:
         # never passes its window, and a refused frame moves nothing.
         run: cargo fuzz run fuzz_network_flow_state -- -max_total_time="$DURATION"
 
+      - name: Fuzz egress routes (fuzz_egress_routes)
+        working-directory: crates/mvm-contract
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # A route set arrives in a signed plan and every request on a
+        # terminated flow is decided against it with a guest-chosen method and
+        # path. Asserts decode/validate/decide never panic, a path that cannot
+        # be canonicalised is refused rather than matched, a decision is a
+        # function of its inputs, and a parsed `--allow-endpoint` spec always
+        # builds a valid route.
+        run: cargo fuzz run fuzz_egress_routes -- -max_total_time="$DURATION"
+
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:

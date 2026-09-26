@@ -751,6 +751,25 @@ mod tests {
         admitted: &[&str],
         forwarder: Arc<dyn Forwarder>,
     ) -> Assembled {
+        assemble_with(bound, admitted, forwarder, Routing::default())
+    }
+
+    /// Endpoint routes, and who answers their `ask`s, for [`assemble_with`].
+    #[derive(Default)]
+    struct Routing {
+        routes: Vec<mvm_contract::policy::routes::EgressRoute>,
+        approver: Option<Arc<dyn crate::supervisor::egress_approval::EgressApprover>>,
+    }
+
+    /// [`assemble`] with the gate carrying `routing.routes`, and the egress
+    /// certificate covering every route host that grants interception as the
+    /// launch path's would.
+    fn assemble_with(
+        bound: &[Bound<'_>],
+        admitted: &[&str],
+        forwarder: Arc<dyn Forwarder>,
+        routing: Routing,
+    ) -> Assembled {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         let mut registry = SubstitutionRegistry::new();
@@ -790,7 +809,14 @@ mod tests {
         // Through the production delivery, so the certificate a guest is handed
         // and the key the endpoint terminates under are the ones the launch path
         // actually ships rather than a look-alike minted here.
-        let patterns: Vec<&str> = bound.iter().map(|b| b.pattern).collect();
+        let mut patterns: Vec<&str> = bound.iter().map(|b| b.pattern).collect();
+        patterns.extend(
+            routing
+                .routes
+                .iter()
+                .filter(|route| route.intercept)
+                .map(|route| route.host.as_str()),
+        );
         let delivery = mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&patterns)
             .expect("mint the per-VM egress ca");
         let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::from_pem(
@@ -807,11 +833,20 @@ mod tests {
             Arc::new(registry),
             resolver,
             forwarder,
-            gate_admitting(&admitted),
+            Arc::new(
+                (*gate_admitting(&admitted)).clone().with_routes(
+                    mvm_contract::policy::routes::RouteSet::new(routing.routes)
+                        .expect("test routes validate"),
+                ),
+            ),
         )
         .with_tenant(TENANT)
         .with_recorder(recorder)
         .with_tls_intermediate(intermediate);
+        let service = match routing.approver {
+            Some(approver) => service.with_approver(approver),
+            None => service,
+        };
 
         Assembled {
             service: Arc::new(service),
@@ -1101,6 +1136,7 @@ mod tests {
     /// whether a request was substituted used to depend on which variable the
     /// workload's toolchain happened to read.
     mod destination_scope;
+    mod endpoint_routes;
 
     #[test]
     fn a_client_configured_from_the_proxy_environment_gets_the_substituted_credential() {

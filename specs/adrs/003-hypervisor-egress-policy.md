@@ -71,6 +71,18 @@ the substitution path's forward leg resolves through the gate's recorded
 answer rather than the system resolver. A name cannot answer the decision
 with one address and the connection with another.
 
+**Endpoint routes are decided by the gate, where the request is read.** A
+plan's network policy can carry routes: a destination, rules over HTTP method
+and path glob, and an outcome of allow, deny or ask
+(`mvm_contract::policy::routes`). `EgressGate::decide_route` decides a request
+against them on every flow the endpoint reads — typed flows and terminated
+ones — and each decision is recorded with the route and rule. A route never
+causes interception by itself: a destination no secret is bound to is
+terminated for its rules only when the route grants it (`intercept`), the
+per-VM certificate is minted over those hosts too, and an opaque flow to a
+destination whose rules cannot be enforced is refused. `ask` goes to an
+approver seam that refuses until an approval backend exists.
+
 **Per-VM network provisioning goes through one trait.** Each backend's
 provider brings a VM up against an admitted network spec and reports the
 same vsock-only capability shape; a caller never branches on which backend it

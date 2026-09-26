@@ -33,3 +33,10 @@ path = "fuzz_targets/fuzz_network_flow_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_egress_routes"
+path = "fuzz_targets/fuzz_egress_routes.rs"
+test = false
+doc = false
+bench = false

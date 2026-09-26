@@ -237,6 +237,16 @@ fn prepare_observation_identity(
 #[derive(Debug)]
 struct BootEgressCa(Option<EgressTlsDelivery>);
 
+/// Hosts whose routes the plan grants interception for, in route order.
+fn intercepted_route_hosts(policy: &NetworkPolicy) -> Vec<String> {
+    policy
+        .routes()
+        .iter()
+        .filter(|route| route.intercept && route.inspects())
+        .map(|route| route.host.clone())
+        .collect()
+}
+
 impl BootEgressCa {
     /// Resolve the CA for this boot, or nothing when it terminates nothing.
     ///
@@ -252,9 +262,16 @@ impl BootEgressCa {
         // inherited certificate has to cover.
         let bindings = FileBindingStore::default_location()
             .context("opening the host secret-binding store")?;
-        let hosts =
+        let mut hosts =
             mvm_core::crypto::secret_binding::bound_hosts(req.secrets, req.tenant, &bindings)
                 .context("resolving the destinations this workload's secrets are bound to")?;
+        // A route whose rules the plan grants interception for is terminated
+        // too, so the certificate has to cover it.
+        for host in intercepted_route_hosts(req.network_policy) {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
         match req.identity {
             FlowMuxIdentitySource::InheritFrom(parent_state_dir) => {
                 Self::inherit(parent_state_dir, req.state_dir, &hosts)
@@ -355,6 +372,40 @@ mod tests {
     use mvm_vmm::host::telemetry_registration::{
         TELEMETRY_REGISTRATION_FILE, resolve_expected_telemetry_peer,
     };
+
+    /// Only a route that both inspects and grants interception is terminated,
+    /// so only those hosts go into the egress certificate.
+    #[test]
+    fn only_intercepted_inspecting_routes_widen_the_certificate() {
+        use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+        let route = |id: &str, host: &str, intercept: bool, rules: bool| EgressRoute {
+            id: id.into(),
+            host: host.into(),
+            port: 443,
+            rules: if rules {
+                vec![EndpointRule {
+                    id: None,
+                    method: Some("GET".into()),
+                    path: "/**".into(),
+                    outcome: RouteOutcome::Allow,
+                }]
+            } else {
+                Vec::new()
+            },
+            otherwise: if rules {
+                RouteOutcome::Deny
+            } else {
+                RouteOutcome::Allow
+            },
+            intercept,
+        };
+        let policy = NetworkPolicy::deny_all().with_routes(vec![
+            route("a", "a.example.com", true, true),
+            route("b", "b.example.com", false, true),
+            route("c", "c.example.com", true, false),
+        ]);
+        assert_eq!(intercepted_route_hosts(&policy), ["a.example.com"]);
+    }
 
     fn prepare_test_identity(
         state: &Path,

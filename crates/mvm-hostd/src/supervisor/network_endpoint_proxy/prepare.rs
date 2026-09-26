@@ -313,6 +313,20 @@ impl SubstitutionService {
                 // The forward leg connects to exactly these; see `pinned_dns`.
                 if let Some((host, port)) = url_host_and_port(&req.url) {
                     self.admitted.record(&host, port, ips);
+                    // Then what the request may do there. The path is the
+                    // URL's own, the one the forward leg will send.
+                    let path = Url::parse(&req.url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_default();
+                    if let Err(reason) = self.enforce_routes(&host, port, &req.method, &path).await
+                    {
+                        return Err(WireResponse::Refused {
+                            message: format!(
+                                "egress route refused {} {host}:{port} ({reason})",
+                                super::routing::method_label(&req.method)
+                            ),
+                        });
+                    }
                 }
             }
             Err(reason) => {

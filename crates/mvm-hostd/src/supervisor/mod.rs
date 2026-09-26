@@ -50,6 +50,7 @@ pub mod dns_resolver;
 /// Host-side vsock egress telemetry (eBPF/procfs).
 pub mod ebpf_telemetry;
 pub mod egress;
+pub mod egress_approval;
 pub mod entropy_scanner;
 pub mod event_bus;
 pub mod firewall;
