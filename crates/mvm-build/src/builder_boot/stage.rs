@@ -251,6 +251,75 @@ mod tests {
         assert!(err.contains("ABI 1") && err.contains("0..=0"), "{err}");
     }
 
+    /// A 16 MiB ext4 with the feature set a Nix-built builder image carries,
+    /// which the host's own ext4 writer does not produce: `64bit`, `flex_bg`
+    /// (16 groups), `metadata_csum` with `metadata_csum_seed`, a journal,
+    /// `orphan_file`, `huge_file` and 256-byte inodes. It holds
+    /// `/etc/mvm/builder-boot-abi` = `1`, `/run`, `/sbin` and `/tmp`.
+    ///
+    /// Made with Homebrew e2fsprogs 1.47.4, the `-O` list copied from
+    /// `dumpe2fs -h` of a Stage 0-built `rootfs.ext4`:
+    ///
+    /// ```text
+    /// truncate -s 16M img
+    /// E2FSPROGS_FAKE_TIME=1 mke2fs -q -F -b 4096 -T default \
+    ///   -E hash_seed=00000000-0000-0000-0000-000000000000,root_owner=0:0 \
+    ///   -U 44444444-4444-4444-8888-888888888888 \
+    ///   -O none,has_journal,ext_attr,resize_inode,dir_index,orphan_file,filetype,extent,64bit,flex_bg,metadata_csum_seed,sparse_super,large_file,huge_file,dir_nlink,extra_isize,metadata_csum \
+    ///   -G 16 -I 256 -d tree img
+    /// gzip -9 -n img
+    /// ```
+    ///
+    /// Committed rather than generated: the test must not depend on a host
+    /// `mke2fs`, and building the image in a builder VM is not a unit test.
+    const NIX_LAYOUT_ABI1: &[u8] = include_bytes!("testdata/nix-layout-abi1.ext4.gz");
+
+    fn nix_layout_image(dir: &Path) -> PathBuf {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        flate2::read::GzDecoder::new(NIX_LAYOUT_ABI1)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        let image = dir.join("rootfs.ext4");
+        std::fs::write(&image, bytes).unwrap();
+        image
+    }
+
+    /// The host reads the marker off an image laid out the way Nix's
+    /// `make-ext4-fs` lays one out, not only off the host writer's own.
+    #[test]
+    fn the_abi_marker_reads_off_a_nix_layout_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = nix_layout_image(dir.path());
+        assert_eq!(
+            read_image_boot_abi(&image).unwrap(),
+            BuilderBootAbi::PAYLOAD
+        );
+        let err = baked_boot(&image).unwrap_err().to_string();
+        assert!(err.contains("ABI 1"), "{err}");
+    }
+
+    /// What a reader sees while another process rewrites the image in place:
+    /// a file shorter than the filesystem it describes. Refused by name, with
+    /// the reader's own words, rather than misread.
+    #[test]
+    fn a_short_copy_of_an_image_is_refused_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = nix_layout_image(dir.path());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .set_len(2048)
+            .unwrap();
+        let err = read_image_boot_abi(&image).unwrap_err();
+        assert!(
+            matches!(&err, StageBootError::ImageUnreadable { detail, .. }
+                if detail.contains("failed to fill whole buffer")),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn an_unreadable_image_is_refused_naming_it() {
         let dir = tempfile::tempdir().unwrap();
