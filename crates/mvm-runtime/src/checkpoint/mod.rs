@@ -15,11 +15,16 @@ mod chunks;
 #[cfg(test)]
 mod durability_tests;
 mod params;
+mod restore_content;
 mod retention;
 mod staging;
+
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness,
+};
+use restore_content::{
+    content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
 };
 
 pub use retention::{
@@ -639,17 +644,27 @@ pub fn fork_vm_full(
     // from its OWN copies — never the parent's live blobs.
     materialize_checkpoint_blobs(store, &parent, &params.dest_dir)?;
 
+    // A fork branches a new VM identity, so it must never boot on the parent's
+    // FlowMux signing key. The captured identity drive was just cloned into the
+    // child's dir with the rest of the content; mint a fresh one over it.
+    reseed_forked_identity_drive(&params.child_vm_name, &params.dest_dir)?;
+
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
     // The bound rides on the spawn, so the grant that just cleared the subset
     // check is what the restorer starts the child's VMM under. Without this the
     // check would decide only what may be *recorded* for the child, and a child
     // admitted to 1.5 cores would restore with no quota at all.
+    let content = content_with_load_memory_digest(
+        &parent.content,
+        &store.content_dir(&parent.id),
+        &params.dest_dir.join(mvm_core::checkpoint::MEMORY_BLOB),
+    )?;
     restore.restore(&RestoredChild {
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
         cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),
-        content: &parent.content,
+        content: &content,
     })?;
 
     let child = CheckpointMeta::builder(
@@ -676,53 +691,6 @@ pub fn fork_vm_full(
     .build();
     store.write_meta(&child)?;
     Ok(child)
-}
-
-/// Ensure a cloned checkpoint keeps the complete dm-verity binding and the
-/// device-path metadata needed to remap snapshot references to child files.
-fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Result<()> {
-    let has_verity = parent
-        .content
-        .iter()
-        .any(|blob| blob.name == "rootfs.verity");
-    let has_roothash = parent
-        .content
-        .iter()
-        .any(|blob| blob.name == "rootfs.roothash");
-    anyhow::ensure!(
-        has_verity == has_roothash,
-        "checkpoint '{}' has an incomplete dm-verity sidecar set",
-        parent.id
-    );
-
-    let anchors_path = child_dir.join("device-anchors.json");
-    anyhow::ensure!(
-        anchors_path.is_file(),
-        "checkpoint '{}' is missing device-anchors.json",
-        parent.id
-    );
-    let anchors: DeviceAnchors = serde_json::from_slice(
-        &std::fs::read(&anchors_path)
-            .with_context(|| format!("reading {}", anchors_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", anchors_path.display()))?;
-
-    if has_verity {
-        anyhow::ensure!(
-            anchors.rootfs_verity.is_some()
-                && child_dir.join("rootfs.verity").is_file()
-                && child_dir.join("rootfs.roothash").is_file(),
-            "checkpoint '{}' would drop its dm-verity binding during fork",
-            parent.id
-        );
-    } else {
-        anyhow::ensure!(
-            anchors.rootfs_verity.is_none(),
-            "checkpoint '{}' has a verity device anchor without sidecars",
-            parent.id
-        );
-    }
-    Ok(())
 }
 
 /// Validate the child admission envelope before a vm_full restore starts a VMM,
@@ -1194,13 +1162,14 @@ pub fn restore_checkpoint(
     let stored_config = dir.join(SUPERVISOR_CONFIG_FILE_NAME);
     let config_src = stored_config.is_file().then_some(stored_config.as_path());
 
+    let content = content_with_load_memory_digest(&meta.content, &dir, &memory)?;
     restore.restore(
         &params.target_vm,
         &rootfs,
         &memory,
         &dir.join("machine-id"),
         config_src,
-        &meta.content,
+        &content,
     )
 }
 
@@ -3149,6 +3118,134 @@ mod tests {
             child.session.is_none(),
             "forked child must not inherit the parent's session binding"
         );
+    }
+
+    /// A fork branches a new VM identity, so it must never boot on the parent's
+    /// captured FlowMux signing key. The identity drive is cloned into the child
+    /// with the rest of the content and then replaced with a freshly minted one.
+    #[test]
+    fn fork_vm_full_mints_a_fresh_identity_drive_for_the_child() {
+        use mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE;
+        let tmp = tempfile::tempdir().unwrap();
+        // The mint pins the child to the host signer, so an isolated home needs
+        // that key on disk.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path().join("home"));
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(
+            keys.join(mvm_vmm::host::broker_services_spawn::HOST_SIGNER_KEY),
+            [7u8; 32],
+        )
+        .unwrap();
+
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent_state = tmp.path().join("parent-state");
+        std::fs::create_dir_all(&parent_state).unwrap();
+        let rootfs = parent_state.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let parent_identity_bytes = b"parent-identity-drive-bytes";
+        let identity = parent_state.join(IDENTITY_DRIVE_FILE);
+        std::fs::write(&identity, parent_identity_bytes).unwrap();
+        let ctl = MockControl {
+            rootfs,
+            identity: Some(identity),
+            events: RefCell::new(vec![]),
+        };
+        let parent = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("idp"),
+                vm_name: "identity-parent".into(),
+                supervisor_config_digest: "d".into(),
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 1,
+                retain_paused: false,
+                grants: None,
+            },
+            &ctl,
+        )
+        .unwrap();
+        assert!(
+            parent.content.iter().any(|b| b.name == IDENTITY_DRIVE_FILE),
+            "the parent checkpoint must carry the identity drive"
+        );
+
+        let dest = tmp.path().join("child-state");
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let restorer = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("idf"),
+                child_vm_name: "identity-child".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .unwrap();
+
+        let child_drive = dest.join(IDENTITY_DRIVE_FILE);
+        assert!(child_drive.is_file(), "the child keeps an identity drive");
+        assert_ne!(
+            std::fs::read(&child_drive).unwrap().as_slice(),
+            parent_identity_bytes.as_slice(),
+            "a fork must mint its own identity, never boot on the parent's captured drive"
+        );
+    }
+
+    /// A chunked memory blob records its chunk-index content-address in the
+    /// manifest, not the digest of the reassembled bytes. A backend verifies
+    /// the saved RAM on load by hashing the materialized file, so the restore
+    /// must hand it the whole-file digest of the verified material. Before this
+    /// fix a same-identity HVF restore compared the loaded bytes against the
+    /// index address and failed every time it reached memory verification.
+    #[test]
+    fn restore_content_carries_the_memory_whole_file_digest_not_the_index_address() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "mem-digest");
+        let dir = store.content_dir(&meta.id);
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let memory = materialized_source(&store, &meta, "memory.bin", &scratch).unwrap();
+
+        let recorded = meta
+            .content
+            .iter()
+            .find(|b| b.name == "memory.bin")
+            .unwrap()
+            .sha256
+            .clone();
+        let whole_file = sha256_file_hex(&memory).unwrap();
+        assert_ne!(
+            recorded, whole_file,
+            "the recorded content-address is the chunk index address, not the bytes"
+        );
+
+        let corrected = content_with_load_memory_digest(&meta.content, &dir, &memory).unwrap();
+        let corrected_mem = corrected.iter().find(|b| b.name == "memory.bin").unwrap();
+        assert_eq!(
+            corrected_mem.sha256, whole_file,
+            "restore must hand the backend the whole-file digest of the materialized RAM"
+        );
+        for blob in &corrected {
+            if blob.name != "memory.bin" {
+                let original = meta.content.iter().find(|b| b.name == blob.name).unwrap();
+                assert_eq!(
+                    blob.sha256, original.sha256,
+                    "only the memory blob's digest is substituted"
+                );
+            }
+        }
     }
 
     #[test]

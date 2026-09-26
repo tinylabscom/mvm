@@ -720,6 +720,11 @@ fn restore(id: &str, json: bool) -> Result<()> {
             id.as_str()
         );
     }
+    // Held until the restored supervisor is up. Until then the target's state
+    // dir has no live owner and no registry record, so this lock is what keeps
+    // a stop or reconcile in another process from deleting it mid-restore,
+    // and what makes this restore wait for a stop that is still removing it.
+    let _lifecycle = mvm_runtime::vm::instance_snapshot::lock_resume(&meta.vm_name)?;
     if vm_is_running(&meta.vm_name) {
         bail!(
             "cannot restore into '{}': it is still running; stop it first",

@@ -509,7 +509,12 @@ pub fn running_vm_dir(name: &str) -> String {
 /// must outlive a VMM restart. Shared by the mvm-layer pause/resume
 /// orchestration and the backend warm-start path so both agree on one path.
 pub fn instances_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("instances")
+    instances_root_at(mvm_home())
+}
+
+/// Per-instance state root beneath an explicit mvm home.
+pub fn instances_root_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("instances")
 }
 
 /// Per-instance state directory: `<mvm_home>/instances/<name>/`.

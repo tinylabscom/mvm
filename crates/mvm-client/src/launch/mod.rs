@@ -1134,25 +1134,14 @@ impl LocalBackend {
     }
 }
 
-/// Remove a directory tree, treating "already absent" as success.
-/// Drop a VM's runtime state *and* the directory its sockets live in.
-///
-/// Those are not always the same place. When the state dir is deep enough that
-/// a socket path would overflow macOS's `sun_path` limit, `vm_socket_dir_at`
-/// puts the sockets under a short hashed `/tmp/mvm-sock/<hash>` namespace
-/// instead. Removing only the state dir then leaves the substitution socket
-/// behind, and the next launch under that name dies binding it with "Address
-/// already in use" — the same stale-socket failure this cleanup exists to
-/// prevent, just relocated.
+/// Drop a VM's runtime state *and* the directory its sockets live in; see
+/// [`mvm_runtime::vm::reconcile::remove_runtime_dirs`].
 fn remove_vm_runtime_dirs(name: &str) -> Result<()> {
-    let state_dir = vm_state_dir(name);
-    let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
-    if socket_dir != state_dir {
-        remove_dir_if_present(&socket_dir)?;
-    }
-    remove_dir_if_present(&state_dir)
+    mvm_runtime::vm::reconcile::remove_runtime_dirs(&vm_state_dir(name))
+        .map_err(|e| crate::local::backend_err(format!("removing runtime state of {name:?}: {e}")))
 }
 
+/// Remove a directory tree, treating "already absent" as success.
 fn remove_dir_if_present(dir: &std::path::Path) -> Result<()> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
