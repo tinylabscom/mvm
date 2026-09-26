@@ -760,16 +760,7 @@ pub(in crate::commands) fn run_secure_with_source(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
-    // Egress refusals print as they happen, except where a stray line would
-    // corrupt the session (a raw-mode PTY) or the caller asked for one JSON
-    // document. Armed by the admission below, once the machine has a name.
-    let denials = std::rc::Rc::new(super::egress_denials::PendingWatch::new(
-        if args.json || args.pty {
-            super::egress_denials::Live::Quiet
-        } else {
-            super::egress_denials::Live::Notices
-        },
-    ));
+    let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
@@ -893,10 +884,7 @@ pub(in crate::commands) fn run_secure_with_source(
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
-        let refused = denials.finish();
-        if !json_requested {
-            super::egress_denials::print_summary(&refused, &super::host_notices::Stderr);
-        }
+        let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
@@ -1096,9 +1084,7 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
-    // Before the outputs are collected and before a nonzero exit ends the
-    // process: the summary is the last thing the run has to say about egress.
-    super::egress_denials::print_summary(&audit.denials.finish(), &super::host_notices::Stderr);
+    audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;

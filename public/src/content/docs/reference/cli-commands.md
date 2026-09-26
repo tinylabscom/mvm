@@ -1296,7 +1296,7 @@ running microVM.
 | `mvmctl bench --runs <n> --warmup <n>` | Sample counts. Below 20 measured runs the report is indicative only, not publication-grade                                                                                |
 | `mvmctl bench --json`                  | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable                                                                           |
 | `mvmctl bench -- <launch>`             | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`)                                                                            |
-| `mvmctl explain <run>`                 | Explain a run after the fact from the chain-signed audit log, including the egress it was refused and how to allow it                                                     |
+| `mvmctl explain <run>`                 | Explain a run and its egress refusals from the chain-signed audit log: each refused destination, its count, and how to allow it where a grant can                           |
 | `mvmctl watch <ir.json>`               | Rebuild a workload when its local inputs change                                                                                                                           |
 
 ## Packs, Bundles, and Dependencies

@@ -78,8 +78,7 @@ pub(in crate::commands) struct Args {
     /// Name of the VM
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
-    /// Follow log output (like tail -f), printing each egress refusal as it
-    /// happens
+    /// Follow output and egress refusals live
     #[arg(long, short = 'f')]
     pub follow: bool,
     /// Number of recorded output records to replay before following. A record
