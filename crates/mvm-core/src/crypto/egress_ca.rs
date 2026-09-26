@@ -366,18 +366,21 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             },
             SecretBinding {
                 name: "ANTHROPIC_API_KEY".into(),
                 source: SecretSource::Keystore {
                     address: "anthropic".into(),
                 },
+                destinations: Vec::new(),
             },
             SecretBinding {
                 name: "SEARCH_API_KEY".into(),
                 source: SecretSource::Keystore {
                     address: "search".into(),
                 },
+                destinations: Vec::new(),
             },
             // Resolved elsewhere, so it contributes no destination here.
             SecretBinding {
@@ -386,6 +389,7 @@ mod tests {
                     provider: "vault".into(),
                     path: "kv/token".into(),
                 },
+                destinations: Vec::new(),
             },
         ];
 

@@ -365,6 +365,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }];
         let (sk, _vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");
@@ -386,6 +387,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "echo-key".into(),
             },
+            destinations: Vec::new(),
         }];
         let json = serde_json::to_string(&plan).unwrap();
         let decoded = plan_from_admitted_json(&json).unwrap();
@@ -400,6 +402,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "echo-key".into(),
             },
+            destinations: Vec::new(),
         }];
         // Content-address after the last body edit so the decoded plan matches.
         plan.plan_id = crate::plan::compute_plan_id(&plan);

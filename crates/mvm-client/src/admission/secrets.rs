@@ -29,6 +29,9 @@ impl ResolvedPlanSecrets {
         }
     }
 
+    /// Lower metadata-only references into plan bindings. Each reference's
+    /// destinations ride into the signed plan, where they narrow the stored
+    /// allow-list for this launch.
     #[must_use]
     pub fn from_machine_refs(references: &[MachineSecretRef]) -> Self {
         let bindings = references
@@ -43,6 +46,7 @@ impl ResolvedPlanSecrets {
                         source: SecretSource::Keystore {
                             address: reference.name.clone(),
                         },
+                        destinations: reference.destinations.clone(),
                     })
             })
             .collect();
@@ -191,6 +195,7 @@ fn append_env_bindings(
             source: SecretSource::Keystore {
                 address: reference.name.clone(),
             },
+            destinations: reference.allowed_hosts.clone(),
         });
     }
 }
@@ -280,6 +285,21 @@ mod tests {
         assert_eq!(
             ResolvedPlanSecrets::from_machine_refs(&references),
             lower_workload_secrets(&workload)
+        );
+    }
+
+    #[test]
+    fn declared_destinations_ride_into_the_plan_binding() {
+        let workload = workload_with_secret(SecretMount::Env {
+            var: "API_KEY".to_string(),
+        });
+        let lowered = lower_workload_secrets(&workload);
+        assert_eq!(lowered.secrets[0].destinations, vec!["api.example.com"]);
+        let references = workload_machine_refs(&workload, "local");
+        assert_eq!(
+            ResolvedPlanSecrets::from_machine_refs(&references).secrets[0].destinations,
+            vec!["api.example.com"],
+            "a persistent machine signs the same narrowing a transient run does"
         );
     }
 
