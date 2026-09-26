@@ -15,7 +15,7 @@ pub mod sigv4;
 pub mod substitution;
 
 pub use admission::{AssembleError, HandedPlaceholders, assemble_registry, secret_placeholder_env};
-pub use injector::{InjectError, Injector};
+pub use injector::{InjectError, Injector, SubstitutionObserver};
 /// The binding store lives in `mvm-core` because the launch path reads it too:
 /// the per-VM egress certificate is name-constrained to the same
 /// `allowed_hosts` the keyholder enforces, and the launcher that mints it sits

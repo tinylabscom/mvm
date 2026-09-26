@@ -71,8 +71,13 @@ pub(in crate::commands) enum SecretAction {
         #[arg(long, conflicts_with = "value_file")]
         value: Option<String>,
         /// Read value from a file on disk.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from")]
         value_file: Option<PathBuf>,
+        /// Read the value from where it already lives on this host:
+        /// env://VAR, file:///abs/path, keychain://service/account,
+        /// op://vault/item/field or bw://item/field. Resolved once, now.
+        #[arg(long, value_name = "REF", conflicts_with = "value")]
+        from: Option<String>,
     },
 
     /// Check whether a local secret exists. Never prints the raw
@@ -129,8 +134,13 @@ pub(in crate::commands) enum SecretAction {
         #[arg(long, conflicts_with = "value_file")]
         value: Option<String>,
         /// Read value from a file on disk.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from")]
         value_file: Option<PathBuf>,
+        /// Read the value from where it already lives on this host:
+        /// env://VAR, file:///abs/path, keychain://service/account,
+        /// op://vault/item/field or bw://item/field. Resolved once, now.
+        #[arg(long, value_name = "REF", conflicts_with = "value")]
+        from: Option<String>,
     },
 
     /// List the built-in service providers `--provider` accepts. Static
@@ -193,7 +203,17 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             tenant,
             value,
             value_file,
-        } => cmd_put(service, tenant, name, value, value_file),
+            from,
+        } => cmd_put(
+            service,
+            tenant,
+            name,
+            ValueSource {
+                value,
+                value_file,
+                from,
+            },
+        ),
         SecretAction::Set {
             name,
             tenant,
@@ -205,6 +225,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             service: aws_service,
             value,
             value_file,
+            from,
         } => cmd_set(
             service,
             SetArgs {
@@ -216,8 +237,11 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
                 aws_access_key_id,
                 region,
                 service: aws_service,
-                value,
-                value_file,
+                value: ValueSource {
+                    value,
+                    value_file,
+                    from,
+                },
             },
         ),
         SecretAction::Get { name, tenant } => cmd_get(service, tenant, name),
@@ -235,11 +259,10 @@ fn cmd_put(
     service: &SecretService,
     tenant: String,
     name: String,
-    value: Option<String>,
-    value_file: Option<PathBuf>,
+    value: ValueSource,
 ) -> Result<()> {
-    let raw = resolve_value(value, value_file, &name)?;
-    let outcome = service.put(&tenant, &name, SecretValueInput::new(raw))?;
+    let input = value.resolve(&name)?;
+    let outcome = service.put(&tenant, &name, input)?;
     match outcome {
         PutOutcome::Created => eprintln!("Stored secret '{name}' for tenant '{tenant}'."),
         PutOutcome::Replaced => eprintln!("Replaced secret '{name}' for tenant '{tenant}'."),
@@ -258,8 +281,7 @@ struct SetArgs {
     aws_access_key_id: Option<String>,
     region: Option<String>,
     service: Option<String>,
-    value: Option<String>,
-    value_file: Option<PathBuf>,
+    value: ValueSource,
 }
 
 fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
@@ -273,7 +295,6 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         region,
         service: aws_service,
         value,
-        value_file,
     } = set;
     // Resolve the destination + auth shape BEFORE touching the store, so a
     // rejected provider or a bad SigV4 scope leaves nothing behind.
@@ -285,8 +306,8 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         region,
         aws_service,
     })?;
-    let raw = resolve_value(value, value_file, &name)?;
-    service.put(&tenant, &name, SecretValueInput::new(raw))?;
+    let input = value.resolve(&name)?;
+    service.put(&tenant, &name, input)?;
     // Binding after value: the service refuses to bind a secret with no
     // stored value, so a failed value write never leaves a dangling binding.
     service.bind(
@@ -418,6 +439,9 @@ fn cmd_providers(search: Option<&str>) -> Result<()> {
         if let Some(var) = &p.env_var {
             line.push_str(&format!("\tenv={var}"));
         }
+        if let Some(header) = &p.header {
+            line.push_str(&format!("\theader={header}"));
+        }
         line.push_str(&format!("\t{}", p.description));
         println!("{line}");
     }
@@ -543,6 +567,34 @@ fn cmd_rm(service: &SecretService, tenant: String, name: String) -> Result<()> {
 // Value resolution — flag / stdin / file
 // ============================================================================
 
+/// Where `put` or `set` reads the value from: at most one of an inline value,
+/// a file, or a source reference; none of them prompts.
+struct ValueSource {
+    value: Option<String>,
+    value_file: Option<PathBuf>,
+    from: Option<String>,
+}
+
+impl ValueSource {
+    fn resolve(self, secret_name: &str) -> Result<SecretValueInput> {
+        let Self {
+            value,
+            value_file,
+            from,
+        } = self;
+        match from {
+            Some(reference) => {
+                if value.is_some() || value_file.is_some() {
+                    anyhow::bail!("--from cannot be combined with --value or --value-file");
+                }
+                let source: mvm_client::secret::SecretSource = reference.parse()?;
+                Ok(mvm_client::secret::SourceResolver::host().resolve(&source)?)
+            }
+            None => resolve_value(value, value_file, secret_name).map(SecretValueInput::new),
+        }
+    }
+}
+
 fn resolve_value(
     value: Option<String>,
     value_file: Option<PathBuf>,
@@ -595,6 +647,14 @@ mod tests {
     use mvm_hostd::keyholder::FileBindingStore;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn inline(value: String) -> ValueSource {
+        ValueSource {
+            value: Some(value),
+            value_file: None,
+            from: None,
+        }
+    }
 
     struct Fixture {
         _tmp: TempDir,
@@ -649,8 +709,7 @@ mod tests {
                 aws_access_key_id: None,
                 region: None,
                 service: None,
-                value: Some(value.into()),
-                value_file: None,
+                value: inline(value.into()),
             },
         )
     }
@@ -698,14 +757,46 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     #[test]
+    fn put_from_an_env_source_stores_that_value_and_a_bad_reference_stores_nothing() {
+        let f = fixture();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_TEST_SOURCED_SECRET", "sk-sourced-value");
+        cmd_put(
+            &f.service,
+            "acme".into(),
+            "sourced".into(),
+            ValueSource {
+                value: None,
+                value_file: None,
+                from: Some("env://MVM_TEST_SOURCED_SECRET".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(f.service.list("acme").unwrap().len(), 1);
+
+        let err = cmd_put(
+            &f.service,
+            "acme".into(),
+            "other".into(),
+            ValueSource {
+                value: None,
+                value_file: None,
+                from: Some("op://vault/$(id)/field".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("malformed"), "{err:#}");
+        assert_eq!(f.service.list("acme").unwrap().len(), 1);
+    }
+
+    #[test]
     fn cmd_put_then_ls_shows_name() {
         let f = fixture();
         cmd_put(
             &f.service,
             "acme".into(),
             "api_token".into(),
-            Some("secret-xyz".into()),
-            None,
+            inline("secret-xyz".into()),
         )
         .unwrap();
         let rows = f.service.list("acme").unwrap();
@@ -716,14 +807,7 @@ mod tests {
     #[test]
     fn cmd_rm_after_put_clears_name() {
         let f = fixture();
-        cmd_put(
-            &f.service,
-            "acme".into(),
-            "k".into(),
-            Some("v".into()),
-            None,
-        )
-        .unwrap();
+        cmd_put(&f.service, "acme".into(), "k".into(), inline("v".into())).unwrap();
         cmd_rm(&f.service, "acme".into(), "k".into()).unwrap();
         assert!(f.service.list("acme").unwrap().is_empty());
     }
@@ -870,8 +954,7 @@ mod tests {
                 aws_access_key_id: None,
                 region: None,
                 service: None,
-                value: Some("sk-live-zzz".into()),
-                value_file: None,
+                value: inline("sk-live-zzz".into()),
             },
         )
         .unwrap();
@@ -936,6 +1019,7 @@ mod tests {
             auth: AuthType::Sigv4,
             sigv4_service: None,
             env_var: None,
+            header: None,
             tags: vec![],
         };
         assert!(bad.validate().is_err());
@@ -979,8 +1063,7 @@ mod tests {
                 region: Some("us-east-1".into()),
                 service: Some("s3".into()),
                 // The secret-access-key is the stored value.
-                value: Some("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
-                value_file: None,
+                value: inline("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
             },
         )
         .unwrap();
@@ -1110,8 +1193,7 @@ mod tests {
             &f.service,
             "local".into(),
             "openai".into(),
-            Some("sk-live-zzz".into()),
-            None,
+            inline("sk-live-zzz".into()),
         )
         .unwrap();
         // A persistent machine (spec on disk) declares a reference.
@@ -1147,8 +1229,7 @@ mod tests {
             &f.service,
             "acme".into(),
             "api_token".into(),
-            Some("secret-xyz".into()),
-            None,
+            inline("secret-xyz".into()),
         )
         .unwrap();
         cmd_get(&f.service, "acme".into(), "api_token".into()).unwrap();
@@ -1173,14 +1254,7 @@ mod tests {
         // validate_shell_id before the secret hits disk, AND the
         // audit log must capture the rejection.
         let f = fixture();
-        let err = cmd_put(
-            &f.service,
-            "../etc".into(),
-            "k".into(),
-            Some("v".into()),
-            None,
-        )
-        .unwrap_err();
+        let err = cmd_put(&f.service, "../etc".into(), "k".into(), inline("v".into())).unwrap_err();
         assert!(
             err.to_string().contains("Invalid tenant_id")
                 || err.to_string().contains("alphanumeric")

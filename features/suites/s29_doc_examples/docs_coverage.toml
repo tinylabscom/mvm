@@ -456,6 +456,7 @@ uncovered = [
     "mvmctl secret put api-token --value -",
     "mvmctl secret set agent-workload-smoke --provider anthropic --value -",
     "mvmctl secret set anthropic --provider anthropic",
+    "mvmctl secret set anthropic --provider anthropic --from op://Private/Anthropic/credential",
     "mvmctl secret set anthropic --provider anthropic --value -",
     "mvmctl secret set echo-key --host httpbin.org --type bearer --value -",
     "mvmctl secret set my-api --host api.example.com --type bearer",

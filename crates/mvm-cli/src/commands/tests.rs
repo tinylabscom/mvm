@@ -3551,14 +3551,45 @@ fn secret_put_without_value_source_parses_for_interactive_prompt() {
                     tenant,
                     value,
                     value_file,
+                    from,
                 },
         }) => {
             assert_eq!(name, "api-key");
             assert_eq!(tenant, "local");
             assert!(value.is_none());
             assert!(value_file.is_none());
+            assert!(from.is_none());
         }
         _ => panic!("Expected Secret put command"),
+    }
+}
+
+#[test]
+fn secret_set_takes_a_source_reference_and_refuses_it_beside_an_inline_value() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "secret",
+        "set",
+        "anthropic",
+        "--provider",
+        "anthropic",
+        "--from",
+        "op://Private/Anthropic/credential",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Secret(secret::Args {
+            action: secret::SecretAction::Set { from, .. },
+        }) => assert_eq!(from.as_deref(), Some("op://Private/Anthropic/credential")),
+        _ => panic!("Expected Secret set command"),
+    }
+    for clash in [["--value", "x"], ["--value-file", "/tmp/x"]] {
+        let mut argv = vec!["mvmctl", "secret", "put", "k", "--from", "env://K"];
+        argv.extend(clash);
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "--from beside {clash:?} must be refused"
+        );
     }
 }
 

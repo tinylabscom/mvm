@@ -332,6 +332,15 @@ impl PlaceholderMap {
             .any(|r| host_is_bound(&r.allowed_hosts, host))
     }
 
+    /// Whether any secret in this session puts its value on the wire — a
+    /// bearer or basic credential, rather than a signing key that only ever
+    /// leaves as a signature. Only such a value can come back in a response.
+    pub fn injects_a_credential(&self) -> bool {
+        self.map
+            .values()
+            .any(|r| matches!(r.auth_type, AuthType::Bearer | AuthType::Basic))
+    }
+
     /// Number of recorded placeholders. Session bookkeeping only.
     pub fn len(&self) -> usize {
         self.map.len()

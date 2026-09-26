@@ -101,10 +101,14 @@ A managed secret stays on the host; the guest holds a placeholder. The model is:
 
 1. Store the value and bind it to its destinations with
    `mvmctl secret set <name> --provider <provider>` (or `--host <host>
-   --type <type>` for an uncatalogued destination).
+   --type <type>` for an uncatalogued destination). `--from op://…`,
+   `bw://…`, `keychain://…`, `env://…` or `file://…` reads the value from
+   where it already lives instead of a prompt.
 2. Bind it to a run with `--secret <name>[:HOST,...]` on `mvmctl run` or
-   `mvmctl machine run`, or declare it with `mvm.secret(...)` in an SDK
-   workload and pass the compiled IR with `--from-workload-ir`.
+   `mvmctl machine run`, declare it for every run of a project in `mvm.toml`'s
+   `[secrets]` table (names and destinations only), or declare it with
+   `mvm.secret(...)` in an SDK workload and pass the compiled IR with
+   `--from-workload-ir`.
 3. The guest sees only a normal environment variable holding an opaque
    `mvm-secret-…` placeholder.
 4. The per-VM host network endpoint substitutes the real value into request
@@ -118,7 +122,13 @@ mvmctl secret set anthropic --provider anthropic
 mvmctl machine run --flake . --name agent -d --secret anthropic
 ```
 
-`mvm.toml` has no secret declaration. See the
+```toml
+# mvm.toml
+[secrets]
+anthropic = { hosts = ["api.anthropic.com"] }
+```
+
+See the
 [agent sandbox guide](/guides/agent-sandbox/) for what the guest receives,
 what the host checks, and what the audit chain records.
 

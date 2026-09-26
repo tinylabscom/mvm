@@ -89,6 +89,7 @@ impl SubstitutionService {
             instance_metrics: None,
             admitted: Arc::default(),
             approver: Arc::new(crate::supervisor::egress_approval::NoApprovalBackend),
+            reflection: super::reflection::ReflectionGuard::default(),
         }
     }
 

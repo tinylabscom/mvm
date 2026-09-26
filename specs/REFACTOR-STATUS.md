@@ -24,7 +24,11 @@ Last updated: 2026-09-26
     - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
     - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding
     - [x] `examples/claude-code` binds the key with `--secret`; no raw key in the guest
-    - [ ] secret source references, provider routes, `[secrets]` in `mvm.toml`, OAuth2
+    - [x] response-path scrub of reflected values (`secret.reflection_scrubbed`)
+    - [x] secret source references (`--from env://|file://|keychain://|op://|bw://`)
+    - [x] provider routes with credential headers (gitlab, gemini added)
+    - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
+    - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716

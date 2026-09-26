@@ -233,6 +233,7 @@ removes the installed `mvmctl` and its host binaries too.
 | `mvmctl secret put <name>`                                | Store or replace a local secret using hidden interactive input when stdin is a terminal, or piped stdin otherwise                 |
 | `mvmctl secret put <name> --value -`                      | Store or replace a local secret from stdin                                                                                        |
 | `mvmctl secret put <name> --value-file <path>`            | Store or replace a local secret from a file                                                                                       |
+| `mvmctl secret put <name> --from <ref>`                   | Store a secret read on the host from `env://VAR`, `file:///path`, `keychain://service/account`, `op://vault/item/field` or `bw://item/field`. `set` takes `--from` too|
 | `mvmctl secret put <name> --value <value>`                | Store or replace a local secret from an inline value. Avoid in interactive shells because the value may be saved in shell history |
 | `mvmctl secret set <name> --provider <provider>`          | Store a secret and bind it to a catalogued provider's destinations and auth type                                                  |
 | `mvmctl secret set <name> --host <host> --type <auth>`    | Store a secret and bind it to explicit destinations. Repeat `--host`; `*.` subdomain wildcards supported                          |
@@ -259,7 +260,9 @@ entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
 belong to your account, not to the provider.
 
 `secret providers` also names the environment variable each provider's own
-tooling reads (`env=ANTHROPIC_API_KEY`). `run --secret <name>` and
+tooling reads (`env=ANTHROPIC_API_KEY`) and the header its API reads the
+credential from (`header=x-api-key: <credential>`), which is where the guest's
+client must put the placeholder. `run --secret <name>` and
 `machine run --secret <name>` hand the guest its placeholder under that
 variable; a secret bound with `--host` uses its own name, uppercased. See
 [Agent sandbox](/guides/agent-sandbox/) for the substitution path.

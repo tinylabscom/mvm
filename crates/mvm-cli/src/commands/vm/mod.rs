@@ -32,7 +32,7 @@ pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
 pub(in crate::commands) mod run_routes;
-mod run_secrets;
+pub(in crate::commands) mod run_secrets;
 mod run_validation;
 pub(super) mod runtime_pack;
 pub(super) mod sandbox;

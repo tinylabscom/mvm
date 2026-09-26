@@ -18,6 +18,12 @@
 //! mem = "1024M"
 //! data_disk = "0"
 //! name = "openclaw"       # optional, display only
+//!
+//! # Stored secrets this project binds to every run. Names and destinations
+//! # only — a value is refused by the schema, never read.
+//! [secrets]
+//! anthropic = {}                               # the stored allow-list whole
+//! gitlab = { hosts = ["gitlab.com"] }          # narrowed to these hosts
 //! ```
 //!
 //! The schema is strict: unknown keys are rejected (`deny_unknown_fields`),
@@ -186,6 +192,14 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "ManifestGrants::is_empty")]
     pub grants: ManifestGrants,
 
+    /// Stored secrets every run of this project binds, by name, with the
+    /// destinations each may reach. Names and destinations only: the schema
+    /// has no field a value could go in, and a manifest that tries is refused
+    /// at parse. Merged with `--secret` under the same narrowing rules — a
+    /// flag can narrow a declared secret, never widen it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secrets: std::collections::BTreeMap<String, ManifestSecret>,
+
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
     pub data_disk: String,
@@ -203,6 +217,7 @@ impl Manifest {
     /// Validation runs immediately so broken manifests fail before
     /// any I/O (e.g. before `nix build` is invoked).
     pub fn from_toml_str(text: &str) -> Result<Self> {
+        check_secrets_carry_no_value(text)?;
         let m: Self = toml::from_str(text).context("Failed to parse manifest TOML")?;
         m.validate()?;
         Ok(m)
@@ -343,6 +358,14 @@ impl Manifest {
             validate_template_name(name)
                 .with_context(|| format!("invalid `name` field: {:?}", name))?;
         }
+        for (name, secret) in &self.secrets {
+            crate::crypto::keystore::validate_shell_id(name)
+                .with_context(|| format!("invalid `[secrets]` name {name:?}"))?;
+            for host in &secret.hosts {
+                validate_secret_host(host)
+                    .with_context(|| format!("invalid `[secrets.{name}].hosts` entry {host:?}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -454,6 +477,87 @@ fn validate_volume_spec(spec: &str) -> Result<()> {
         return Err(anyhow!(
             "volume guest path must be absolute (start with '/'): {spec:?}"
         ));
+    }
+    Ok(())
+}
+
+/// Refuse a `[secrets]` table shaped to hold anything but names and hosts,
+/// with an error that quotes none of it.
+///
+/// The typed parse would refuse the same manifests, but its errors quote the
+/// offending text — `invalid type: string "sk-…"` — and a key pasted into a
+/// manifest is exactly the mistake this table invites. So the shape is checked
+/// first, over the untyped document, naming only the secret and the line.
+fn check_secrets_carry_no_value(text: &str) -> Result<()> {
+    let table: toml::Table = match text.parse() {
+        Ok(table) => table,
+        Err(error) if text.contains("[secrets") => {
+            let error: toml::de::Error = error;
+            let line = error
+                .span()
+                .map(|span| text[..span.start.min(text.len())].lines().count().max(1))
+                .unwrap_or(0);
+            return Err(anyhow!(
+                "Failed to parse manifest TOML near line {line}: {}",
+                error.message()
+            ));
+        }
+        // No secrets table: the typed parse reports the error as it always has.
+        Err(_) => return Ok(()),
+    };
+    let Some(secrets) = table.get("secrets") else {
+        return Ok(());
+    };
+    let refuse = |what: &str| {
+        Err(anyhow!(
+            "`[secrets]` {what}; an entry carries only `hosts`, and a secret's value is \
+             stored with `mvmctl secret set`, never in the manifest"
+        ))
+    };
+    let Some(secrets) = secrets.as_table() else {
+        return refuse("must be a table of secret names");
+    };
+    for (name, entry) in secrets {
+        let Some(entry) = entry.as_table() else {
+            return refuse(&format!("entry {name:?} is not a table"));
+        };
+        for (key, value) in entry {
+            let hosts_ok = key == "hosts"
+                && value
+                    .as_array()
+                    .is_some_and(|hosts| hosts.iter().all(toml::Value::is_str));
+            if !hosts_ok {
+                return refuse(&format!("entry {name:?} has a field other than `hosts`"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `[secrets]` entry: where a stored secret may go on this project's runs.
+// allow(secret-debug): destination hosts only; the schema has no field a value can occupy
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSecret {
+    /// Destinations the secret may reach on these runs. Empty keeps the
+    /// stored allow-list whole; entries must each lie inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+}
+
+/// A secret destination is a host name or `*.suffix` wildcard: no port (which
+/// ports are reachable is the network policy's decision), no scheme or path.
+fn validate_secret_host(host: &str) -> Result<()> {
+    if host.trim().is_empty() {
+        return Err(anyhow!("host must not be empty"));
+    }
+    if host.contains(':') {
+        return Err(anyhow!(
+            "name the host only; which ports are reachable is `[grants].allow_hosts`' decision"
+        ));
+    }
+    if host.chars().any(char::is_whitespace) || host.contains('/') {
+        return Err(anyhow!("not a host name"));
     }
     Ok(())
 }
@@ -988,6 +1092,45 @@ mod tests {
         ] {
             let text = format!("{}\n{bad}", minimal_manifest_toml());
             assert!(Manifest::from_toml_str(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_secrets_table_names_secrets_and_their_destinations() {
+        let text = format!(
+            "{}\n[secrets]\nanthropic = {{}}\ngitlab = {{ hosts = [\"gitlab.com\"] }}\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(m.secrets.len(), 2);
+        assert!(m.secrets["anthropic"].hosts.is_empty());
+        assert_eq!(m.secrets["gitlab"].hosts, ["gitlab.com"]);
+    }
+
+    #[test]
+    fn a_secrets_table_has_nowhere_to_put_a_value() {
+        for body in [
+            "[secrets]\nanthropic = { value = \"sk-ant-inline\" }\n",
+            "[secrets]\nanthropic = \"sk-ant-inline\"\n",
+            "[secrets.anthropic]\nhosts = [\"api.anthropic.com\"]\nfrom = \"env://K\"\n",
+            "[secrets]\nanthropic = sk-ant-inline\n",
+        ] {
+            let text = format!("{}\n{body}", minimal_manifest_toml());
+            let err = Manifest::from_toml_str(&text).expect_err(body);
+            assert!(!format!("{err:#}").contains("sk-ant-inline"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn a_secret_destination_with_a_port_or_a_bad_name_is_refused() {
+        for body in [
+            "[secrets]\nanthropic = { hosts = [\"api.anthropic.com:443\"] }\n",
+            "[secrets]\nanthropic = { hosts = [\"https://api.anthropic.com\"] }\n",
+            "[secrets]\nanthropic = { hosts = [\"\"] }\n",
+            "[secrets]\n\"bad name\" = {}\n",
+        ] {
+            let text = format!("{}\n{body}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{body}");
         }
     }
 

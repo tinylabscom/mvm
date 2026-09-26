@@ -8,7 +8,8 @@ use super::prepare::{PreparedFlow, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
     ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
-    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_substituted,
+    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_reflection_scrubbed,
+    emit_secret_substituted,
 };
 
 /// The sorted, de-duplicated category list a `secret.redacted` entry carries.
@@ -200,6 +201,24 @@ impl SubstitutionService {
             .await
         {
             tracing::warn!(error = %e, "host.route.decided audit emit failed");
+        }
+    }
+
+    /// Emit one `secret.reflection_scrubbed` per binding whose value a
+    /// response carried back. Metadata only: the name and how many times,
+    /// never the value. Best-effort, like every entry on this path.
+    pub(super) async fn audit_reflection_scrubbed(
+        &self,
+        counts: &super::reflection::ScrubCounts,
+        destination: Option<&str>,
+    ) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        for (name, count) in counts {
+            if let Err(e) = emit_secret_reflection_scrubbed(recorder, name, dest, *count).await {
+                tracing::warn!(error = %e, "secret.reflection_scrubbed audit emit failed");
+            }
         }
     }
 

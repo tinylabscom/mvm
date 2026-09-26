@@ -153,13 +153,19 @@ Security-bearing gaps first, then the foundations the UX needs:
       carries its destinations in the signed plan, narrowing the stored
       allow-list; one placeholder per binding, refused and audited anywhere
       else; upstream TLS verified, no fallback to relay
-- [ ] secret source references: `env://`, `file://`, `keychain://`, `op://`, `bw://`
-- [ ] provider routes: anthropic, openai, github, gitlab, gemini
-- [ ] `[secrets]` in `mvm.toml` (names + destinations only)
-- [ ] OAuth2 client-credentials and token-response placeholder capture
-- [ ] scrub a substituted value out of the response before it reaches the
-      guest: a destination that echoes request headers hands the real value
-      back today (observed live against an echo endpoint)
+- [x] secret source references: `env://`, `file://`, `keychain://`, `op://`, `bw://`
+      — `secret set|put --from REF`, resolved on the host once when accepted
+- [x] provider routes: anthropic, openai, github, gitlab, gemini — each with
+      its guest variable and credential header, shown by `secret providers`
+- [x] `[secrets]` in `mvm.toml` (names + destinations only), merged with
+      `--secret` so a flag narrows and never widens
+- [ ] OAuth2 client-credentials and token-response placeholder capture —
+      moved to #3743
+- [x] scrub a substituted value out of the response before it reaches the
+      guest: every value substituted in the VM is replaced by its placeholder
+      in response headers and bodies (streaming, split-safe), audited as
+      `secret.reflection_scrubbed`; identity encoding is requested upstream
+      and an encoded response is refused
 - [x] `examples/claude-code` stops putting a raw key in the guest
 
 ### PS-04 — Denial feedback (#3714)

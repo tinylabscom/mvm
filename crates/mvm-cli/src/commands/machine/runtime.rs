@@ -94,8 +94,10 @@ fn persistent_secret_refs(
             .map(|workload| {
                 mvm_client::admission::secrets::workload_machine_refs(&workload, "local")
             });
-    let flagged =
-        mvm_client::admission::run_secrets::resolve_run_secret_flags(&args.run.secret, "local")?;
+    let flagged = mvm_client::admission::run_secrets::resolve_run_secret_specs(
+        crate::commands::vm::run_secrets::merged_secret_specs(&args.run)?,
+        "local",
+    )?;
     if declared.is_none() && flagged.is_empty() {
         return Ok(None);
     }
@@ -445,6 +447,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         memory_mib,
         from_workload_ir: args.run.from_workload_ir.clone(),
         secret_flags: args.run.secret.clone(),
+        manifest_secrets: crate::commands::vm::run_secrets::project_secret_specs(&args.run)?,
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
         machine_name,

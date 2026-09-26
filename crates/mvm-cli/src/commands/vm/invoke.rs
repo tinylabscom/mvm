@@ -60,6 +60,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// Raw `--secret NAME[:HOST,...]` values, bound on top of whatever the
     /// workload IR declares. Resolved before boot, like the IR's own.
     pub secret_flags: Vec<String>,
+    /// The `[secrets]` the run's project manifest declares, merged with
+    /// `secret_flags` under the same narrowing rules.
+    pub manifest_secrets: Vec<mvm_client::admission::run_secrets::RunSecretSpec>,
     /// Explicit ProdSafe agent-verb override to mint into the admitted grant
     /// for the transient entrypoint boot. Empty => use the computed default.
     pub agent_verb_override: Vec<String>,
@@ -470,6 +473,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     let lowered_secrets = mvm_client::admission::run_secrets::resolve_launch_secrets(
         call.from_workload_ir.as_deref(),
         &call.secret_flags,
+        &call.manifest_secrets,
         "local",
     )?;
     let backend_name = if let Some(name) = call.hypervisor.as_deref() {
@@ -2690,6 +2694,7 @@ mod streamed_stdin_tests {
             memory_mib: 256,
             from_workload_ir: None,
             secret_flags: Vec::new(),
+            manifest_secrets: Vec::new(),
             agent_verb_override: Vec::new(),
             caller_commitment: None,
             machine_name: None,

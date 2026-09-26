@@ -19,7 +19,7 @@ pub use mvm_contract::substitution::{
 use rand::Rng;
 use zeroize::Zeroizing;
 
-use super::injector::{InjectError, Injector};
+use super::injector::{InjectError, Injector, SubstitutionObserver};
 use super::resolver::SecretResolver;
 use super::signer::{SignError, Signature, Signer, SigningInput};
 
@@ -79,6 +79,12 @@ impl SubstitutionRegistry {
         self.map.host_is_bound(host)
     }
 
+    /// Whether any secret in this session puts its raw value on the wire.
+    /// See [`PlaceholderMap::injects_a_credential`].
+    pub fn injects_a_credential(&self) -> bool {
+        self.map.injects_a_credential()
+    }
+
     /// The portable half, for a caller that only needs to resolve.
     pub fn as_map(&self) -> &PlaceholderMap {
         &self.map
@@ -112,6 +118,14 @@ impl<'a> NetworkEndpoint<'a> {
             resolver,
             injector: Injector::new(resolver),
         }
+    }
+
+    /// Report every value this endpoint substitutes to `observer`, as it is
+    /// substituted — the response path uses it to recognise a value sent back.
+    #[must_use]
+    pub fn observed_by(mut self, observer: &'a dyn SubstitutionObserver) -> Self {
+        self.injector = self.injector.observed_by(observer);
+        self
     }
 
     /// The `(secret name, auth-type)` a placeholder resolves to — for audit
