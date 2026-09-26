@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -67,6 +67,12 @@ class CopyDirection2(Enum):
 
 
 CopyDirection = Union[CopyDirection1, CopyDirection2]
+
+
+@dataclass
+class EgressTarget:
+    host: str
+    port: int
 
 
 class FsEntryKind(Enum):
@@ -231,6 +237,34 @@ class GuestProcStdinRequest:
 
 
 @dataclass
+class GuestProcStreamCloseReply:
+    pass
+
+
+@dataclass
+class GuestProcStreamCloseRequest:
+    stream: int
+
+
+@dataclass
+class GuestProcStreamNextRequest:
+    stream: int
+    wait_ms: Optional[int] = None
+
+
+@dataclass
+class GuestProcStreamOpenReply:
+    stream: int
+
+
+@dataclass
+class GuestProcStreamOpenRequest:
+    id: str
+    token: str
+    timeout_secs: Optional[int] = None
+
+
+@dataclass
 class GuestProcWaitRequest:
     id: str
     token: str
@@ -300,6 +334,21 @@ InstanceReadiness = Union[
 
 
 @dataclass
+class MachineCreateRequest:
+    image: str
+    name: str
+    backend: Optional[str] = None
+    command: Optional[List[str]] = field(default_factory=lambda: [])
+    cpus: Optional[int] = None
+    egress: Optional[List[EgressTarget]] = None
+    env: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+    force: Optional[bool] = False
+    memory_mib: Optional[int] = None
+    ports: Optional[List[str]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+
+
+@dataclass
 class MachineExecReply:
     exit_code: int
     stderr_b64: str
@@ -320,6 +369,14 @@ class MachineInspectRequest:
     id: str
 
 
+MachineInventoryReply = List[Dict[str, Any]]
+
+
+@dataclass
+class MachineInventoryRequest:
+    pass
+
+
 @dataclass
 class MachineLogsReply:
     data_b64: str
@@ -338,6 +395,11 @@ class MachineRmReply:
 
 @dataclass
 class MachineRmRequest:
+    id: str
+
+
+@dataclass
+class MachineStartRequest:
     id: str
 
 
@@ -390,6 +452,22 @@ class ProcState4(Enum):
 
 
 ProcState = Union[ProcState1, ProcState2, ProcState3, ProcState4]
+
+
+class RunMode1(Enum):
+    transient = 'transient'
+
+
+class RunMode2(Enum):
+    persistent = 'persistent'
+
+
+RunMode = Union[RunMode1, RunMode2]
+
+
+class StreamName(Enum):
+    stdout = 'stdout'
+    stderr = 'stderr'
 
 
 class Kind(Enum):
@@ -497,9 +575,27 @@ class GuestProcStdin:
 
 
 @dataclass
+class GuestProcStreamClose:
+    reply: GuestProcStreamCloseReply
+    request: GuestProcStreamCloseRequest
+
+
+@dataclass
+class GuestProcStreamOpen:
+    reply: GuestProcStreamOpenReply
+    request: GuestProcStreamOpenRequest
+
+
+@dataclass
 class MachineExec:
     reply: MachineExecReply
     request: MachineExecRequest
+
+
+@dataclass
+class MachineInventory:
+    reply: MachineInventoryReply
+    request: MachineInventoryRequest
 
 
 @dataclass
@@ -550,6 +646,27 @@ class GuestProcWaitReply:
     stderr_b64: str
     stdout_b64: str
     truncated: bool
+
+
+@dataclass
+class MachineCreateReply:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
 
 
 @dataclass
@@ -604,6 +721,71 @@ class MachineListRequest:
 
 
 @dataclass
+class MachineRunRequest:
+    image: str
+    backend: Optional[str] = None
+    command: Optional[List[str]] = field(default_factory=lambda: [])
+    cpus: Optional[int] = None
+    egress: Optional[List[EgressTarget]] = None
+    env: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+    force: Optional[bool] = False
+    memory_mib: Optional[int] = None
+    mode: Optional[RunMode] = None
+    name: Optional[str] = None
+    ports: Optional[List[str]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    ttl_seconds: Optional[int] = None
+
+
+@dataclass
+class MachineStartReply:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
+class MachineState:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
+class StreamEvent:
+    data_b64: str
+    stream: StreamName
+
+
+@dataclass
 class GuestFsList:
     reply: GuestFsListReply
     request: GuestFsListRequest
@@ -622,6 +804,12 @@ class GuestProcWait:
 
 
 @dataclass
+class MachineCreate:
+    reply: MachineCreateReply
+    request: MachineCreateRequest
+
+
+@dataclass
 class MachineInspect:
     reply: MachineInspectReply
     request: MachineInspectRequest
@@ -631,6 +819,38 @@ class MachineInspect:
 class MachineList:
     reply: MachineListReply
     request: MachineListRequest
+
+
+@dataclass
+class MachineStart:
+    reply: MachineStartReply
+    request: MachineStartRequest
+
+
+@dataclass
+class GuestProcStreamNextReply:
+    done: bool
+    events: List[StreamEvent]
+    outcome: Optional[WaitOutcome] = None
+
+
+@dataclass
+class MachineRunReply:
+    build_mode: str
+    machine: MachineState
+    plan_id: str
+
+
+@dataclass
+class GuestProcStreamNext:
+    reply: GuestProcStreamNextReply
+    request: GuestProcStreamNextRequest
+
+
+@dataclass
+class MachineRun:
+    reply: MachineRunReply
+    request: MachineRunRequest
 
 
 @dataclass
@@ -649,10 +869,17 @@ class HostAbi:
     guest_proc_signal: GuestProcSignal
     guest_proc_start: GuestProcStart
     guest_proc_stdin: GuestProcStdin
+    guest_proc_stream_close: GuestProcStreamClose
+    guest_proc_stream_next: GuestProcStreamNext
+    guest_proc_stream_open: GuestProcStreamOpen
     guest_proc_wait: GuestProcWait
+    machine_create: MachineCreate
     machine_exec: MachineExec
     machine_inspect: MachineInspect
+    machine_inventory: MachineInventory
     machine_list: MachineList
     machine_logs: MachineLogs
     machine_rm: MachineRm
+    machine_run: MachineRun
+    machine_start: MachineStart
     machine_stop: MachineStop
