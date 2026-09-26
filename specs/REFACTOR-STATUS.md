@@ -3917,3 +3917,5 @@ resume` takes a `current_head` and refuses when it differs from the
             - [x] Wave 0: deletion inventory re-scanned from `main` (80
                   files, four classes); waves re-sequenced to 0.5a/0.5b,
                   1+2, 3, 4.
+            - [ ] Wave 0.5a: initramfs accepted as an image-set role in
+                  `mvm-core`; `image-set/v0.2.1` and its pin pending.

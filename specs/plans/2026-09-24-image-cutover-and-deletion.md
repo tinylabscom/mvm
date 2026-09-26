@@ -339,6 +339,9 @@ need an owner in `mvm-images` first.
       immutable and unused. The role lands in `mvm` first, `mvm-images`
       advances its `mvm` pin to that commit, and the set publishes as
       `image-set/v0.2.1`.
+      *Progress:* the role is in `mvm-core` (`ImageSetRole::Initramfs`,
+      accepted and selectable, not yet in `current_train`); the set release
+      and the pin that adds the requirement follow.
 - [ ] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
       sidecar and initramfs are acquired as members of the locked set —
       digest- and size-checked against the verified root, through the one
