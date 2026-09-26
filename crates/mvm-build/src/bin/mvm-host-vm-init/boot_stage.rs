@@ -1,4 +1,12 @@
-//! Stage 1: PID 1 of the builder boot payload.
+//! How this PID 1 got here, and stage 1 of the builder boot payload.
+//!
+//! A builder guest's PID 1 is this binary in one of three roles
+//! ([`BootRole`]): stage 1, unpacked from the boot payload; stage 2, the same
+//! binary re-executed by stage 1 from its tmpfs copy; or a direct boot from an
+//! image's baked copy. Stages 2 and direct are the builder init proper; they
+//! differ only in what is already mounted ([`PseudoFs`]).
+//!
+//! ## Stage 1
 //!
 //! The kernel unpacks the payload `mvmctl` loaded as the initramfs and runs
 //! its `/init`, which is this binary. Stage 1 turns the payload into the
@@ -52,6 +60,67 @@ pub(crate) fn boot_role(pid: u32, payload_present: bool, stage_env: Option<&str>
     }
 }
 
+/// Which pseudo-filesystems a stage-2 or direct PID 1 still has to mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PseudoFs {
+    /// A direct boot: nothing is mounted yet.
+    MountAll,
+    /// Stage 2 of a payload boot. Stage 1 mounted `/proc`, `/sys`, `/dev`,
+    /// `/run` and `/tmp` and carried them across the pivot; a fresh tmpfs on
+    /// `/run` would hide the payload this process is running from.
+    CarriedByStage1,
+}
+
+/// The mounts every PID 1 needs before anything else, as
+/// `(source, target, fstype)`. `/run` must be a tmpfs: the rootfs is mounted
+/// read-only and runtime state (locks, sockets, pid files) lives there.
+pub(crate) fn base_pseudofs_mounts(
+    pseudo_fs: PseudoFs,
+) -> &'static [(&'static str, &'static str, &'static str)] {
+    const ALL: &[(&str, &str, &str)] = &[
+        ("proc", "/proc", "proc"),
+        ("sysfs", "/sys", "sysfs"),
+        ("devtmpfs", "/dev", "devtmpfs"),
+        ("tmpfs", "/tmp", "tmpfs"),
+        ("tmpfs", "/run", "tmpfs"),
+    ];
+    match pseudo_fs {
+        PseudoFs::MountAll => ALL,
+        PseudoFs::CarriedByStage1 => &[],
+    }
+}
+
+/// PID 1's `PATH`: the payload's copies first, so a builder booted from the
+/// payload resolves `mvm-host-vm-init` and `mvm-builderd` to the copies the
+/// running `mvmctl` supplied rather than stale ones an older image baked;
+/// then the builder image's layout (busybox at `/bin/*`, extra packages at
+/// `/sbin/*` and `/usr/local/bin/*`). The payload directory does not exist on
+/// a direct boot and is skipped.
+pub(crate) fn pid1_path() -> String {
+    format!(
+        "{}:/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin",
+        mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR
+    )
+}
+
+/// Run PID 1 in the role this process finds itself in.
+#[cfg(target_os = "linux")]
+pub(crate) fn run_pid1() -> std::process::ExitCode {
+    let payload_manifest = Path::new("/")
+        .join(mvm_build::builder_boot::PAYLOAD_DIR_IN_INITRAMFS)
+        .join(mvm_build::builder_boot::PAYLOAD_MANIFEST_NAME);
+    let stage = std::env::var(mvm_build::builder_boot::STAGE_ENV).ok();
+    match boot_role(
+        std::process::id(),
+        payload_manifest.is_file(),
+        stage.as_deref(),
+    ) {
+        BootRole::Stage1 => run(),
+        BootRole::Stage2 => crate::linux::run(PseudoFs::CarriedByStage1),
+        BootRole::Direct => crate::linux::run(PseudoFs::MountAll),
+    }
+}
+
 /// Why stage 1 stopped.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Stage1Refusal {
@@ -100,7 +169,7 @@ pub(crate) fn check_image(root: &Path) -> Result<BuilderBootAbi, Stage1Refusal> 
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::run;
+use linux::run;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -268,6 +337,36 @@ mod tests {
             assert!(!line.contains('\n'), "{line}");
         }
         assert!(refusal_line(&refusals[0]).contains("/dev/vda"));
+    }
+
+    #[test]
+    fn a_direct_boot_mounts_the_base_pseudo_filesystems() {
+        let targets: Vec<&str> = base_pseudofs_mounts(PseudoFs::MountAll)
+            .iter()
+            .map(|(_, target, _)| *target)
+            .collect();
+        assert_eq!(targets, ["/proc", "/sys", "/dev", "/tmp", "/run"]);
+    }
+
+    /// Stage 1 carried these across the pivot. A second `/run` tmpfs would
+    /// hide the payload binaries stage 2 is executing from.
+    #[test]
+    fn stage2_mounts_nothing_stage1_carried_across() {
+        assert!(base_pseudofs_mounts(PseudoFs::CarriedByStage1).is_empty());
+        for (_, target, _) in base_pseudofs_mounts(PseudoFs::MountAll) {
+            assert!(
+                mvm_agentd::guest_mount::PIVOT_MOVED_MOUNTS.contains(target),
+                "{target} is skipped in stage 2 but stage 1 does not carry it"
+            );
+        }
+    }
+
+    #[test]
+    fn pid1_resolves_the_payload_copies_first() {
+        let path = pid1_path();
+        let first = path.split(':').next().unwrap();
+        assert_eq!(first, mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR);
+        assert!(path.contains(":/sbin:"), "{path}");
     }
 
     /// Stage 2 runs from the payload's tmpfs copy, so the directory it lives

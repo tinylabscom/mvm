@@ -133,12 +133,13 @@ fn admit_source_builder_image(
     choice: BuilderBackendChoice,
     bootstrap: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    // libkrun and Firecracker boot the Stage 0 image as-is, so a stale one is
-    // rebuilt before the job rather than run. HVF boots a re-baked copy
-    // resolved by its own resolver.
+    // Every builder that boots the Stage 0 image as-is admits it the same way,
+    // so a stale one is rebuilt before the job rather than run.
     if matches!(
         choice,
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Firecracker
+        BuilderBackendChoice::Libkrun
+            | BuilderBackendChoice::Firecracker
+            | BuilderBackendChoice::Hvf
     ) {
         bootstrap().context("admitting the current source builder VM image")?;
     }
@@ -186,15 +187,17 @@ mod tests {
         assert!(called.get());
     }
 
+    /// HVF boots the image as built, like Firecracker, now that no patched
+    /// copy stands in for it.
     #[test]
-    fn hvf_uses_its_dedicated_image_resolver() {
+    fn hvf_shell_jobs_admit_the_current_source_image() {
         let called = Cell::new(false);
         admit_source_builder_image(BuilderBackendChoice::Hvf, || {
             called.set(true);
             Ok(())
         })
-        .expect("hvf skips source builder bootstrap");
-        assert!(!called.get());
+        .expect("source image admission");
+        assert!(called.get());
     }
 
     #[test]
