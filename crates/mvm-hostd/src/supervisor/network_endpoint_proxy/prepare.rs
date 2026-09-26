@@ -141,9 +141,9 @@ pub(super) const UNPARSEABLE_DESTINATION: &str = "unparseable";
 /// The reason a request carrying a placeholder in its URL is refused.
 const REASON_PLACEHOLDER_IN_URL: &str = "placeholder_in_url";
 /// The reason a request carrying a placeholder in its body is refused.
-pub(super) const REASON_PLACEHOLDER_IN_BODY: &str = "placeholder_in_body";
+pub(crate) const REASON_PLACEHOLDER_IN_BODY: &str = "placeholder_in_body";
 /// What the workload is told when it sends a placeholder outside a header.
-pub(super) const PLACEHOLDER_OUTSIDE_HEADERS: &str = "a secret placeholder is substituted only in a request header; refusing a request \
+pub(crate) const PLACEHOLDER_OUTSIDE_HEADERS: &str = "a secret placeholder is substituted only in a request header; refusing a request \
      that carries one elsewhere";
 
 /// Finds a minted placeholder in a body that arrives in chunks, including one

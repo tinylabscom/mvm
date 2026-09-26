@@ -57,6 +57,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// ephemeral VM is admitted so the host spawns the substitution endpoint;
     /// the guest only ever holds the opaque `mvm-secret-<hex>` placeholder.
     pub from_workload_ir: Option<PathBuf>,
+    /// Raw `--secret NAME[:HOST,...]` values, bound on top of whatever the
+    /// workload IR declares. Resolved before boot, like the IR's own.
+    pub secret_flags: Vec<String>,
     /// Explicit ProdSafe agent-verb override to mint into the admitted grant
     /// for the transient entrypoint boot. Empty => use the computed default.
     pub agent_verb_override: Vec<String>,
@@ -464,8 +467,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     ui::info(&format!(
         "entrypoint: booting {lifecycle_label} for template '{template_id}'"
     ));
-    let lowered_secrets =
-        mvm_client::admission::secrets::resolve_workload_secrets(call.from_workload_ir.as_deref())?;
+    let lowered_secrets = mvm_client::admission::run_secrets::resolve_launch_secrets(
+        call.from_workload_ir.as_deref(),
+        &call.secret_flags,
+        "local",
+    )?;
     let backend_name = if let Some(name) = call.hypervisor.as_deref() {
         mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(name)?;
         mvm_runtime::backend::AnyBackend::from_hypervisor(name)
@@ -2683,6 +2689,7 @@ mod streamed_stdin_tests {
             cpus: 1,
             memory_mib: 256,
             from_workload_ir: None,
+            secret_flags: Vec::new(),
             agent_verb_override: Vec::new(),
             caller_commitment: None,
             machine_name: None,

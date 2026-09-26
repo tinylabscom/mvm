@@ -2038,6 +2038,7 @@ mod tests {
             source: mvm_core::plan::SecretSource::Keystore {
                 address: "addr".to_string(),
             },
+            destinations: Vec::new(),
         };
         let admitted = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("acme")

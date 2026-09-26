@@ -97,24 +97,30 @@ fn with_config_and_secrets(
 
 ## Managed Secrets
 
-`mvmctl machine run` has no `--secret` flag (removed).
+A managed secret stays on the host; the guest holds a placeholder. The model is:
 
-Use `mvmctl secret put` to store local secret refs, then bind those refs
-through `mvm.toml` or the SDKs. That is the supported path for managed
-secrets.
+1. Store the value and bind it to its destinations with
+   `mvmctl secret set <name> --provider <provider>` (or `--host <host>
+   --type <type>` for an uncatalogued destination).
+2. Bind it to a run with `--secret <name>[:HOST,...]` on `mvmctl run` or
+   `mvmctl machine run`, or declare it with `mvm.secret(...)` in an SDK
+   workload and pass the compiled IR with `--from-workload-ir`.
+3. The guest sees only a normal environment variable holding an opaque
+   `mvm-secret-…` placeholder.
+4. The per-VM host network endpoint substitutes the real value into request
+   headers bound for the secret's destinations — including HTTPS requests an
+   ordinary client tunnels with `CONNECT`, which the endpoint terminates under
+   a per-VM certificate the guest trusts. Traffic to any other destination is
+   relayed without being opened.
 
-The managed-secret model is:
+```bash
+mvmctl secret set anthropic --provider anthropic
+mvmctl machine run --flake . --name agent -d --secret anthropic
+```
 
-1. Store a secret ref locally with `mvmctl secret put <name>`
-2. Declare that ref in `mvm.toml` or with `mvm.secret(...)`
-3. The guest sees only a normal env var name with an opaque token
-4. Host-mediated broker verbs such as `mvm.web_fetch` and `mvm.web_search`
-   release the real value at request time when policy allows it. These are
-   host-side broker tool names, not functions exported by the Python or
-   TypeScript SDK.
-
-Managed secret refs are host-mediated only. Guest HTTPS CONNECT egress
-is not a substitution path.
+`mvm.toml` has no secret declaration. See the
+[agent sandbox guide](/guides/agent-sandbox/) for what the guest receives,
+what the host checks, and what the audit chain records.
 
 ## Design
 

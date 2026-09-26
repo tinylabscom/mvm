@@ -1380,6 +1380,7 @@ mod tests {
             source: crate::plan::SecretSource::Keystore {
                 address: "api-key".into(),
             },
+            destinations: Vec::new(),
         }];
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.secrets, inp.secrets);

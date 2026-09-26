@@ -1717,6 +1717,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "test-key".into(),
             },
+            destinations: Vec::new(),
         }
     }
 

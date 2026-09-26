@@ -106,13 +106,19 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] enforcement only in `EgressGate`; every decision audited with route id and rule
 
 ### PS-03 — Credential injection UX (#3713)
-- [ ] `--secret NAME[:HOST,...]` on `run` and `machine run` (finish #3333), fail-closed before boot
-- [ ] host TLS termination for plan-bound destinations only
+- [x] `--secret NAME[:HOST,...]` on `run` and `machine run` (finish #3333), fail-closed before boot
+- [x] host TLS termination for plan-bound destinations only — each plan binding
+      carries its destinations in the signed plan, narrowing the stored
+      allow-list; one placeholder per binding, refused and audited anywhere
+      else; upstream TLS verified, no fallback to relay
 - [ ] secret source references: `env://`, `file://`, `keychain://`, `op://`, `bw://`
 - [ ] provider routes: anthropic, openai, github, gitlab, gemini
 - [ ] `[secrets]` in `mvm.toml` (names + destinations only)
 - [ ] OAuth2 client-credentials and token-response placeholder capture
-- [ ] `examples/claude-code` stops putting a raw key in the guest
+- [ ] scrub a substituted value out of the response before it reaches the
+      guest: a destination that echoes request headers hands the real value
+      back today (observed live against an echo endpoint)
+- [x] `examples/claude-code` stops putting a raw key in the guest
 
 ### PS-04 — Denial feedback (#3714)
 - [ ] live, deduplicated egress denials on the host with the correct remedy per reason, plus an exit summary

@@ -136,6 +136,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -256,6 +257,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),

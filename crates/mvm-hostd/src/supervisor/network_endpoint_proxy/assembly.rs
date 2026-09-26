@@ -348,6 +348,7 @@ mod server_tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }];
         let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
@@ -406,6 +407,7 @@ mod server_tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }];
 
         // A policy that opts api.openai.com into entropy redaction. After

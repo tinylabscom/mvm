@@ -11,6 +11,10 @@ Last updated: 2026-09-25
   - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
   - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
+    - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
+    - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding
+    - [x] `examples/claude-code` binds the key with `--secret`; no raw key in the guest
+    - [ ] secret source references, provider routes, `[secrets]` in `mvm.toml`, OAuth2
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716

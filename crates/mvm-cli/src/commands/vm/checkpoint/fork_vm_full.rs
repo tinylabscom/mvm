@@ -722,6 +722,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "stripe".to_string(),
             },
+            destinations: Vec::new(),
         }];
         let got = admitted_child_secrets(&declared, "child-declared");
         assert_eq!(got, declared);

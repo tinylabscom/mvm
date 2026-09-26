@@ -699,6 +699,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             std::path::Path::new("/tmp/x"),
         );
@@ -800,6 +801,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             dir.path(),
         );
@@ -946,6 +948,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             dir.path(),
         );
@@ -995,6 +998,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             dir.path(),
         );
@@ -1030,6 +1034,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             dir.path(),
         );

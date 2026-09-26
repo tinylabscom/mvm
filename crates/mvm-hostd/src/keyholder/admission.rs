@@ -6,7 +6,7 @@
 //! carries only the name + source (the lowering dropped the egress binding), so
 //! the auth-type and destination allow-list are read back from the local
 //! [`BindingStore`] (`mvmctl secret set` metadata), keyed by the secret's
-//! keystore address.
+//! keystore address, and narrowed to the destinations the plan binding names.
 //!
 //! Returns the registry plus a `(guest-facing name → placeholder)` list the
 //! caller hands to the guest (env/file injection) so the workload sends the
@@ -70,6 +70,12 @@ pub fn assemble_registry(
             .ok_or_else(|| AssembleError::NoBinding {
                 name: address.clone(),
             })?;
+        // The placeholder is valid only where the signed plan says: the stored
+        // allow-list, narrowed to the binding's own destinations when it names
+        // any. A plan naming a destination outside the stored allow-list is
+        // refused here rather than widened.
+        let allowed_hosts =
+            mvm_core::crypto::secret_binding::plan_binding_hosts(b, address, &meta)?;
         // `mount` is irrelevant to substitution (which keys on name/auth/hosts);
         // record the guest-facing name so the placeholder reaches the right env
         // slot when handed to the guest.
@@ -79,7 +85,7 @@ pub fn assemble_registry(
                 var: b.name.clone(),
             },
             auth_type: meta.auth_type,
-            allowed_hosts: meta.allowed_hosts,
+            allowed_hosts,
             // Non-secret SigV4 scope from the operator-set binding; the
             // forward-path signer reads it to name the credential. None for
             // every non-SigV4 secret.
@@ -104,6 +110,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: address.into(),
             },
+            destinations: Vec::new(),
         }
     }
 
@@ -182,6 +189,84 @@ mod tests {
         assert_eq!(params.service, "s3");
     }
 
+    fn store_with_two_hosts(dir: &std::path::Path) -> FileBindingStore {
+        let store = FileBindingStore::with_dir(dir);
+        store
+            .put(
+                "local",
+                "anthropic",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.anthropic.com".into(), "platform.claude.com".into()],
+                    sigv4: None,
+                    provider: Some("anthropic".into()),
+                },
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_placeholder_is_scoped_to_the_destinations_its_plan_binding_names() {
+        let dir = tempdir().unwrap();
+        let store = store_with_two_hosts(dir.path());
+        let mut binding = keystore_binding("ANTHROPIC_API_KEY", "anthropic");
+        binding.destinations = vec!["api.anthropic.com".into()];
+        let (registry, handed) = assemble_registry(&[binding], "local", &store).unwrap();
+        let secret_ref = registry.resolve(handed[0].1.as_str()).unwrap();
+        assert_eq!(secret_ref.allowed_hosts, vec!["api.anthropic.com"]);
+        assert!(registry.host_is_bound("api.anthropic.com"));
+        assert!(
+            !registry.host_is_bound("platform.claude.com"),
+            "a stored host the plan did not name is not bound for this run"
+        );
+    }
+
+    #[test]
+    fn a_plan_binding_that_widens_the_stored_allow_list_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = store_with_two_hosts(dir.path());
+        let mut binding = keystore_binding("ANTHROPIC_API_KEY", "anthropic");
+        binding.destinations = vec!["api.anthropic.com".into(), "collector.evil.test".into()];
+        let err = assemble_registry(&[binding], "local", &store)
+            .expect_err("a plan must not widen a stored binding");
+        assert!(err.to_string().contains("collector.evil.test"), "{err}");
+    }
+
+    #[test]
+    fn two_bindings_mint_two_placeholders_each_valid_only_for_its_own_destination() {
+        let dir = tempdir().unwrap();
+        let store = store_with_two_hosts(dir.path());
+        store
+            .put(
+                "local",
+                "github",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.github.com".into()],
+                    sigv4: None,
+                    provider: Some("github".into()),
+                },
+            )
+            .unwrap();
+        let mut anthropic = keystore_binding("ANTHROPIC_API_KEY", "anthropic");
+        anthropic.destinations = vec!["api.anthropic.com".into()];
+        let github = keystore_binding("GITHUB_TOKEN", "github");
+        let (registry, handed) = assemble_registry(&[anthropic, github], "local", &store).unwrap();
+        assert_eq!(handed.len(), 2);
+        assert_ne!(handed[0].1, handed[1].1, "each binding gets its own token");
+        let first = registry.resolve(handed[0].1.as_str()).unwrap();
+        let second = registry.resolve(handed[1].1.as_str()).unwrap();
+        assert!(!mvm_contract::ir::host_is_bound(
+            &first.allowed_hosts,
+            "api.github.com"
+        ));
+        assert!(!mvm_contract::ir::host_is_bound(
+            &second.allowed_hosts,
+            "api.anthropic.com"
+        ));
+    }
+
     #[test]
     fn fails_closed_when_a_secret_has_no_local_binding() {
         let dir = tempdir().unwrap();
@@ -201,6 +286,7 @@ mod tests {
                 provider: "vault".into(),
                 path: "kv/x".into(),
             },
+            destinations: Vec::new(),
         }];
         let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();
         assert!(handed.is_empty());

@@ -46,10 +46,13 @@ pub mod vsock;
 
 pub use assembly::{FromPlanError, FromPlanInputs};
 pub(crate) use classify::TerminationMode;
+#[cfg(test)]
+pub(crate) use forward::TestTransport;
 pub use forward::{
     ForwardError, ForwardResponse, ForwardStreamResponse, Forwarder, HardenedForwarder,
 };
 pub use ingress::HostMaterialError;
+pub(crate) use prepare::{PLACEHOLDER_OUTSIDE_HEADERS, REASON_PLACEHOLDER_IN_BODY};
 pub use prepare::{ProxyError, prepare_request};
 
 /// 16 MiB cap on a single routed request/response frame.

@@ -31,6 +31,7 @@ pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
+mod run_secrets;
 mod run_validation;
 pub(super) mod runtime_pack;
 pub(super) mod sandbox;

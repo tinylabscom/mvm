@@ -802,6 +802,7 @@ pub(in crate::commands) fn parse_declared_secrets(
                 source: mvm_core::plan::SecretSource::Keystore {
                     address: address.to_string(),
                 },
+                destinations: Vec::new(),
             })
         })
         .collect()
@@ -1329,9 +1330,13 @@ fn resolve_fork_secret_audit(
                         "secret {address:?} has no binding in child tenant {tenant:?}; bind it for that tenant before forking"
                     )
                 })?;
+            // What the child's endpoint will enforce: the stored allow-list,
+            // narrowed by the binding's own destinations.
             Ok(mvm_hostd::audit::bind::CheckpointForkSecretBinding {
                 name: binding.name.clone(),
-                allowed_hosts: metadata.allowed_hosts,
+                allowed_hosts: mvm_core::crypto::secret_binding::plan_binding_hosts(
+                    binding, address, &metadata,
+                )?,
             })
         })
         .collect()
@@ -1421,6 +1426,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: address.into(),
             },
+            destinations: Vec::new(),
         }
     }
 
@@ -1602,6 +1608,7 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "kv/stripe".to_string(),
                 },
+                destinations: Vec::new(),
             },
             SecretBinding {
                 name: "DB_PASSWORD".to_string(),
@@ -1609,6 +1616,7 @@ mod tests {
                     provider: "vault".to_string(),
                     path: "secret/db".to_string(),
                 },
+                destinations: Vec::new(),
             },
         ];
         mvm_hostd::audit::plan_persist::write_plan("secretful-parent", &plan).unwrap();
@@ -1650,6 +1658,7 @@ mod tests {
                 provider: "vault".to_string(),
                 path: "secret/very/specific/path".to_string(),
             },
+            destinations: Vec::new(),
         }];
         mvm_hostd::audit::plan_persist::write_plan("p-vm", &plan).unwrap();
 

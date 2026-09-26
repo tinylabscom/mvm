@@ -30,7 +30,8 @@ use super::read::{ReadError, read_http_request};
 use super::request::{method_of, proxy_request_from_connect_authority};
 use super::tls::{is_framing_header, reason_phrase, server_config_for_sni, smuggles_crlf};
 use crate::supervisor::network_endpoint_proxy::{
-    ForwardStreamResponse, SubstitutionService, TerminationMode,
+    ForwardStreamResponse, PLACEHOLDER_OUTSIDE_HEADERS, REASON_PLACEHOLDER_IN_BODY,
+    SubstitutionService, TerminationMode,
 };
 
 /// Status written back when the request's `Host` disagrees with the authority
@@ -321,6 +322,14 @@ impl TerminatedFlow {
                 }
             };
             let method = request.method.clone();
+            if mvm_contract::substitution::contains_minted_placeholder(&request.body) {
+                // The whole body is already in hand, so a placeholder in it is
+                // refused before the forward leg exists at all — not partway
+                // through a send whose headers already carried the credential.
+                self.audit(REASON_PLACEHOLDER_IN_BODY);
+                write_refusal(io, BAD_GATEWAY, PLACEHOLDER_OUTSIDE_HEADERS, Some(&method))?;
+                return Ok(());
+            }
             let head = HttpFlowHead {
                 method: request.method,
                 url: request.url,
@@ -655,23 +664,46 @@ mod tests {
         }
     }
 
-    struct Harness {
+    /// A service assembled the way the endpoint assembles one, over whatever
+    /// forward leg the test supplies.
+    struct Assembled {
         service: Arc<SubstitutionService>,
-        forwarder: Arc<RecordingForwarder>,
-        placeholder: String,
+        /// One minted placeholder per binding, in binding order.
+        placeholders: Vec<String>,
         intermediate_pem: String,
         audit_path: std::path::PathBuf,
         audit_key: ed25519_dalek::VerifyingKey,
         _dir: tempfile::TempDir,
     }
 
-    impl Harness {
+    impl Assembled {
         /// The chain-signed audit log, verified before it is read, so a test
         /// asserting on an entry is also asserting the chain still holds.
         fn audit_chain(&self) -> String {
             crate::supervisor::audit_file::verify_audit_chain(&self.audit_path, &self.audit_key)
                 .expect("audit chain verifies");
             std::fs::read_to_string(&self.audit_path).expect("read audit chain")
+        }
+    }
+
+    /// One secret bound to one destination pattern, as a harness mints it.
+    struct Bound<'a> {
+        secret: &'a str,
+        pattern: &'a str,
+    }
+
+    /// The common case: one secret, a recording forward leg.
+    struct Harness {
+        assembled: Assembled,
+        forwarder: Arc<RecordingForwarder>,
+        placeholder: String,
+    }
+
+    impl std::ops::Deref for Harness {
+        type Target = Assembled;
+
+        fn deref(&self) -> &Assembled {
+            &self.assembled
         }
     }
 
@@ -688,39 +720,65 @@ mod tests {
     /// As [`harness`], with the secret bound to — and the certificate minted
     /// from — `pattern` rather than [`BOUND_HOST`].
     fn harness_bound_to(pattern: &str, admitted: &str, response_body: &[u8]) -> Harness {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
-        store
-            .put(
-                TENANT,
-                "model-api",
-                &SecretBox::new(Box::new(REAL_SECRET.to_string())),
-            )
-            .expect("seed secret store");
-        let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(
-            TENANT,
-            Arc::new(store) as Arc<dyn SecretStore>,
-        ));
-
-        let mut registry = SubstitutionRegistry::new();
-        let placeholder = registry
-            .mint(SecretRef {
-                name: "model-api".into(),
-                mount: SecretMount::Env {
-                    var: "API_KEY".into(),
-                },
-                auth_type: AuthType::Bearer,
-                allowed_hosts: vec![pattern.to_string()],
-                sigv4: None,
-            })
-            .as_str()
-            .to_string();
-
         let forwarder = Arc::new(RecordingForwarder {
             seen: Mutex::new(None),
             body: response_body.to_vec(),
             fail_after_send: std::sync::atomic::AtomicBool::new(false),
         });
+        let assembled = assemble(
+            &[Bound {
+                secret: "model-api",
+                pattern,
+            }],
+            &[admitted],
+            forwarder.clone(),
+        );
+        let placeholder = assembled.placeholders[0].clone();
+        Harness {
+            assembled,
+            forwarder,
+            placeholder,
+        }
+    }
+
+    /// Assemble a service over the real registry, resolver, claim-10 gate and
+    /// chain-signed recorder, with a per-VM egress intermediate minted over
+    /// every bound pattern and `admitted` the hosts the network policy allows
+    /// on 443. Every secret resolves to [`REAL_SECRET`] suffixed with its name,
+    /// so a test can tell which credential reached the wire.
+    fn assemble(
+        bound: &[Bound<'_>],
+        admitted: &[&str],
+        forwarder: Arc<dyn Forwarder>,
+    ) -> Assembled {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        let mut registry = SubstitutionRegistry::new();
+        let mut placeholders = Vec::with_capacity(bound.len());
+        for binding in bound {
+            let value = if binding.secret == "model-api" {
+                REAL_SECRET.to_string()
+            } else {
+                format!("{REAL_SECRET}-{}", binding.secret)
+            };
+            store
+                .put(TENANT, binding.secret, &SecretBox::new(Box::new(value)))
+                .expect("seed secret store");
+            let placeholder = registry.mint(SecretRef {
+                name: binding.secret.into(),
+                mount: SecretMount::Env {
+                    var: "API_KEY".into(),
+                },
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec![binding.pattern.to_string()],
+                sigv4: None,
+            });
+            placeholders.push(placeholder.as_str().to_string());
+        }
+        let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(
+            TENANT,
+            Arc::new(store) as Arc<dyn SecretStore>,
+        ));
 
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let audit_key = signing_key.verifying_key();
@@ -732,7 +790,8 @@ mod tests {
         // Through the production delivery, so the certificate a guest is handed
         // and the key the endpoint terminates under are the ones the launch path
         // actually ships rather than a look-alike minted here.
-        let delivery = mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&[pattern])
+        let patterns: Vec<&str> = bound.iter().map(|b| b.pattern).collect();
+        let delivery = mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&patterns)
             .expect("mint the per-VM egress ca");
         let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::from_pem(
             delivery.cert_pem(),
@@ -743,20 +802,20 @@ mod tests {
 
         // Nothing is ever dialed: the forward leg is a double, and the gate pins
         // the admitted name without DNS.
+        let admitted: Vec<(&str, u16)> = admitted.iter().map(|host| (*host, 443)).collect();
         let service = SubstitutionService::new(
             Arc::new(registry),
             resolver,
-            forwarder.clone(),
-            gate_admitting(&[(admitted, 443)]),
+            forwarder,
+            gate_admitting(&admitted),
         )
         .with_tenant(TENANT)
         .with_recorder(recorder)
         .with_tls_intermediate(intermediate);
 
-        Harness {
+        Assembled {
             service: Arc::new(service),
-            forwarder,
-            placeholder,
+            placeholders,
             intermediate_pem,
             audit_path,
             audit_key,
@@ -819,7 +878,7 @@ mod tests {
     /// Drive one request through a terminated TLS flow, exactly as an
     /// unmodified HTTPS client would: handshake against the minted leaf, send
     /// an origin-form request, read the response back.
-    fn exchange(harness: &Harness, request: &[u8]) -> Vec<u8> {
+    fn exchange(harness: &Assembled, request: &[u8]) -> Vec<u8> {
         exchange_trusting(harness, &harness.intermediate_pem.clone(), request)
             .expect("the guest's tls client completes its handshake")
     }
@@ -828,7 +887,11 @@ mod tests {
     ///
     /// `None` when the handshake never completed — which is the answer a client
     /// that was delivered some other VM's certificate must get.
-    fn exchange_trusting(harness: &Harness, trusted_pem: &str, request: &[u8]) -> Option<Vec<u8>> {
+    fn exchange_trusting(
+        harness: &Assembled,
+        trusted_pem: &str,
+        request: &[u8],
+    ) -> Option<Vec<u8>> {
         exchange_with(harness, BOUND_HOST, trusted_pem, request).ok()
     }
 
@@ -837,7 +900,7 @@ mod tests {
     /// A handshake that never completed is an `Err` carrying what each side
     /// reported: the guest client's error and the terminator's own result.
     fn exchange_with(
-        harness: &Harness,
+        harness: &Assembled,
         host: &str,
         trusted_pem: &str,
         request: &[u8],
@@ -1037,6 +1100,8 @@ mod tests {
     /// and the one that could substitute never saw a tunnel — which is why
     /// whether a request was substituted used to depend on which variable the
     /// workload's toolchain happened to read.
+    mod destination_scope;
+
     #[test]
     fn a_client_configured_from_the_proxy_environment_gets_the_substituted_credential() {
         let vm = harness(BOUND_HOST, b"{\"ok\":true}");
