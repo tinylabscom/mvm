@@ -50,13 +50,18 @@ What `import mvm` gives you on a developer's machine. Two halves:
   `json-schema-to-typescript` for TypeScript) into `_ir`, `_protocol`,
   `_runtime`. `xtask check-stubs` fails on drift. Adding a language here is a
   new `StubArtifact` generator target — mechanical.
-- **Hand-written facade.** `_cli`, `_machine`, `_sandbox`, `_session`,
-  `_subprocess`, `audit`, `host`, the decorator/DSL surface. These wrap the
-  `mvmctl` binary via subprocess; they are **not** FFI bindings. This is where
-  the real per-language cost lives, and none of it is generated today.
+- **Host-library binding.** `_hostlib` loads `libmvm_hostlib` (the C ABI over
+  `mvm-client`, `crates/mvm-hostlib`) and exposes one `call(method, request)`.
+  The method table and request/reply types are generated from the library's
+  registry, like the other stubs. No SDK runs `mvmctl`; `xtask
+  check-no-cli-shellout` holds that line.
+- **Hand-written facade.** `_machine`, `_sandbox`, `_session`, `audit`,
+  `host`, the decorator/DSL surface. These map idiomatic calls onto library
+  methods. This is where the real per-language cost lives.
 
 So a new language costs: one codegen target (cheap) + one hostsvc shim (cheap) +
-one facade (the actual work).
+one host-library loader (a C ABI of four functions, cheap) + one facade (the
+actual work).
 
 ## The risk this plan must not create
 
@@ -116,6 +121,6 @@ encodes the old names.
 ## Out of scope
 
 Nothing here changes the trust posture. Surface A is untrusted-guest code by
-construction and surface B shells out to `mvmctl`, which performs its own
-admission. A binding that appears to need a new host-side capability is a
+construction and surface B calls `libmvm_hostlib`, whose launch methods admit
+through `mvm-client`'s signed-plan path. A binding that appears to need a new host-side capability is a
 finding to raise, not to implement inside this work.
