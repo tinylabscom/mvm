@@ -128,6 +128,19 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 pub struct HardenedForwarder {
     timeout_secs: u64,
     proxy: Option<mvm_http::ProxyConfig>,
+    /// A test's stand-in for the network: where names resolve, and which
+    /// anchors the upstream certificate is verified against. Verification
+    /// itself is never switched off — a test that wants a failure supplies an
+    /// anchor the upstream does not chain to.
+    #[cfg(test)]
+    test_transport: Option<TestTransport>,
+}
+
+/// See [`HardenedForwarder::with_test_transport`].
+#[cfg(test)]
+pub(crate) struct TestTransport {
+    pub(crate) resolver: std::sync::Arc<dyn mvm_http::resolve::Resolve>,
+    pub(crate) roots: rustls::RootCertStore,
 }
 
 impl HardenedForwarder {
@@ -135,7 +148,30 @@ impl HardenedForwarder {
         Ok(Self {
             timeout_secs,
             proxy: None,
+            #[cfg(test)]
+            test_transport: None,
         })
+    }
+
+    /// Resolve every name through `transport.resolver` and verify upstream
+    /// certificates against `transport.roots` instead of the platform store,
+    /// so a test can put a real TLS server behind a public name without DNS.
+    #[cfg(test)]
+    pub(crate) fn with_test_transport(mut self, transport: TestTransport) -> Self {
+        self.test_transport = Some(transport);
+        self
+    }
+
+    fn client_builder(&self) -> mvm_http::ClientBuilder {
+        let builder = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref());
+        #[cfg(test)]
+        let builder = match &self.test_transport {
+            Some(transport) => builder
+                .resolver(std::sync::Arc::clone(&transport.resolver))
+                .root_store(transport.roots.clone()),
+            None => builder,
+        };
+        builder
     }
 
     /// Route the forward leg through an operator-configured upstream proxy.
@@ -152,7 +188,8 @@ impl HardenedForwarder {
     ) -> Result<ForwardStreamResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
+        let client = self
+            .client_builder()
             .max_response_bytes(MAX_FORWARD_RESPONSE_BYTES as u64)
             .build()
             .map_err(|e| ForwardError::Failed(e.to_string()))?;
