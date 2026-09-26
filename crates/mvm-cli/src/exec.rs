@@ -748,6 +748,11 @@ fn run_inner(
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
+    // Answer the endpoint's `ask` decisions for as long as the run is in the
+    // foreground. The wasm tier has no network endpoint to ask.
+    let _approvals =
+        (backend.name() != "wasm").then(|| crate::approval::serve_for(&vm_name, req.pty));
+
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
     // exit status instead of waiting for a vsock console.

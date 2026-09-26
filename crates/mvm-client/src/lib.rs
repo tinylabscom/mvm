@@ -43,6 +43,7 @@
 //! ```
 
 pub mod admission;
+pub mod approval_broker;
 pub mod audit;
 pub mod boot;
 pub mod connect;
