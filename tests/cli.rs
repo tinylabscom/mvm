@@ -208,7 +208,7 @@ fn explain_help_lists_run_id_and_json() {
     );
     assert!(help.contains("--json"), "help is missing --json:\n{help}");
     assert!(
-        help.contains("egress it was refused"),
+        help.contains("egress refusals"),
         "help does not say explain reports egress refusals:\n{help}"
     );
 }
@@ -226,7 +226,7 @@ fn machine_logs_follow_help_mentions_egress_refusals() {
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(
-        help.contains("printing each egress refusal as it"),
+        help.contains("Follow output and egress refusals live"),
         "`machine logs --help` does not say --follow shows egress refusals:\n{help}"
     );
 }

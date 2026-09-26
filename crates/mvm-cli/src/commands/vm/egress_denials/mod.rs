@@ -23,6 +23,7 @@ mod watch;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -78,6 +79,17 @@ impl PendingWatch {
         }
     }
 
+    /// The watch a transient run arms from its admission. Refusals print as
+    /// they happen, except where a stray line would corrupt the session (a
+    /// raw-mode PTY) or the caller asked for one JSON document.
+    pub(in crate::commands) fn for_run(json: bool, pty: bool) -> Rc<Self> {
+        Rc::new(Self::new(if json || pty {
+            Live::Quiet
+        } else {
+            Live::Notices
+        }))
+    }
+
     /// Start watching `vm_name`. A second call — a retried boot under a new
     /// name — replaces the first watch.
     pub(in crate::commands) fn arm(&self, vm_name: &str) {
@@ -95,6 +107,19 @@ impl PendingWatch {
             .take()
             .map(DenialWatch::finish)
             .unwrap_or_default()
+    }
+
+    /// [`Self::finish`], printing the exit summary unless `print` is false.
+    ///
+    /// Called as soon as the workload returns — before its outputs are
+    /// collected and before a nonzero exit ends the process — so the summary
+    /// is the last thing the run says about egress.
+    pub(in crate::commands) fn finish_and_summarize(&self, print: bool) -> DenialTally {
+        let tally = self.finish();
+        if print {
+            print_summary(&tally, &Stderr);
+        }
+        tally
     }
 }
 
@@ -176,5 +201,12 @@ mod tests {
     #[test]
     fn an_unarmed_watch_finishes_empty() {
         assert!(PendingWatch::new(Live::Quiet).finish().is_empty());
+    }
+
+    #[test]
+    fn a_json_or_pty_run_watches_quietly() {
+        assert_eq!(PendingWatch::for_run(true, false).live, Live::Quiet);
+        assert_eq!(PendingWatch::for_run(false, true).live, Live::Quiet);
+        assert_eq!(PendingWatch::for_run(false, false).live, Live::Notices);
     }
 }
