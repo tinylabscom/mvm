@@ -3040,6 +3040,7 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+ "zeroize",
 ]
 
 [[package]]
@@ -3053,6 +3054,7 @@ dependencies = [
  "ed25519-dalek",
  "ext4-view",
  "flate2",
+ "globset",
  "hex",
  "mvm-agentd",
  "mvm-build",
@@ -3064,6 +3066,7 @@ dependencies = [
  "mvm-sdk",
  "mvm-vmm",
  "rand 0.10.2",
+ "schemars",
  "secrecy",
  "serde",
  "serde_jcs",
@@ -3073,6 +3076,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]

@@ -749,6 +749,10 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
+    let admit_workload_dir = mvm_client::instruction_trust::gate::local_workload_dir(
+        args.flake.as_deref(),
+        args.manifest.as_deref(),
+    );
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -772,6 +776,9 @@ pub(in crate::commands) fn run_secure_with_source(
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            instructions: mvm_client::admission::InstructionSources::for_workload(
+                admit_workload_dir.as_deref(),
+            ),
             outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",

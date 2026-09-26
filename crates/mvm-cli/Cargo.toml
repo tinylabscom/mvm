@@ -58,6 +58,9 @@ sha2.workspace = true
 tar.workspace = true
 flate2.workspace = true
 hex.workspace = true
+# Wipes a `trust instructions sign --key` secret-key file's bytes from memory
+# once the signing key is built. Already in the closure through mvm-core.
+zeroize.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 notify = { workspace = true, optional = true }
@@ -167,6 +170,7 @@ dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
     "mvm-runtime/manifest-verify",
     "mvm-core/manifest-verify",
+    "mvm-client/manifest-verify",
 ]
 template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # Forwards to `mvm-runtime/test-support` + `mvm-client/test-support`: the

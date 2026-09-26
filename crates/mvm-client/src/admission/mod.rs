@@ -37,6 +37,7 @@ use self::policy::{
 pub mod agent_verbs;
 mod audit;
 pub mod entrypoint_resolve;
+pub mod instructions;
 pub mod policy;
 pub mod policy_resolver;
 pub mod run_grants;
@@ -44,6 +45,8 @@ pub mod run_network;
 pub mod run_routes;
 pub mod run_secrets;
 pub mod secrets;
+
+pub use instructions::InstructionSources;
 
 /// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
 /// directory tree the run binds by content identity without attaching it
@@ -202,6 +205,11 @@ pub struct AdmitPlanForBootParams<'a> {
     /// [`backend_name`](Self::backend_name) — a name is a label, and a grant
     /// checked against a label is checked against whatever the caller typed.
     pub backend_kind: Option<mvm_contract::protocol::vm_backend::BackendKind>,
+    /// Where instruction-file provenance looks beyond `shares` and `assets`:
+    /// the workload's own source directory, and an override for the user
+    /// policy. Every instruction file the boot copies into the guest is
+    /// verified against that policy before the boot is admitted.
+    pub instructions: InstructionSources<'a>,
 }
 
 /// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
@@ -505,6 +513,12 @@ pub fn admit_plan_for_boot_with_ingress(
         caller_assets.push(mvm_core::plan::AssetIdentity::new(spec.kind, name, digest)?);
     }
 
+    // Instruction files the boot copies into the guest, verified against the
+    // operator's provenance policy now — before signing — so a broken policy
+    // or an unreadable input fails here. The verdicts are recorded, and the
+    // policy enforced, once the plan exists to bind them to.
+    let instruction_report = instructions::evaluate(&shares, &p.assets, p.instructions)?;
+
     // The resolved network policy's identity: the plan pins policies by
     // reference name, so the caller adds the resolved bytes' hash — an
     // operator comparing identities sees which exact policy content was
@@ -706,6 +720,10 @@ pub fn admit_plan_for_boot_with_ingress(
             return Err(err);
         }
     };
+
+    if let Some(report) = &instruction_report {
+        instructions::record_and_enforce(&emitter, admitted.plan(), report)?;
+    }
 
     // A sealed-production run that cannot record its admission does not boot.
     // The chain can prove nothing was altered among the entries it holds, but
@@ -1278,7 +1296,7 @@ mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
-    fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
+    pub(super) fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");
         let mut f = std::fs::File::create(&path).expect("create rootfs");
         f.write_all(bytes).expect("write rootfs");
@@ -1332,11 +1350,12 @@ mod admit_plan_tests {
 
     /// A minimal admission that really runs — signs, verifies, burns a nonce.
     /// Callers override only the fields their assertion is about.
-    fn pinning_params<'a>(
+    pub(super) fn pinning_params<'a>(
         rootfs: &'a std::path::Path,
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
         AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1406,6 +1425,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
             keys_dir: Some(keys_dir.path()),
@@ -1446,6 +1466,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
             keys_dir: Some(keys_dir.path()),
@@ -1476,6 +1497,7 @@ mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1542,6 +1564,7 @@ mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1623,6 +1646,7 @@ mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                instructions: Default::default(),
                 outputs: Vec::new(),
                 network_mode: mode,
                 grants: None,
@@ -1680,6 +1704,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1715,6 +1740,7 @@ mod admit_plan_tests {
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1764,6 +1790,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1891,6 +1918,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -1952,6 +1980,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -2023,6 +2052,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -2135,6 +2165,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2196,6 +2227,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2261,6 +2293,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2315,6 +2348,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2378,6 +2412,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2437,6 +2472,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2488,6 +2524,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
@@ -2567,6 +2604,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: true,
@@ -2596,6 +2634,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: false,
@@ -2615,6 +2654,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: true,
@@ -2672,6 +2712,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: true,
@@ -2692,6 +2733,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             restrict_agent_verbs: false,
@@ -2888,6 +2930,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -2995,6 +3038,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -3168,6 +3212,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -3235,6 +3280,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
@@ -3277,3 +3323,7 @@ allow_hosts = ["localhost:8443"]
         );
     }
 }
+
+#[cfg(test)]
+#[path = "instruction_admission_tests.rs"]
+mod instruction_admission_tests;
