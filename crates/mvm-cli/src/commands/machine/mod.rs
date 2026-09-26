@@ -617,6 +617,13 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
+    if !args.run.allow_endpoint.is_empty() {
+        bail!(
+            "--allow-endpoint is not yet supported on a persistent machine: its routes \
+             would not be recorded beside the spec, so a restart would drop them. Use a \
+             transient `run`/`machine run` without --name, or --allow-host"
+        );
+    }
     let config = mvm_core::user_config::load(None);
     let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
@@ -1244,6 +1251,13 @@ fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
         .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
     let manifest = Manifest::read_file(&manifest_path)
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
+    if !manifest.network.routes.is_empty() {
+        bail!(
+            "{} declares [[network.routes]], which a persistent machine does not record yet; \
+             a restart would drop them. Run it transiently, or remove the routes",
+            manifest_path.display()
+        );
+    }
     let workflow = manifest.machine_workflow().ok_or_else(|| {
         anyhow!(
             "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"

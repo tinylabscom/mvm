@@ -316,6 +316,8 @@ impl Manifest {
         for entry in &self.network.allow_hosts {
             parse_allow_host(entry)?;
         }
+        mvm_contract::policy::routes::RouteSet::new(self.network.routes.clone())
+            .context("invalid `[[network.routes]]`")?;
         // Two authored allow-lists are two answers to one question, and
         // whichever the enforcement path happens to read becomes the real
         // policy. Refuse the ambiguity instead of picking a winner silently.
@@ -464,11 +466,16 @@ pub struct ManifestNetwork {
     /// Optional AI egress metering and budget policy for this workload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiPolicy>,
+    /// Endpoint routes: what a request to a destination may do, by method and
+    /// path (`[[network.routes]]`). A route host is admitted as if
+    /// allow-listed. See `mvm_contract::policy::routes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<mvm_contract::policy::routes::EgressRoute>,
 }
 
 impl ManifestNetwork {
     fn is_empty(&self) -> bool {
-        self.allow_hosts.is_empty() && self.ai.is_none()
+        self.allow_hosts.is_empty() && self.ai.is_none() && self.routes.is_empty()
     }
 }
 
@@ -961,6 +968,27 @@ mod tests {
             mem = "1024M"
             data_disk = "0"
         "#
+    }
+
+    #[test]
+    fn network_routes_parse_and_validate() {
+        let text = format!(
+            "{}\n[[network.routes]]\nid = \"github\"\nhost = \"api.github.com\"\nintercept = true\nrules = [{{ method = \"GET\", path = \"/repos/org/**\", outcome = \"allow\" }}]\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(m.network.routes.len(), 1);
+        assert_eq!(m.network.routes[0].port, 443);
+        assert!(m.network.routes[0].intercept);
+
+        for bad in [
+            "[[network.routes]]\nid = \"g\"\nhost = \"api.github.com\"\nupstream = \"http://x\"\n",
+            "[[network.routes]]\nid = \"g\"\nhost = \"*.com\"\n",
+            "[[network.routes]]\nid = \"g\"\nhost = \"api.github.com\"\nrules = [{ path = \"repos\", outcome = \"allow\" }]\n",
+        ] {
+            let text = format!("{}\n{bad}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

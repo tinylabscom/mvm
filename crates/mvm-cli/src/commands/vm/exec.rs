@@ -292,6 +292,9 @@ pub(in crate::commands) struct RunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Allow one HTTP endpoint only, e.g. GET https://h/p/**.
+    #[arg(long = "allow-endpoint", value_name = "[METHOD ]URL")]
+    pub allow_endpoint: Vec<String>,
     /// Cap total AI tokens for this run.
     #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
     pub ai_token_budget: Option<u64>,
@@ -504,6 +507,7 @@ impl Default for RunArgs {
             net: false,
             network_preset: None,
             allow_host: Vec::new(),
+            allow_endpoint: Vec::new(),
             ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
@@ -693,10 +697,12 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
     let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
+    let routes = super::run_routes::launch_routes(&args)?;
+    let allow_host = routes.with_allow_host(&args.allow_host);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
-        allow_host: &args.allow_host,
+        allow_host: &allow_host,
         peer: &args.peer,
         net: args.net,
         network_preset: args.network_preset,
@@ -705,7 +711,10 @@ pub(in crate::commands) fn run_secure_with_source(
         config: &host_config,
         ai: ai_policy.as_ref(),
     })?;
-    let network_policy = resolved_grants.network_policy.clone();
+    let network_policy = resolved_grants
+        .network_policy
+        .clone()
+        .with_routes(routes.routes.clone());
     let admit_secrets = super::run_secrets::admitted_run_secrets(&mut args)?;
 
     // Every transient run is admitted as a locally-signed workload (uniform
