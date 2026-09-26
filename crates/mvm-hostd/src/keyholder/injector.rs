@@ -34,15 +34,33 @@ pub enum InjectError {
     NonUtf8Value,
 }
 
+/// Told about every value the injector puts on the wire, at the moment it
+/// does, so a response carrying one back can be recognised. The value is
+/// borrowed for the call only.
+pub trait SubstitutionObserver: Sync {
+    fn substituted(&self, secret: &SecretRef, placeholder: &str, value: &str);
+}
+
 /// The injecting keyholder. Borrows a [`SecretResolver`] for the value
 /// source.
 pub struct Injector<'a> {
     resolver: &'a dyn SecretResolver,
+    observer: Option<&'a dyn SubstitutionObserver>,
 }
 
 impl<'a> Injector<'a> {
     pub fn new(resolver: &'a dyn SecretResolver) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            observer: None,
+        }
+    }
+
+    /// Report every substituted value to `observer`.
+    #[must_use]
+    pub fn observed_by(mut self, observer: &'a dyn SubstitutionObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Substitute `placeholder` in `text` with the secret's resolved value,
@@ -69,6 +87,9 @@ impl<'a> Injector<'a> {
         let value = self.resolver.resolve(r)?;
         let value =
             std::str::from_utf8(value.expose_secret()).map_err(|_| InjectError::NonUtf8Value)?;
+        if let Some(observer) = self.observer {
+            observer.substituted(r, placeholder, value);
+        }
         // The output carries the raw credential — hand it back zeroizing so
         // the caller's copy wipes on drop.
         Ok(Zeroizing::new(mvm_contract::substitution::substitute_into(

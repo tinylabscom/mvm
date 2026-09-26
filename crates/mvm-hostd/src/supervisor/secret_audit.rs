@@ -171,6 +171,29 @@ pub async fn emit_secret_flow_refused(
         .await
 }
 
+/// Emit `secret.reflection_scrubbed { name, destination, count }` — a response
+/// from `destination` carried the value substituted for `name`, `count` times,
+/// and each occurrence was replaced by the binding's placeholder before the
+/// response reached the workload. Name and count only; never the value.
+pub async fn emit_secret_reflection_scrubbed(
+    recorder: &Recorder,
+    secret_name: &str,
+    destination: &str,
+    count: u64,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.reflection_scrubbed",
+            [
+                ("name".to_string(), secret_name.to_string()),
+                ("destination".to_string(), destination.to_string()),
+                ("count".to_string(), count.to_string()),
+            ],
+        )
+        .await
+}
+
 /// Emit one `secret.rewrite_proof` metadata record for an owned replace or
 /// reinject event. The digests are keyed HMACs of the original and rewritten
 /// bytes; no plaintext crosses the audit chain.

@@ -36,6 +36,7 @@ mod pinned_dns;
 mod pipeline;
 mod prepare;
 mod redaction;
+mod reflection;
 mod routing;
 mod sign;
 
@@ -110,6 +111,9 @@ pub struct SubstitutionService {
     /// Answers `ask` route decisions. [`crate::supervisor::egress_approval::NoApprovalBackend`]
     /// until an approval backend is configured, which refuses every one.
     approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
+    /// Every credential value substituted so far in this VM, so a response
+    /// that echoes one back is scrubbed before it reaches the guest.
+    reflection: reflection::ReflectionGuard,
 }
 
 #[cfg(test)]

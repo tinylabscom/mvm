@@ -1137,6 +1137,7 @@ mod tests {
     /// workload's toolchain happened to read.
     mod destination_scope;
     mod endpoint_routes;
+    mod reflection;
 
     #[test]
     fn a_client_configured_from_the_proxy_environment_gets_the_substituted_credential() {

@@ -282,7 +282,8 @@ impl SubstitutionService {
         // Per-request endpoint: two refs, cheap; the registry is read-only
         // after admission minted its placeholders.
         let registry: &SubstitutionRegistry = &self.registry;
-        let endpoint = NetworkEndpoint::new(registry, self.resolver.as_ref());
+        let endpoint =
+            NetworkEndpoint::new(registry, self.resolver.as_ref()).observed_by(&self.reflection);
         // Capture audit metadata (name + auth-type per substituted secret, and
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
@@ -402,6 +403,11 @@ impl SubstitutionService {
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
         let mut req = req;
+        if self.registry.injects_a_credential() {
+            // A value this VM substitutes can come back in a response, which
+            // has to be readable to be scrubbed. Ask for it unencoded.
+            super::reflection::request_identity_encoding(&mut req.headers);
+        }
         let mut replacement_flow = self
             .replacement_engine
             .start_flow(&self.tenant, &replacement_action);
