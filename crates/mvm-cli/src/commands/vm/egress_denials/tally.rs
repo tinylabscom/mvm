@@ -166,7 +166,7 @@ impl DenialTally {
                     .join(", ")
             ));
         }
-        let named_only = allow_targets(&rows, |kind| matches!(kind, DenialKind::NamedOnly { .. }));
+        let named_only = allow_targets(&rows, DenialKind::is_named_only);
         if !named_only.is_empty() {
             lines.push(
                 "denied by default, and admitted only by naming each exactly — do so only if \

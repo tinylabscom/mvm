@@ -4,36 +4,13 @@
 //! The reason is the fixed label the endpoint wrote into the chain-signed
 //! entry. The destination only refines it where the label is the generic
 //! `policy_denied` and the destination is an address literal in a restricted
-//! range — see [`restricted_address_label`]. For a destination no grant can
-//! ever admit — cloud
-//! metadata, loopback, link-local, the SSH port — there is no remedy to offer:
-//! naming a flag would suggest the refusal is a missing permission when it is
-//! the boundary working.
+//! range — see [`restricted_class`]. For a destination no grant can ever
+//! admit — cloud metadata, loopback, link-local, the SSH port — there is no
+//! remedy to offer: naming a flag would suggest the refusal is a missing
+//! permission when it is the boundary working.
 
+use mvm_contract::policy::restricted_address::{RestrictedClass, classify as classify_address};
 use serde::{Deserialize, Serialize};
-
-/// Restricted-address classes no grant re-admits, with how each reads to an
-/// operator. The labels are the ones the egress gate records.
-const NEVER_REACHABLE: &[(&str, &str)] = &[
-    ("cloud_metadata", "cloud instance-metadata endpoint"),
-    ("loopback", "loopback address"),
-    ("unspecified", "unspecified address"),
-    ("link_local", "link-local address"),
-    ("shared_address_space", "carrier-grade NAT address"),
-    (
-        "embedded_restricted",
-        "restricted address embedded in an IPv6 prefix",
-    ),
-];
-
-/// Restricted-address classes denied by default that a grant naming the exact
-/// address re-admits.
-const NAMED_ONLY: &[(&str, &str)] = &[
-    ("private_range", "private address range"),
-    ("unique_local", "IPv6 unique-local address"),
-    ("multicast", "multicast address"),
-    ("reserved", "reserved or broadcast address"),
-];
 
 /// Refusal labels that are not a decision about the destination: a flow that
 /// was admitted and then failed to connect. Shown nowhere as a denial.
@@ -42,62 +19,17 @@ const NOT_A_DENIAL: &[&str] = &["connect_failed"];
 /// TCP/22 is refused whatever the policy says; SSH never reaches a workload.
 const SSH_PORT: u16 = 22;
 
-/// The restricted-address class of `host` when it is an address literal, as
-/// the gate labels it.
+/// The restricted-address class of `host` when it is an address literal, by
+/// the same classifier the egress gate decides with.
 ///
 /// The gate records a restricted address under its own class label, and that
-/// label is what [`DenialKind::classify`] reads first. A gate that records the
-/// generic `policy_denied` for one says nothing the remedy can rely on, so the
+/// label is what [`DenialKind::classify`] reads first. A refusal recorded under
+/// the generic `policy_denied` says nothing the remedy can rely on, so the
 /// address itself decides: a notice must never offer an allow for the
 /// metadata service because the recorded word was not specific enough.
-pub(in crate::commands) fn restricted_address_label(host: &str) -> Option<&'static str> {
-    use std::net::IpAddr;
+pub(in crate::commands) fn restricted_class(host: &str) -> Option<RestrictedClass> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let ip: IpAddr = host.parse().ok()?;
-    match mvm_contract::policy::network_policy::unmap_v4_mapped(ip) {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let label = if octets == [169, 254, 169, 254] || octets == [100, 100, 100, 200] {
-                "cloud_metadata"
-            } else if v4.is_loopback() {
-                "loopback"
-            } else if octets[0] == 0 {
-                "unspecified"
-            } else if v4.is_link_local() {
-                "link_local"
-            } else if octets[0] == 100 && octets[1] & 0xc0 == 0x40 {
-                "shared_address_space"
-            } else if v4.is_private() {
-                "private_range"
-            } else if v4.is_multicast() {
-                "multicast"
-            } else if octets[0] >= 240 {
-                "reserved"
-            } else {
-                return None;
-            };
-            Some(label)
-        }
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            let label = if v6.segments() == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254] {
-                "cloud_metadata"
-            } else if v6.is_loopback() {
-                "loopback"
-            } else if v6.is_unspecified() {
-                "unspecified"
-            } else if first & 0xffc0 == 0xfe80 {
-                "link_local"
-            } else if first & 0xfe00 == 0xfc00 {
-                "unique_local"
-            } else if v6.is_multicast() {
-                "multicast"
-            } else {
-                return None;
-            };
-            Some(label)
-        }
-    }
+    classify_address(host.parse().ok()?)
 }
 
 /// What the host decided, in terms of what can be done about it.
@@ -105,10 +37,9 @@ pub(in crate::commands) fn restricted_address_label(host: &str) -> Option<&'stat
 pub(in crate::commands) enum DenialKind {
     /// The network policy does not admit the destination.
     NotAllowed,
-    /// A restricted address no grant can re-admit.
-    NeverReachable { label: &'static str },
-    /// A restricted address denied unless the grant names it exactly.
-    NamedOnly { label: &'static str },
+    /// A restricted address: never reachable, or denied unless a grant names
+    /// it exactly, as its class says.
+    Restricted(RestrictedClass),
     /// The SSH port, banned outright.
     SshPort,
     /// More connection attempts than this VM's rate limit allows.
@@ -167,17 +98,15 @@ impl DenialKind {
             return None;
         }
         let generic = matches!(inputs.label, "policy_denied" | "refused");
-        let label = match inputs.host.and_then(restricted_address_label) {
-            Some(class) if generic => class,
-            _ => inputs.label,
-        };
-        if let Some((label, _)) = NEVER_REACHABLE.iter().find(|(l, _)| *l == label) {
-            return Some(Self::NeverReachable { label });
+        let class = RestrictedClass::from_label(inputs.label).or_else(|| {
+            generic
+                .then(|| inputs.host.and_then(restricted_class))
+                .flatten()
+        });
+        if let Some(class) = class {
+            return Some(Self::Restricted(class));
         }
-        if let Some((label, _)) = NAMED_ONLY.iter().find(|(l, _)| *l == label) {
-            return Some(Self::NamedOnly { label });
-        }
-        let kind = match label {
+        let kind = match inputs.label {
             "policy_denied" | "refused" if inputs.port == Some(SSH_PORT) => Self::SshPort,
             "policy_denied" | "refused" => Self::NotAllowed,
             "rate_limited" => Self::RateLimited,
@@ -208,15 +137,9 @@ impl DenialKind {
 
     /// A few words on why, for the line that reports the refusal.
     pub(in crate::commands) fn describe(&self) -> String {
-        let table = |label: &str, rows: &[(&str, &'static str)]| {
-            rows.iter()
-                .find(|(l, _)| *l == label)
-                .map_or("restricted address", |(_, text)| *text)
-        };
         match self {
             Self::NotAllowed => "not in the allow-list".into(),
-            Self::NeverReachable { label } => table(label, NEVER_REACHABLE).into(),
-            Self::NamedOnly { label } => table(label, NAMED_ONLY).into(),
+            Self::Restricted(class) => class.describe().into(),
             Self::SshPort => "SSH port".into(),
             Self::RateLimited => "connection rate limit".into(),
             Self::Malformed => "unparseable destination".into(),
@@ -247,14 +170,14 @@ impl DenialKind {
                     text: "the network policy does not admit it".into(),
                 },
             },
-            Self::NamedOnly { .. } => match allow_target {
+            Self::Restricted(class) if class.readmittable() => match allow_target {
                 Some(target) => Remedy::NameExplicitly { flag: flag(target) },
                 None => Remedy::Never {
                     why: "denied by default; only a grant naming the exact address admits it"
                         .into(),
                 },
             },
-            Self::NeverReachable { .. } => Remedy::Never {
+            Self::Restricted(_) => Remedy::Never {
                 why: "never reachable from a workload; no grant admits it".into(),
             },
             Self::SshPort => Remedy::Never {
@@ -313,6 +236,12 @@ impl DenialKind {
     /// one re-run command.
     pub(in crate::commands) fn is_plain_allow(&self) -> bool {
         matches!(self, Self::NotAllowed)
+    }
+
+    /// Whether it is denied by default and admitted only by a grant naming
+    /// the exact address — listed apart from the plain allows.
+    pub(in crate::commands) fn is_named_only(&self) -> bool {
+        matches!(self, Self::Restricted(class) if class.readmittable())
     }
 }
 
@@ -476,7 +405,7 @@ mod tests {
         }
         assert_eq!(
             classify("cloud_metadata", Some(80)).describe(),
-            "cloud instance-metadata endpoint"
+            "a cloud instance-metadata endpoint"
         );
     }
 
@@ -492,7 +421,7 @@ mod tests {
     #[test]
     fn a_private_range_says_it_must_be_named_explicitly() {
         let kind = classify("private_range", Some(5432));
-        assert_eq!(kind.describe(), "private address range");
+        assert_eq!(kind.describe(), "an RFC1918 private range");
         let remedy = kind.remedy(Some("10.0.0.5:5432"));
         assert_eq!(
             remedy,
@@ -504,6 +433,7 @@ mod tests {
         assert!(text.contains("naming it exactly"), "{text}");
         assert!(!text.starts_with("allow with"), "{text}");
         assert!(!kind.is_plain_allow());
+        assert!(kind.is_named_only());
     }
 
     #[test]
@@ -569,21 +499,16 @@ mod tests {
         ] {
             let kind = classify_at(host);
             assert!(
-                matches!(kind, DenialKind::NeverReachable { .. }),
+                matches!(kind, DenialKind::Restricted(class) if !class.readmittable()),
                 "{host}: {kind:?}"
             );
         }
         assert_eq!(
             classify_at("169.254.169.254"),
-            DenialKind::NeverReachable {
-                label: "cloud_metadata"
-            }
+            DenialKind::Restricted(RestrictedClass::CloudMetadata)
         );
         for host in ["10.0.0.5", "192.168.1.1", "172.16.0.1", "[fd12::1]"] {
-            assert!(
-                matches!(classify_at(host), DenialKind::NamedOnly { .. }),
-                "{host}"
-            );
+            assert!(classify_at(host).is_named_only(), "{host}");
         }
         assert_eq!(classify_at("93.184.216.34"), DenialKind::NotAllowed);
         assert_eq!(classify_at("api.example.com"), DenialKind::NotAllowed);

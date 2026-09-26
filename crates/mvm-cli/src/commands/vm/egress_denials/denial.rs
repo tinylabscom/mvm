@@ -243,7 +243,7 @@ pub(super) mod tests {
         let notice = d.notice();
         assert!(
             notice.starts_with(
-                "egress blocked: 169.254.169.254:80 (cloud instance-metadata endpoint) — never"
+                "egress blocked: 169.254.169.254:80 (a cloud instance-metadata endpoint) — never"
             ),
             "{notice}"
         );
