@@ -203,9 +203,17 @@ kept out of the allow command and named apart.
 
 A run with no egress at all — the default: no `--net`, no `--allow-host`, no
 `--secret`, no published port — starts no network endpoint. The guest has no
-channel to ask for a destination on, the host decides nothing, and there is
-nothing to print; the guest's own `Could not resolve host` is the signal. Add
-the destination and run again:
+channel to ask for a destination on and the host decides nothing, so there is
+no refusal to report. When such a run fails, one line after its output says
+it was offline:
+
+```text
+curl: (6) Could not resolve host: api.example.com
+[mvm] this run had no network access (the default); if the workload needed it, allow destinations with --allow-host HOST:PORT
+```
+
+A run that succeeds prints nothing extra, and `--json` reports `"network":
+"none"` instead of the line. Add the destination and run again:
 
 ```sh
 mvmctl run --allow-host api.example.com:443 -- curl -sS https://api.example.com/
@@ -230,8 +238,9 @@ refusals have none, and the notice says so rather than offering a flag:
 A restricted address the host recorded under the generic `policy_denied` is
 still read by its address, so the metadata service is never offered an allow.
 
-With `mvmctl run --json`, nothing prints live; the summary's records are in the
-document's `egress_denials` array, each with the destination, the recorded
+With `mvmctl run --json`, nothing prints live; the document's `network` field
+is `none` or `granted`, and the summary's records are in its `egress_denials`
+array, each with the destination, the recorded
 event and reason, a count, first and last timestamps, and a `remedy` whose
 `kind` is `allow_host`, `name_explicitly`, `edit_route`, `never` or `advice`.
 An interactive `--pty` run also prints nothing live, because a line written

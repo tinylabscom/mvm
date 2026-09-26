@@ -27,6 +27,10 @@ pub(super) struct RunJsonSummary {
     /// remedy. Always present; empty when nothing was refused.
     #[serde(default)]
     pub(super) egress_denials: Vec<crate::commands::vm::egress_denials::DeniedDestination>,
+    /// `none` when the run could reach no network at all — no egress grant,
+    /// no secret — so no refusal could have been recorded; else `granted`.
+    #[serde(default)]
+    pub(super) network: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +105,14 @@ impl RunJsonSummary {
             phase_timing: output.phase_timing.clone(),
             receipt_path,
             egress_denials: Vec::new(),
+            network: String::new(),
         }
+    }
+
+    /// Record whether the run could reach the network.
+    pub(super) fn with_network(mut self, label: &str) -> Self {
+        self.network = label.to_string();
+        self
     }
 
     /// Attach the run's egress refusals.
