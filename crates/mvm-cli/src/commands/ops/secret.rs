@@ -39,7 +39,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use mvm_client::secret::{PutOutcome, SecretBindingMeta, SecretService, SecretValueInput};
+use mvm_client::secret::{
+    PutOutcome, SecretApproval, SecretBindingMeta, SecretService, SecretValueInput,
+};
 use mvm_contract::ir::{AuthType, Sigv4Params};
 use mvm_contract::service_catalog;
 
@@ -129,6 +131,9 @@ pub(in crate::commands) enum SecretAction {
         /// service comes from the catalog entry, so passing it is rejected.
         #[arg(long, conflicts_with = "provider")]
         service: Option<String>,
+        /// Whether each run's first use of the secret needs an approval.
+        #[arg(long, value_enum, default_value = "never")]
+        approve: ApproveArg,
         /// Inline value. Pass `-` to read from stdin (preferred when
         /// scripting; avoids shell-history exposure).
         #[arg(long, conflicts_with = "value_file")]
@@ -223,6 +228,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             aws_access_key_id,
             region,
             service: aws_service,
+            approve,
             value,
             value_file,
             from,
@@ -237,6 +243,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
                 aws_access_key_id,
                 region,
                 service: aws_service,
+                approve: approve.into(),
                 value: ValueSource {
                     value,
                     value_file,
@@ -281,7 +288,26 @@ struct SetArgs {
     aws_access_key_id: Option<String>,
     region: Option<String>,
     service: Option<String>,
+    approve: SecretApproval,
     value: ValueSource,
+}
+
+/// `--approve`: whether a run's first use of the secret must be approved.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(in crate::commands) enum ApproveArg {
+    /// Use it without asking.
+    Never,
+    /// Ask before the first use in each run (`--approval`).
+    Ask,
+}
+
+impl From<ApproveArg> for SecretApproval {
+    fn from(arg: ApproveArg) -> Self {
+        match arg {
+            ApproveArg::Never => Self::Never,
+            ApproveArg::Ask => Self::Ask,
+        }
+    }
 }
 
 fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
@@ -294,6 +320,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         aws_access_key_id,
         region,
         service: aws_service,
+        approve,
         value,
     } = set;
     // Resolve the destination + auth shape BEFORE touching the store, so a
@@ -318,6 +345,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             allowed_hosts: resolved.allowed_hosts,
             sigv4: resolved.sigv4,
             provider: resolved.provider,
+            approve,
         },
     )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
@@ -539,6 +567,9 @@ fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
             if let Some(p) = &b.provider {
                 line.push_str(&format!("\tprovider={p}"));
             }
+            if b.approve == SecretApproval::Ask {
+                line.push_str("\tapprove=ask");
+            }
             line
         }
         None => name.to_string(),
@@ -709,9 +740,43 @@ mod tests {
                 aws_access_key_id: None,
                 region: None,
                 service: None,
+                approve: SecretApproval::Never,
                 value: inline(value.into()),
             },
         )
+    }
+
+    #[test]
+    fn set_approve_ask_is_recorded_on_the_binding_and_never_is_the_default() {
+        let f = fixture();
+        set(&f, "plain", &["api.github.com"], AuthType::Bearer, "v1").unwrap();
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "gated".into(),
+                provider: None,
+                hosts: vec!["api.github.com".into()],
+                auth_type: Some(AuthType::Bearer),
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Ask,
+                value: inline("v2".into()),
+            },
+        )
+        .unwrap();
+        let approve = |name| {
+            f.service
+                .metadata("local", name)
+                .unwrap()
+                .unwrap()
+                .binding
+                .unwrap()
+                .approve
+        };
+        assert_eq!(approve("plain"), SecretApproval::Never);
+        assert_eq!(approve("gated"), SecretApproval::Ask);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -954,6 +1019,7 @@ mod tests {
                 aws_access_key_id: None,
                 region: None,
                 service: None,
+                approve: SecretApproval::Never,
                 value: inline("sk-live-zzz".into()),
             },
         )
@@ -1042,10 +1108,17 @@ mod tests {
             allowed_hosts: vec!["api.openai.com".into()],
             sigv4: None,
             provider: Some("openai".into()),
+            approve: Default::default(),
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.contains("provider=openai"), "got: {line}");
         assert!(line.contains("hosts=api.openai.com"), "got: {line}");
+        assert!(!line.contains("approve"), "got: {line}");
+        let gated = SecretBindingMeta {
+            approve: SecretApproval::Ask,
+            ..b
+        };
+        assert!(ls_line("openai", Some(&gated)).ends_with("\tapprove=ask"));
     }
 
     #[test]
@@ -1062,6 +1135,7 @@ mod tests {
                 aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
                 region: Some("us-east-1".into()),
                 service: Some("s3".into()),
+                approve: SecretApproval::Never,
                 // The secret-access-key is the stored value.
                 value: inline("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
             },
@@ -1138,6 +1212,7 @@ mod tests {
                 service: "s3".into(),
             }),
             provider: None,
+            approve: Default::default(),
         };
         let line = ls_line("aws", Some(&b));
         assert!(line.contains("type=sigv4"), "got: {line}");
@@ -1156,6 +1231,7 @@ mod tests {
             allowed_hosts: vec!["api.openai.com".into(), "*.openai.com".into()],
             sigv4: None,
             provider: None,
+            approve: Default::default(),
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.starts_with("openai"));

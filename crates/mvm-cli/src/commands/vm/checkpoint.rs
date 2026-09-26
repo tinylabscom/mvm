@@ -1464,6 +1464,7 @@ mod tests {
                     allowed_hosts: vec!["api.example.com".into()],
                     sigv4: None,
                     provider: Some("catalog-provider".into()),
+                    approve: Default::default(),
                 },
             )
             .unwrap();

@@ -51,6 +51,7 @@ use serde::Serialize;
 pub use audit::SecretAudit;
 pub use input::SecretValueInput;
 pub use mvm_contract::ir::{AuthType, Sigv4Params};
+pub use mvm_core::crypto::secret_binding::SecretApproval;
 pub use mvm_hostd::keyholder::SecretBindingMeta;
 pub use refs::{MachineSecretRef, MachineSecretRefSet};
 pub use source::{SecretSource, SourceError, SourceResolver};
@@ -541,6 +542,7 @@ mod tests {
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
             provider: None,
+            approve: Default::default(),
         }
     }
 
@@ -1058,6 +1060,7 @@ mod tests {
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: None,
             provider: None,
+            approve: Default::default(),
         };
         assert!(validate_binding_meta("local", "aws", &missing).is_err());
         // SigV4 with scope → accepted.
@@ -1066,6 +1069,7 @@ mod tests {
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: Some(sigv4.clone()),
             provider: None,
+            approve: Default::default(),
         };
         validate_binding_meta("local", "aws", &good).unwrap();
         // Non-SigV4 carrying scope → refused (would be silently ignored).
@@ -1074,6 +1078,7 @@ mod tests {
             allowed_hosts: vec!["api.example.com".into()],
             sigv4: Some(sigv4),
             provider: None,
+            approve: Default::default(),
         };
         assert!(validate_binding_meta("local", "k", &stray).is_err());
     }

@@ -259,6 +259,49 @@ pub(super) struct PreparedFlow {
 }
 
 impl SubstitutionService {
+    /// Hold a request that carries the placeholder of a secret bound with
+    /// `approve = "ask"` until an approval backend answers. Only a placeholder
+    /// that would actually be substituted here asks: one the destination is
+    /// not bound for is refused later without bothering anyone.
+    async fn approve_secret_use(
+        &self,
+        headers: &[(String, String)],
+        destination: Option<&str>,
+    ) -> Result<(), &'static str> {
+        if self.approval_required.is_empty() {
+            return Ok(());
+        }
+        let Some(destination) = destination else {
+            return Ok(());
+        };
+        let mut asked: Vec<&str> = Vec::new();
+        for (_, value) in headers {
+            let Some(placeholder) = find_placeholder(value) else {
+                continue;
+            };
+            let Some(secret) = self.registry.resolve(placeholder) else {
+                continue;
+            };
+            if !self.approval_required.contains(&secret.name)
+                || !mvm_contract::ir::host_is_bound(&secret.allowed_hosts, destination)
+                || asked.contains(&secret.name.as_str())
+            {
+                continue;
+            }
+            asked.push(&secret.name);
+            let subject = crate::supervisor::runtime_approval::ApprovalSubject::SecretUse {
+                secret: secret.name.clone(),
+                destination: destination.to_string(),
+            };
+            if let crate::supervisor::runtime_approval::ApprovalVerdict::Denied { reason } =
+                self.approver.decide(&subject).await
+            {
+                return Err(reason);
+            }
+        }
+        Ok(())
+    }
+
     /// Apply every pre-connect security decision once, returning the prepared
     /// request plus the state needed to transform and audit its response.
     pub(super) async fn prepare_flow(
@@ -402,6 +445,19 @@ impl SubstitutionService {
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
+        if let Err(reason) = self
+            .approve_secret_use(&req.headers, destination.as_deref())
+            .await
+        {
+            self.audit_flow_refused(
+                destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                reason,
+            )
+            .await;
+            return Err(WireResponse::Refused {
+                message: format!("use of a secret that needs approval was refused ({reason})"),
+            });
+        }
         let mut req = req;
         if self.registry.injects_a_credential() {
             // A value this VM substitutes can come back in a response, which

@@ -51,6 +51,33 @@ pub struct SecretBindingMeta {
     /// silently widening a binding that already exists.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Whether a use of this secret must be approved at run time. `ask`
+    /// pauses the first request that would carry it until an approval
+    /// backend answers; an approval can reach the rest of the session.
+    /// Host-side policy, like `allowed_hosts`.
+    #[serde(default, skip_serializing_if = "SecretApproval::is_never")]
+    pub approve: SecretApproval,
+}
+
+/// Whether a secret's use needs a run-time approval.
+// allow(secret-debug): a two-valued policy flag (`never` / `ask`) that
+// `mvmctl secret ls` prints; it carries no part of the secret.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretApproval {
+    /// Substituted without asking.
+    #[default]
+    Never,
+    /// The first use in a session is put to an approval backend.
+    Ask,
+}
+
+impl SecretApproval {
+    /// Whether this is the default, [`Self::Never`].
+    #[must_use]
+    pub fn is_never(&self) -> bool {
+        matches!(self, Self::Never)
+    }
 }
 
 /// Storage for [`SecretBindingMeta`], keyed by (tenant, name). Parallel
@@ -222,6 +249,7 @@ mod tests {
             allowed_hosts: vec!["api.openai.com".into()],
             sigv4: None,
             provider: None,
+            approve: Default::default(),
         }
     }
 
@@ -238,6 +266,7 @@ mod tests {
                 service: "s3".into(),
             }),
             provider: None,
+            approve: Default::default(),
         };
         store.put("local", "aws", &m).unwrap();
         assert_eq!(store.get("local", "aws").unwrap(), Some(m));
@@ -327,6 +356,7 @@ mod tests {
             allowed_hosts: vec!["api.openai.com".into(), "*.example.com".into()],
             sigv4: None,
             provider: None,
+            approve: Default::default(),
         }
     }
 

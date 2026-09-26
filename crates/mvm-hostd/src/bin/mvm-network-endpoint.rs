@@ -553,7 +553,12 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
         mvm_core::config::mvm_keys_dir(),
         resolver_uds_path(cfg),
     )
-    .with_session_marker_parent(session_marker_parent);
+    .with_session_marker_parent(session_marker_parent)
+    .with_approval_socket_parent(
+        cfg.approval_socket
+            .as_deref()
+            .and_then(std::path::Path::parent),
+    );
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
     Ok(())
@@ -1250,6 +1255,7 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
             connector_uds_path: None,
+            approval_socket: None,
             flowmux_identity: None,
         }
     }
@@ -1283,6 +1289,7 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
             connector_uds_path: None,
+            approval_socket: None,
         }
     }
 
@@ -1761,6 +1768,7 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
             connector_uds_path: Some(PathBuf::from("/tmp/mvm-flowmux-connector.sock")),
+            approval_socket: None,
             flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
                 session_id: "s".into(),
                 host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),

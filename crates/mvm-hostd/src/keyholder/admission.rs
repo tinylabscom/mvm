@@ -127,6 +127,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -172,6 +173,7 @@ mod tests {
                         service: "s3".into(),
                     }),
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -200,6 +202,7 @@ mod tests {
                     allowed_hosts: vec!["api.anthropic.com".into(), "platform.claude.com".into()],
                     sigv4: None,
                     provider: Some("anthropic".into()),
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -246,6 +249,7 @@ mod tests {
                     allowed_hosts: vec!["api.github.com".into()],
                     sigv4: None,
                     provider: Some("github".into()),
+                    approve: Default::default(),
                 },
             )
             .unwrap();

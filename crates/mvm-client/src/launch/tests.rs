@@ -87,6 +87,7 @@ fn seeded_secret_ref(service: &SecretService) -> MachineSecretRef {
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
                 provider: None,
+                approve: Default::default(),
             },
         )
         .expect("bind secret");

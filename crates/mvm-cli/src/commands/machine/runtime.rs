@@ -430,6 +430,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
+    crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
     let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
         args.run.net,
         args.run.network_preset,

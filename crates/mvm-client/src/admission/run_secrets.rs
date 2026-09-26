@@ -411,6 +411,7 @@ mod tests {
                     allowed_hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
                     sigv4: None,
                     provider: provider.map(str::to_string),
+                    approve: Default::default(),
                 },
             )
             .unwrap();
