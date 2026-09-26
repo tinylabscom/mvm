@@ -1466,41 +1466,23 @@ fn promote_fetched_builder_vm_cache(
 /// network — so the unit test can verify naming matches the
 /// release.yml side without touching the network. Gated together
 /// with [`download_builder_vm_image`].
-#[cfg(any(
-    test,
-    all(
-        feature = "release-artifact-bootstrap",
-        feature = "builder-vm",
-        feature = "manifest-verify"
-    )
-))]
+#[cfg(test)]
 pub(super) struct BuilderVmArtifactNames {
     pub(super) kernel: String,
     pub(super) rootfs: String,
     pub(super) cmdline: String,
-    #[cfg(test)]
     pub(super) manifest: String,
-    #[cfg(test)]
     pub(super) checksums: String,
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "release-artifact-bootstrap",
-        feature = "builder-vm",
-        feature = "manifest-verify"
-    )
-))]
+#[cfg(test)]
 pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
     let [kernel, rootfs, cmdline] = builder_vm_boot_assets(arch);
     BuilderVmArtifactNames {
         kernel,
         rootfs,
         cmdline,
-        #[cfg(test)]
         manifest: format!("builder-vm-{arch}.manifest.json"),
-        #[cfg(test)]
         checksums: format!("builder-vm-{arch}-checksums-sha256.txt"),
     }
 }
