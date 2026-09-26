@@ -661,11 +661,21 @@ the Stage 0 flake reference follows W8's re-pointing.
         binaries through `builder_guest_paths::guest_host_binary`, which
         prefers the payload copy: `mvm-builderd`'s before-build hook runner
         and the persistent dispatch script used to name `/sbin` outright.
-- [ ] **W3 — one builder boot-contract cmdline.** Converge
+- [x] **W3 — one builder boot-contract cmdline.** Converge
       `BUILDER_CMDLINE_TAIL`, `SYNTHESIZED_BUILDER_VM_CMDLINE`, the QEMU
       rewrite and the libkrun call sites on one function that emits
       `mvm.boot_payload=` and no `init=`. Tests: one table test over all four
       backends' console tokens.
+      - Done: `mvm_build::builder_boot::builder_boot_cmdline(console_base,
+        &BuilderBoot, runtime_overlay)`. `BuilderBoot` is `Payload { initramfs,
+        digest }` or `Baked`; a boot without a payload emits
+        `init=/sbin/mvm-host-vm-init` on every backend, so libkrun and QEMU no
+        longer chain through busybox `/init` (the payload `/init` bypasses it
+        either way). The image's `cmdline.txt` is no longer read for a builder
+        boot; `synthesized_builder_vm_cmdline()` writes it from the contract.
+        Every backend stages its boot through `stage_builder_boot` /
+        `stage_image_boot`. Table test:
+        `the_builder_boot_contract_composes_onto_every_shipped_driver`.
 - [ ] **W4 — wire every backend.** HVF and Firecracker `builder_spec` and
       `persistent_builder_spec`; libkrun, including relaxing `validate_boot_config`
       with a test that `rootfs + initramfs` is accepted and `root_dir +

@@ -26,16 +26,24 @@
 pub mod abi;
 pub mod cmdline;
 pub mod payload;
+pub mod stage;
 
 pub use crate::builder_guest_paths::{RUNTIME_HOST_BIN_DIR, guest_host_binary};
 pub use abi::{
     BootAbiError, IMAGE_ABI_MARKER, baked_only_abis, check_image_abi, parse_image_abi_marker,
     payload_supported_abis,
 };
-pub use cmdline::{Stage1Cmdline, Stage1CmdlineError, parse_stage1_cmdline};
+pub use cmdline::{
+    BuilderBoot, LIBKRUN_BUILDER_CONSOLE_BASE, Stage1Cmdline, Stage1CmdlineError,
+    builder_boot_cmdline, parse_stage1_cmdline,
+};
 pub use payload::{
     BootPayloadError, BuilderBootPayload, BuilderBootPayloadBuilder, PayloadDigest,
     PayloadManifest, install_payload, verify_unpacked_payload,
+};
+pub use stage::{
+    BootPayloadSource, PAYLOAD_FILE_NAME, StageBootError, read_image_boot_abi,
+    register_boot_payload_source, stage_builder_boot, stage_image_boot, supported_image_abis,
 };
 
 /// Where the payload's binaries and manifest sit inside the initramfs,
