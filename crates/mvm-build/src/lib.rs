@@ -20,6 +20,9 @@ pub mod builder_cmdline;
 pub mod builder_disk_transport;
 mod builder_egress_process;
 mod builder_host_binaries;
+/// The mvm sources a builder image's evaluation reads, shared by the Stage 0
+/// fingerprint and the local image cache key.
+pub mod builder_image_inputs;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
@@ -104,6 +107,8 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod runtime_identity;
 pub mod seed_store_entries;
+/// The identity of a Rust binary an image compiles from workspace source.
+pub mod source_closure;
 pub mod stage0;
 /// Host-side Stage 0 pieces that belong to no particular VMM.
 ///
@@ -117,6 +122,9 @@ pub mod store_readiness;
 pub mod template_reuse;
 /// Persistent ext4 image materialization for user-attached block volumes.
 pub mod volume_image;
+/// The workspace crate graph and source hashes, shared with `mvm-cli`'s build
+/// script by `#[path]` include.
+pub mod workspace_graph;
 
 /// Acquiring and running the builder-VM bootstrap helper.
 pub mod builder_vm_bootstrap;

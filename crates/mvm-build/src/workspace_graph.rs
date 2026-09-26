@@ -1,13 +1,14 @@
 //! The workspace's crate graph, read from its manifests, and content hashes of
 //! a crate's sources.
 //!
-//! Two consumers need "every workspace crate this binary is built from": the
-//! build script, which keys its content-addressed store of embedded binaries on
-//! that closure, and the builder-VM cache key, which has to change when a
+//! Two consumers need "every workspace crate this binary is built from":
+//! `mvm-cli`'s build script, which keys its content-addressed store of embedded
+//! binaries on that closure, and the builder image's cache keys (the Stage 0
+//! fingerprint and the local image cache key), which have to change when a
 //! binary the builder image compiles from workspace source changes. One copy,
-//! so the two cannot disagree about what a closure is. The build script reaches
-//! this file through a `#[path]` include, since it cannot depend on its own
-//! crate.
+//! so they cannot disagree about what a closure is. The build script reaches
+//! this file through a `#[path]` include, since a build script cannot depend on
+//! a workspace crate.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 /// Workspace members, by package name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceGraph {
+pub struct WorkspaceGraph {
     /// package name -> the crate directory holding its `src/`.
     pub dirs: BTreeMap<String, PathBuf>,
     /// package name -> the workspace packages it depends on.
@@ -30,7 +31,7 @@ pub(crate) struct WorkspaceGraph {
 /// replaces named `mvm-build` only, while `mvm-egress-client` — the guest's
 /// entire egress path — lives in `mvm-agentd`, so an edit there embedded the
 /// previous binary and nothing said so.
-pub(crate) fn workspace_closure(graph: &WorkspaceGraph, roots: &[&str]) -> Vec<String> {
+pub fn workspace_closure(graph: &WorkspaceGraph, roots: &[&str]) -> Vec<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
 
@@ -55,7 +56,7 @@ pub(crate) fn workspace_closure(graph: &WorkspaceGraph, roots: &[&str]) -> Vec<S
 }
 
 /// The package name declared by a crate manifest.
-pub(crate) fn parse_package_name(manifest: &str) -> Option<String> {
+pub fn parse_package_name(manifest: &str) -> Option<String> {
     manifest
         .parse::<toml::Value>()
         .ok()?
@@ -74,7 +75,7 @@ pub(crate) fn parse_package_name(manifest: &str) -> Option<String> {
 /// omitting either would key a binary on an incomplete closure.
 ///
 /// Dev-dependencies are excluded — they cannot reach a `[[bin]]`.
-pub(crate) fn parse_manifest_deps(manifest: &str) -> Vec<String> {
+pub fn parse_manifest_deps(manifest: &str) -> Vec<String> {
     let Ok(value) = manifest.parse::<toml::Value>() else {
         return Vec::new();
     };
@@ -102,7 +103,7 @@ pub(crate) fn parse_manifest_deps(manifest: &str) -> Vec<String> {
 /// Read every workspace member under `crates/` (descending one extra level
 /// into `crates/deps/`, which is where vendored FFI crates live) and build the
 /// package-name graph.
-pub(crate) fn read_workspace_graph(workspace_root: &Path) -> WorkspaceGraph {
+pub fn read_workspace_graph(workspace_root: &Path) -> WorkspaceGraph {
     let mut dirs = BTreeMap::new();
     let mut manifests = Vec::new();
 
@@ -152,7 +153,7 @@ fn push_child_dirs(parent: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// Sorted so the key is stable regardless of directory iteration order, which
 /// is not guaranteed and differs between filesystems.
-pub(crate) fn hash_tree(workspace_root: &Path, dir: &Path) -> Vec<(String, String)> {
+pub fn hash_tree(workspace_root: &Path, dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     collect_file_hashes(workspace_root, dir, &mut out);
     out.sort();
@@ -197,7 +198,7 @@ const UNLINKED_TARGET_DIRS: &[&str] = &["tests", "benches", "examples", "fuzz"];
 /// The manifest has to go through a file hash, not `hash_tree` — `hash_tree`
 /// lists a directory, so handing it a file path silently contributes nothing
 /// and a feature or dependency edit would not move the key.
-pub(crate) fn hash_member(workspace_root: &Path, dir: &Path) -> Vec<(String, String)> {
+pub fn hash_member(workspace_root: &Path, dir: &Path) -> Vec<(String, String)> {
     let mut hashes = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return hashes;
@@ -222,12 +223,12 @@ pub(crate) fn hash_member(workspace_root: &Path, dir: &Path) -> Vec<(String, Str
 }
 
 /// Hash one file, or the empty string when it cannot be read.
-pub(crate) fn hash_file(path: &Path) -> String {
+pub fn hash_file(path: &Path) -> String {
     std::fs::read(path)
         .map(|bytes| hex(Sha256::digest(&bytes).as_slice()))
         .unwrap_or_default()
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

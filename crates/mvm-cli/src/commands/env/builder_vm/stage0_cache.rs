@@ -410,7 +410,7 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    `mvm-setpriv` reaches (only itself; it is a leaf over `libc`), the
 ///    `Cargo.lock` entries of their non-dev dependency closure, and the
 ///    root-manifest tables that change how that closure compiles (see
-///    `setpriv_source`).
+///    `mvm_build::source_closure`).
 ///
 /// The workspace `Cargo.lock` as a whole is deliberately not hashed, so a
 /// dependency bump outside those two binaries' closures does not rebuild the
@@ -498,27 +498,18 @@ pub(super) fn fingerprint_builder_vm_sources(
 
     // Layer 4: the one Rust binary the flake compiles from workspace source
     // itself, so it has no embedded bytes to fold into layer 2.
-    super::setpriv_source::fold_setpriv_source_identity(&mut hasher, &workspace_root)?;
+    mvm_build::source_closure::fold_package_source_identity(
+        &mut hasher,
+        &workspace_root,
+        mvm_build::source_closure::SETPRIV_PACKAGE,
+    )?;
 
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// The Nix sources, relative to the workspace root, that the builder-vm flake
-/// imports from outside its own directory: the shared library (mkGuest, the
-/// workspace filter, the host-binaries manifest), the guest package recipes,
-/// the kernel configs, and the runtime-overlay flake. The top-level `nix`
-/// flake is listed because a build reaches the recipes through it.
-///
-/// A test holds this list to the flakes' actual import sites, so adding an
-/// import without listing it fails rather than going stale.
-pub(super) const BUILDER_FLAKE_NIX_INPUTS: &[&str] = &[
-    "nix/flake.nix",
-    "nix/flake.lock",
-    "nix/lib",
-    "nix/packages",
-    "nix/images/kernel",
-    "nix/images/runtime-overlay",
-];
+/// Shared with the local image cache key of a pair-built builder image, which
+/// reads the same sources.
+pub(super) use mvm_build::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
 
 /// Fold the identity of each payload binary the builder image bakes, in
 /// payload order. The seed and bootstrap-support binaries drive Stage 0 but

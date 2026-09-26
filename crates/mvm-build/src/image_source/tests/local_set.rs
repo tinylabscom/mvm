@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ImageSetError, ImageSetRole, ImageSetStage, ImageTrustTier, LOCAL_SET_MANIFEST_NAME,
-    LocalImageSet, RepoIdentity, WorkloadImageProfile,
+    LocalImageSet, MvmCheckoutRule, RepoIdentity, WorkloadImageProfile,
 };
 use mvm_core::packs::Sha256Hex;
 
@@ -102,6 +102,7 @@ impl Pair {
             set_dir: &self.set_dir(),
             arch: GuestArch::Aarch64,
             roles,
+            mvm_rule: MvmCheckoutRule::Current,
         })
     }
 
@@ -246,6 +247,7 @@ fn a_set_for_another_architecture_is_refused() {
             set_dir: &pair.set_dir(),
             arch: GuestArch::X86_64,
             roles: &[],
+            mvm_rule: MvmCheckoutRule::Current,
         })
         .unwrap_err();
 

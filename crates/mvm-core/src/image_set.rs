@@ -38,7 +38,8 @@ pub use identity::{
     RepositorySlug, RevocationChannel, TagRef, WorkflowPath,
 };
 pub use local::{
-    LOCAL_SET_MANIFEST_NAME, LocalImageSet, LocalImageSetVerification, verify_local_image_set,
+    LOCAL_SET_MANIFEST_NAME, LocalImageSet, LocalImageSetVerification, MvmCheckoutRule,
+    verify_local_image_set,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
 pub use train_lock::{

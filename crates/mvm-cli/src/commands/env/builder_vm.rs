@@ -19,7 +19,6 @@ mod local_pair;
 #[cfg(test)]
 mod published_fetch_tests;
 mod sdk_sidecar;
-mod setpriv_source;
 #[cfg(feature = "builder-vm")]
 mod shell_job;
 mod stage0_artifact;

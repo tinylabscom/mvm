@@ -1,17 +1,16 @@
-//! The Rust source the builder image's `mvm-setpriv` is compiled from.
+//! The identity of a Rust binary compiled from workspace source.
 //!
-//! Every other Rust binary in the builder image is embedded in `mvmctl` and
-//! folded into the cache key by its bytes. `mvm-setpriv` is not: the flake
-//! compiles it from workspace source (`cargo build --package mvm-setpriv --bin
-//! mvm-setpriv`) against the workspace `Cargo.lock`, so its identity has to be
-//! taken from those inputs instead.
+//! An image that compiles a workspace package itself, rather than taking its
+//! bytes from `mvmctl`'s embedded payload, has to be keyed on what those bytes
+//! are compiled from: `mvm-setpriv`, which every Nix-built image builds with
+//! `cargo build --package mvm-setpriv`, and the builder host binaries a paired
+//! image checkout compiles from the `mvm-build` package.
 //!
-//! The inputs are derived, not listed: the workspace crates `mvm-setpriv`
+//! The inputs are derived, not listed: the workspace crates the package
 //! reaches through its manifests, the `Cargo.lock` entries those crates'
 //! non-dev dependencies resolve to, and the parts of the root manifest that
 //! change how they compile. A dependency bump outside that closure — the reason
-//! the whole lockfile is not hashed — leaves the key alone. The package is a
-//! leaf over `libc`, so in practice the closure is its own source.
+//! the whole lockfile is not hashed — leaves the key alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,28 +23,32 @@ use crate::workspace_graph::{
     WorkspaceGraph, hash_member, parse_manifest_deps, read_workspace_graph, workspace_closure,
 };
 
-/// The workspace package whose `mvm-setpriv` binary the builder flake builds.
-pub(super) const SETPRIV_PACKAGE: &str = "mvm-setpriv";
+/// The workspace package whose `mvm-setpriv` binary every Nix-built image,
+/// the builder image included, compiles from source
+/// (`nix/packages/mvm-setpriv.nix`).
+pub const SETPRIV_PACKAGE: &str = "mvm-setpriv";
 
-/// Fold the identity of every input `mvm-setpriv` is compiled from.
+/// Fold the identity of every input `package` is compiled from.
 ///
 /// Fails rather than hashing less than it should: a workspace without the
 /// package, or a lockfile without an entry for a crate in its closure, is not
-/// a tree the flake could build, and a key computed from part of it would
-/// serve a stale image.
-pub(super) fn fold_setpriv_source_identity(
+/// a tree the image could be built from, and a key computed from part of it
+/// would serve a stale image.
+pub fn fold_package_source_identity(
     hasher: &mut Sha256,
     workspace_root: &Path,
+    package: &str,
 ) -> Result<()> {
-    let inputs = SetprivInputs::read(workspace_root)?;
+    let inputs = PackageInputs::read(workspace_root, package)?;
+    fold_entry(hasher, "package", package);
     for (path, sha) in &inputs.sources {
-        fold_entry(hasher, "setpriv-src", &format!("{path}\0{sha}"));
+        fold_entry(hasher, "package-src", &format!("{path}\0{sha}"));
     }
     for entry in &inputs.locked {
-        fold_entry(hasher, "setpriv-lock", entry);
+        fold_entry(hasher, "package-lock", entry);
     }
     for entry in &inputs.build_settings {
-        fold_entry(hasher, "setpriv-manifest", entry);
+        fold_entry(hasher, "package-manifest", entry);
     }
     Ok(())
 }
@@ -59,9 +62,9 @@ fn fold_entry(hasher: &mut Sha256, domain: &str, entry: &str) {
     hasher.update(entry.as_bytes());
 }
 
-/// Everything `mvm-setpriv`'s bytes depend on, each list sorted.
+/// Everything a package's bytes depend on, each list sorted.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct SetprivInputs {
+struct PackageInputs {
     /// `(workspace-relative path, SHA-256)` of every source file in the
     /// workspace crates and path-patched crates it is built from.
     sources: Vec<(String, String)>,
@@ -71,17 +74,17 @@ struct SetprivInputs {
     build_settings: Vec<String>,
 }
 
-impl SetprivInputs {
-    fn read(workspace_root: &Path) -> Result<Self> {
+impl PackageInputs {
+    fn read(workspace_root: &Path, package: &str) -> Result<Self> {
         let graph = read_workspace_graph(workspace_root);
-        if !graph.dirs.contains_key(SETPRIV_PACKAGE) {
+        if !graph.dirs.contains_key(package) {
             anyhow::bail!(
-                "builder VM source fingerprint: no `{SETPRIV_PACKAGE}` crate under {}/crates, \
-                 but the builder flake compiles mvm-setpriv from it",
+                "no `{package}` crate under {}/crates, but the image being keyed compiles it \
+                 from there",
                 workspace_root.display()
             );
         }
-        let members = workspace_closure(&graph, &[SETPRIV_PACKAGE]);
+        let members = workspace_closure(&graph, &[package]);
         let declared = declared_dependencies(&graph, &members)?;
 
         let lock_path = workspace_root.join("Cargo.lock");
@@ -471,8 +474,8 @@ arrayref = { path = "third_party/arrayref" }
     /// one whose every edit rebuilds the builder image again.
     #[test]
     fn the_shipped_setpriv_closure_is_the_leaf_and_libc() {
-        let inputs =
-            SetprivInputs::read(&shipped_workspace()).expect("the shipped workspace resolves");
+        let inputs = PackageInputs::read(&shipped_workspace(), SETPRIV_PACKAGE)
+            .expect("the shipped workspace resolves");
 
         let paths: Vec<&str> = inputs.sources.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
@@ -547,7 +550,7 @@ arrayref = { path = "third_party/arrayref" }
             fold_entry(&mut h, domain, entry);
             hex::encode(h.finalize())
         };
-        assert_ne!(digest("setpriv-src", "ab"), digest("setpriv-sr", "cab"));
-        assert_ne!(digest("setpriv-src", "a"), digest("setpriv-lock", "a"));
+        assert_ne!(digest("package-src", "ab"), digest("package-sr", "cab"));
+        assert_ne!(digest("package-src", "a"), digest("package-lock", "a"));
     }
 }

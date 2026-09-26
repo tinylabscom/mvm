@@ -27,7 +27,7 @@ pub mod ts_runner;
 pub mod ui;
 pub mod update;
 pub mod watch;
-pub(crate) mod workspace_graph;
+pub(crate) use mvm_build::workspace_graph;
 
 pub use commands::run;
 

@@ -1,6 +1,8 @@
 #[path = "build_support.rs"]
 mod build_support;
-#[path = "src/workspace_graph.rs"]
+// The crate graph and source hashing are shared with `mvm-build`, whose
+// local image cache keys builder images on the same closures.
+#[path = "../mvm-build/src/workspace_graph.rs"]
 mod workspace_graph;
 // The pinned-toolchain resolution is shared with `mvm-build`. A build script
 // cannot depend on a workspace crate, so it reads the same file off disk.
@@ -106,7 +108,7 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/payload_build.rs");
-    println!("cargo:rerun-if-changed=src/workspace_graph.rs");
+    println!("cargo:rerun-if-changed=../mvm-build/src/workspace_graph.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");

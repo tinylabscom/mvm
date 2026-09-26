@@ -8,7 +8,10 @@
 //! 1. its producer is the two checkouts it was built from, never a release —
 //!    a local file naming a release workflow is refused, not trusted;
 //! 2. those checkouts are still what the caller finds on disk now, so a set
-//!    built before an edit or a checkout of another commit is refused as stale;
+//!    built before an edit or a checkout of another commit is refused as stale.
+//!    A caller that keys the set on exactly the mvm sources its image reads
+//!    may instead hold the recorded mvm checkout as provenance
+//!    ([`MvmCheckoutRule::Provenance`]); the image checkout is always held;
 //! 3. every member targets the requested guest architecture, and every role
 //!    the caller needs is present;
 //! 4. every artifact is a regular file inside the set's directory with the
@@ -31,6 +34,22 @@ use crate::packs::Sha256Hex;
 /// The name a locally built set's manifest has inside its directory.
 pub const LOCAL_SET_MANIFEST_NAME: &str = "image-set.json";
 
+/// How a local set's recorded mvm checkout is held against the one on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MvmCheckoutRule {
+    /// The set must record the mvm checkout exactly as it is now.
+    #[default]
+    Current,
+    /// The recorded mvm checkout is provenance, not a freshness condition.
+    ///
+    /// Only for a caller that has established freshness another way: by
+    /// keying the set on exactly the mvm sources its image reads, and
+    /// re-deriving that key before the read. Two mvm commits that differ only
+    /// outside those sources build the same image, so a set recording either
+    /// one is current for both.
+    Provenance,
+}
+
 /// One locally built set to read, and what the caller needs of it.
 #[derive(Clone, Copy)]
 pub struct LocalImageSetVerification<'a> {
@@ -43,6 +62,7 @@ pub struct LocalImageSetVerification<'a> {
     arch: GuestArch,
     roles: &'a [ImageSetRole],
     host_protocols: Option<&'a HostProtocolSupport>,
+    mvm_rule: MvmCheckoutRule,
 }
 
 impl<'a> LocalImageSetVerification<'a> {
@@ -59,7 +79,16 @@ impl<'a> LocalImageSetVerification<'a> {
             arch,
             roles: &[],
             host_protocols: None,
+            mvm_rule: MvmCheckoutRule::Current,
         }
+    }
+
+    /// Hold the recorded mvm checkout by `rule` rather than requiring it to be
+    /// the one on disk.
+    #[must_use]
+    pub fn with_mvm_checkout_rule(mut self, rule: MvmCheckoutRule) -> Self {
+        self.mvm_rule = rule;
+        self
     }
 
     /// Also refuse a set that lacks any of `roles` for the requested
@@ -85,8 +114,9 @@ pub struct LocalImageSet {
     pub manifest: ImageSetManifest,
     /// Digest of the manifest bytes that were read, to key a cache entry on.
     pub manifest_sha256: Sha256Hex,
-    /// The checkouts the set was built from, which were also the checkouts on
-    /// disk when it was read.
+    /// The checkouts the set was built from. The image checkout was also the
+    /// one on disk when it was read; so was the mvm checkout, unless it was
+    /// held as provenance.
     pub checkouts: LocalCheckouts,
     pub artifacts: Vec<VerifiedArtifact>,
 }
@@ -108,7 +138,7 @@ pub fn verify_local_image_set(
     let manifest = parse_manifest(request.manifest_bytes)?;
     validate_structure(&manifest)?;
     let recorded = require_local(&manifest)?.clone();
-    check_fresh(&recorded, request.current)?;
+    check_fresh(&recorded, request.current, request.mvm_rule)?;
     check_architecture(&manifest, request.arch)?;
     require_complete(
         &manifest,
@@ -140,9 +170,16 @@ fn require_local(manifest: &ImageSetManifest) -> Result<&LocalCheckouts, ImageSe
 
 /// The image checkout is compared first: it is the one the contributor named,
 /// so a stale set is most usefully reported against it.
-fn check_fresh(recorded: &LocalCheckouts, current: &LocalCheckouts) -> Result<(), ImageSetError> {
+fn check_fresh(
+    recorded: &LocalCheckouts,
+    current: &LocalCheckouts,
+    mvm_rule: MvmCheckoutRule,
+) -> Result<(), ImageSetError> {
     check_checkout_fresh("mvm-images", &recorded.images, &current.images)?;
-    check_checkout_fresh("mvm", &recorded.mvm, &current.mvm)
+    match mvm_rule {
+        MvmCheckoutRule::Current => check_checkout_fresh("mvm", &recorded.mvm, &current.mvm),
+        MvmCheckoutRule::Provenance => Ok(()),
+    }
 }
 
 fn check_checkout_fresh(

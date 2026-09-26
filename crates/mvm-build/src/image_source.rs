@@ -51,7 +51,8 @@ pub use build::{
 pub use cache::{
     CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,
     ImageBuildRole, ImageBuildTarget, KeyInputs, LOCAL_IMAGE_CACHE_DIR, LocalImageCache,
-    LocalImageCacheError, LocalImageCacheKey, PublishOutcome, StagedEntry, ToolchainPins,
+    LocalImageCacheError, LocalImageCacheKey, MvmSourceIdentity, PublishOutcome, StagedEntry,
+    ToolchainPins,
 };
 pub use git::{RepoIdentity, WorktreeState, probe_identity};
 pub use local_set::{LocalSetError, LocalSetRequest};

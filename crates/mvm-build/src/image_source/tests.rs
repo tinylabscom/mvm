@@ -625,5 +625,6 @@ fn the_dirty_fingerprint_matches_the_emitters_for_a_fixed_tree() {
     );
 }
 
+mod builder_key;
 mod cache;
 mod local_set;
