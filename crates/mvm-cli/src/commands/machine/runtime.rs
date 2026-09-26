@@ -64,6 +64,17 @@ fn run_persistent(
         return Ok(());
     }
 
+    // Watch for egress refusals from before the boot, so one the workload
+    // hits while it starts is not lost to the moment before the attach.
+    let denials = (args.run.argv.is_empty() && post_start_action(&args) == PostStart::Attach)
+        .then(|| {
+            super::super::vm::egress_denials::watch_machine(
+                &name,
+                super::super::vm::egress_denials::Live::Notices,
+            )
+        })
+        .flatten();
+
     let booted = persist_and_boot_machine(
         &name,
         &spec,
@@ -79,7 +90,7 @@ fn run_persistent(
         apply_machine_ttl(&name, dur_str)?;
     }
 
-    run_persistent_post_start(cli, cfg, &args, &name)
+    run_persistent_post_start(cli, cfg, &args, &name, denials)
 }
 
 /// The secret references a persistent machine records beside its spec: those
@@ -161,6 +172,7 @@ fn run_persistent_post_start(
     cfg: &MvmConfig,
     args: &MachineRunArgs,
     name: &str,
+    denials: Option<super::super::vm::egress_denials::DenialWatch>,
 ) -> Result<()> {
     if !args.run.argv.is_empty() {
         if !shared::wait_for_guest_agent(name, 30) {
@@ -194,7 +206,7 @@ fn run_persistent_post_start(
             println!("{name}");
             Ok(())
         }
-        PostStart::Attach => attach_to_output(name),
+        PostStart::Attach => attach_to_output(name, denials),
     }
 }
 
@@ -270,13 +282,21 @@ pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
 ///
 /// A machine with no capture is a note, not a failure: the machine booted, and
 /// that is what `machine run` was asked to do.
-fn attach_to_output(name: &str) -> Result<()> {
+///
+/// Egress refusals the machine hits while attached print as they happen, and
+/// once more as a summary if its output ends.
+fn attach_to_output(
+    name: &str,
+    denials: Option<super::super::vm::egress_denials::DenialWatch>,
+) -> Result<()> {
     // Say what attaching means before it blocks. The machine is persistent, so
     // interrupting detaches from the output and leaves it running — the
     // opposite of what Ctrl-C does to a foreground transient run, and worth
     // stating rather than leaving to be discovered.
     eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
-    match logs::attach(name)? {
+    let attached = logs::attach(name);
+    super::super::vm::egress_denials::finish_and_summarize(denials);
+    match attached? {
         logs::AttachOutcome::Followed => Ok(()),
         logs::AttachOutcome::NoCapture => {
             eprintln!(

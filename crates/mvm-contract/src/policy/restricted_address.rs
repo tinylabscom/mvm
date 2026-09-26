@@ -59,6 +59,27 @@ pub enum RestrictedClass {
 }
 
 impl RestrictedClass {
+    /// Every class, in declaration order.
+    pub const ALL: [Self; 10] = [
+        Self::CloudMetadata,
+        Self::Loopback,
+        Self::Unspecified,
+        Self::LinkLocal,
+        Self::SharedAddressSpace,
+        Self::Private,
+        Self::UniqueLocal,
+        Self::Multicast,
+        Self::Reserved,
+        Self::Embedded,
+    ];
+
+    /// The class a recorded [`Self::label`] names, for a reader of the audit
+    /// chain turning a refusal's reason back into its meaning.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.label() == label)
+    }
+
     /// Whether an explicit grant naming the address can re-admit it.
     #[must_use]
     pub const fn readmittable(self) -> bool {
@@ -266,6 +287,47 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// A recorded label reads back as the class that wrote it, for every
+    /// class, and nothing else reads as one.
+    #[test]
+    fn every_label_reads_back_as_its_class() {
+        for class in RestrictedClass::ALL {
+            assert_eq!(RestrictedClass::from_label(class.label()), Some(class));
+        }
+        let mut labels: alloc::vec::Vec<&str> =
+            RestrictedClass::ALL.iter().map(|c| c.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            RestrictedClass::ALL.len(),
+            "labels are distinct"
+        );
+        assert_eq!(RestrictedClass::from_label("policy_denied"), None);
+    }
+
+    /// `ALL` lists the classes in declaration order. The match has no
+    /// wildcard, so a new class does not compile until it is given a position
+    /// here — the prompt to add it to `ALL` as well.
+    #[test]
+    fn all_lists_every_class() {
+        let position = |class: RestrictedClass| match class {
+            RestrictedClass::CloudMetadata => 0,
+            RestrictedClass::Loopback => 1,
+            RestrictedClass::Unspecified => 2,
+            RestrictedClass::LinkLocal => 3,
+            RestrictedClass::SharedAddressSpace => 4,
+            RestrictedClass::Private => 5,
+            RestrictedClass::UniqueLocal => 6,
+            RestrictedClass::Multicast => 7,
+            RestrictedClass::Reserved => 8,
+            RestrictedClass::Embedded => 9,
+        };
+        for (index, class) in RestrictedClass::ALL.into_iter().enumerate() {
+            assert_eq!(position(class), index);
+        }
     }
 
     fn net(s: &str) -> IpNet {

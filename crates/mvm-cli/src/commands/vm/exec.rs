@@ -26,6 +26,8 @@ use crate::ui;
 
 pub(in crate::commands) mod detect;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
+mod run_mode;
+pub(in crate::commands) use run_mode::resolve_run_mode;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -760,6 +762,8 @@ pub(in crate::commands) fn run_secure_with_source(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
+    let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
+    let denials_for_admit = std::rc::Rc::clone(&denials);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
@@ -770,6 +774,7 @@ pub(in crate::commands) fn run_secure_with_source(
             assets,
             volumes,
         } = inputs;
+        denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             outputs: admit_outputs.clone(),
@@ -881,6 +886,7 @@ pub(in crate::commands) fn run_secure_with_source(
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
+        let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
@@ -891,7 +897,8 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested && let Some(timing) = output.phase_timing.as_ref() {
             eprintln!("{}", timing.render_table());
         }
-        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path);
+        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path)
+            .with_egress_denials(refused.destinations());
         if let Some(path) = summary.receipt_path.as_deref() {
             write_run_receipt(path, receipt_input, &output)?;
         }
@@ -924,74 +931,9 @@ pub(in crate::commands) fn run_secure_with_source(
             backend: &receipt_backend,
             oci_provenance: &oci_provenance,
             outputs: &outputs,
+            denials: &denials,
         },
     )
-}
-
-/// Resolve the `mvmctl run` transport mode from the explicit
-/// `--mode` flag, the friendly `--dev` / `--prod` aliases, and the
-/// `MVM_SDK_MODE` env-var override. Returns `Ok(None)` when no SDK
-/// mode was requested — in that case the verb falls back to the
-/// transient-sandbox runner over the trailing argv.
-///
-/// Env-var precedence matches `mvmctl build compile`: `MVM_SDK_MODE`
-/// supersedes any flag-only override so a wrapper script can pin a
-/// mode without the user retyping `--mode`.
-pub(in crate::commands) fn resolve_run_mode(
-    sdk: &SdkTransportArgs,
-    run: &RunArgs,
-) -> Result<Option<RunMode>> {
-    if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
-        // The SDK modes do not go through the image run, so `--prod` would be
-        // dropped without a word; refuse the pair instead.
-        if run.prod {
-            anyhow::bail!(
-                "--prod is not honoured by an SDK run mode, and {}={env_mode} selects one; \
-                 unset it to run a production image",
-                mvm_sdk::env::MVM_SDK_MODE_ENV
-            );
-        }
-        return Ok(Some(parse_env_run_mode(&env_mode)?));
-    }
-    if sdk.dev {
-        if run.prod {
-            anyhow::bail!("--dev selects the SDK live mode, which does not honour --prod");
-        }
-        return Ok(Some(RunMode::Live));
-    }
-    if run.prod {
-        if run.image.is_some() {
-            return Ok(None);
-        }
-        anyhow::bail!(
-            "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl build compile`, where \
-             record is the default mode. Re-run as `mvmctl build compile <script>` (the trailing argv \
-             on `mvmctl run` is for the live sandbox runner, not for SDK record-mode)."
-        );
-    }
-    match sdk.mode {
-        None => Ok(None),
-        Some(RunMode::Live) => Ok(Some(RunMode::Live)),
-        Some(RunMode::Record) => anyhow::bail!(
-            "`mvmctl run --mode record` is unsupported — `mvmctl build compile` is the record-mode verb \
-             (record is the default; pass the script as the positional entry)."
-        ),
-        Some(RunMode::Plan) => Ok(Some(RunMode::Plan)),
-    }
-}
-
-fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "live" => Ok(RunMode::Live),
-        "plan" => Ok(RunMode::Plan),
-        "record" => anyhow::bail!(
-            "MVM_SDK_MODE=record on `mvmctl run` is unsupported — `mvmctl build compile` is the \
-             record-mode verb (record is its default)."
-        ),
-        other => anyhow::bail!(
-            "MVM_SDK_MODE={other:?} is not recognized; expected one of: live, plan, record"
-        ),
-    }
 }
 
 struct TransientMounts {
@@ -1032,6 +974,8 @@ struct RunAudit<'a> {
     /// Output grants whose disks the run attaches and whose collection is
     /// recorded once it exits.
     outputs: &'a super::outputs::PreparedOutputs,
+    /// The run's egress refusals, summarized once it exits.
+    denials: &'a super::egress_denials::PendingWatch,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -1076,6 +1020,7 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
+    audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
@@ -2629,6 +2574,10 @@ mod tests {
         assert!(json.contains("\"total_ms\":28.0"));
         assert!(!json.contains("sensitive stdout"));
         assert!(!json.contains("sensitive stderr"));
+        // Present and empty when nothing was refused, so a consumer reads one
+        // shape whether or not the run hit the gate.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["egress_denials"], serde_json::json!([]));
     }
 
     #[test]

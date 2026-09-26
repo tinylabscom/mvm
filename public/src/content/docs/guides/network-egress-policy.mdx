@@ -160,6 +160,92 @@ Each refusal is recorded in the chain-signed audit log with its class —
 `cloud_metadata`, `loopback`, `private_range`, `unique_local` — rather than a
 generic denial, so a workload reaching for the metadata service stands out.
 
+## When a destination is refused
+
+A refused connection fails inside the guest, and the host records the refusal
+in the chain-signed audit log. A foreground `mvmctl run` or `mvmctl machine
+run`, and `mvmctl machine logs -f`, read those records back for the machine on
+screen and print each distinct refusal on stderr as it happens, once, with the
+remedy for that reason. Here a run allowed only `api.github.com` also reaches
+for `example.com` twice, for the cloud metadata service, and for an address on
+a private network:
+
+```sh
+mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'
+```
+
+```text
+curl: (7) CONNECT tunnel failed, response 403
+curl: (7) CONNECT tunnel failed, response 403
+[mvm] egress blocked: example.com:443 (not in the allow-list) — allow with --allow-host example.com:443
+[mvm] egress blocked: 169.254.169.254:80 (a cloud instance-metadata endpoint) — never reachable from a workload; no grant admits it
+[mvm] egress blocked: 10.0.0.5:8080 (an RFC1918 private range) — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
+[mvm] egress denied: 3 destinations, 4 attempts
+[mvm]   example.com:443        2×  not in the allow-list
+[mvm]   169.254.169.254:80     1×  a cloud instance-metadata endpoint — never reachable from a workload; no grant admits it
+[mvm]   10.0.0.5:8080          1×  an RFC1918 private range — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
+[mvm] to allow what the allow-list refused, re-run with:
+[mvm]   --allow-host example.com:443
+[mvm] or, for a machine created with `machine create --manifest`, in its mvm.toml:
+[mvm]   [network]
+[mvm]   allow_hosts = ["example.com:443"]
+[mvm] denied by default, and admitted only by naming each exactly — do so only if the workload should reach it:
+[mvm]   --allow-host 10.0.0.5:8080
+```
+
+The block at the end is the exit summary: every refused destination with how
+often it was refused, then the exact flags that admit the ones a grant can
+admit. The metadata service is listed and never offered; the private address is
+kept out of the allow command and named apart.
+
+A run with no egress at all — the default: no `--net`, no `--allow-host`, no
+`--secret`, no published port — starts no network endpoint. The guest has no
+channel to ask for a destination on, the host decides nothing, and there is
+nothing to print; the guest's own `Could not resolve host` is the signal. Add
+the destination and run again:
+
+```sh
+mvmctl run --allow-host api.example.com:443 -- curl -sS https://api.example.com/
+```
+
+The reason comes from the host's own decision, and so does the remedy. Some
+refusals have none, and the notice says so rather than offering a flag:
+
+| Recorded reason | What the notice says | Remedy |
+| --- | --- | --- |
+| `policy_denied` | not in the allow-list | `--allow-host HOST:PORT` |
+| `cloud_metadata`, `loopback`, `link_local`, `unspecified`, `shared_address_space`, `embedded_restricted` | the address class | none — never reachable from a workload |
+| TCP/22 | SSH port | none — SSH never reaches a workload |
+| `private_range`, `unique_local`, `multicast`, `reserved` | the address class | denied by default; admitted only by naming the exact address (`--allow-host 10.0.0.5:5432`). Listed apart from the allow flags in the summary |
+| `route_denied` | refused by an endpoint route | change that route's method/path rules |
+| `ambiguous_path` | ambiguous request path | none — send the canonical path |
+| `endpoint_rules_unenforceable` | endpoint rules need interception | set `intercept = true` on the route |
+| `approval_unavailable` | needs approval, no approver | none yet — an `ask` rule with no approver refuses |
+| `rate_limited`, `resource_exhausted`, `termination_exhausted` | the limit reached | fewer connections at once |
+| `typed_transform_required`, `termination_unavailable`, `placeholder_in_url`, `placeholder_in_body`, `placeholder_dropped` | the secret-substitution rule it broke | see [Secrets and credentials](/guides/secrets-and-credentials/) |
+
+A restricted address the host recorded under the generic `policy_denied` is
+still read by its address, so the metadata service is never offered an allow.
+
+With `mvmctl run --json`, nothing prints live; the summary's records are in the
+document's `egress_denials` array, each with the destination, the recorded
+event and reason, a count, first and last timestamps, and a `remedy` whose
+`kind` is `allow_host`, `name_explicitly`, `edit_route`, `never` or `advice`.
+An interactive `--pty` run also prints nothing live, because a line written
+over a raw-mode terminal would corrupt it; its summary prints after the
+session ends.
+
+After the fact, `mvmctl explain` lists a run's refusals the same way, joined to
+the run by its machine name and bounded by the run's own start and exit:
+
+```sh
+mvmctl explain agent-sandbox
+```
+
+This is observation only. The per-VM network endpoint is still the only place
+an egress decision is made; the notices read what it recorded and change
+nothing it decides.
+
 ## SDK declaration pattern
 
 Static declarations should make network posture reviewable:

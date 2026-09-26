@@ -169,7 +169,10 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] `examples/claude-code` stops putting a raw key in the guest
 
 ### PS-04 — Denial feedback (#3714)
-- [ ] live, deduplicated egress denials on the host with the correct remedy per reason, plus an exit summary
+- [x] live, deduplicated egress denials on the host with the correct remedy per reason, plus an exit summary
+      (foreground `run` / `machine run` and `machine logs -f`; `run --json` carries
+      `egress_denials`; `mvmctl explain` lists a finished run's refusals. Read from
+      the chain the per-VM endpoint already writes, now attributed with `vm_name`)
 - [ ] denial → policy draft selector (Grant / Skip), never auto-granting
 - [ ] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
 
