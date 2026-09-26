@@ -326,6 +326,7 @@ uncovered = [
     "mvmctl machine run --flake . --name api-dev --port 8080:8080 --port 3000:3000",
     "mvmctl machine run --flake . --name build-sandbox --net",
     "mvmctl machine run --flake . --name coding-agent -d",
+    "mvmctl machine run --flake . --name db-client --allow-host 10.20.30.40:5432",
     "mvmctl machine run --flake . --name hello --cpus 2 --memory 1024 --port 8080:8080",
     "mvmctl machine run --flake . --name hello --port 8080:8080",
     "mvmctl machine run --flake . --name hello --port 8080:8080 --mount ./config:/data/config --mount ./disk.img:/data/store:1024:rw",

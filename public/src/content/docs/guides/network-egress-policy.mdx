@@ -57,6 +57,40 @@ mvmctl machine run --flake . --name api-dev --port 8080:8080
 Opening a host port does not mean the guest should have outbound internet
 access.
 
+## Internal addresses
+
+Every policy, including an unrestricted one, refuses these destinations:
+
+| Refused | Ranges | Can a grant re-admit it? |
+| --- | --- | --- |
+| Cloud metadata | `169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254` | Never |
+| Loopback, unspecified | `127.0.0.0/8`, `::1`, `0.0.0.0/8`, `::` | Never |
+| Link-local, carrier-grade NAT | `169.254.0.0/16`, `fe80::/10`, `100.64.0.0/10` | Never |
+| Private ranges | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` | Yes, by naming it |
+| Multicast, reserved, broadcast | `224.0.0.0/4`, `ff00::/8`, `240.0.0.0/4` | Yes, by naming it |
+
+A private address is reachable only when a grant names it: the literal address
+or a CIDR inside that private range, or an allow-listed host that resolved to
+it when the run was admitted.
+
+```sh
+mvmctl machine run --flake . --name db-client --allow-host 10.20.30.40:5432
+```
+
+`--net`, an unrestricted policy, or a rule for `0.0.0.0/0` names no private
+address, so none of them reaches one. An IPv6 address that carries an IPv4 one
+(`::ffff:10.0.0.1`, NAT64 `64:ff9b::…`, 6to4 `2002:…`, Teredo) is judged by the
+IPv4 address it reaches; a restricted one inside a translation prefix is never
+re-admitted.
+
+A host name is resolved once, by the host. The workload connects to exactly the
+addresses that decision admitted, so a name cannot answer the policy check with
+a public address and the connection with an internal one.
+
+Each refusal is recorded in the chain-signed audit log with its class —
+`cloud_metadata`, `loopback`, `private_range`, `unique_local` — rather than a
+generic denial, so a workload reaching for the metadata service stands out.
+
 ## SDK declaration pattern
 
 Static declarations should make network posture reviewable:

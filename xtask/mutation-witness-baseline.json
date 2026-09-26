@@ -173,6 +173,13 @@
       ]
     },
     {
+      "path": "crates/mvm-contract/src/policy/restricted_address.rs",
+      "package": "mvm-contract",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-contract/src/protocol/broker.rs",
       "package": "mvm-contract",
       "claims": [
@@ -311,6 +318,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/supervisor/network_endpoint_proxy/pinned_dns.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -355,6 +369,13 @@
     },
     {
       "path": "crates/mvm-vmm/src/snapshot.rs",
+      "package": "mvm-vmm",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs",
       "package": "mvm-vmm",
       "claims": [
         10

@@ -32,6 +32,7 @@ mod classify;
 mod forward;
 mod ingress;
 mod listen;
+mod pinned_dns;
 mod pipeline;
 mod prepare;
 mod redaction;
@@ -102,6 +103,9 @@ pub struct SubstitutionService {
     /// process-global registry is used.
     instance_metrics:
         Option<Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>>,
+    /// The addresses the egress gate admitted for each destination, shared
+    /// with the forward leg's resolver so it connects to nothing else.
+    admitted: Arc<pinned_dns::AdmittedAddresses>,
 }
 
 #[cfg(test)]

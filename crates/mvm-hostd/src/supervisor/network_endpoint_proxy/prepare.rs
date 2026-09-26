@@ -121,6 +121,13 @@ pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
 /// The `host:port` the egress gate decides on, using the scheme's default port
 /// when the URL omits one. `None` when the URL has no parseable host or port —
 /// which the caller treats as a claim-10 refusal (fail closed).
+/// The host and port the forward leg will dial for `url`, keyed the way the
+/// HTTP client asks its resolver.
+fn url_host_and_port(url: &str) -> Option<(String, u16)> {
+    let u = Url::parse(url).ok()?;
+    Some((u.host_str()?.to_string(), u.port_or_known_default()?))
+}
+
 fn url_host_port(url: &str) -> Option<String> {
     let u = Url::parse(url).ok()?;
     match (u.host_str(), u.port_or_known_default()) {
@@ -194,18 +201,33 @@ impl BodyPlaceholderScan {
 /// `target` is the request's `host:port`, and `None` when the URL has no
 /// parseable one. The returned label is chosen here from a fixed set, so the
 /// chain entry built from it carries nothing the workload sent.
+#[cfg(test)]
 fn claim10_refusal(
     gate: &mvm_runtime::vmm::egress_gate::EgressGate,
     target: Option<&str>,
 ) -> Option<&'static str> {
+    claim10_decision(gate, target).err()
+}
+
+/// The gate's decision for `target`: the addresses it admitted, or the fixed
+/// label of why not. A restricted address records its class
+/// (`cloud_metadata`, `private_range`), every other policy refusal
+/// `policy_denied`.
+fn claim10_decision(
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
+    target: Option<&str>,
+) -> Result<Vec<std::net::IpAddr>, &'static str> {
     use mvm_runtime::vmm::egress_gate::EgressVerdict;
     let Some(target) = target else {
-        return Some(REASON_MALFORMED);
+        return Err(REASON_MALFORMED);
     };
     match gate.decide_request(target) {
-        EgressVerdict::Allow { .. } => None,
-        EgressVerdict::Malformed => Some(REASON_MALFORMED),
-        EgressVerdict::Deny(_) => Some(REASON_POLICY_DENIED),
+        EgressVerdict::Allow { ips, .. } => Ok(ips),
+        EgressVerdict::Malformed => Err(REASON_MALFORMED),
+        EgressVerdict::Deny(reason) => Err(match reason.audit_label() {
+            "policy_denied" => REASON_POLICY_DENIED,
+            label => label,
+        }),
     }
 }
 
@@ -286,15 +308,23 @@ impl SubstitutionService {
             });
         }
         let target = url_host_port(&req.url);
-        if let Some(reason) = claim10_refusal(&self.egress_gate, target.as_deref()) {
-            let recorded = target
-                .as_deref()
-                .or(destination.as_deref())
-                .unwrap_or(UNPARSEABLE_DESTINATION);
-            self.audit_flow_refused(recorded, reason).await;
-            return Err(WireResponse::Refused {
-                message: "egress destination not admitted by network policy (claim-10)".into(),
-            });
+        match claim10_decision(&self.egress_gate, target.as_deref()) {
+            Ok(ips) => {
+                // The forward leg connects to exactly these; see `pinned_dns`.
+                if let Some((host, port)) = url_host_and_port(&req.url) {
+                    self.admitted.record(&host, port, ips);
+                }
+            }
+            Err(reason) => {
+                let recorded = target
+                    .as_deref()
+                    .or(destination.as_deref())
+                    .unwrap_or(UNPARSEABLE_DESTINATION);
+                self.audit_flow_refused(recorded, reason).await;
+                return Err(WireResponse::Refused {
+                    message: "egress destination not admitted by network policy (claim-10)".into(),
+                });
+            }
         }
         // A placeholder is substituted only in a header. Anywhere else it would
         // go to the destination as the token itself, so the request is refused
