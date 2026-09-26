@@ -34,6 +34,12 @@ fails when a rebuild differs. `mvm` has one `images.lock`, an offline
 `verified-release` tiers, a local-manifest reader, and a local image cache
 (W5a–W5d).
 
+W6 has moved further than the plan's checkboxes say: `mvm-images` has published
+`image-set/v0.1.0`, `v0.1.1` and `v0.2.1` plus a `revocations` release, and
+`crates/mvm-core/images.lock` on mvm main pins `image-set/v0.1.1` (proposed in
+#3677), with the Stage 0 kernel on the same tag. Read the lock and the release
+list before trusting any plan checkbox about publication.
+
 ## Pick up here
 
 1. **Finish W4c (#3362).** The comparison against `boot-image/v0.1.5` is done
@@ -116,14 +122,29 @@ mvmctl's own payload. Three agreed interfaces, as of 2026-09-25:
   `scripts/emit-local-manifest.py`, and dropping `MVM_HOST_BIN_DIR` from
   mvm-images' `images/builder-vm/image.nix` once a payload-supplying mvmctl is
   the pinned consumer. Those are two separate PRs in mvm-images, because the
-  pin advance is its own change. The agreed transition rule: a missing field
-  means ABI 0 **only** for a release producer, and a local set without it is
-  refused by name. `compatibility` is required on local sets too, so a blanket
-  default would let a local set built from a no-longer-baking flake declare the
-  legacy ABI against bytes that cannot satisfy it. The emitter therefore always
+  pin advance is its own change. `ImageSetCompatibility` carries
+  `deny_unknown_fields`, so the two repositories must land in this order or a
+  sibling pair build breaks: mvm teaches the schema the field as optional with a
+  missing value meaning ABI 0 on both producers; then mvm-images emits it
+  (`mvm-images#31`, ready and deliberately unqueued); then mvm flips a local set
+  without the field to refused by name, which rides with W8. The emitter always
   writes the field — 0 while the flake still bakes, 1 in the same PR that drops
   `MVM_HOST_BIN_DIR` — so the release default only ever covers sets published
   before the field existed.
+
+  The ABI-1 publish order is: publish the ABI-1 set from mvm-images, then an mvm
+  PR re-pins `images.lock` to it with `xtask repin-image-lock`, which carries
+  `builder_boot_abi` across. That re-pin is W8 and comes only after the
+  payload-supplying mvmctl is on main.
+
+  The published `image-set/v0.2.1` builder kernels already carry
+  `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_RD_GZIP=y` and `CONFIG_EXT4_FS=y` on both
+  architectures, so the payload needs no kernel change. But none of those
+  options is pinned in `kernel/base.nix` or `kernel/builder.nix` — they are
+  inherited from nixpkgs while their `RD_*` neighbours are explicitly disabled —
+  so pin them with a config test in the same change, in mvm first and then
+  re-copied to mvm-images, or a nixpkgs bump can drop them and the failure
+  arrives as a builder that cannot find PID 1.
 - **W8.** Stage 0 stays a from-seed source build for contributors after
   `nix/images/builder-vm` is deleted. ADR-030 item 4 names that directory and
   "the in-repo flakes" explicitly, so W8 carries an explicit item amending it to
