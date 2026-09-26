@@ -1027,6 +1027,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: crate::commands::machine::preflight_network(),
             tenant: "local",

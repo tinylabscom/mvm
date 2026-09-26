@@ -51,6 +51,7 @@ pub mod drive;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
+pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
 pub mod local;
