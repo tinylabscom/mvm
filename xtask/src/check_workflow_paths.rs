@@ -614,7 +614,7 @@ mod tests {
             .find("sudo --preserve-env=")
             .expect("warm claim must cross the privilege boundary");
         let recipe = warm_claim
-            .find("bdd-live-warm-claim")
+            .find("bdd::live-warm-claim")
             .expect("warm claim recipe must run");
         let invocation = &warm_claim[sudo..recipe];
         assert!(
