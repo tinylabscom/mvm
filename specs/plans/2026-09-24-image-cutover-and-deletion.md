@@ -379,7 +379,7 @@ need an owner in `mvm-images` first.
       with a refusal test. Pair builds, their
       consumed-input key and its `mvm-setpriv`, `source_closure`,
       `workspace_graph` and `builder_image_inputs` dependencies stay.
-- [ ] **Wave 3 — workflows.** Retire `release-boot-image.yml` and
+- [x] **Wave 3 — workflows.** Retire `release-boot-image.yml` and
       `kernel-build.yml`'s in-tree publication; strip `initramfs-image` and
       (after 0.5b ships) the W7.1 mirror from `release.yml`; drop the in-tree
       legs of `cache-warm.yml`, `ci.yml`, `ci-full.yml`, `security.yml` and
@@ -387,7 +387,16 @@ need an owner in `mvm-images` first.
       `mvm-images` checkout. `check_workflow_paths.rs`,
       `github_actions_aarch64_no_kvm.rs` and
       `scripts/local-aarch64-no-kvm-smoke.sh` move in the same PR.
-- [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`; move
+      *Done 2026-09-27:* `release-boot-image.yml` and `kernel-build.yml` are
+      deleted, and `release.yml` neither builds, mirrors nor re-signs an
+      image. The verifier now checks each CLI archive against the signed
+      combined manifest. The re-pointed security lanes
+      (`verified-boot-artifacts`, the claim 3 witness, and both sealed-prod
+      lanes) and Extended CI's hosted no-KVM bootstrap passed when first run
+      on this branch (security run 36298381536, Extended CI run 36298382873).
+      The documented-surface suite's SDK sidecar step builds from an
+      `mvm-images` checkout taken at the pinned release tag.
+- [x] **Wave 4 — tree and stragglers.** Delete `nix/images/`; move
       `kernel/base.nix` for `nix/packages/qemu-wasm-smoke-image.nix` and the
       `examples/llm-agent` recipe out of it; retire
       `check-runtime-overlay-version` with the `_release-prep` bump and
@@ -395,6 +404,13 @@ need an owner in `mvm-images` first.
       `check-kernel-config-budget`; delete the dead `build-dev-image`;
       E-class edits and live docs (`CLAUDE.md`, `README.md`, contributor
       docs).
+      *Done 2026-09-27:* `nix/images/` and `nix/packages/qemu-wasm*` are gone;
+      the llm-agent recipe moved to `nix/examples/llm-agent`;
+      `check-runtime-overlay-version`, `check-kernel-config-budget` and
+      `build-dev-image` are retired; `check-guest-binary-lists` and
+      `check-kernel-pin-freshness` read what remains; ADR-030 item 4 now
+      names the selected `mvm-images` checkout; the live docs say image
+      construction lives in `mvm-images`.
 
 - [ ] **Release decoupling — set members are identified by the lock, not
       the CLI version.** With the equality above, every CLI version bump

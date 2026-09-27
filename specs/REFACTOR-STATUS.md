@@ -3950,3 +3950,5 @@ resume` takes a `current_head` and refuses when it differs from the
             - [x] Waves 1+2: no mvm code path builds an image in-tree; an
                   in-tree build refuses with "image construction lives in
                   mvm-images".
+            - [x] Waves 3+4: no workflow builds, mirrors or re-signs an
+                  image; `nix/images/` is deleted.
