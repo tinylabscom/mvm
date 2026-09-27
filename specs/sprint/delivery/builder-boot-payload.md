@@ -33,9 +33,14 @@ side of the `builder_boot_abi` image-set field.
 - **Persistent builders** record the payload digest they booted with and are
   stopped, not reused, by an `mvmctl` with different builder binaries.
 - **The HVF patcher is gone.** HVF and Firecracker resolve their image through
-  `ensure_builder_vm_image`, the freshness decision libkrun and QEMU already
-  took; before, they checked only that two files existed. `cache prune`
-  removes `builder-vm/hvf/`.
+  `ensure_builder_vm_image`, the cache check, seed and bootstrap libkrun and
+  QEMU already took; before, they checked only that two files existed.
+  `cache prune` removes `builder-vm/hvf/`.
+- **Job scripts run the payload's binaries.** The one-shot and persistent
+  flake jobs resolve `mvm-host-vm-init` for the before_build hook through
+  `builder_boot::guest_host_binary_sh`: the payload copy first, `/sbin`
+  otherwise. The one-shot script named `/sbin` directly until the rebase onto
+  #3774, which would have failed every flake build on an ABI 1 image.
 - **The payload manifest moved** to `crates/mvm-build/src/host_payload_manifest.rs`,
   so `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone.
 - **Image sets** carry `builder_boot_abi`. A set without it means ABI 0, local
@@ -45,14 +50,15 @@ side of the `builder_boot_abi` image-set field.
 
 ## What did not change, and why
 
-- **Fingerprint layer 2 stays.** The in-tree builder flake still bakes the
-  builder binaries (ABI 0), so a Rust edit to them still moves the builder
-  image key and a source checkout still rebuilds the image through Stage 0.
-  The payload makes that rebuild unnecessary for correctness — the baked
-  copies never run — but removing the term is W8, after `mvm-images` ships
-  ABI-1 images (W7).
-- **Job-side `/mvm-bins` packing stays.** Builder jobs that build the builder
-  flake read `MVM_HOST_BIN_DIR=/mvm-bins`; that goes with W8 too.
+- **The pair key's host-binary term stays.** #3774 removed the builder
+  source fingerprint (layer 2 with it) and every in-tree image build, so a
+  source checkout no longer rebuilds the builder image through Stage 0 at
+  all: the builder comes from the signed set or a paired `mvm-images`
+  checkout. A paired builder image that still bakes the binaries (ABI 0)
+  keys on the `mvm-build` package, so an edit to them still rebuilds that
+  image; the term drops when `mvm-images` ships ABI 1 (W7).
+- **`MVM_HOST_BIN_DIR` and job-side `/mvm-bins` packing stay.** Pair and
+  Stage 0 builds of an ABI 0 builder image read them; they go with W8.
 
 ## Live boot (HVF, macOS 26 Apple Silicon, 2026-09-25)
 
@@ -77,10 +83,8 @@ rebuilt (its files kept their timestamps), the payload digest moved to
 `7d1f…89ea`, and the guest printed the edited line. The second job took
 22.4 s end to end.
 
-What this does not show: in a source checkout **without**
-`MVM_BOOT_IMAGE=fetch`, the same edit still moves fingerprint layer 2 and
-rebuilds the image through Stage 0, because the in-tree flake still bakes the
-binaries. That is W8's to remove.
+This run predates the rebase onto #3774; see *Live boot after the rebase*
+below.
 
 Boot overhead, from the guest's console: the kernel unpacked the 2.2 MB
 payload in about 1 ms (`Unpacking initramfs` 0.6445 s, `Freeing initrd
@@ -97,16 +101,18 @@ were not booted live here.
   through `ensure_builder_vm_image`.
 - That then exposed that `MVM_BOOT_IMAGE=fetch` in a source checkout fetched
   and verified the published image and refused to boot it for want of a
-  source fingerprint; libkrun and QEMU had the same rule. An explicit fetch
-  now stands the fingerprint rule down.
+  source fingerprint; libkrun and QEMU had the same rule. The fix was dropped
+  in the rebase: #3774 removed the fingerprint rule itself.
 - Seeding an isolated builder image cache from the shared one copied each
   artifact into place with `std::fs::copy`, which truncates and refills an
   existing file's inode. A second seeder racing the first shrank a
   `rootfs.ext4` another process was already reading, and the host-side ABI
   read failed with `ImageUnreadable` ("failed to fill whole buffer"). It
   showed up as a flaky `libkrun_builder` test in two of three runs with a
-  fresh `MVM_HOME` and a real image in `$HOME`; the seed now stages and
-  renames, and the same runs passed four of four. `ext4_view` itself reads
+  fresh `MVM_HOME` and a real image in `$HOME`. This branch first fixed it by
+  staging and renaming; #3762 then fixed it on `main` with a per-file
+  temp-and-rename (`copy_writable`), so the rebase keeps `main`'s fix and
+  only a test that holds a reader open across a seed. `ext4_view` itself reads
   a Nix-built image fine; a committed fixture with that image's exact
   `dumpe2fs` feature set now pins it. The three `run_build` tests that
   reached the seed without isolating `HOME` are hermetic, and

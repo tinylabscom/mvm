@@ -3,11 +3,15 @@
 Backing: preview
 Validation: none
 
-**Status:** IN PROGRESS. W0–W6 and W11 are implemented in `mvm`; W7 is the
-`mvm-images` side, and W8–W10 and W12 remain. The design below was written
-against `origin/main` at `9ebb81b459` on 2026-09-24, so its file:line
-citations describe the code before these workstreams; re-verify them before
-starting one that remains.
+**Status:** IN PROGRESS. W0–W6 and W9–W11 are implemented in `mvm`; W7 is
+the `mvm-images` side, and W8a, what is left of W8, and W12 remain. The
+cutover plan's W8 Waves 1+2 (#3774, 2026-09-27) removed every in-tree image
+build, the builder source fingerprint and the Stage 0 builder-image build,
+which took several W8 items with them; W8 below says which. The design was
+written against `origin/main` at `9ebb81b459` on 2026-09-24, so its
+file:line citations — and everything it says about fingerprint layers and
+the in-tree flake — describe the code before these changes; re-verify them
+before starting one that remains.
 
 **Related:** `specs/plans/2026-09-22-builder-image-source-freshness.md` (#3524,
 the loader-side freshness check this plan narrows),
@@ -585,12 +589,14 @@ kernel-pin bumps and image-extraction work, which leave this repository with W8.
 
 ## Migration and cache invalidation
 
-- `BUILDER_VM_CACHE_CONTRACT_VERSION` 4 → 5. Every existing
-  `builder-vm/<arch>/` cache (Stage 0, pair or fetched) is rebuilt or
-  refetched **once**, because the fingerprint shape changes and the new image
-  lacks nothing the new payload needs. Say so in the release notes. The shared
-  seed at `~/.mvm/cache/builder-vm` fails the contract check and is not copied
-  (`builder_vm_image.rs:185-225`).
+- `BUILDER_VM_CACHE_CONTRACT_VERSION` 4 → 5 when an ABI 1 image first enters
+  a cache. The fingerprint reason this bullet first gave is gone with the
+  fingerprint (#3774); the reason that stays is that an `mvmctl` older than
+  the payload must not boot an ABI 1 image from a cache it shares, because
+  the image has no init of its own. Every existing `builder-vm/<arch>/` cache
+  is refetched or rebuilt **once**. Say so in the release notes. The shared
+  seed at `~/.mvm/cache/builder-vm` fails the contract check and is not
+  copied.
 - `builder-vm/hvf/<key>/` entries become orphans. `mvmctl cache prune` learns to
   remove them. They are removed rather than migrated.
 - Persistent builders from an older CLI are stopped on first contact, under the
@@ -609,13 +615,13 @@ kernel-pin bumps and image-extraction work, which leave this repository with W8.
 2. `mvm-images`: stop consuming `mvm.lib.hostBinaries` and `MVM_HOST_BIN_DIR`,
    write the ABI marker, drop `build-host-binaries.sh` from the builder job,
    and publish an image set with `builder_boot_abi = 1`.
-3. `mvm`: pin that set (`update-image-pin.yml`), then remove layer 2, the in-tree
-   bake (if W8 has not already deleted the in-tree flake), the `hostBinaries`
-   export and its sync gate, and the job-side `mvm-bins` packing.
+3. `mvm`: pin that set (`update-image-pin.yml`), then remove the `hostBinaries`
+   export and its sync gate, the host-binary build for pair jobs, and the
+   job-side `mvm-bins` packing.
 
-W8 of `2026-09-24-image-cutover-and-deletion.md` may delete
-`nix/images/builder-vm` first. If so, the in-tree edits in step 3 are moot, and
-the Stage 0 flake reference follows W8's re-pointing.
+The cutover plan's W8 Waves 1+2 (#3774) landed first: it removed the in-tree
+builds and the builder source fingerprint, so step 3 no longer has a layer 2
+or an in-tree bake to remove.
 
 ## Workstreams
 
@@ -630,6 +636,11 @@ the Stage 0 flake reference follows W8's re-pointing.
         `HOST_BINARIES` is now `mvm-host-vm-init` and `mvm-builderd`;
         `mvm-egress-proxy` is retired. Delivery note:
         `specs/sprint/delivery/builder-key-baked-bins-only.md`.
+      - Superseded 2026-09-27: #3774 removed the builder source fingerprint,
+        layer 2 included, and `is_baked_into_rootfs` with it. What W0 kept
+        out of the key is still kept out: the pair key's host-binary term
+        (W10) folds the `mvm-build` package that builds the baked binaries,
+        and only while the target contract says the image needs them.
 - [x] **W1 — payload assembly.** In `mvm-build`, next to
       `rootfs_inject::build_newc_cpio`, add a deterministic payload builder
       that takes the extracted host-bin directory and returns bytes plus a
@@ -737,24 +748,28 @@ the Stage 0 flake reference follows W8's re-pointing.
       manifest predates the builder boot ABI and must be regenerated. One
       condition in `validate_local` plus its test. Releases published before
       the field existed keep reading as ABI 0.
-- [ ] **W8 — `mvm` cut-over.** Pin the new set. Remove fingerprint layer 2
-      and the unembedded `BootstrapPreflight` path. Remove the in-tree bake
-      (unless already deleted by the cutover plan's W8),
-      `nix/lib/mvm-host-binaries.nix`, `xtask check-mvm-host-binaries-sync`
-      and Stage 0's `MVM_HOST_BIN_DIR` export. Replace the Stage 0
-      `/sbin/mvm-host-vm-init` check with the ABI-marker check. Move the cache
-      contract 4 → 5. Tests: update the fingerprint layer tests
-      (`builder_vm_bootstrap_tests.rs`) so a change to the embed table no
-      longer moves the key and every Nix input still does.
-      - [ ] Stop packing job-side `mvm-bins` (`runner.rs`, `hvf_persistent.rs`,
-        `libkrun_builder.rs`, `qemu_builder.rs`) once no builder job builds a
-        flake that reads `MVM_HOST_BIN_DIR`; W4 kept it for that reason.
-      - [ ] **Amend ADR-030 item 4.** Its wording names `nix/images/builder-vm/`
-        and "the in-repo flakes". After the in-tree flake is deleted it must
-        read "the paired `mvm-images` checkout selected by `MVM_IMAGES_DIR`",
-        with the no-silent-substitution rule and the `source: fetched` rule
-        unchanged. Record it as an amendment, not as an implicit
-        reinterpretation of the current text.
+- [ ] **W8 — `mvm` cut-over.** What remains after #3774, which removed every
+      in-tree image build, the builder source fingerprint (layer 2 and the
+      unembedded `BootstrapPreflight` path included) and the Stage 0
+      builder-image build — so none of those is W8's any more, and the
+      fingerprint layer tests they needed are gone with them:
+      - [ ] Pin the first image set whose builder declares
+        `builder_boot_abi = 1`, and move the cache contract 4 → 5 in the same
+        change (see *Migration*).
+      - [ ] Remove `nix/lib/mvm-host-binaries.nix`, the `hostBinaries` export
+        and `xtask check-mvm-host-binaries-sync` once the paired builder no
+        longer reads them; W7 is what stops it.
+      - [ ] Stop exporting `MVM_HOST_BIN_DIR` to builder jobs: Stage 0's
+        (`stage0-init`), the pair build's (`image_source/build.rs`, which
+        stages host binaries for a contract with `needs_host_binaries`) and
+        the job-side `mvm-bins` packing (`runner.rs`, `hvf_persistent.rs`,
+        `libkrun_builder.rs`, `qemu_builder.rs`). All of them serve an image
+        that bakes the binaries; W4 kept them for that reason.
+      - [x] **Amend ADR-030 item 4.** Done 2026-09-27, after #3774: the rule
+        now names the selected `mvm-images` checkout rather than
+        `nix/images/builder-vm/`, says that without one a build uses the
+        signed set, and keeps the `source: fetched` rule. Recorded as a dated
+        amendment in the item itself.
 - [x] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
       `libc`-only closure (pending the crate-count decision), vendoring
       `configure_close_fds`. Point `nix/packages/mvm-setpriv.nix` and
@@ -809,8 +824,11 @@ the Stage 0 flake reference follows W8's re-pointing.
         to ABI 1, and corrects the backend paragraph (four backends,
         Firecracker on Linux with KVM). ADR-030 item 4 gains the
         never-a-published-artifact sentence; ADR-018's Context points at the
-        builder analogue. The item-4 wording change for the in-tree flake's
-        deletion is a W8 item above.
+        builder analogue.
+      - Updated 2026-09-27 for #3774: ADR-004's cache sentence now describes
+        the pair key's host-binary term rather than a builder source
+        fingerprint, and ADR-030 item 4 carries the amendment for the
+        in-tree flake's removal.
 - [ ] **W12 — measured acceptance.** On the Apple Silicon workstation and the
       KVM box: after a one-line `mvm-core` edit plus `just embed`, time
       `mvmctl machine run` end to end, before and after. Acceptance: no Stage 0

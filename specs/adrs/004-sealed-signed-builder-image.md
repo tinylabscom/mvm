@@ -126,9 +126,12 @@ property mvm applies to sealed workload rootfs, not to the builder itself.
 The builder's trust rests on being deterministically reconstructible from
 the hash-pinned seed and on content-addressed caching keyed to the flake and
 the Nix and Rust sources it compiles — not on a block-level integrity check
-at its own boot. While the in-tree flake still bakes the builder binaries
-(ABI 0), the key also folds the digests of the binaries it bakes; that term
-leaves the key when the builder images move to ABI 1.
+at its own boot. mvm no longer builds the builder image: it comes from the
+signed image set, or from a paired `mvm-images` checkout. While that image
+still bakes the builder binaries (ABI 0), a pair build's cache key folds the
+source identity of the package that builds them, because its target contract
+says the image needs host binaries; that term leaves the key when the image
+moves to ABI 1.
 
 **Published release artifacts are cosign-signed, and the signed manifest —
 not the artifacts individually — is the trust anchor.** A release's
@@ -157,8 +160,8 @@ the builder VM's flake.
 
 A Rust-only change to `mvmctl` no longer needs a new builder image to reach
 the builder: the next boot carries it. Once the builder images declare ABI 1
-and the cache key drops the baked-binary term, such a change no longer
-rebuilds the image either.
+and a pair build's key drops the host-binary term, such a change no longer
+rebuilds a paired builder image either.
 
 Four backends producing byte-identical artifacts means switching which VMM
 builds on a given host is invisible to everything downstream, but it also
