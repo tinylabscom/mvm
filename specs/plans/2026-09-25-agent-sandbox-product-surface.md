@@ -310,4 +310,33 @@ small PRs.
 - [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
-- [ ] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
+- [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
+
+Inventory of `mvm-cli` paths that reach past `mvm-client` (into
+`mvm-runtime`/`mvm-core`/`mvm-hostd`/`mvm-agentd` directly), classified by
+severity. `mvm-cli` still names `mvm-core` in 189 files — full elimination is
+a long refactor; this table is the tracking list.
+
+**Real bypasses, large (multi-day extractions — follow-up work, not this PR):**
+checkpoint state machine (`commands/vm/checkpoint*`, ~6.6k lines); transient-run
+core (`exec.rs` + `exec/{session,guest_run,launch_plan,mounts,transient}.rs`,
+~4.5k); warm pool (`commands/pool*`, ~2.9k); baked invoke
+(`commands/vm/invoke.rs`, 2.8k); agent sessions (`commands/agent_session.rs`,
+2.4k); builder-VM env (`commands/env/builder_vm/*`, ~6k, dev-env domain);
+image OCI cache (`commands/image/pull_core.rs`, `cache.rs`, ~3.3k); audit
+`DecisionStore` reads (`commands/ops/audit.rs` — half-moved, best medium
+follow-up).
+
+**Real bypasses, small — moved behind `mvm-client` in this change:**
+| Was | Now |
+|---|---|
+| `snapshot ls/rm` reaching `mvm_runtime::vm::instance_snapshot` + name-registry cleanup + audit | `mvm_client::snapshot::{list_instance_snapshots, remove_instance_snapshot}` (new module; same audit entry) |
+| `wait`/`boot-report` vsock `ReadinessStatus` round-trip | `mvm_client::readiness::fetch_live_readiness` |
+| transient-run backend selection + egress validation (`exec/backend_select.rs`) | `mvm_client::boot::{select_exec_backend, select_backend_name_for_egress, validate_backend_for_egress, validate_image_egress_backend, validate_image_egress_backend_name}` (tests moved with it) |
+
+**Legitimately CLI-side (not bypasses):** clap parsing, TTY/console plumbing,
+table/JSON rendering, install/self-update/packaging, doctor probes, and the
+build domain (`mvm_build`/`mvm_sdk` calls), which is a library in its own
+right. Pattern for future slices: `mvm_client::guest` (guest RPC verbs) and
+`mvm_client::volume::LocalVolumeService` — a service module + DTOs in the
+client, CLI left with args + rendering.

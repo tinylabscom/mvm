@@ -31,17 +31,16 @@ mod launch_plan;
 mod mounts;
 use either::Either;
 use mounts::refuse_unloadable_sidecar;
-mod backend_select;
 mod session;
 mod sidecar_selection;
 mod transient;
 
 pub use launch_plan::load_launch_plan;
 
-pub(crate) use backend_select::{
+use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
+pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
-use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
 pub use session::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, SessionVmName, boot_session_vm,

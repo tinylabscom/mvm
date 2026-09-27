@@ -58,6 +58,7 @@ pub mod profile;
 pub mod readiness;
 pub mod registration;
 pub mod secret;
+pub mod snapshot;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
