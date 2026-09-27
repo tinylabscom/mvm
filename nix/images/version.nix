@@ -7,4 +7,4 @@
 # rewrites it with the workspace version, and `xtask
 # check-runtime-overlay-version` fails when the two differ or when an image
 # flake binds its version to anything other than this file.
-"0.18.0-rc.2"
+"0.18.0"
