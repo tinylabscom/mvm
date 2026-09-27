@@ -217,10 +217,9 @@ pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocol
         )
         .expect("the compiled guest-agent protocol range must be ordered"),
         builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
-        // This mvmctl hands builders no boot payload, so it can boot only a
-        // builder image that bakes its own init; a set declaring anything
-        // else is refused before a byte of it is fetched.
-        builder_boot_abi: mvm_core::image_set::BuilderBootAbiRange::LEGACY_ONLY,
+        // Payload ABIs only when this process can hand a builder the payload;
+        // an image with no builder binaries of its own is unbootable without.
+        builder_boot_abi: crate::builder_boot::supported_image_abis(),
     }
 }
 
@@ -584,10 +583,11 @@ mod tests {
         );
     }
 
-    /// This mvmctl hands builders no boot payload, so a locked set whose
-    /// builder image carries no init of its own (ABI 1) is refused before
-    /// anything is fetched; one that bakes it (ABI 0), or says nothing, is
-    /// accepted.
+    /// A process with no boot payload source — this test binary registers
+    /// none — cannot boot a builder image that carries no init of its own, so
+    /// a locked set declaring ABI 1 is refused before anything is fetched; one
+    /// that bakes it (ABI 0), or says nothing, is accepted. `mvmctl` registers
+    /// its payload at startup and so accepts both.
     #[test]
     fn a_set_whose_builder_needs_a_boot_payload_is_refused_before_fetching() {
         use mvm_core::image_set::BuilderBootAbi;

@@ -13,15 +13,13 @@ pub const IMAGE_ABI_MARKER: &str = "/etc/mvm/builder-boot-abi";
 
 /// Every builder boot ABI this build of the payload can boot.
 pub fn payload_supported_abis() -> BuilderBootAbiRange {
-    BuilderBootAbiRange::new(BuilderBootAbi::LEGACY, BuilderBootAbi::PAYLOAD)
-        .expect("the legacy ABI precedes the payload ABI")
+    BuilderBootAbiRange::WITH_PAYLOAD
 }
 
 /// The ABIs a host can boot without a payload: only images that carry their
 /// own builder binaries.
 pub fn baked_only_abis() -> BuilderBootAbiRange {
-    BuilderBootAbiRange::new(BuilderBootAbi::LEGACY, BuilderBootAbi::LEGACY)
-        .expect("a single ABI is a range")
+    BuilderBootAbiRange::LEGACY_ONLY
 }
 
 /// Why a builder image's boot ABI was refused.
