@@ -446,7 +446,8 @@ reason = "publishes a host-signed root into the caller's audit history"
 
 [[command]]
 path = "trust audit sessions"
-tier = "exec"
+tier = "parse"
+reason = "reports session history from the caller's audit chain, which an isolated home does not contain"
 
 [[command]]
 path = "trust audit show"
