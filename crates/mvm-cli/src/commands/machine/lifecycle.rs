@@ -157,6 +157,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         SpecReconcile::Reuse => {}
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
+    enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
     let effective_hypervisor = args
         .hypervisor
         .as_deref()
@@ -165,9 +166,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let started = mvm_client::launch::machine_start::start_machine_spec(
         &spec,
-        &CliStartHost {
-            kernel_pinned: args.kernel_pin.is_some(),
-        },
+        &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
@@ -212,9 +211,26 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
 /// How the CLI supplies a machine start with what differs by process: it may
 /// build the workload kernel through the builder VM, and it prepares volumes
 /// through its mount cache.
-struct CliStartHost {
+pub(super) struct CliStartHost {
     /// `--kernel-pin` was passed: boot the pinned kernel.
     kernel_pinned: bool,
+    /// The profile the machine's stored spec names. Its registered volumes
+    /// are leased under it, so a writable one is admitted exactly where a
+    /// writable `--mount` disk image is; a name that is not a profile admits
+    /// nothing writable.
+    profile: mvm_client::volume::AdmittedProfile,
+}
+
+impl CliStartHost {
+    pub(super) fn for_spec(spec: &MachineSpec, kernel_pinned: bool) -> Self {
+        let profile = mvm_client::profile::RunProfile::from_name(&spec.profile)
+            .map(mvm_client::volume::AdmittedProfile::new)
+            .unwrap_or_default();
+        Self {
+            kernel_pinned,
+            profile,
+        }
+    }
 }
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
@@ -256,7 +272,11 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
         volume_specs: &[String],
     ) -> Result<mvm_client::volume::LaunchPreparation> {
         let volume_cfg = build_machine_volume_cfg(volume_specs)?;
-        crate::commands::vm::volume::merge_registered_volumes_for_launch(name, &volume_cfg)
+        crate::commands::vm::volume::merge_registered_volumes_for_launch(
+            name,
+            &volume_cfg,
+            self.profile,
+        )
     }
 }
 

@@ -193,6 +193,9 @@ manifest-verify = ["mvm-core/manifest-verify"]
 # invisible on a macOS dev host.
 interactive = []
 contributor-bootstrap = []
+# Exposes `published_image_set::fixture`, a signed-root-shaped image set served
+# from a directory, to other crates' tests.
+test-support = []
 
 [lints]
 workspace = true

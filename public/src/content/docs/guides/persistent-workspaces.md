@@ -72,7 +72,14 @@ Security rules:
 - `volume lock` reseals the volume and removes plaintext after use;
 - keep volume names scoped to the workflow or project;
 - do not mount the same writable volume into unrelated sandboxes unless sharing
-  state is the intent.
+  state is the intent;
+- a managed volume is an ext4 image the guest writes into, never a live host
+  directory, so `--rw` follows the same profile grant as a
+  `HOST.img:/GUEST:SIZE:rw` disk image: every start (`mvmctl machine start`,
+  `LocalBackend`, or the language SDKs through their host library) admits it
+  when the machine's profile is `standard` (the default), `dev`, or
+  `permissive`, and refuses it under `restrictive`. `volume mount --rw` against
+  an existing `restrictive` machine is refused at registration.
 
 ## Durable tenant volumes through mvmd
 
@@ -137,7 +144,10 @@ mvmctl machine volume mount agent-sandbox \
   --guest /data
 ```
 
-Use `--rw` only for trusted workflows:
+With `--rw` the machine gets a private copy of the snapshot image. The guest
+writes into that copy and never into the source directory, and a source
+directory whose contents change replaces the copy — discarding the guest's
+writes — at the next start. Use `--rw` only for trusted workflows:
 
 ```sh
 mvmctl machine volume mount agent-sandbox \

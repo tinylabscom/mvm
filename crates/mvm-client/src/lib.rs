@@ -43,6 +43,7 @@
 //! ```
 
 pub mod admission;
+pub mod approval_broker;
 pub mod audit;
 pub mod boot;
 pub mod connect;
@@ -53,6 +54,7 @@ pub mod guest;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod profile;
 pub mod readiness;
 pub mod registration;
 pub mod secret;

@@ -902,6 +902,10 @@ pub fn endpoint_config_for_identity(
 fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_json::Value {
     let mut cfg = serde_json::json!({
         "tenant_id": params.tenant,
+        // The machine this endpoint serves. It stamps every audit entry it
+        // records with it, so a reader of the shared tenant chain can tell
+        // whose egress decision each one was.
+        "instance_id": params.vm_name,
         "secrets": params.secrets,
         // Per-destination redaction policy from the signed plan; the endpoint
         // applies it to the cleartext it forwards. Default (all-off) is harmless.
@@ -930,6 +934,10 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         cfg["session_ready_socket"] =
             serde_json::json!(session_ready_socket_path(params.state_dir));
         cfg["connector_uds_path"] = serde_json::json!(connector_socket_path(params.state_dir));
+        // Where an `ask` is put to the operator. The foreground `mvmctl`
+        // binds it for the life of the run; nothing there is a denial.
+        cfg["approval_socket"] =
+            serde_json::json!(mvm_core::config::vm_approval_socket_at(params.state_dir));
     }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
@@ -2376,6 +2384,10 @@ mod tests {
         assert_eq!(cfg["egress_mode"], "wire");
         // Base fields carried through the extraction.
         assert_eq!(cfg["tenant_id"], "tenant-x");
+        assert_eq!(
+            cfg["instance_id"], "cfg-vm",
+            "the endpoint is told which machine its audit entries describe"
+        );
         assert_eq!(cfg["secrets"], serde_json::json!([]));
         assert_eq!(cfg["transport"]["kind"], "uds");
         // No remote resolver / binding_store_dir requested ⇒ the keys must be
@@ -2514,6 +2526,11 @@ mod tests {
         assert_eq!(
             cfg["connector_uds_path"],
             serde_json::json!(Path::new("/tmp").join(SUBST_CONNECTOR_SOCKET))
+        );
+        assert_eq!(
+            cfg["approval_socket"],
+            serde_json::json!(Path::new("/tmp").join(mvm_core::config::VM_APPROVAL_SOCKET)),
+            "the endpoint is told where the operator's approval broker listens"
         );
     }
 

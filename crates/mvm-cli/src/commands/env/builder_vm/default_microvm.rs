@@ -207,9 +207,7 @@ pub(super) fn default_workload_kernel_source_for(
 
 #[cfg(feature = "builder-vm")]
 fn build_local_workload_kernel() -> Result<String> {
-    ui::notice(
-        "Preparing the workload kernel using the Stage 0 builder. The first source build can take several minutes; the persistent Nix store and finished kernel are reused afterward.",
-    );
+    // `build_kernel_via_stage0` announces itself with a live status line.
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
         .context(
             "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
@@ -294,7 +292,12 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
 }
 
 fn download_workload_kernel(arch: &str, dest: &std::path::Path) -> Result<()> {
-    crate::update::download_kernel(arch, "workload", dest)
+    let phase = mvm_runtime::ui::activity::start(format!(
+        "Downloading the published workload kernel ({arch})"
+    ));
+    crate::update::download_kernel(arch, "workload", dest)?;
+    phase.finish();
+    Ok(())
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {
@@ -488,17 +491,8 @@ fn ensure_pair_workload_image(
             std::path::Path::new(&format!("{cache_dir}/{label}")),
         )?;
     }
-    // Cache entries are sealed read-only; the install owns its copies and
-    // the sidecar is about to be rewritten with the pair identity.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            format!("{cache_dir}/{}", mvm_build::builder_vm::SIDECAR_FILENAME),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .with_context(|| format!("lifting the sidecar permissions in {cache_dir}"))?;
-    }
+    // `copy_contract_file` left every output above owner-writable, the
+    // sidecar among them, so it can be rewritten with the pair identity.
     // The sidecar names the pair identity; the next run compares it before
     // deciding the install answers, so a changed pair reinstalls and a
     // fetched or in-tree image is never mistaken for a pair build.
@@ -673,7 +667,7 @@ fn download_default_microvm_image(
         "x86_64"
     };
     let guest_arch = arch.parse().context("parse host architecture")?;
-    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
     let tag = mvm_core::image_set::image_train_lock()
         .image_set
         .release_tag

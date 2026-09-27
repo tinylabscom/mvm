@@ -193,6 +193,69 @@ pub fn is_already_exists(err: &anyhow::Error) -> bool {
     err.downcast_ref::<LostCreateRace>().is_some()
 }
 
+/// Copy `src` to `dst` and leave `dst` owner-writable, replacing whatever
+/// `dst` already was. Returns the number of bytes copied.
+///
+/// `std::fs::copy` gives the destination the source's permission bits, so a
+/// copy out of a read-only source — a Nix store output, a sealed cache entry —
+/// lands read-only. A later `std::fs::copy` onto that same destination then
+/// fails with `EACCES`, because it has to open the existing file for writing.
+/// Any cache that is ever reinstalled from such a source breaks on its second
+/// install.
+///
+/// This copies into a temporary sibling of `dst`, adds the owner-write bit
+/// there, and renames the sibling over `dst`. A rename needs write access to
+/// the directory, not to the file it replaces, so an existing read-only
+/// destination is replaced rather than refused. It also means a reader of
+/// `dst` sees either the old file or the new one and never a partial copy,
+/// and that a process still holding the old file open keeps reading the old
+/// bytes instead of a file truncated under it.
+///
+/// The bytes are the source's, unchanged. Only the owner-write bit is added;
+/// every other mode bit (the execute bits in particular) is kept. A failed
+/// copy removes its temporary sibling and leaves `dst` as it was.
+pub fn copy_writable(src: &Path, dst: &Path) -> Result<u64> {
+    let context = || format!("copying {} to {}", src.display(), dst.display());
+    let parent = match dst.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(dst.file_name().unwrap_or_default());
+    prefix.push(".");
+    // The temporary path does not exist when `fs::copy` runs, so the copy
+    // keeps its fast path (a copy-on-write clone where the filesystem has
+    // one) instead of rewriting an existing file.
+    let tmp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".partial")
+        .make_in(parent, |path| {
+            fs::copy(src, path).inspect_err(|_| {
+                let _ = fs::remove_file(path);
+            })
+        })
+        .with_context(context)?;
+    add_owner_write(tmp.path()).with_context(|| format!("making {} writable", dst.display()))?;
+    tmp.persist(dst)
+        .map_err(|err| err.error)
+        .with_context(context)
+}
+
+#[cfg(unix)]
+fn add_owner_write(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(perms.mode() | 0o200);
+    fs::set_permissions(path, perms)
+}
+
+/// Unix is the only host this workspace runs on; elsewhere the copy keeps the
+/// source's attributes.
+#[cfg(not(unix))]
+fn add_owner_write(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// RAII file lock using `flock(2)`.
 ///
 /// Acquires an exclusive lock on a `.lock` file adjacent to the target path.
@@ -453,6 +516,101 @@ mod tests {
             .expect("try_acquire")
             .expect("got lock after drop");
         drop(lock3);
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("stat").permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn read_only_file(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, bytes).expect("write source");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o444)).expect("chmod 0444");
+    }
+
+    /// A copy out of a read-only source must not inherit its read-only mode:
+    /// the destination is a cache entry the next install writes again.
+    #[cfg(unix)]
+    #[test]
+    fn copy_writable_leaves_a_fresh_destination_owner_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("mvm-meta.json");
+        read_only_file(&src, b"{\"v\":1}");
+        let dst = dir.path().join("out").join("mvm-meta.json");
+        fs::create_dir_all(dst.parent().expect("parent")).expect("mkdir");
+
+        let copied = copy_writable(&src, &dst).expect("copy");
+
+        assert_eq!(copied, 7);
+        assert_eq!(fs::read(&dst).expect("read"), b"{\"v\":1}");
+        assert_eq!(mode_of(&dst), 0o644, "0444 plus the owner-write bit");
+        assert_eq!(mode_of(&src), 0o444, "the source is never touched");
+    }
+
+    /// The exact failure a revision reinstall hit: the destination already
+    /// exists at 0444 from an earlier copy, and a plain `fs::copy` onto it is
+    /// refused with `EACCES` (for any user but root, which bypasses the mode
+    /// check — so this does not assert the plain copy's failure itself).
+    #[cfg(unix)]
+    #[test]
+    fn copy_writable_replaces_an_existing_read_only_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        read_only_file(&src, b"new bytes");
+        let dst = dir.path().join("dst");
+        read_only_file(&dst, b"old");
+
+        copy_writable(&src, &dst).expect("copy over a read-only destination");
+
+        assert_eq!(fs::read(&dst).expect("read"), b"new bytes");
+        assert_eq!(mode_of(&dst), 0o644);
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("readdir")
+            .map(|entry| entry.expect("entry").file_name())
+            .filter(|name| name != "src" && name != "dst")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temporary sibling left: {leftovers:?}"
+        );
+    }
+
+    /// Only the owner-write bit is added; an executable stays executable.
+    #[cfg(unix)]
+    #[test]
+    fn copy_writable_keeps_the_other_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("microvm-run");
+        fs::write(&src, b"#!/bin/sh\n").expect("write");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let dst = dir.path().join("copy");
+
+        copy_writable(&src, &dst).expect("copy");
+
+        assert_eq!(mode_of(&dst), 0o755);
+    }
+
+    /// A copy that fails leaves the existing destination untouched and no
+    /// temporary sibling behind.
+    #[test]
+    fn copy_writable_failure_leaves_the_destination_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dst = dir.path().join("dst");
+        fs::write(&dst, b"keep").expect("write");
+
+        let err = copy_writable(&dir.path().join("missing"), &dst)
+            .expect_err("a missing source must fail");
+
+        assert!(
+            format!("{err:#}").contains("missing"),
+            "names the source: {err:#}"
+        );
+        assert_eq!(fs::read(&dst).expect("read"), b"keep");
+        assert_eq!(fs::read_dir(dir.path()).expect("readdir").count(), 1);
     }
 
     #[test]

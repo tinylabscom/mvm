@@ -275,6 +275,18 @@ fn download_failure_message() -> String {
     )
 }
 
+/// Acquire the image set this build pins, fetching through [`download_file`]
+/// so a large member resumes, retries, and reports progress on a terminal.
+pub(crate) fn acquire_image_set() -> Result<mvm_build::published_image_set::PublishedImageSet> {
+    mvm_build::published_image_set::PublishedImageSet::acquire_from(
+        mvm_build::published_image_set::ImageSetSource::locked().with_download(download_to),
+    )
+}
+
+fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
+    download_file(url, &dest.to_string_lossy())
+}
+
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
     let status = std::process::Command::new("curl")

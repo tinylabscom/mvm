@@ -30,9 +30,15 @@ Last updated: 2026-09-26
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
+    - [ ] denial → policy draft selector (Grant / Skip)
+    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+    - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
+    - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
+    - [ ] tool calls (PS-13), SDK callback through hostlib (PS-01), a broker for detached machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
@@ -3939,3 +3945,5 @@ resume` takes a `current_head` and refuses when it differs from the
                   1+2, 3, 4.
             - [x] Wave 0.5a: the initramfs is a required signed root
                   member; `images.lock` pins `image-set/v0.2.1`.
+            - [x] Wave 0.5b: runtime overlay, SDK sidecar and initramfs
+                  come from the pinned set, not the CLI's own release.

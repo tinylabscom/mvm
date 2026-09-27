@@ -695,6 +695,21 @@ pub fn vm_socket_dir(name: &str) -> std::path::PathBuf {
     vm_socket_dir_at(&vm_state_dir(name))
 }
 
+/// File name of the runtime-approval socket in a VM's socket directory.
+pub const VM_APPROVAL_SOCKET: &str = "approval.sock";
+
+/// Where the operator's approval broker listens for a VM whose state lives at
+/// `state_dir`: the foreground `mvmctl` binds it, the VM's network endpoint
+/// connects to it when a decision is `ask`.
+pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
+}
+
+/// [`vm_approval_socket_at`] for a named VM.
+pub fn vm_approval_socket(name: &str) -> std::path::PathBuf {
+    vm_approval_socket_at(&vm_state_dir(name))
+}
+
 /// libkrun's per-port vsock listener socket: `<socket-dir>/vsock-<port>.sock`.
 /// `socket-dir` is normally the per-VM state dir, but falls back to a short
 /// hashed `/tmp` namespace when a deep worktree path would overflow macOS's

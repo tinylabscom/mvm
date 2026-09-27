@@ -17,9 +17,11 @@ use clap::Args as ClapArgs;
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 
-use mvm_hostd::supervisor::{PlanAuditEntry, SignedEnvelope, verify_audit_chain};
+use mvm_hostd::supervisor::{PlanAuditEntry, verify_audit_chain};
 
 use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
+use super::audit_follow::{ChainLine, parse_chain_line};
+use super::egress_denials::{DeniedDestination, denials_in_window};
 use super::host_signer;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -70,6 +72,9 @@ pub(in crate::commands) struct RunExplanation {
     pub image_name: String,
     pub image_sha256: String,
     pub events: Vec<EventRecord>,
+    /// The machine's egress refusals while this run held its name, counted by
+    /// destination and reason, each with its remedy.
+    pub egress_denials: Vec<DeniedDestination>,
     pub chain_verified: bool,
     /// Total verified entry count across the whole chain file (not just
     /// this run's events). Rendering-only; not part of the JSON contract.
@@ -104,6 +109,7 @@ impl RunExplanation {
         if let Some(provenance) = self.provenance_summary() {
             println!("source provenance: {provenance}");
         }
+        self.render_denials();
         println!();
         match (self.chain_verified, &self.verify_error) {
             (true, _) => println!(
@@ -114,6 +120,20 @@ impl RunExplanation {
                 "\u{26a0} audit chain FAILED verification: {e} — this run's record may be tampered"
             ),
             (false, None) => println!("\u{26a0} audit chain verification could not be confirmed"),
+        }
+    }
+
+    /// One line per refused destination, with its count and remedy.
+    fn render_denials(&self) {
+        if self.egress_denials.is_empty() {
+            return;
+        }
+        println!("egress denied:");
+        for denied in &self.egress_denials {
+            println!(
+                "  {}  {}×  {} — {}",
+                denied.destination, denied.count, denied.description, denied.hint
+            );
         }
     }
 
@@ -192,8 +212,8 @@ pub(in crate::commands) fn collect_run(
         // Unparsable lines are skipped, matching the tolerant read in
         // `ops/audit.rs::print_chain_line` — a foreign line shouldn't
         // sink the whole explain.
-        if let Ok(envelope) = serde_json::from_str::<SignedEnvelope>(line) {
-            all_entries.push(envelope.entry);
+        if let ChainLine::Entry(entry) = parse_chain_line(line) {
+            all_entries.push(*entry);
         }
     }
 
@@ -244,6 +264,8 @@ pub(in crate::commands) fn collect_run(
         })
         .collect();
 
+    let egress_denials = run_denials(&all_entries, &plan_id, &image_name);
+
     let (chain_verified, chain_entry_count, verify_error) =
         match verify_audit_chain(path, verifying_key) {
             Ok(count) => (true, count, None),
@@ -257,10 +279,40 @@ pub(in crate::commands) fn collect_run(
         image_name,
         image_sha256,
         events,
+        egress_denials,
         chain_verified,
         chain_entry_count,
         verify_error,
     })
+}
+
+/// The refusals the per-VM endpoint recorded for this run's machine.
+///
+/// The endpoint holds no plan, so its entries are joined to the run by the
+/// machine name they carry — the run's image name — and bounded in time: from
+/// the run's first entry to its terminal one, or, for a run with no terminal
+/// entry, to the next admission under the same name. A name reused by a later
+/// run therefore never lends this one its refusals.
+fn run_denials(entries: &[PlanAuditEntry], plan_id: &str, vm_name: &str) -> Vec<DeniedDestination> {
+    let own = || entries.iter().filter(|e| e.plan_id.0 == plan_id);
+    let Some(from) = own().map(|e| e.timestamp).min() else {
+        return Vec::new();
+    };
+    let terminal = own()
+        .filter(|e| e.event == "plan.exited" || e.event == "plan.failed")
+        .map(|e| e.timestamp)
+        .max();
+    let next_admission = entries
+        .iter()
+        .filter(|e| {
+            e.event == "plan.admitted"
+                && e.image_name == vm_name
+                && e.plan_id.0 != plan_id
+                && e.timestamp > from
+        })
+        .map(|e| e.timestamp)
+        .min();
+    denials_in_window(entries, vm_name, from, terminal.or(next_admission)).destinations()
 }
 
 /// First 12 hex chars of an image sha256 — enough to disambiguate at a
@@ -325,6 +377,113 @@ mod tests {
         assert!(explanation.verify_error.is_none());
         assert_eq!(explanation.outcome(), "exited with code 0");
         assert_eq!(explanation.backend().as_deref(), Some("firecracker"));
+    }
+
+    /// Record a refusal the way the per-VM endpoint does: unbound, attributed
+    /// to the machine by name, into the same tenant chain.
+    fn endpoint_refusal(dir: &Path, key: &SigningKey, vm: &str, target: &str, reason: &str) {
+        use mvm_hostd::supervisor::audit_recorder::{EventCategory, Recorder};
+        let signer = mvm_hostd::supervisor::audit_file::FileAuditSigner::open(
+            key.clone(),
+            dir.to_path_buf(),
+        )
+        .unwrap();
+        let recorder = Recorder::new(
+            std::sync::Arc::new(signer),
+            mvm_core::plan::TenantId("local".into()),
+        )
+        .with_vm_name(vm);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(recorder.record_unbound(
+                EventCategory::Host,
+                "host.flow.denied",
+                [
+                    ("class".to_string(), "tcp".to_string()),
+                    ("target".to_string(), target.to_string()),
+                    ("reason".to_string(), reason.to_string()),
+                ],
+            ))
+            .unwrap();
+    }
+
+    /// `explain` shows the machine's refusals from its own run and no other:
+    /// not a different machine's, and not a later run's under the same name.
+    #[test]
+    fn collect_run_reports_the_runs_egress_denials_and_no_one_elses() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-denied-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "firecracker").unwrap();
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "api.example.com:443",
+            "policy_denied",
+        );
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "api.example.com:443",
+            "policy_denied",
+        );
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "169.254.169.254:80",
+            "cloud_metadata",
+        );
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-other",
+            "other.example:443",
+            "policy_denied",
+        );
+        emitter.emit_exited(&plan, 7, "firecracker").unwrap();
+        let later = fixture_plan("local", "plan-denied-2");
+        emitter.emit_admitted(&later, "host:test").unwrap();
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "later.example:443",
+            "policy_denied",
+        );
+
+        let path = dir.path().join("local.jsonl");
+        let explanation = collect_run(&path, &vk, "local", "plan-denied-1").unwrap();
+        assert!(explanation.chain_verified, "{:?}", explanation.verify_error);
+        let denied = &explanation.egress_denials;
+        assert_eq!(denied.len(), 2, "{denied:?}");
+        assert_eq!(denied[0].destination, "api.example.com:443");
+        assert_eq!(denied[0].count, 2);
+        assert_eq!(
+            denied[0].hint,
+            "allow with --allow-host api.example.com:443"
+        );
+        assert_eq!(denied[1].reason, "cloud_metadata");
+        assert!(
+            !denied[1].hint.contains("--allow-host"),
+            "{}",
+            denied[1].hint
+        );
+
+        let json = serde_json::to_value(&explanation).unwrap();
+        assert_eq!(json["egress_denials"][0]["count"], 2);
+        assert_eq!(json["egress_denials"][1]["remedy"]["kind"], "never");
+
+        // The later run under the same name sees only its own.
+        let later = collect_run(&path, &vk, "local", "plan-denied-2").unwrap();
+        assert_eq!(later.egress_denials.len(), 1);
+        assert_eq!(later.egress_denials[0].destination, "later.example:443");
     }
 
     #[test]

@@ -513,6 +513,65 @@ mod tests {
         );
     }
 
+    /// Register a writable attachment of an unlocked managed block volume
+    /// for `owner`, under the default library profile.
+    fn register_writable_managed_volume(home: &crate::volume::test_support::TestVolumeHome) {
+        use crate::volume::VolumeService as _;
+        home.create_block("state", 16);
+        let volumes = crate::volume::LocalVolumeService::new();
+        volumes.unlock_volume("state").expect("unlock");
+        let request = crate::volume::AttachmentRequest::builder("web", "state")
+            .and_then(|b| {
+                b.guest_path("/data/state")
+                    .access(crate::volume::AccessMode::ReadWrite)
+                    .profile(crate::volume::AdmittedProfile::from_profile_name(
+                        "standard",
+                    ))
+                    .build()
+            })
+            .expect("standard registers a writable managed volume");
+        volumes.prepare_attachment(&request).expect("attach");
+    }
+
+    /// An embedder starting a machine under the default `standard` profile
+    /// gets its writable managed volume, as `dev` and `permissive` do: the
+    /// guest writes into the volume's own disk image.
+    #[test]
+    fn the_embedder_host_leases_a_writable_managed_volume_under_standard() {
+        let home = crate::volume::test_support::TestVolumeHome::new();
+        register_writable_managed_volume(&home);
+        for profile in ["standard", "dev", "permissive"] {
+            let prepared = EmbedderStartHost::new(None, profile)
+                .prepare_volumes("web", &[])
+                .unwrap_or_else(|e| panic!("{profile}: {e:#}"));
+            assert_eq!(prepared.volumes.len(), 1, "{profile}");
+            assert_eq!(prepared.volumes[0].guest, "/data/state");
+            assert!(!prepared.volumes[0].read_only, "{profile}");
+            // Dropped uncommitted, so the next profile can take the lease.
+        }
+    }
+
+    /// `restrictive` grants no writable disk image, and a profile name that
+    /// is not a preset grants nothing; both refuse the writable volume.
+    #[test]
+    fn the_embedder_host_refuses_a_writable_managed_volume_under_restrictive() {
+        let home = crate::volume::test_support::TestVolumeHome::new();
+        register_writable_managed_volume(&home);
+        for (profile, named) in [
+            ("restrictive", "profile \"restrictive\""),
+            ("prod", "no recognised profile"),
+        ] {
+            let message = format!(
+                "{:#}",
+                EmbedderStartHost::new(None, profile)
+                    .prepare_volumes("web", &[])
+                    .expect_err("no writable volume without the grant")
+            );
+            assert!(message.contains("does not permit writable"), "{message}");
+            assert!(message.contains(named), "{message}");
+        }
+    }
+
     /// With nothing in the kernel cache the embedder refuses and says how to
     /// fill it, rather than building one.
     #[test]

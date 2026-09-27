@@ -25,7 +25,9 @@ mvm-hostd.workspace = true
 # sees only ciphertext.
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
-mvm-client.workspace = true
+# `clap`: the `--profile` flag parses into `mvm_client::profile::RunProfile`,
+# the profile table the library launch paths read too.
+mvm-client = { workspace = true, features = ["clap"] }
 mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.

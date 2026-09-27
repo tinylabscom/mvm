@@ -37,8 +37,6 @@ use super::artifact_verify::bump_verify_outcome;
 #[cfg(test)]
 use super::artifact_verify::{ChecksumManifest, verify_artifact_hash};
 use crate::ui;
-#[cfg(all(test, feature = "builder-vm"))]
-use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
 #[cfg(feature = "builder-vm")]
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
@@ -125,12 +123,12 @@ use image_ops::validate_dev_image_artifacts;
 #[cfg(feature = "builder-vm")]
 use image_ops::verify_stage0_rootfs_has_init;
 pub(crate) use kernel::KernelSource;
+#[cfg(all(test, feature = "builder-vm"))]
+use kernel::format_compile_start;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::resolve_kernel_source;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
-#[cfg(all(test, feature = "builder-vm"))]
-use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(all(test, feature = "builder-vm"))]
 pub(crate) use local_pair::derive_pair_key;
 #[cfg(feature = "builder-vm")]
@@ -147,15 +145,16 @@ pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 pub(crate) use shell_job::ShellJobBuilder;
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
-#[cfg(any(
-    all(
-        feature = "release-artifact-bootstrap",
-        feature = "builder-vm",
-        feature = "manifest-verify"
-    ),
-    test
-))]
+#[cfg(test)]
 use stage0_cache::builder_vm_artifact_names;
+#[cfg(all(
+    feature = "manifest-verify",
+    any(
+        all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+        test
+    )
+))]
+use stage0_cache::builder_vm_boot_assets;
 #[cfg(feature = "release-artifact-bootstrap")]
 use stage0_cache::download_builder_vm_image;
 pub(in crate::commands) use stage0_cache::{

@@ -12,9 +12,10 @@
 //!    returns paths into the nix store. Linux-only — host Nix is never used
 //!    by mvmctl on macOS, so the function gates on `target_os = "linux"`;
 //!    macOS builds run through the direct in-process assembler instead.
-//! 2. **Download from a release.** [`download_runtime_overlay`] fetches the
-//!    published per-arch tarball, verifies it, and installs it — the same
-//!    integrity pattern the dev-image download uses.
+//! 2. **Download from the image set.** [`download_runtime_overlay`] fetches
+//!    the per-arch tarball as a member of the signed image set this build
+//!    pins, holds it to the digest the verified root declares, and installs
+//!    it.
 //!
 //! [`install_overlay_into_cache`] is the shared atomic cache installer both
 //! producers hand off to, and [`resolve_or_seed_from_default_cache`] wraps
@@ -134,6 +135,24 @@ pub enum RuntimeOverlayError {
     /// The direct in-process overlay assembly failed.
     #[error("direct runtime overlay build failed: {reason}")]
     DirectBuildFailed { reason: String },
+
+    /// The image set this build pins could not be acquired and verified, so
+    /// no member of it can be trusted.
+    #[error("{0:#}")]
+    ImageSet(anyhow::Error),
+
+    /// The verified image set could not deliver the member asked for: it
+    /// declares none, or the bytes served are not the ones it declares.
+    /// Boxed so the rare refusal does not widen every `Result` this crate
+    /// returns.
+    #[error(transparent)]
+    ImageSetMember(Box<crate::published_image_set::ImageSetMemberError>),
+}
+
+impl From<crate::published_image_set::ImageSetMemberError> for RuntimeOverlayError {
+    fn from(error: crate::published_image_set::ImageSetMemberError) -> Self {
+        Self::ImageSetMember(Box::new(error))
+    }
 }
 
 const DIRECT_OVERLAY_VERITY_SALT: [u8; 32] = [0u8; 32];
@@ -619,6 +638,10 @@ fn build_runtime_overlay_from_source_checkout(
             .map_err(|e| RuntimeOverlayError::NixBuildFailed {
                 reason: format!("compute runtime-overlay source fingerprint: {e}"),
             })?;
+    let phase = mvm_vmm::host::ui::activity::start(format!(
+        "Compiling the {arch} runtime overlay from local sources (cached for this checkout \
+         afterward)"
+    ));
     let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
         cache_root,
         version,
@@ -631,6 +654,7 @@ fn build_runtime_overlay_from_source_checkout(
     let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
     write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
     write_local_build_epoch(cache_root, version, arch)?;
+    phase.finish();
     Ok(artifact)
 }
 
@@ -836,42 +860,21 @@ pub(crate) fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
 // Download the published runtime overlay (consumer side)
 // ============================================================================
 
-/// Default GitHub Releases base URL the release pipeline
-/// (`runtime-overlay-image` job in `.github/workflows/release.yml`)
-/// uploads to. Override via the `MVM_OVERLAY_BASE_URL` env var for
-/// hermetic tests or a private mirror — the env path doesn't accept
-/// the `v` prefix or trailing slash; we append `/v<version>` ourselves
-/// so the test can pin to a `file://...` fixture dir.
-const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/download";
-
 /// Documented escape hatch — bypass the SHA-256
 /// integrity check when an emergency rotation requires it. Never set
 /// in CI. Matches the env var name honoured by `verify_artifact_hash` on the
 /// CLI's download path, so the operator runbook covers both.
 pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
-/// Construct the per-version release base URL the four artifacts
-/// live under. Production-shape:
-/// `https://github.com/tinylabscom/mvm/releases/download/v<version>`.
-/// Honors `MVM_OVERLAY_BASE_URL` for tests + private mirrors —
-/// callers pass the *prefix*, this function appends `/v<version>`.
-pub fn release_base_url(version: &str) -> String {
-    let base =
-        std::env::var("MVM_OVERLAY_BASE_URL").unwrap_or_else(|_| DEFAULT_RELEASE_BASE.to_string());
-    format!("{}/v{version}", base.trim_end_matches('/'))
-}
-
-/// Download the runtime overlay tarball for `version` + `arch` from the
-/// published GitHub Release, SHA-256-verify the archive, safely extract it,
-/// re-verify each inner artifact against the archive's embedded
-/// `checksums-sha256.txt`, and install into `cache_root` under the canonical layout
+/// Download the runtime overlay tarball for `arch` as a member of the image
+/// set this build pins, safely extract it, re-verify each inner artifact
+/// against the archive's embedded `checksums-sha256.txt`, and install into
+/// `cache_root` under the canonical layout
 /// `<cache_root>/runtime-overlay/<version>/<arch>/`.
 ///
-/// Mirrors the integrity pattern of `download_builder_vm_image`: fetch the
-/// archive checksum first; reject
-/// downloads whose hash isn't pre-committed there; honor
-/// `MVM_SKIP_HASH_VERIFY=1` only as a documented emergency
-/// rotation escape (never set in CI).
+/// The archive is trusted only through the set: the root manifest is held to
+/// its locked digest and its publisher's signature, and the archive to the
+/// size and digest that root declares, all before extraction.
 ///
 /// Returns the installed `RuntimeOverlayArtifact` so the caller
 /// can hand it straight to the backend.
@@ -880,38 +883,72 @@ pub fn download_runtime_overlay(
     arch: GuestArch,
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let image_set = crate::published_image_set::PublishedImageSet::acquire()
+        .map_err(RuntimeOverlayError::ImageSet)?;
+    download_runtime_overlay_from(&image_set, version, arch, cache_root)
+}
+
+/// [`download_runtime_overlay`] from a set that has already been acquired.
+pub fn download_runtime_overlay_from(
+    image_set: &crate::published_image_set::PublishedImageSet,
+    version: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let names = RuntimeOverlayArtifactNames::for_arch(&arch.to_string());
-    let base = release_base_url(version);
-    let archive_checksum_url = format!("{base}/{}", names.archive_checksum);
-
-    // Step 1: fetch the archive checksum sidecar before touching the tarball.
-    // The archive is the transport unit; a missing checksum aborts before we
-    // spend bandwidth on the payload.
-    let expected = fetch_expected_hashes(&archive_checksum_url, &[&names.archive])?;
-
-    // Step 2: download the tarball into a temp dir, prove it against both the
-    // digest and the release signing identity, then safely extract it into
-    // canonical filenames so `install_overlay_into_cache` can consume the
-    // extracted directory directly. The signature rung sits before extraction
-    // so an unauthenticated tar is never parsed.
     let tmp = tempfile::tempdir()?;
-    let stage = tmp.path();
-    let archive_local = stage.join(&names.archive);
-    curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
-    verify_file_sha256(&archive_local, &names.archive, expected.get(&names.archive))?;
+    let archive_local = tmp.path().join(&names.archive);
+    image_set.fetch_member_artifact(
+        mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+        arch,
+        &names.archive,
+        &archive_local,
+    )?;
+    install_runtime_overlay_archive(&archive_local, version, arch, cache_root)
+}
+
+/// Fetch `asset` from the per-version directory `release_url` of a CLI
+/// release, the way clients that predate the image set acquire it: its
+/// `.sha256` sidecar first, then the archive held to that digest, then the
+/// archive held to the CLI release workflow's signing identity.
+///
+/// The CLI release still publishes these archives for those clients, and its
+/// workflow proves each one survives this path before publishing.
+pub fn fetch_cli_release_archive(
+    release_url: &str,
+    version: &str,
+    asset: &str,
+    dest: &Path,
+) -> Result<(), RuntimeOverlayError> {
+    let expected = fetch_expected_hashes(&format!("{release_url}/{asset}.sha256"), &[asset])?;
+    curl_download(&format!("{release_url}/{asset}"), dest)?;
+    verify_file_sha256(dest, asset, expected.get(asset))?;
     crate::release_signature::verify_release_archive_signature(
         &crate::release_signature::ReleaseSignatureRequest {
-            base_url: &base,
-            asset: &names.archive,
-            archive_path: &archive_local,
+            base_url: release_url,
+            asset,
+            archive_path: dest,
             version,
-            // Unchanged: this path still resolves its base URL from the CLI
-            // version, so its signature train must stay the CLI one. Splitting
-            // its download tag from its cache key is a separate change.
             train: crate::release_signature::ReleaseTrain::Cli,
         },
-    )?;
-    extract_release_archive(&archive_local, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
+    )
+}
+
+/// Install an authenticated runtime overlay archive: safely extract it,
+/// re-verify each inner artifact against the archive's own manifest, seed the
+/// OCI guest runtime from it, and install the overlay atomically.
+///
+/// The caller must have authenticated `archive` already — tar extraction is
+/// an attack surface, and an unauthenticated archive is never parsed.
+pub fn install_runtime_overlay_archive(
+    archive: &Path,
+    version: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let tmp = tempfile::tempdir()?;
+    let stage = tmp.path();
+    extract_release_archive(archive, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
     verify_overlay_dir_integrity(stage)?;
     verify_release_guest_runtime(stage)?;
 
@@ -927,19 +964,18 @@ pub fn download_runtime_overlay(
         arch,
     )?;
 
-    // Step 3: read the roothash text so the returned
-    // `RuntimeOverlayArtifact` carries the value the backend
-    // bakes into the kernel cmdline (`mvm.runtime_roothash=…`).
+    // Read the roothash text so the returned `RuntimeOverlayArtifact` carries
+    // the value the backend bakes into the kernel cmdline
+    // (`mvm.runtime_roothash=…`).
     let ext4_local = stage.join("overlay.ext4");
     let verity_local = stage.join("overlay.verity");
     let roothash_local = stage.join("overlay.roothash");
     let roothash = read_roothash_file(&roothash_local)?;
 
-    // Step 4: hand off to the existing atomic installer. It
-    // copies into a staging dir under `cache_root` and renames
-    // into the canonical artifact dir on success — so a
-    // mid-install crash leaves only a `.tmp.<pid>` behind, never
-    // a partially-overwritten cache entry.
+    // Hand off to the existing atomic installer. It copies into a staging dir
+    // under `cache_root` and renames into the canonical artifact dir on
+    // success — so a mid-install crash leaves only a `.tmp.<pid>` behind,
+    // never a partially-overwritten cache entry.
     let staged_artifact = RuntimeOverlayArtifact {
         overlay_ext4: ext4_local,
         sidecar: verity_local,
@@ -1185,6 +1221,8 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::published_image_set::fixture::ImageSetFixture;
+    use crate::published_image_set::{ImageSetMemberError, PublishedImageSet};
     use mvm_core::util::test_env::TestEnv;
     use mvm_fs::ext4::{Node, Owner};
     use tempfile::TempDir;
@@ -1797,116 +1835,66 @@ mod tests {
     // download_runtime_overlay tests
     // ====================================================================
 
-    /// `release_base_url` honors `MVM_OVERLAY_BASE_URL`. Pinned via a
-    /// mutex so concurrent tests don't fight over the env var.
-    #[test]
-    fn release_base_url_honors_env_override() {
-        // `TestEnv` serializes env-mutating tests in this process behind a
-        // shared lock and restores the prior value on drop.
-        let mut env = TestEnv::new();
-        env.set("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm");
-        let url = release_base_url("9.9.9");
-        assert_eq!(url, "https://mirror.example.com/mvm/v9.9.9");
-        env.remove("MVM_OVERLAY_BASE_URL");
+    const OVERLAY_ARCHIVE: &str = "runtime-overlay-aarch64.tar.gz";
+
+    fn fixture_overlay_archive() -> Vec<u8> {
+        runtime_overlay_archive_bytes(
+            b"fake-ext4-bytes",
+            b"fake-verity-sidecar",
+            format!("{FAKE_ROOTHASH}\n").as_bytes(),
+            b"9.9.9\n",
+        )
     }
 
-    #[test]
-    fn release_base_url_falls_back_to_default_without_env() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_OVERLAY_BASE_URL");
-        let url = release_base_url("0.14.0");
-        assert_eq!(
-            url,
-            "https://github.com/tinylabscom/mvm/releases/download/v0.14.0"
-        );
+    fn with_overlay(archive: Vec<u8>) -> ImageSetFixture {
+        ImageSetFixture::complete().publish(
+            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
+            OVERLAY_ARCHIVE,
+            archive,
+        )
     }
 
-    #[test]
-    fn release_base_url_strips_trailing_slash_on_override() {
-        let mut env = TestEnv::new();
-        env.set("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm/");
-        let url = release_base_url("9.9.9");
-        assert_eq!(url, "https://mirror.example.com/mvm/v9.9.9");
-        env.remove("MVM_OVERLAY_BASE_URL");
-    }
-
-    /// End-to-end download flow against a `file://` fixture: stage
-    /// a tarball + archive checksum sidecar under names matching the
-    /// release-pipeline layout, point
-    /// `MVM_OVERLAY_BASE_URL` at the fixture dir, and assert the
-    /// installer materializes everything correctly into the cache.
-    /// Exercises every code path except the actual GitHub network
-    /// hop — same wire format, same archive verification, same
-    /// inner-manifest verification, same atomic install.
-    ///
-    /// `file://` URLs work with curl (`-fSL`) the same way HTTP
-    /// URLs do, so the test exercises the exact code path
-    /// production hits.
-    #[test]
-    fn download_runtime_overlay_end_to_end_against_file_url_fixture() {
-        // SAFETY: must serialize against other env-touching tests
-        // in this module.
-        let mut env = TestEnv::new();
-
-        let upstream = TempDir::new().unwrap();
-        let release_dir = upstream.path().join("v9.9.9");
-        std::fs::create_dir_all(&release_dir).unwrap();
-
-        // Fixture bytes — the actual contents don't matter for the
-        // download path, only their checksums.
-        let ext4_bytes = b"fake-ext4-bytes";
-        let verity_bytes = b"fake-verity-sidecar";
-        let roothash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
-        let version_text = "9.9.9\n";
-        let archive_bytes = runtime_overlay_archive_bytes(
-            ext4_bytes,
-            verity_bytes,
-            roothash_text.as_bytes(),
-            version_text.as_bytes(),
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz",
-            &archive_bytes,
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz.sha256",
-            format!(
-                "{}  runtime-overlay-aarch64.tar.gz\n",
-                sha256_hex(&archive_bytes)
-            )
-            .as_bytes(),
-        );
-
-        let base_url = format!("file://{}", upstream.path().display());
-        env.set("MVM_OVERLAY_BASE_URL", &base_url);
-        // A valid Sigstore signature cannot be minted offline, and this test is
-        // about the digest, extraction, and install rungs. The signature rung
-        // has its own witnesses in `crate::release_signature` and below.
+    /// Acquire `fixture` as the verified set. A fixture carries no publisher
+    /// signature; that rung has its own witnesses in
+    /// `crate::published_image_set`.
+    fn acquire(fixture: &ImageSetFixture, served: &Path, env: &mut TestEnv) -> PublishedImageSet {
         env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        PublishedImageSet::acquire_from(fixture.serve_from(served))
+            .expect("the fixture root must be accepted")
+    }
+
+    /// The member the signed root names is fetched, extracted, re-verified
+    /// against its own manifest and installed under the canonical layout.
+    /// `file://` URLs go through the same `curl -fSL` a release URL does, so
+    /// only the network hop is missing.
+    #[test]
+    fn download_runtime_overlay_installs_the_member_the_signed_root_names() {
+        let mut env = TestEnv::new();
+        let served = TempDir::new().unwrap();
+        let set = acquire(
+            &with_overlay(fixture_overlay_archive()),
+            served.path(),
+            &mut env,
+        );
 
         let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
+        let installed =
+            download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
+                .expect("download + install must succeed against the fixture set");
 
-        env.remove("MVM_OVERLAY_BASE_URL");
-
-        let installed = result.expect("download + install must succeed against fixture");
         assert_eq!(installed.arch, "aarch64");
         assert_eq!(installed.version, "9.9.9");
-        assert_eq!(
-            installed.roothash,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-        assert!(installed.overlay_ext4.is_file());
-        assert!(installed.sidecar.is_file());
-        assert!(installed.roothash_file.is_file());
-        // Canonical names in the cache (no `runtime-overlay-` prefix).
+        assert_eq!(installed.roothash, FAKE_ROOTHASH);
         let cache_dir = cache.path().join("runtime-overlay/9.9.9/aarch64");
-        assert!(cache_dir.join("overlay.ext4").is_file());
-        assert!(cache_dir.join("overlay.verity").is_file());
-        assert!(cache_dir.join("overlay.roothash").is_file());
-        assert!(cache_dir.join("VERSION").is_file());
+        for file in [
+            "overlay.ext4",
+            "overlay.verity",
+            "overlay.roothash",
+            "VERSION",
+        ] {
+            assert!(cache_dir.join(file).is_file(), "{file} must be installed");
+        }
         assert!(
             crate::guest_agent_build::cached_guest_binaries(
                 &cache.path().join("oci"),
@@ -1918,144 +1906,165 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(cache_dir.join("overlay.ext4")).unwrap(),
-            ext4_bytes
+            b"fake-ext4-bytes"
         );
     }
 
-    /// The overlay carries the same signature rung the sidecar does: a release
-    /// that publishes an archive with no signature beside it is refused, and
-    /// nothing lands in the cache — even though its digest matches.
+    /// Bytes other than the ones the signed root declares are refused at the
+    /// digest, before extraction, and nothing reaches the cache. The served
+    /// archive differs in its gzip trailer only, so had it been extracted the
+    /// failure would have been a gzip error rather than a digest mismatch.
     #[test]
-    fn download_runtime_overlay_refuses_an_unsigned_archive() {
+    fn download_runtime_overlay_rejects_checksum_mismatch() {
         let mut env = TestEnv::new();
-        let upstream = TempDir::new().unwrap();
-        let release_dir = upstream.path().join("v9.9.9");
-        std::fs::create_dir_all(&release_dir).unwrap();
-
-        let archive_bytes = b"not-even-a-real-archive".to_vec();
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz",
-            &archive_bytes,
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz.sha256",
-            format!(
-                "{}  runtime-overlay-aarch64.tar.gz\n",
-                sha256_hex(&archive_bytes)
-            )
-            .as_bytes(),
-        );
-
-        env.set(
-            "MVM_OVERLAY_BASE_URL",
-            format!("file://{}", upstream.path().display()),
-        );
-        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let archive = fixture_overlay_archive();
+        let mut tampered = archive.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        let served = TempDir::new().unwrap();
+        let fixture = with_overlay(archive).serve_instead(OVERLAY_ARCHIVE, tampered);
+        let set = acquire(&fixture, served.path(), &mut env);
 
         let cache = TempDir::new().unwrap();
-        let err = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path())
-            .expect_err("an unsigned overlay archive must not install");
+        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
+            .expect_err("tampered archive must be refused");
+        match err {
+            RuntimeOverlayError::ImageSetMember(member) => match *member {
+                ImageSetMemberError::DigestMismatch { name, .. } => {
+                    assert_eq!(name, OVERLAY_ARCHIVE)
+                }
+                other => panic!("expected a digest mismatch, got {other:?}"),
+            },
+            other => panic!("expected a digest mismatch, got {other:?}"),
+        }
+        assert!(!cache.path().join("runtime-overlay/9.9.9/aarch64").exists());
+    }
 
+    /// The current train requires an overlay for every arch, so a root without
+    /// one is refused at acquisition — naming the role and arch — before any
+    /// member is requested.
+    #[test]
+    fn download_runtime_overlay_refuses_a_set_without_an_overlay_for_the_arch() {
+        let mut env = TestEnv::new();
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let served = TempDir::new().unwrap();
+        let fixture = ImageSetFixture::complete().without_member(
+            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
+        );
+
+        let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+            .err()
+            .expect("a set without the overlay member must be refused");
+        assert!(
+            format!("{err:#}").contains("runtime_overlay/aarch64"),
+            "{err:#}"
+        );
+    }
+
+    /// A member that exists but does not carry this arch's archive name is
+    /// refused by name before any download.
+    #[test]
+    fn download_runtime_overlay_refuses_a_member_without_the_archive() {
+        let mut env = TestEnv::new();
+        let served = TempDir::new().unwrap();
+        let fixture = ImageSetFixture::complete().publish(
+            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
+            "runtime-overlay-renamed.tar.gz",
+            fixture_overlay_archive(),
+        );
+        let set = acquire(&fixture, served.path(), &mut env);
+
+        let cache = TempDir::new().unwrap();
+        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
+            .expect_err("an undeclared archive must be refused");
+        assert!(
+            matches!(
+                &err,
+                RuntimeOverlayError::ImageSetMember(member)
+                    if matches!(**member, ImageSetMemberError::NoArtifact { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("runtime_overlay/aarch64"), "{err}");
+    }
+
+    /// Stage a CLI release directory the way `release.yml` publishes one: the
+    /// archive and a `.sha256` sidecar pinning `checksum_over`.
+    fn stage_cli_release(root: &Path, archive: &[u8], checksum_over: &[u8]) -> String {
+        let release_dir = root.join("v9.9.9");
+        std::fs::create_dir_all(&release_dir).unwrap();
+        write_fixture(&release_dir, OVERLAY_ARCHIVE, archive);
+        write_fixture(
+            &release_dir,
+            &format!("{OVERLAY_ARCHIVE}.sha256"),
+            format!("{}  {OVERLAY_ARCHIVE}\n", sha256_hex(checksum_over)).as_bytes(),
+        );
+        format!("file://{}", release_dir.display())
+    }
+
+    #[test]
+    fn a_cli_release_archive_installs_through_the_shared_install_half() {
+        let mut env = TestEnv::new();
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let archive = fixture_overlay_archive();
+        let upstream = TempDir::new().unwrap();
+        let release_url = stage_cli_release(upstream.path(), &archive, &archive);
+
+        let stage = TempDir::new().unwrap();
+        let local = stage.path().join(OVERLAY_ARCHIVE);
+        fetch_cli_release_archive(&release_url, "9.9.9", OVERLAY_ARCHIVE, &local).unwrap();
+        let cache = TempDir::new().unwrap();
+        let installed =
+            install_runtime_overlay_archive(&local, "9.9.9", GuestArch::Aarch64, cache.path())
+                .unwrap();
+        assert_eq!(installed.roothash, FAKE_ROOTHASH);
+    }
+
+    /// A CLI release archive with no signature beside it is refused even
+    /// though its digest matches its sidecar.
+    #[test]
+    fn a_cli_release_archive_without_a_signature_is_refused() {
+        let mut env = TestEnv::new();
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let archive = b"not-even-a-real-archive".to_vec();
+        let upstream = TempDir::new().unwrap();
+        let release_url = stage_cli_release(upstream.path(), &archive, &archive);
+
+        let stage = TempDir::new().unwrap();
+        let err = fetch_cli_release_archive(
+            &release_url,
+            "9.9.9",
+            OVERLAY_ARCHIVE,
+            &stage.path().join(OVERLAY_ARCHIVE),
+        )
+        .expect_err("an unsigned archive must not be accepted");
         let rendered = err.to_string();
         assert!(
             rendered.contains("signature") || rendered.contains("bundle"),
             "the refusal must be about the signature: {rendered}"
         );
+    }
+
+    /// A CLI release archive whose bytes are not the ones its sidecar pins is
+    /// refused and deleted.
+    #[test]
+    fn a_cli_release_archive_that_misses_its_sidecar_digest_is_refused() {
+        let mut env = TestEnv::new();
+        env.remove(SKIP_HASH_VERIFY_ENV);
+        let upstream = TempDir::new().unwrap();
+        let release_url = stage_cli_release(upstream.path(), b"tampered!", b"the-real-bytes");
+
+        let stage = TempDir::new().unwrap();
+        let local = stage.path().join(OVERLAY_ARCHIVE);
+        let err = fetch_cli_release_archive(&release_url, "9.9.9", OVERLAY_ARCHIVE, &local)
+            .expect_err("a digest mismatch must be refused");
         assert!(
-            !cache.path().join("runtime-overlay/9.9.9/aarch64").exists(),
-            "a refused download must cache nothing"
+            matches!(err, RuntimeOverlayError::ChecksumMismatch { .. }),
+            "{err:?}"
         );
-    }
-
-    /// A tampered artifact whose sha doesn't match the manifest
-    /// must be rejected, the bad file deleted, and the cache left
-    /// unchanged. This is the fail-closed integrity contract.
-    #[test]
-    fn download_runtime_overlay_rejects_checksum_mismatch() {
-        let mut env = TestEnv::new();
-
-        let upstream = TempDir::new().unwrap();
-        let release_dir = upstream.path().join("v9.9.9");
-        std::fs::create_dir_all(&release_dir).unwrap();
-
-        let expected_archive_bytes = runtime_overlay_archive_bytes(
-            b"the-real-ext4-bytes",
-            b"v",
-            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
-            b"9.9.9\n",
-        );
-        let tampered_archive_bytes = runtime_overlay_archive_bytes(
-            b"tampered!",
-            b"v",
-            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
-            b"9.9.9\n",
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz",
-            &tampered_archive_bytes,
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz.sha256",
-            format!(
-                "{}  runtime-overlay-aarch64.tar.gz\n",
-                sha256_hex(&expected_archive_bytes)
-            )
-            .as_bytes(),
-        );
-
-        let base_url = format!("file://{}", upstream.path().display());
-        env.set("MVM_OVERLAY_BASE_URL", &base_url);
-        let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
-        env.remove("MVM_OVERLAY_BASE_URL");
-
-        let err = result.expect_err("tampered ext4 must reject");
-        match err {
-            RuntimeOverlayError::ChecksumMismatch { name, .. } => {
-                assert_eq!(name, "runtime-overlay-aarch64.tar.gz");
-            }
-            other => panic!("expected ChecksumMismatch, got {other:?}"),
-        }
-        // The cache must NOT have been populated.
-        assert!(!cache.path().join("runtime-overlay/9.9.9/aarch64").exists());
-    }
-
-    /// An archive checksum sidecar missing the tarball entry aborts before the
-    /// archive is fetched.
-    #[test]
-    fn download_runtime_overlay_rejects_missing_checksum_entry() {
-        let mut env = TestEnv::new();
-
-        let upstream = TempDir::new().unwrap();
-        let release_dir = upstream.path().join("v9.9.9");
-        std::fs::create_dir_all(&release_dir).unwrap();
-        // Sidecar lists the wrong name, not the archive we need.
-        let checksums = "\
-0000000000000000000000000000000000000000000000000000000000000001  runtime-overlay-aarch64-not-it.tar.gz
-";
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.tar.gz.sha256",
-            checksums.as_bytes(),
-        );
-
-        let base_url = format!("file://{}", upstream.path().display());
-        env.set("MVM_OVERLAY_BASE_URL", &base_url);
-        let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
-        env.remove("MVM_OVERLAY_BASE_URL");
-
-        let err = result.expect_err("missing archive checksum entry must reject");
-        match err {
-            RuntimeOverlayError::ChecksumMissing { name, .. } => {
-                assert_eq!(name, "runtime-overlay-aarch64.tar.gz");
-            }
-            other => panic!("expected ChecksumMissing, got {other:?}"),
-        }
+        assert!(!local.exists(), "refused bytes must not stay on disk");
     }
 
     #[test]

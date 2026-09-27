@@ -90,37 +90,6 @@ fn incompatible_cached_kernel_is_fully_evicted_for_automatic_recovery() {
 }
 
 #[test]
-#[cfg(feature = "builder-vm")]
-fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let count = Arc::new(AtomicUsize::new(0));
-    let sink = Arc::clone(&count);
-    // Tight 10ms cadence into a counter (not stdout) so the test is fast and
-    // deterministic-ish; a generous window then asserts it ticked.
-    let hb = BuildHeartbeat::start_with(
-        "Test build",
-        std::time::Duration::from_millis(10),
-        move |_line| {
-            sink.fetch_add(1, Ordering::Relaxed);
-        },
-    );
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    let while_alive = count.load(Ordering::Relaxed);
-    assert!(while_alive >= 1, "heartbeat should tick while alive");
-
-    drop(hb); // joins the thread — no further emits after this returns
-    let after_drop = count.load(Ordering::Relaxed);
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    assert_eq!(
-        count.load(Ordering::Relaxed),
-        after_drop,
-        "no heartbeat ticks after drop joins the thread"
-    );
-}
-
-#[test]
 fn find_builder_vm_flake_resolves_to_in_repo_path() {
     // From a source checkout, the helper must find the
     // flake at <workspace>/nix/images/builder-vm/flake.nix.
@@ -388,9 +357,9 @@ fn write_builder_vm_source_cache_metadata(dir: &std::path::Path, fingerprint: &s
 
 /// `acquire_stage0_lock` is an advisory `flock(2)`
 /// guard at `<cache_parent>/stage0.lock`. The first acquisition
-/// succeeds; a second concurrent attempt while the first guard is
-/// still in scope fails fast with a recognizable message; once the
-/// first guard drops, the lock becomes available again.
+/// succeeds; a second attempt with no wait budget (the test default)
+/// refuses with a message naming the subject, the live holder and the
+/// lock file; once the first guard drops, the lock becomes available again.
 #[test]
 fn stage0_lock_refuses_concurrent_acquisition() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -404,14 +373,22 @@ fn stage0_lock_refuses_concurrent_acquisition() {
         "stage0.lock should be created on first acquisition"
     );
 
-    let err = match acquire_stage0_lock(out_dir_str) {
+    let err = match acquire_stage0_lock(out_dir_str, "the builder VM image") {
         Err(e) => e,
         Ok(_) => panic!("second acquisition must refuse while first is held"),
     };
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("already bootstrapping the builder VM image"),
+        msg.contains("the builder VM image (") && msg.contains("is still held by"),
         "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains(&format!("pid {}", std::process::id())),
+        "error should name the live holder: {msg}"
+    );
+    assert!(
+        !msg.contains("delete the lock file"),
+        "a dead holder releases its flock; nobody should be told to delete it: {msg}"
     );
     assert!(
         msg.contains("stage0.lock"),
@@ -422,6 +399,35 @@ fn stage0_lock_refuses_concurrent_acquisition() {
 
     // Now reachable again — guards must not leak past their scope.
     let _second = acquire_stage0_lock_uncontended(out_dir_str);
+}
+
+/// A second caller queues behind a live holder instead of failing, and picks
+/// the lock up as soon as the holder is done with it.
+#[test]
+fn stage0_lock_waits_for_a_live_holder_then_proceeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp.path().join("aarch64");
+    let out_dir_str = out_dir.to_str().expect("utf-8 out_dir").to_string();
+
+    let first = acquire_stage0_lock_uncontended(&out_dir_str);
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(first);
+    });
+
+    let started = std::time::Instant::now();
+    let second = super::stage0_cache::acquire_stage0_lock_within(
+        &out_dir_str,
+        "the builder VM image",
+        mvm_build::builder_vm_runtime::LockWait::of(std::time::Duration::from_secs(30)),
+    )
+    .expect("the waiter must get the lock once the holder releases it");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(250),
+        "the waiter returned before the holder released"
+    );
+    releaser.join().expect("releaser thread");
+    drop(second);
 }
 
 /// Lock setup must not fail when the parent cache directory does
@@ -545,7 +551,7 @@ fn is_orphan_stage0_staging_dir_name_matches_known_shapes() {
 /// these — they want the real "held" outcome.
 fn acquire_stage0_lock_uncontended(out_dir: &str) -> super::stage0_cache::Stage0LockGuard {
     for attempt in 0..200u32 {
-        match acquire_stage0_lock(out_dir) {
+        match acquire_stage0_lock(out_dir, "the builder VM image") {
             Ok(guard) => return guard,
             Err(e) => {
                 assert!(

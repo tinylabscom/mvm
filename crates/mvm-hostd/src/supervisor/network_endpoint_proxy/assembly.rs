@@ -59,6 +59,33 @@ pub struct FromPlanInputs<'a> {
     pub egress_gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
 }
 
+/// The registry names of the plan's secrets whose binding asks for a
+/// run-time approval. A binding that cannot be read here already failed
+/// registry assembly, so it cannot be substituted either.
+fn secrets_requiring_approval(
+    plan_secrets: &[mvm_core::plan::SecretBinding],
+    tenant: &str,
+    bindings: &dyn crate::keyholder::BindingStore,
+) -> std::collections::BTreeSet<String> {
+    plan_secrets
+        .iter()
+        .filter_map(|binding| match &binding.source {
+            mvm_core::plan::SecretSource::Keystore { address } => Some(address),
+            mvm_core::plan::SecretSource::External { .. } => None,
+        })
+        .filter(|address| {
+            bindings
+                .get(tenant, address)
+                .ok()
+                .flatten()
+                .is_some_and(|meta| {
+                    meta.approve == mvm_core::crypto::secret_binding::SecretApproval::Ask
+                })
+        })
+        .cloned()
+        .collect()
+}
+
 impl SubstitutionService {
     /// Build a service over its registry, resolver, forward leg and claim-10
     /// gate. The gate is a constructor argument rather than a builder step so
@@ -88,16 +115,24 @@ impl SubstitutionService {
             instance_id: None,
             instance_metrics: None,
             admitted: Arc::default(),
-            approver: Arc::new(crate::supervisor::egress_approval::NoApprovalBackend),
+            approver: Arc::new(crate::supervisor::runtime_approval::NoApprovalBackend),
+            approval_required: std::collections::BTreeSet::new(),
             reflection: super::reflection::ReflectionGuard::default(),
         }
+    }
+
+    /// Hold a request carrying any of `names`' placeholders for an approval.
+    #[must_use]
+    pub fn with_approval_required(mut self, names: std::collections::BTreeSet<String>) -> Self {
+        self.approval_required = names;
+        self
     }
 
     /// Answer `ask` route decisions with `approver`.
     #[must_use]
     pub fn with_approver(
         mut self,
-        approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
+        approver: Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>,
     ) -> Self {
         self.approver = approver;
         self
@@ -220,8 +255,10 @@ impl SubstitutionService {
                 .with_proxy(proxy)
                 .with_gate_resolver(Arc::clone(&admitted), Arc::clone(&egress_gate)),
         );
+        let approval_required = secrets_requiring_approval(plan_secrets, tenant, bindings);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder, egress_gate)
             .with_admitted_addresses(admitted)
+            .with_approval_required(approval_required)
             .with_tenant(tenant)
             .with_instance_id(instance_id);
         service = service.with_redaction_policy(redaction);
@@ -357,6 +394,7 @@ mod server_tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -416,6 +454,7 @@ mod server_tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();

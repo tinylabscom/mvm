@@ -2,17 +2,17 @@
 //!
 //! Picking a cached sidecar and proving it sound is the resolve half and lives
 //! in [`mvm_fs::sdk_sidecar`]. This module owns how one *lands* in the cache on
-//! a host that cannot build it: the per-arch release tarball published beside
-//! the runtime overlay's, fetched through the same integrity helpers, extracted
-//! through the same allow-listed entry validator, and installed through the same
-//! stage-then-rename discipline.
+//! a host that cannot build it: the per-arch, per-libc member of the signed
+//! image set this build pins, delivered through the same member fetch as the
+//! runtime overlay's, extracted through the same allow-listed entry validator,
+//! and installed through the same stage-then-rename discipline.
 //!
-//! Every step fails closed. A missing archive checksum, a hash mismatch, an
-//! unsafe archive entry, an inner-manifest disagreement, or a post-install
-//! resolve failure all return `Err` and leave the cache untouched. There is no
-//! degraded install, because a workload admitted to call an SDK-served host
-//! service that boots without the cdylib hits an in-guest `dlopen` failure it
-//! cannot act on.
+//! Every step fails closed. A set that does not declare the member, a size or
+//! digest mismatch, an unsafe archive entry, an inner-manifest disagreement, or
+//! a post-install resolve failure all return `Err` and leave the cache
+//! untouched. There is no degraded install, because a workload admitted to call
+//! an SDK-served host service that boots without the cdylib hits an in-guest
+//! `dlopen` failure it cannot act on.
 
 use std::path::{Path, PathBuf};
 
@@ -109,34 +109,26 @@ pub enum SdkSidecarBuildError {
     },
 }
 
-/// Download the SDK sidecar for `version` + `arch` from the published release,
-/// verify it, and install it under `<cache_root>/sdk-sidecar/<version>/<arch>/`.
+/// Download the SDK sidecar for `arch` and `libc` as a member of the image set
+/// this build pins, verify it, and install it under
+/// `<cache_root>/sdk-sidecar/<version>/<arch>/<libc>/`.
 ///
 /// The verification ladder, in order, each rung fatal:
 ///
-/// 1. The release's `sha256` sidecar must pre-commit the archive's digest —
-///    fetched *before* the payload, so an artifact whose hash cannot be pinned
-///    costs no bandwidth and reaches no disk.
-/// 2. The downloaded archive must hash to that digest.
-/// 3. The archive must verify against the release workflow's cosign-keyless
-///    signing identity — the digest alone authenticates the transport, not the
-///    publisher. Checked before extraction, so an unauthenticated tar is never
-///    parsed.
-/// 4. Every archive member must be one of the three canonical files, named by a
+/// 1. The image set's root manifest must hash to the digest this build locks
+///    and verify under that set's release signing identity, and must be a
+///    complete, compatible set — all before any member is requested.
+/// 2. The downloaded archive must have the size and digest the root declares
+///    for the `sdk_sidecar_<libc>` member of `arch`. Checked before
+///    extraction, so an unauthenticated tar is never parsed.
+/// 3. Every archive member must be one of the three canonical files, named by a
 ///    single unprefixed path component (no traversal, no absolute, no nesting),
 ///    and all three must be present.
-/// 5. The archive's own `checksums-sha256.txt` must agree with the bytes it
+/// 4. The archive's own `checksums-sha256.txt` must agree with the bytes it
 ///    carried.
-/// 6. The *installed* entry must satisfy [`SdkSidecarResolver::resolve`] — the
+/// 5. The *installed* entry must satisfy [`SdkSidecarResolver::resolve`] — the
 ///    same check the launch path runs — so a transport bug cannot produce a
 ///    cache entry that only fails later at boot.
-///
-/// `MVM_SKIP_HASH_VERIFY=1` bypasses rung 2 and `MVM_SKIP_COSIGN_VERIFY=1`
-/// bypasses rung 3; both are documented emergency-rotation escapes shared with
-/// every other mvm downloader, and neither is ever set in CI. The release base
-/// URL is the runtime overlay's (`MVM_OVERLAY_BASE_URL` overrides it for a
-/// private mirror or a test fixture) because both artifacts ship in the same
-/// release.
 pub fn download_sdk_sidecar(
     version: &str,
     arch: GuestArch,
@@ -146,44 +138,53 @@ pub fn download_sdk_sidecar(
     if libc == GuestLibc::Unknown {
         return Err(SdkSidecarBuildError::UnknownLibc { arch });
     }
+    let image_set = crate::published_image_set::PublishedImageSet::acquire()
+        .map_err(RuntimeOverlayError::ImageSet)?;
+    download_sdk_sidecar_from(&image_set, version, arch, libc, cache_root)
+}
 
-    let arch_dir = arch.to_string();
-    let names = SdkSidecarArtifactNames::for_target(&arch_dir, libc);
-    let base = crate::runtime_overlay::release_base_url(version);
-
-    let expected = crate::runtime_overlay::fetch_expected_hashes(
-        &format!("{base}/{}", names.archive_checksum),
-        &[&names.archive],
-    )?;
-
+/// [`download_sdk_sidecar`] from a set that has already been acquired.
+pub fn download_sdk_sidecar_from(
+    image_set: &crate::published_image_set::PublishedImageSet,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    cache_root: &Path,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    if libc == GuestLibc::Unknown {
+        return Err(SdkSidecarBuildError::UnknownLibc { arch });
+    }
+    let names = SdkSidecarArtifactNames::for_target(&arch.to_string(), libc);
     let tmp = tempfile::tempdir()?;
     let archive_local = tmp.path().join(&names.archive);
-    crate::runtime_overlay::curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
-    crate::runtime_overlay::verify_file_sha256(
-        &archive_local,
-        &names.archive,
-        expected.get(&names.archive),
-    )?;
-    // Before extraction: an unauthenticated tar is never parsed.
-    crate::release_signature::verify_release_archive_signature(
-        &crate::release_signature::ReleaseSignatureRequest {
-            base_url: &base,
-            asset: &names.archive,
-            archive_path: &archive_local,
-            version,
-            // Unchanged for the same reason as the runtime overlay: the base
-            // URL is still CLI-version-derived, so the train must match it.
-            train: crate::release_signature::ReleaseTrain::Cli,
-        },
-    )?;
+    image_set
+        .fetch_member_artifact(
+            mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
+            arch,
+            &names.archive,
+            &archive_local,
+        )
+        .map_err(RuntimeOverlayError::from)?;
+    install_sdk_sidecar_archive(&archive_local, version, arch, libc, cache_root)
+}
 
+/// Install an authenticated SDK-sidecar archive: safely extract it, re-check
+/// it against its own manifest, install it, and resolve the installed entry.
+///
+/// The caller must have authenticated `archive` already — an unauthenticated
+/// tar is never parsed.
+pub fn install_sdk_sidecar_archive(
+    archive: &Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    cache_root: &Path,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    let arch_dir = arch.to_string();
+    let tmp = tempfile::tempdir()?;
     let extracted = tmp.path().join("extracted");
     std::fs::create_dir(&extracted)?;
-    crate::runtime_overlay::extract_release_archive(
-        &archive_local,
-        &extracted,
-        &SIDECAR_ARCHIVE_MEMBERS,
-    )?;
+    crate::runtime_overlay::extract_release_archive(archive, &extracted, &SIDECAR_ARCHIVE_MEMBERS)?;
     verify_sidecar_dir_integrity(&extracted)?;
 
     install_sidecar_into_cache(&extracted, cache_root, version, &arch_dir, libc)?;
@@ -454,6 +455,9 @@ fn seed_from_default_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::published_image_set::PublishedImageSet;
+    use crate::published_image_set::fixture::ImageSetFixture;
+    use mvm_core::image_set::{ImageSetRole, MemberTarget};
     use mvm_core::util::test_env::TestEnv;
     use sha2::{Digest, Sha256};
 
@@ -770,102 +774,89 @@ mod tests {
         ])
     }
 
-    /// What a release directory looks like on disk, so a test can vary exactly
-    /// one thing about it.
+    /// An acquired image set whose SDK-sidecar member for this host is the
+    /// thing under test, so a test can vary exactly one thing about it.
+    ///
+    /// A fixture root carries no publisher signature, so acquisition skips that
+    /// rung through its documented escape hatch; the signature rung has its own
+    /// witnesses in [`crate::published_image_set`] and
+    /// [`crate::release_signature`]. The caller owns the `TestEnv` so its
+    /// process-wide env lock spans the whole test.
     struct ReleaseFixture {
-        _root: tempfile::TempDir,
-        release_dir: PathBuf,
-        names: SdkSidecarArtifactNames,
+        _served: tempfile::TempDir,
+        set: PublishedImageSet,
     }
 
     impl ReleaseFixture {
-        /// Stage a release directory carrying `archive`, with the archive's
-        /// checksum sidecar computed from `checksum_over` (which is the archive
-        /// itself for a sound release, and something else for a drift test).
-        fn stage_for_libc(libc: GuestLibc, archive: &[u8], checksum_over: Option<&[u8]>) -> Self {
-            let root = tempfile::tempdir().expect("release fixture root");
-            let release_dir = root.path().join(format!("v{FIXTURE_VERSION}"));
-            std::fs::create_dir_all(&release_dir).expect("create the release dir");
-            let names = SdkSidecarArtifactNames::for_target(&GuestArch::host().to_string(), libc);
-            std::fs::write(release_dir.join(&names.archive), archive).expect("write the archive");
-            if let Some(bytes) = checksum_over {
-                std::fs::write(
-                    release_dir.join(&names.archive_checksum),
-                    format!("{}  {}\n", sha256_hex(bytes), names.archive),
-                )
-                .expect("write the archive checksum");
-            }
-            Self {
-                _root: root,
-                release_dir,
-                names,
-            }
-        }
-
-        fn stage(archive: &[u8], checksum_over: Option<&[u8]>) -> Self {
-            Self::stage_for_libc(GuestLibc::Glibc, archive, checksum_over)
-        }
-
-        fn sound_for_libc(libc: GuestLibc) -> Self {
-            let archive = well_formed_archive(FIXTURE_VERSION, libc);
-            let checksum = archive.clone();
-            Self::stage_for_libc(libc, &archive, Some(&checksum))
-        }
-
-        fn sound() -> Self {
-            Self::sound_for_libc(GuestLibc::Glibc)
-        }
-
-        fn base_url(&self) -> String {
-            format!(
-                "file://{}",
-                self.release_dir
-                    .parent()
-                    .expect("the release dir has a parent")
-                    .display()
+        /// Serve a set whose `libc` member declares `declared` and serves
+        /// `archive` — the same bytes for a sound release, different ones for a
+        /// substitution.
+        fn stage_for_libc(
+            env: &mut TestEnv,
+            libc: GuestLibc,
+            archive: &[u8],
+            declared: &[u8],
+        ) -> Self {
+            let name = archive_name(libc);
+            Self::acquire(
+                env,
+                ImageSetFixture::complete()
+                    .publish(
+                        ImageSetRole::SdkSidecar(libc),
+                        MemberTarget::Arch(GuestArch::host()),
+                        &name,
+                        declared.to_vec(),
+                    )
+                    .serve_instead(&name, archive.to_vec()),
             )
+        }
+
+        fn acquire(env: &mut TestEnv, fixture: ImageSetFixture) -> Self {
+            let served = tempfile::tempdir().expect("image set fixture root");
+            env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+            let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+                .expect("the fixture root must be accepted");
+            Self {
+                _served: served,
+                set,
+            }
+        }
+
+        fn stage(env: &mut TestEnv, archive: &[u8]) -> Self {
+            Self::stage_for_libc(env, GuestLibc::Glibc, archive, archive)
+        }
+
+        fn sound_for_libc(env: &mut TestEnv, libc: GuestLibc) -> Self {
+            let archive = well_formed_archive(FIXTURE_VERSION, libc);
+            Self::stage_for_libc(env, libc, &archive, &archive)
+        }
+
+        fn sound(env: &mut TestEnv) -> Self {
+            Self::sound_for_libc(env, GuestLibc::Glibc)
         }
     }
 
-    /// Point the downloader at a staged release directory and give it a cold
-    /// cache root. The caller owns the `TestEnv` so its process-wide env lock
-    /// spans the whole test, not just the download call.
-    ///
-    /// The signature rung is skipped here via its documented escape hatch: a
-    /// valid Sigstore signature cannot be minted offline, and these tests are
-    /// about the digest, extraction, and install rungs. The signature rung has
-    /// its own witnesses below and in [`crate::release_signature`].
-    fn download_from(
-        env: &mut TestEnv,
-        fixture: &ReleaseFixture,
-        cache: &Path,
-    ) -> Result<SdkSidecarArtifact, String> {
-        download_from_for_libc(env, fixture, cache, GuestLibc::Glibc)
+    fn archive_name(libc: GuestLibc) -> String {
+        SdkSidecarArtifactNames::for_target(&GuestArch::host().to_string(), libc).archive
+    }
+
+    fn download_from(fixture: &ReleaseFixture, cache: &Path) -> Result<SdkSidecarArtifact, String> {
+        download_from_for_libc(fixture, cache, GuestLibc::Glibc)
     }
 
     fn download_from_for_libc(
-        env: &mut TestEnv,
         fixture: &ReleaseFixture,
         cache: &Path,
         libc: GuestLibc,
     ) -> Result<SdkSidecarArtifact, String> {
-        env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), libc, cache)
-            .map_err(|e| format!("{e}"))
-    }
-
-    /// Same, but with the signature rung live — so a test can prove the
-    /// download refuses an archive the release never signed.
-    fn download_with_signature_check(
-        env: &mut TestEnv,
-        fixture: &ReleaseFixture,
-        cache: &Path,
-    ) -> Result<SdkSidecarArtifact, String> {
-        env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
-        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Glibc, cache)
-            .map_err(|e| format!("{e}"))
+        download_sdk_sidecar_from(
+            &fixture.set,
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            libc,
+            cache,
+        )
+        .map_err(|e| format!("{e}"))
     }
 
     #[test]
@@ -873,9 +864,9 @@ mod tests {
         let mut env = TestEnv::new();
         let cache_dir = tempfile::tempdir().expect("tempdir");
         let cache = cache_dir.path();
-        let fixture = ReleaseFixture::sound_for_libc(GuestLibc::Musl);
+        let fixture = ReleaseFixture::sound_for_libc(&mut env, GuestLibc::Musl);
 
-        let artifact = download_from_for_libc(&mut env, &fixture, cache, GuestLibc::Musl)
+        let artifact = download_from_for_libc(&fixture, cache, GuestLibc::Musl)
             .expect("the published musl sidecar must install");
 
         assert_eq!(artifact.libc, GuestLibc::Musl);
@@ -886,7 +877,7 @@ mod tests {
     fn an_unknown_libc_is_refused_before_transport() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_OVERLAY_BASE_URL", "http://127.0.0.1:1/never");
+        env.set("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:1/never");
 
         let error = download_sdk_sidecar(
             FIXTURE_VERSION,
@@ -929,49 +920,33 @@ mod tests {
         );
     }
 
-    /// The rung that matters most for an end user: a release that publishes an
-    /// archive with no signature beside it is refused, and nothing is cached —
-    /// even though the archive's digest matches what the release pinned.
+    /// Ordering witness: the archive is held to the signed root's digest
+    /// before any tar member is read. An archive full of hostile members that
+    /// is not the one the root declares must fail on the digest — proving
+    /// extraction never ran.
     #[test]
-    fn an_unsigned_release_archive_is_refused_and_caches_nothing() {
-        let mut env = TestEnv::new();
-        let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::sound();
-
-        let err = download_with_signature_check(&mut env, &fixture, cache.path())
-            .expect_err("an unsigned archive must not install");
-
-        assert!(
-            err.contains("signature") || err.contains("bundle"),
-            "the refusal must be about the signature: {err}"
-        );
-        assert!(err.contains(&fixture.names.archive), "{err}");
-        assert_cache_holds_no_artifact(cache.path());
-    }
-
-    /// Ordering witness: the signature is checked before any tar member is
-    /// read. An archive that is both unsigned *and* full of hostile members
-    /// must fail on the signature — proving extraction never ran.
-    #[test]
-    fn the_signature_is_checked_before_the_archive_is_extracted() {
+    fn the_root_digest_is_checked_before_the_archive_is_extracted() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         append_raw_named(&mut tar, "../escaped", b"payload");
-        let archive = tar.into_inner().unwrap().finish().unwrap();
-        let fixture = ReleaseFixture::stage(&archive, Some(&archive));
+        let hostile = tar.into_inner().unwrap().finish().unwrap();
+        let mut declared = hostile.clone();
+        declared[0] ^= 0xff;
+        let fixture =
+            ReleaseFixture::stage_for_libc(&mut env, GuestLibc::Glibc, &hostile, &declared);
 
-        let err = download_with_signature_check(&mut env, &fixture, cache.path())
-            .expect_err("an unsigned archive must not be extracted at all");
+        let err = download_from(&fixture, cache.path())
+            .expect_err("an undeclared archive must not be extracted at all");
 
         assert!(
-            err.contains("signature") || err.contains("bundle"),
-            "extraction ran before the signature check: {err}"
+            err.contains("not the signed manifest's"),
+            "extraction ran before the digest check: {err}"
         );
         assert!(
             !err.contains("unsafe or unexpected path"),
-            "the tar was parsed before its signature was checked: {err}"
+            "the tar was parsed before its digest was checked: {err}"
         );
         assert_cache_holds_no_artifact(cache.path());
     }
@@ -996,10 +971,9 @@ mod tests {
     fn a_well_formed_release_installs_and_resolves() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::sound();
+        let fixture = ReleaseFixture::sound(&mut env);
 
-        let artifact =
-            download_from(&mut env, &fixture, cache.path()).expect("a sound release installs");
+        let artifact = download_from(&fixture, cache.path()).expect("a sound release installs");
 
         let layout = layout_of(cache.path(), GuestLibc::Glibc);
         assert_eq!(artifact.image, layout.image);
@@ -1017,44 +991,49 @@ mod tests {
             .expect("the installed entry must resolve");
     }
 
-    /// The archive checksum is fetched before the payload, so a release missing
-    /// it fails naming the checksum URL — proving the tarball was never fetched.
+    /// The current train requires both sidecar variants for every arch, so a
+    /// root without one is refused at acquisition, naming the role and arch,
+    /// before any member is requested.
     #[test]
-    fn a_missing_archive_checksum_aborts_before_the_tarball_is_fetched() {
+    fn a_set_without_the_sidecar_member_is_refused_naming_role_and_arch() {
         let mut env = TestEnv::new();
-        let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::stage(
-            &well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc),
-            None,
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let served = tempfile::tempdir().unwrap();
+        let fixture = ImageSetFixture::complete().without_member(
+            ImageSetRole::SdkSidecar(GuestLibc::Musl),
+            MemberTarget::Arch(GuestArch::Aarch64),
         );
 
-        let err =
-            download_from(&mut env, &fixture, cache.path()).expect_err("no checksum, no download");
+        let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+            .err()
+            .expect("a set without the sidecar member must be refused");
 
         assert!(
-            err.contains(&fixture.names.archive_checksum),
-            "the refusal must name the checksum that was absent: {err}"
+            format!("{err:#}").contains("sdk_sidecar_musl/aarch64"),
+            "{err:#}"
         );
-        assert_cache_holds_no_artifact(cache.path());
     }
 
-    /// A checksums file that exists but does not pre-commit this archive is the
-    /// same failure: an artifact whose hash we cannot pin is never fetched.
+    /// A member that does not declare this arch-and-libc archive is refused by
+    /// name, before anything is fetched.
     #[test]
-    fn a_checksum_manifest_without_our_entry_is_refused() {
+    fn a_member_without_our_archive_is_refused() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::sound();
-        std::fs::write(
-            fixture.release_dir.join(&fixture.names.archive_checksum),
-            "0000000000000000000000000000000000000000000000000000000000000000  other.tar.gz\n",
-        )
-        .unwrap();
+        let fixture = ReleaseFixture::acquire(
+            &mut env,
+            ImageSetFixture::complete().publish(
+                ImageSetRole::SdkSidecar(GuestLibc::Glibc),
+                MemberTarget::Arch(GuestArch::host()),
+                "other.tar.gz",
+                well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc),
+            ),
+        );
 
-        let err = download_from(&mut env, &fixture, cache.path())
-            .expect_err("an unpinned archive is refused");
+        let err = download_from(&fixture, cache.path()).expect_err("an undeclared archive");
 
-        assert!(err.contains("did not list an entry"), "{err}");
+        assert!(err.contains(&archive_name(GuestLibc::Glibc)), "{err}");
+        assert!(err.contains("sdk_sidecar_glibc"), "{err}");
         assert_cache_holds_no_artifact(cache.path());
     }
 
@@ -1062,17 +1041,18 @@ mod tests {
     fn an_archive_hash_mismatch_is_refused_and_caches_nothing() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
-        // The checksum is computed over different bytes than the archive
-        // carries — exactly the shape of a substituted payload.
-        let fixture = ReleaseFixture::stage(
-            &well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc),
-            Some(b"other"),
-        );
+        // The root declares different bytes than the ones served — exactly the
+        // shape of a substituted payload.
+        let archive = well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc);
+        let mut declared = archive.clone();
+        let last = declared.len() - 1;
+        declared[last] ^= 0xff;
+        let fixture =
+            ReleaseFixture::stage_for_libc(&mut env, GuestLibc::Glibc, &archive, &declared);
 
-        let err = download_from(&mut env, &fixture, cache.path())
-            .expect_err("a drifted archive is refused");
+        let err = download_from(&fixture, cache.path()).expect_err("a drifted archive is refused");
 
-        assert!(err.contains("checksum mismatch"), "{err}");
+        assert!(err.contains("not the signed manifest's"), "{err}");
         assert_cache_holds_no_artifact(cache.path());
     }
 
@@ -1096,9 +1076,9 @@ mod tests {
             append_file(&mut tar, CHECKSUM_MANIFEST_FILE, b"unused\n");
             append_raw_named(&mut tar, hostile, b"payload");
             let archive = tar.into_inner().unwrap().finish().unwrap();
-            let fixture = ReleaseFixture::stage(&archive, Some(&archive));
+            let fixture = ReleaseFixture::stage(&mut env, &archive);
 
-            let Err(err) = download_from(&mut env, &fixture, cache.path()) else {
+            let Err(err) = download_from(&fixture, cache.path()) else {
                 panic!("{hostile} must be refused");
             };
 
@@ -1126,10 +1106,9 @@ mod tests {
                 .into_bytes(),
             ),
         ]);
-        let fixture = ReleaseFixture::stage(&archive, Some(&archive));
+        let fixture = ReleaseFixture::stage(&mut env, &archive);
 
-        let err =
-            download_from(&mut env, &fixture, cache.path()).expect_err("no image, no install");
+        let err = download_from(&fixture, cache.path()).expect_err("no image, no install");
 
         assert!(
             err.contains(SDK_SIDECAR_IMAGE_FILE),
@@ -1140,7 +1119,7 @@ mod tests {
 
     /// The archive's own manifest is re-checked against the extracted bytes, so
     /// a tarball that is internally inconsistent never reaches the cache — even
-    /// though its outer sha256 matches what the release pinned.
+    /// though its outer sha256 matches what the signed root declares.
     #[test]
     fn an_inner_manifest_disagreeing_with_the_bytes_is_refused() {
         let mut env = TestEnv::new();
@@ -1159,10 +1138,9 @@ mod tests {
                 .into_bytes(),
             ),
         ]);
-        let fixture = ReleaseFixture::stage(&archive, Some(&archive));
+        let fixture = ReleaseFixture::stage(&mut env, &archive);
 
-        let err =
-            download_from(&mut env, &fixture, cache.path()).expect_err("an inconsistent archive");
+        let err = download_from(&fixture, cache.path()).expect_err("an inconsistent archive");
 
         assert!(err.contains("integrity mismatch"), "{err}");
         assert_cache_holds_no_artifact(cache.path());
@@ -1221,12 +1199,12 @@ mod tests {
     fn a_repeat_download_replaces_the_cached_entry() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::sound();
-        download_from(&mut env, &fixture, cache.path()).expect("first install");
+        let fixture = ReleaseFixture::sound(&mut env);
+        download_from(&fixture, cache.path()).expect("first install");
         let layout = layout_of(cache.path(), GuestLibc::Glibc);
         std::fs::write(layout.artifact_dir.join("stale-residue"), b"x").unwrap();
 
-        download_from(&mut env, &fixture, cache.path()).expect("second install");
+        download_from(&fixture, cache.path()).expect("second install");
 
         assert!(
             !layout.artifact_dir.join("stale-residue").exists(),
