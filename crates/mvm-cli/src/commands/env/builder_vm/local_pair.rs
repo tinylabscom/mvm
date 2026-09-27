@@ -133,21 +133,10 @@ pub(crate) fn ensure_pair_workload_kernel(
 /// Copy a sealed (read-only) entry file into a writable cache: the entry's
 /// files are sealed at 0444, and cache consumers (the HVF bake opens the
 /// builder rootfs read-write; the sidecar stamp rewrites the default
-/// image's) must not inherit that.
-#[cfg(unix)]
+/// image's) must not inherit that. A destination left read-only by an
+/// earlier install is replaced rather than refused.
 pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("making {} writable", to.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
+    mvm_core::util::atomic_io::copy_writable(from, to)?;
     Ok(())
 }
 

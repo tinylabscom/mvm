@@ -899,7 +899,10 @@ pub(in crate::commands) mod attested_builder_pack {
     /// plays no part in the readiness check itself. The cache's `manifest.json`
     /// is always synthesized here because the pack envelope manifest
     /// (`pack-manifest.json`) is a different contract from the runtime cache
-    /// manifest the builder loader validates.
+    /// manifest the builder loader validates. The copies are owner-writable
+    /// whatever mode the pack's files carry: this is the same builder-VM cache
+    /// the local-pair installer fills through `copy_contract_file`, and its
+    /// consumers write into it.
     fn copy_builder_pack_artifacts(pack_root: &Path, dest: &Path) -> Result<()> {
         for name in ["vmlinux", "rootfs.ext4"] {
             let src = pack_root.join(name);
@@ -909,12 +912,12 @@ pub(in crate::commands) mod attested_builder_pack {
                     pack_root.display()
                 );
             }
-            std::fs::copy(&src, dest.join(name))
+            mvm_core::util::atomic_io::copy_writable(&src, &dest.join(name))
                 .with_context(|| format!("copying builder pack artifact {name}"))?;
         }
         let cmdline = pack_root.join("cmdline.txt");
         if cmdline.exists() {
-            std::fs::copy(&cmdline, dest.join("cmdline.txt"))
+            mvm_core::util::atomic_io::copy_writable(&cmdline, &dest.join("cmdline.txt"))
                 .context("copying builder pack cmdline.txt")?;
         } else {
             std::fs::write(dest.join("cmdline.txt"), SYNTHESIZED_BUILDER_VM_CMDLINE)
@@ -923,7 +926,7 @@ pub(in crate::commands) mod attested_builder_pack {
         let name = mvm_build::builder_pack::CLOSURE_FILE;
         let src = pack_root.join(name);
         if src.exists() {
-            std::fs::copy(&src, dest.join(name))
+            mvm_core::util::atomic_io::copy_writable(&src, &dest.join(name))
                 .with_context(|| format!("copying builder pack artifact {name}"))?;
         }
         std::fs::write(

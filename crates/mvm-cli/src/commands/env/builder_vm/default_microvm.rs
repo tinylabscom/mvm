@@ -491,17 +491,8 @@ fn ensure_pair_workload_image(
             std::path::Path::new(&format!("{cache_dir}/{label}")),
         )?;
     }
-    // Cache entries are sealed read-only; the install owns its copies and
-    // the sidecar is about to be rewritten with the pair identity.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            format!("{cache_dir}/{}", mvm_build::builder_vm::SIDECAR_FILENAME),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .with_context(|| format!("lifting the sidecar permissions in {cache_dir}"))?;
-    }
+    // `copy_contract_file` left every output above owner-writable, the
+    // sidecar among them, so it can be rewritten with the pair identity.
     // The sidecar names the pair identity; the next run compares it before
     // deciding the install answers, so a changed pair reinstalls and a
     // fetched or in-tree image is never mistaken for a pair build.

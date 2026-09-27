@@ -192,21 +192,20 @@ fn copy_cache(source: &Path, target: &Path) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(target).map_err(|error| {
         BuilderVmError::ExtractionFailed(format!("create {}: {error}", target.display()))
     })?;
+    // The target is only seeded on a miss, so it may still hold a previous
+    // entry's files — read-only ones included, where the entry came from a
+    // Nix output. Each copy replaces what is there and lands owner-writable.
     for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
         let from = source.join(name);
         let to = target.join(name);
-        std::fs::copy(&from, &to).map_err(|error| {
-            BuilderVmError::ExtractionFailed(format!(
-                "seed builder image cache {} -> {}: {error}",
-                from.display(),
-                to.display(),
-            ))
+        mvm_core::util::atomic_io::copy_writable(&from, &to).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!("seed builder image cache: {error:#}"))
         })?;
     }
     for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
         let from = source.join(name);
         if from.is_file() {
-            let _ = std::fs::copy(&from, target.join(name));
+            let _ = mvm_core::util::atomic_io::copy_writable(&from, &target.join(name));
         }
     }
     Ok(())
