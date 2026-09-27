@@ -579,12 +579,19 @@ jobs:
       # Firecracker. Compile the same kernel once so Stage 0 can retain its
       # sibling bzImage, which QEMU's x86 Linux boot protocol requires. Kernel
       # sources live in mvm-images, and a compile refuses without a checkout of
-      # it, so the step below points the source binary at one.
+      # it, so the step below points the source binary at one — at the commit
+      # that produced the set images.lock pins, never at mvm-images `main`.
+      - name: Resolve the mvm-images commit images.lock pins
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Check out mvm-images
         uses: actions/checkout@v6
         with:
           repository: tinylabscom/mvm-images
-          ref: main
+          ref: ${{ steps.images-ref.outputs.ref }}
           path: mvm-images
 
       # Artifact compilation is not the no-KVM launch witness. Re-enable KVM

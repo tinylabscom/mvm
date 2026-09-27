@@ -50,3 +50,19 @@ The same dispatch found two failures in the documented-surface suite:
   source. It keeps the no-silent-substitution and `source: fetched` rules.
 - `CLAUDE.md`, `README.md`, the quickstart, the happy paths and the CLI
   reference say image construction lives in `mvm-images`.
+
+## Notes for the next reader
+
+- **The builder source fingerprint is gone.** Waves 1+2 removed it, along with
+  `host_binaries::manifest::is_baked_into_rootfs`, including the layer extended
+  for #3447 to key on the baked host binaries. It only served the in-tree
+  Stage 0 builder key. The pair build's consumed-input key (#3741) is
+  untouched.
+- **The dev-image warm costs time.** `mvmctl run` with no image now needs an
+  image checkout or a cached image. On the Linux lane, the documented-surface
+  suite builds the dev default image through the pinned `mvm-images` checkout
+  so the Firecracker rootfs byte-identity scenario keeps its witness. That warm
+  took 2,543 s in Extended CI run 36327887644, and the in-tree build it
+  replaces took about 17 minutes inside the suite. The lane grew by about 25
+  minutes (154 against 129 minutes, phase totals). Publishing the dev variant
+  as an image-set member would let the lane fetch it instead.
