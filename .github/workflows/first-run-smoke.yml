@@ -1,7 +1,8 @@
 name: First run after a fresh install
 
 # Installs a published tag the way a new user would and runs the README's first
-# command on each backend: HVF on the self-hosted Apple Silicon runner,
+# command, a second boot from the same HOME, and a boot that binds an SDK host
+# service on each backend: HVF on the self-hosted Apple Silicon runner,
 # Firecracker on a hosted Linux runner with KVM.
 #
 # `release.yml` calls this for the tag it just published, and `promote-release`
@@ -40,7 +41,9 @@ jobs:
             runner: ubuntu-latest
             artifact: first-run-linux-firecracker
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # Above the smoke's summed budgets (install 20 min, three boots 20 min), so
+    # a slow step fails on its own budget with a transcript, not on this.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v6
 

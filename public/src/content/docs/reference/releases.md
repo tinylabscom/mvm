@@ -26,8 +26,16 @@ one until the `first-run-smoke` job has installed it the way a new user
 would — the tag's own `install.sh`, pinned to the tag, into a throwaway `HOME`,
 builder bootstrap included — and run the README's first command,
 `mvmctl machine run --image alpine -- echo <token>`, with stdin closed and a
-time budget. It runs on the self-hosted Apple Silicon runner (HVF) and on a
-hosted Linux runner with KVM (Firecracker). When every lane prints its token,
+time budget. It then boots twice more from the same `HOME`, each with its own
+token and budget. The second boot is the first to take the runtime overlay and
+initramfs from the cache rather than from the download it has just made, so it
+must print its token and must not replace any file the first boot cached. The
+third binds an SDK host service (`--host-service host.time.v1`), which downloads
+the published SDK sidecar, and the guest must find the SDK library under
+`/mvm/sdk`. A release binary refuses or fetches again any of these artifacts
+whose `VERSION` is not its own, and only the later boots reach that check. The
+smoke runs on the self-hosted Apple Silicon runner (HVF) and on a
+hosted Linux runner with KVM (Firecracker). When every lane prints its tokens,
 `promote-release` makes the tag a full release and GitHub's latest, and
 dispatches the site deployment that bakes it into `https://runmvm.com/install.sh`
 as the offline fallback. A release candidate runs the same smoke and stays a

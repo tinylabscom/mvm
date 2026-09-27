@@ -132,6 +132,13 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
          it derives no mvm path",
     ),
     (
+        "tests/smoke_fresh_install.rs",
+        &[Rule::HomeLiteral],
+        "the stand-in mvmctl is shell text run inside the fresh-install smoke's throwaway HOME, \
+         playing a release binary that caches into the layout the smoke script inspects; the \
+         test derives no host path",
+    ),
+    (
         "tests/release_assets.rs",
         &[Rule::HomeLiteral],
         "structural release tests inspect the boot workflow's shell command and pin its canonical \
