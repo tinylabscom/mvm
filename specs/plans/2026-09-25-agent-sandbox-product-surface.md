@@ -257,7 +257,7 @@ apply goes through the protected-path gate.
 - [ ] inventory; delete, merge or move to runtime config; CI lanes updated
 
 ### PS-20 — Unreachable surface (#3729)
-- [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
+- [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
 - [ ] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`

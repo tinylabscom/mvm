@@ -447,9 +447,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     This bullet used to claim that "`mvmctl up` emits an opt-in warning when
     the resolved policy is `unrestricted`", with an escape hatch of
     `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
-    dispatched verb — `up::Args` is not a `Commands` variant, so its
-    `--network-preset` and `--network-allow` fields are unreachable CLI
-    surface. The acknowledgement env var is read nowhere in the workspace;
+    dispatched verb and its leftover `Args` struct has been deleted. The acknowledgement env var is read nowhere in the workspace;
     its only occurrence is a doc comment in `mvm-contract::stream::edge`
     saying another mechanism is "shaped after" it:
 

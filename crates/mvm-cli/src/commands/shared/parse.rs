@@ -35,14 +35,6 @@ pub fn clap_port_spec(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-/// Validate a volume spec at Clap parse time. Delegates to
-/// [`parse_volume_spec`] so the flag and the post-parse converter share
-/// one grammar (no drift between clap-time and run-time validation).
-pub fn clap_volume_spec(s: &str) -> Result<String, String> {
-    parse_volume_spec(s).map_err(|e| e.to_string())?;
-    Ok(s.to_owned())
-}
-
 /// Parsed mount specification from the `--mount` CLI flag, its compatibility
 /// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///
@@ -717,12 +709,6 @@ mod volume_spec_tests {
         ] {
             assert!(parse_volume_spec(spec).is_err(), "should reject {spec:?}");
         }
-    }
-
-    #[test]
-    fn clap_validator_matches_parser() {
-        assert!(clap_volume_spec("/h:/g:10G:rw").is_ok());
-        assert!(clap_volume_spec("/h:/g:enc").is_err());
     }
 
     #[test]

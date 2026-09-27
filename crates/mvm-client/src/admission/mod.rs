@@ -150,8 +150,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
-    /// The resolved runtime egress policy (`--network-preset`,
-    /// `--network-allow`, template default, or deny-all default). Non-deny
+    /// The resolved runtime egress policy (`--allow-host`,
+    /// template default, or deny-all default). Non-deny
     /// policies are lowered into a generated PolicyBundle and referenced by the
     /// signed plan so the bridge never relies on an unsigned bare carrier to
     /// authorize outbound traffic.
