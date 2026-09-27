@@ -280,7 +280,31 @@ apply goes through the protected-path gate.
 - [ ] schema reference generated from PS-05; stale claims fixed
 
 ### PS-19 — Fewer feature flags (#3728)
-- [ ] inventory; delete, merge or move to runtime config; CI lanes updated
+- [x] inventory; delete, merge or move to runtime config; CI lanes updated
+
+Inventory of every `[features]` entry (crates with feature tables: mvm-core,
+mvm-contract, mvm-agentd, mvm-backends, mvm-build, mvm-runtime, mvm-vmm,
+mvm-fs, mvm-hostd, mvm-client, mvm-sdk, mvm-hostlib, mvm-cli, mvm-conformance,
+mvmctl root; `crates/deps/libkrun-sys` is vendored FFI and stays as-is):
+
+| Feature | Verdict |
+|---|---|
+| `mvm-runtime/apple-container` | **Deleted** — inert flag; the backend module is compiled unconditionally and nothing enabled or cfg-gated it. |
+| `mvm-build/interactive` | **Deleted** — zero enablers anywhere (the Cargo comment claiming "tests/dev enable it" was stale); its two `#[cfg]` blocks in `mvm-egress-proxy.rs` were unreachable. The env-override behaviour was deliberately compile-time (the proxy faces the guest; an env-tweakable allowlist is a security property), so it was deleted rather than moved to runtime config. |
+| `mvm-core/attestation-{sev-snp,tdx,apple-device}` | Keep, **owner decision** — dead as compile flags (stubs are always compiled, zero cfg gates) but SPRINT.md records them as documented future scaffolding pending a maintainer ratification call on deleting the stubs themselves. |
+| `mvm-agentd/flowmux-async` | Keep, **owner decision** — merge candidate into `addons` (strict subset minus tokio-vsock/hickory); benches and hostd dev-deps use the narrower surface. |
+| `mvm-cli/pure-mkfs`, `mvm-cli/builder-vm` | Keep, **owner decision** — near-always-on (only test builds opt out); folding into unconditional code changes what nix builds compile. |
+| Everything else (`hostd-transport`, `client`/`client-remote`, `manifest-verify`, `schema` family, `test-support` family, `bdd`, `embed-host-bins`, `contributor-bootstrap`, `release-channel`, `release-artifact-bootstrap`, `template-registry-s3`, `hvf-live-validation`, `trusted-apfs`, `wasm-backend`, `ebpf-telemetry`, `network-perf`, `custom-dns`, `dev-watch`, `tracing-bridge`, `remote`, `deploy-remote`, libkrun family, `attestation-tpm2`, mvmctl `host`/`user`/`dev`) | Keep — each has a live consumer, a CI lane, an xtask gate, or an mvmd-facing contract (mvmd needs `client`/`client-remote`, `hostd-transport`, `remote`, `release-channel`, `tracing-bridge`, the `mvm-contract` family, and the schema emitters). |
+
+CI lanes: no lane referenced the two deleted flags, so `lint-features`,
+`lint-features-test-support`, `lint-features-embed`, the release feature-set
+check, and the xtask gates (`check-two-surfaces`, `check-core-runtime-free`,
+`check-guest-agent-runtime-free`, `check-sdk-transport-free`,
+`check-closure-budget`, `check-feature-closure-budget`) are unchanged; the
+all-features closure shrinks, which the 488-crate budget ratchet absorbs.
+Follow-ups for the owner-decision rows above, plus re-examining
+`mvm-build/builder-libkrun` staying in `default`, are best done as their own
+small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
 - [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected

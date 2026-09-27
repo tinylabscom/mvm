@@ -49,7 +49,7 @@ Last updated: 2026-09-27
   - [ ] PS-16 Nix developer experience — #3725
   - [ ] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
-  - [ ] PS-19 fewer feature flags — #3728
+  - [x] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
   - [ ] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**

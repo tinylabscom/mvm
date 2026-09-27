@@ -82,39 +82,15 @@ mod linux {
         ExitCode::SUCCESS
     }
 
-    /// Resolve the allowlist. Production: the hard-coded
-    /// hostnames. Dev-shell feature: optional
-    /// `MVM_EGRESS_ALLOWLIST=host1,host2,host3` override + optional
-    /// `MVM_EGRESS_ALLOWLIST_PORT=443` override.
+    /// Resolve the allowlist. Production: the hard-coded hostnames, with no
+    /// env override — the proxy faces the guest, so an environment tweakable
+    /// allowlist is a compile-time-gated capability by design, not runtime
+    /// configuration.
     fn build_allowlist() -> Allowlist {
-        #[cfg(feature = "interactive")]
-        {
-            if let Ok(raw) = std::env::var("MVM_EGRESS_ALLOWLIST") {
-                let hosts: Vec<String> = raw
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let port = std::env::var("MVM_EGRESS_ALLOWLIST_PORT")
-                    .ok()
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(mvm_build::egress_proxy::ALLOWED_PORT);
-                eprintln!(
-                    "mvm-egress-proxy: interactive feature on — allowlist override `{raw}` :{port}"
-                );
-                return Allowlist::from_parts(hosts, port);
-            }
-        }
         Allowlist::production()
     }
 
     fn resolve_bind_addr() -> String {
-        #[cfg(feature = "interactive")]
-        {
-            if let Ok(b) = std::env::var("MVM_EGRESS_BIND") {
-                return b;
-            }
-        }
         DEFAULT_BIND.to_string()
     }
 

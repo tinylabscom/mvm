@@ -184,14 +184,6 @@ release-channel = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
-# Folded in with the mvm-egress-proxy bin. Off by default;
-# tests/dev enable it so the `mvm-egress-proxy` bin honors a
-# `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
-# features) ship the four allowed hostnames hard-coded — no env override.
-# The bin's `#[cfg(feature = "interactive")]` blocks only compile on Linux
-# (inside `mod linux`), so this missing feature was a Linux-only error
-# invisible on a macOS dev host.
-interactive = []
 contributor-bootstrap = []
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
