@@ -46,15 +46,19 @@ allow_hosts = ["api.example.com:443"]
 
 [dev]
 init = []                     # dev-only; machine start fails closed today
-volumes = ["./src:/work/src:ro"]
+volumes = ["./state.img:/data/state:1G:rw"]
 
 name = "openclaw"             # optional; display + S3 channel hint
 ```
 
 Unknown keys are rejected. `image` and `flake` are mutually exclusive; setting
 both is an error. Volumes default read-only; use `:rw` explicitly for a writable
-mount. Relative volume host paths in an image-backed manifest are resolved
-relative to the manifest file when persisted by `machine create`.
+mount. `[dev].volumes` feeds a persistent machine, which cannot attach a live
+host directory, so its entries are disk images (`HOST.img:/GUEST:SIZE[:rw]`);
+`machine create` refuses a directory entry and names `mvmctl machine volume
+mount` for snapshotting one in. Relative volume host paths in an image-backed
+manifest are resolved relative to the manifest file when persisted by
+`machine create`.
 
 Each field's owner:
 
@@ -70,7 +74,7 @@ Each field's owner:
 | `gpu` | mvmctl — enable the remoted CUDA/NVML plane | Optional |
 | `gpu_device` | mvmctl — pin the VM to one host GPU ordinal | Optional; implies `gpu = true` |
 | `[dev].init` | mvmctl — future dev-only init hook | Parsed, start fails closed today |
-| `[dev].volumes` | mvmctl — host shares / persistent disks | Optional |
+| `[dev].volumes` | mvmctl — persistent disk images | Optional |
 | `name` | mvmctl — display in `ls`, optional S3 channel key | Optional |
 
 Anything not in this list belongs in the flake (kernel/rootfs content, NixOS
@@ -103,7 +107,7 @@ mem = "512M"
 net = false
 
 [dev]
-volumes = ["./workspace:/work:ro"]
+volumes = ["./workspace.img:/work:2G:rw"]
 ```
 
 ```bash

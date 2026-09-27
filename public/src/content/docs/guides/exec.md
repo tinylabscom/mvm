@@ -67,34 +67,66 @@ echo "hello" > /tmp/foo
 mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo   # prints "hello"
 ```
 
-### Writable: `:rw` needs a persistent machine
+### Writable disk images: `:rw` under any profile
 
-A **transient** run's live shares are read-only under *every* profile —
-`--profile dev` does not change that. `:rw` is accepted only on a persistent
-machine (`--name` plus `-d`), and only under `--profile dev` or
-`--profile permissive`:
+A sized disk image (`HOST.img:GUEST:SIZE:rw`) is an ext4 file mvm creates at
+`HOST` if it is absent and attaches as a block device. The guest writes into
+that image, never into the host filesystem, so every profile that accepts
+`--mount` accepts it writable — the default `standard`, and `--prod`, included.
+This is the way to keep data without `--profile dev`, which would also hand the
+guest the dev shell agent and the DevOnly verbs:
 
 ```bash
-mvmctl machine run --flake . --profile dev --name builder -d --mount .:/work:rw
-mvmctl machine exec builder -- sh -c 'echo result > /work/output.txt'
-cat ./output.txt       # "result" — written by the guest
+mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \
+  -- sh -c 'echo kept > /data/state/note'
 ```
 
-A writable share lets the guest edit host files under `GUEST` — exactly what
-you want for a coding agent that needs to edit your repo. For the durability
-and host-visibility semantics of the current volume backend, see the
-[machine volume docs](/guides/machine-use-cases/).
+The guest mount path still has to sit under `/data` or `/work`; the profile
+decides whether a volume may be writable, not where it may mount.
 
-### Multiple shares
+### Writable directories: never on a transient run
 
-Modes are independent per directory:
+A **transient** run's directory share is a read-only snapshot under *every*
+profile — `--profile dev` does not change that. A write would land in a
+throwaway image and never reach the host directory, so `:rw` on a directory is
+refused rather than silently lost. Use a disk image for anything the guest has
+to write.
+
+### Persistent machines take no live host directory
+
+A persistent machine (`-d`, or `--name` with `--port`, `--ttl` or
+`--healthcheck`) cannot attach a live host directory at all, read-only or
+writable, under any profile. `machine run` and `machine create` refuse a
+directory `--mount` up front and name the two ways to get data in.
+
+Keep the machine's working state in a disk image. It survives stop and start,
+under the default profile:
 
 ```bash
-mvmctl machine run --flake . --profile dev --name build -d \
-  --mount ./src:/work/src:rw \
-  --mount ~/.cargo:/data/cargo:ro
+mvmctl machine run --flake . --name builder -d --mount ./builder.img:/work:4G:rw
+mvmctl machine exec builder -- sh -c 'echo result > /work/output.txt'
+```
+
+The guest writes into `builder.img`, not into a host directory, so copy
+results out with `mvmctl machine cp` rather than expecting them in your
+checkout.
+
+Or snapshot a host directory into the machine with `machine volume mount`. A
+registration is picked up at the machine's next start, so it can come before
+the machine exists:
+
+```bash
+mvmctl machine volume mount build --volume src --host "$PWD/src" --guest /work/src
+mvmctl machine run --flake . --name build -d --mount ~/cargo.img:/data/cargo:8G:rw
 mvmctl machine exec build -- cargo build --manifest-path /work/src/Cargo.toml
 ```
+
+The directory is copied into an ext4 image each time the machine starts, so
+host edits appear after the next stop and start. `--host` must be absolute and
+on encrypted storage. With `--rw`, which only a `dev` or `permissive` machine
+accepts, the guest writes into the machine's private copy; those writes never
+reach the host directory, and a changed host directory replaces the copy at the
+next start. See the [machine volume docs](/guides/machine-use-cases/).
 
 ## Injecting environment variables: `--env`
 
@@ -233,10 +265,12 @@ highest):
   the `host.stream.v1` grant on the signed plan — see
   [Workload input](/guides/workload-input/). For a trailing-argv run, pipe
   data via a `--mount`-shared file instead.
-- **Persistent state** doesn't survive teardown. A transient run cannot take
-  a `:rw` share at all, so nothing is written back to the host. For state
-  that has to outlive the run, boot a persistent machine (`--name` + `-d`)
-  with a `:rw` share or a managed volume.
+- **Persistent state** doesn't survive teardown. No run writes back to a host
+  directory: a transient run's directory share is read-only, and a persistent
+  machine takes none. For state that has to outlive the run, attach a writable
+  disk image (`HOST.img:/GUEST:SIZE:rw`, any profile that accepts `--mount`),
+  or boot a persistent machine (`--name` + `-d`) with a disk image or a
+  managed volume.
 
 ## See also
 

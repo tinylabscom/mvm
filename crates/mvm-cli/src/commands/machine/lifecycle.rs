@@ -157,6 +157,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         SpecReconcile::Reuse => {}
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
+    enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
     let effective_hypervisor = args
         .hypervisor
         .as_deref()
