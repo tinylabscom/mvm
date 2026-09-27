@@ -3952,3 +3952,5 @@ resume` takes a `current_head` and refuses when it differs from the
                   mvm-images".
             - [x] Waves 3+4: no workflow builds, mirrors or re-signs an
                   image; `nix/images/` is deleted.
+            - [x] Release decoupling: image-set members are cached by the
+                  pinned root, so a CLI version bump needs no image rebuild.
