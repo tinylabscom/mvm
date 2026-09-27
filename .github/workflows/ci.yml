@@ -1388,14 +1388,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check out mvm-images
-        if: needs.scope.outputs.nix == 'true'
-        uses: actions/checkout@v6
-        with:
-          repository: tinylabscom/mvm-images
-          ref: main
-          path: mvm-images
-
       - uses: ./.github/actions/free-disk
         if: needs.scope.outputs.nix == 'true'
 
@@ -1411,6 +1403,26 @@ jobs:
         if: needs.scope.outputs.nix == 'true'
         with:
           packages: lld
+
+      # The commit that produced the image set images.lock pins, not
+      # mvm-images `main`: this job gates the merge queue, so it must not go
+      # red because the other repository moved. A change that needs newer image
+      # sources waits for them to be published in an image set and pinned; the
+      # pair's `main`s are compared by the non-blocking `image-pair.yml` canary.
+      - name: Resolve the mvm-images commit images.lock pins
+        if: needs.scope.outputs.nix == 'true'
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images
+        if: needs.scope.outputs.nix == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: mvm-images
 
       - name: Build the guest image from mvm-images
         if: needs.scope.outputs.nix == 'true'

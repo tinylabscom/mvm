@@ -1223,6 +1223,16 @@ fn documented_surface_jobs_check_out_mvm_images_for_the_sidecar_only() {
             "{job} must keep the checkout inside the workspace, away from the sibling path"
         );
         assert!(
+            block.contains(r#"ref="$(cargo run -q -p xtask -- image-source-ref)""#)
+                && block.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
+            "{job} gates releases, so it must check out the mvm-images commit images.lock \
+             pins rather than a branch the other repository can move"
+        );
+        assert!(
+            !block.contains("ref: main"),
+            "{job} must not build against mvm-images main"
+        );
+        assert!(
             block.contains("MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images"),
             "{job} must hand the checkout to the sidecar step"
         );
