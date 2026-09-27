@@ -38,3 +38,12 @@ the kernel build, the dev default image and the SDK sidecar build.
 in-tree fingerprint, and is removed. The builder-image plan that still names
 it (`specs/plans/2026-09-24-builder-image-without-host-bins.md`) describes the
 key this wave deletes.
+
+The documented-surface suite built its SDK sidecar with
+`build sdk-sidecar build`, which now needs an image checkout. Its scenarios
+load the sidecar from the version-matched cache, so it is still built from
+this tree's C ABI, not fetched: `e2e-docs.yml` checks out `mvm-images` inside
+the workspace (`.e2e-mvm-images`), away from the sibling path an image checkout
+is discovered at, and the script hands it to that one step alone. Found by
+dispatching Extended CI on the Wave 3 branch, where both documented-surface
+lanes stopped at that step.

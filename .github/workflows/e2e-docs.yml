@@ -94,8 +94,19 @@ jobs:
       # the unembedded binary re-executes chooses QEMU when the variable is
       # unset, and QEMU can only reach a builder through Stage 0.
       MVM_BUILDER_BACKEND: firecracker
+      MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: main
+          path: .e2e-mvm-images
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
@@ -281,8 +292,19 @@ jobs:
       # macOS 26+ default, and the fetched builder image is self-contained, so
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
+      MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: main
+          path: .e2e-mvm-images
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly

@@ -410,13 +410,22 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
-# The sidecar is still built from this tree: its fingerprint watches the host
-# services crate, so a published sidecar would test an older C ABI. Running it
-# through the unembedded binary keeps the hand-off to the embedded helper
-# covered on every release.
+# The service-plane scenarios load this sidecar from the version-matched cache,
+# so it is built from this tree rather than fetched: a published sidecar carries
+# the C ABI of the mvm commit its image set was built from, not this one. The
+# recipe lives in mvm-images, and the build compiles it against this checkout.
+# The checkout is handed to this step alone, so every other step keeps resolving
+# images from the pinned set, and it is kept out of the sibling path an image
+# checkout is discovered at for the same reason.
 e2e_phase sdk-sidecar
-echo "==> warming source-matched SDK sidecar through unembedded mvmctl"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
+if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
+  echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
+  echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
+  exit 1
+fi
+echo "==> building the source-matched SDK sidecar through unembedded mvmctl"
+MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.
