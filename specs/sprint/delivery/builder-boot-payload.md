@@ -88,6 +88,19 @@ rebuilt (its files kept their timestamps), the payload digest moved to
 This run predates the rebase onto #3774; see *Live boot after the rebase*
 below.
 
+## Live boot after the rebase (HVF, 2026-09-27)
+
+The same isolated shape, on the branch rebased onto #3774 and #3776, with a
+fresh host-binary cross-compile. The builder image was the one the image lock
+now pins, fetched and verified from `image-set/v0.2.1`: ABI 0, no marker.
+PID 1 was `/run/mvm/host-bins/mvm-host-vm-init`, the kernel command line
+carried `mvm.boot_payload=8a99…2df8` and no `init=`, the console showed
+`stage1 payload 8a99…2df8 verified; builder image /dev/vda is boot ABI 0` then
+`pid 1 starting (CarriedByStage1)`, and the shell job succeeded (2 min 53 s
+end to end on a cold cache, most of it the image download and the runtime
+overlay build). The edit-then-reboot half was not repeated: nothing in the
+rebase touched how the payload is assembled or staged.
+
 Boot overhead, from the guest's console: the kernel unpacked the 2.2 MB
 payload in about 1 ms (`Unpacking initramfs` 0.6445 s, `Freeing initrd
 memory` 0.6455 s), ran `/init` at 0.6668 s, and had verified and copied the
