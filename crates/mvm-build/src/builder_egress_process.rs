@@ -47,7 +47,7 @@ pub(crate) fn builder_egress_supervisor_command(
     mvmctl_path: &Path,
     endpoint_path: &Path,
 ) -> Command {
-    let mut command = Command::new(mvmctl_path);
+    let mut command = mvm_core::env_hygiene::helper_command(mvmctl_path);
     command
         .arg("__builder-egress-supervisor")
         .arg("--endpoint")

@@ -14,18 +14,11 @@ import mvm
 @pytest.fixture(autouse=True)
 def _isolate() -> None:
     """Each test starts with a clean recording + record mode."""
-    path = os.environ.get("PATH")
     mvm.reset_recording()
-    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
     yield
     mvm.reset_recording()
-    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
-    if path is None:
-        os.environ.pop("PATH", None)
-    else:
-        os.environ["PATH"] = path
 
 
 # ── basic recording shape ────────────────────────────────────────────
@@ -166,13 +159,17 @@ def test_context_manager_records_kill_on_exit() -> None:
 # ── modes ────────────────────────────────────────────────────────────
 
 
-def test_live_mode_requires_host_cli() -> None:
-    """MVM_SDK_MODE=live without the host CLI must fail with an
-    actionable hint."""
+def test_live_mode_refuses_a_template_before_reaching_the_host(monkeypatch) -> None:
+    """The host library launches images only, so a template in live mode is
+    refused with the way out, and nothing is sent anywhere."""
+    from mvm import _hostlib
+
+    def refuse(method, _request):
+        raise AssertionError(f"reached the host library: {method}")
+
+    monkeypatch.setattr(_hostlib, "_invoke", refuse)
     os.environ["MVM_SDK_MODE"] = "live"
-    os.environ.pop("MVM_CLI_BIN", None)
-    os.environ["PATH"] = ""
-    with pytest.raises(mvm.SandboxModeError, match="mvmctl"):
+    with pytest.raises(mvm.SandboxModeError, match="image="):
         mvm.Sandbox.create("python-3.12")
 
 

@@ -18,7 +18,6 @@ use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::VmStartConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// How long a boot waits for qemu's `-pidfile` to appear
@@ -450,7 +449,7 @@ pub(crate) fn spawn_vsock_bridges(
     let bridge_pid_file = state_dir.join(BRIDGE_PID_FILE);
 
     let exe = resolve_bridge_executable()?;
-    let mut cmd = Command::new(&exe);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&exe);
     cmd.arg("__qemu-vsock-bridge")
         .arg("--spec")
         .arg(&spec_path)

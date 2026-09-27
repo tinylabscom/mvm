@@ -2900,6 +2900,7 @@ dependencies = [
  "libc",
  "mvm-contract",
  "mvm-core",
+ "mvm-setpriv",
  "nix 0.29.0",
  "rand 0.10.2",
  "schemars",
@@ -3335,6 +3336,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3363,6 +3365,7 @@ name = "mvm-mcp"
 version = "0.18.0-rc.2"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "mvm-client",
  "serde",
@@ -3439,7 +3442,6 @@ dependencies = [
 name = "mvm-sdk"
 version = "0.18.0-rc.2"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "blake3",
  "flate2",
@@ -3457,13 +3459,19 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "mvm-setpriv"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

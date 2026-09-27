@@ -759,6 +759,55 @@ fn load_name_registry() -> VmNameRegistry {
     VmNameRegistry::load(&path).unwrap_or_default()
 }
 
+/// Remove a stopped machine's runtime state directory.
+///
+/// A stop that leaves it behind leaves whatever the last run put there, and a
+/// same-identity checkpoint restore rebuilds that directory by cloning the
+/// checkpoint's files into it, so a leftover `rootfs.ext4` from the previous
+/// restore makes the next one fail with `File exists`. The reconcile pass that
+/// would otherwise reap it runs only on the next state-touching command, and a
+/// checkpoint restore is not one.
+///
+/// The directory stays when something still owns it: a supervisor that
+/// survived the stop, or a restore of the same machine in another process,
+/// which holds the machine's lifecycle lock while it fills the directory.
+///
+/// It also stays for a transient run whose exit has not been reported yet. A
+/// transient reports its exit by reading `workload.exit` from this directory
+/// after the machine stops, then removes the directory through its own
+/// cleanup; reaping here would delete that unconsumed exit before it is read.
+/// A persistent machine — the restored-checkpoint case this exists for —
+/// reports no exit through the stop path, so it always reaps.
+fn remove_stopped_runtime_state(name: &str) -> Result<()> {
+    let state_dir = vm_state_dir(name);
+    let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
+        && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
+    if transient_exit_pending {
+        tracing::debug!(
+            machine = name,
+            "transient exit not yet reported; leaving state dir for its own cleanup"
+        );
+        return Ok(());
+    }
+    let removed = mvm_runtime::vm::reconcile::reap_unowned_state_dir(
+        &state_dir,
+        &mvm_core::config::instance_dir(name),
+    )
+    .map_err(|e| {
+        backend_err(format!(
+            "machine {name:?} stopped, but removing its state dir {} failed: {e}",
+            state_dir.display()
+        ))
+    })?;
+    if !removed {
+        tracing::debug!(
+            machine = name,
+            "state dir still owned after stop; left in place"
+        );
+    }
+    Ok(())
+}
+
 /// Best-effort removal of a machine name from the persistent VM name registry
 /// after a successful stop, so it stops showing as registered. A load or save
 /// failure is ignored — a direct-boot VM carries no registry entry, and the
@@ -1196,6 +1245,7 @@ impl MvmClient for LocalBackend {
             if let Err(e) = crate::volume::LocalVolumeService::new().release_owner_leases(&id.0) {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
+            remove_stopped_runtime_state(&id.0)?;
         }
         result.map_err(backend_err)
     }
@@ -2312,6 +2362,107 @@ mod tests {
         be.stop_machine(&MachineId("never-existed-xyz".into()))
             .await
             .expect("stopping an absent machine is Ok");
+    }
+
+    /// Lay out a vm_full checkpoint's content dir the way a same-identity
+    /// restore reads it.
+    #[cfg(feature = "test-support")]
+    fn checkpoint_content(root: &Path) -> PathBuf {
+        let content = root.join("checkpoint-content");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join("rootfs.ext4"), b"rootfs").unwrap();
+        std::fs::write(content.join("memory.bin"), b"ram").unwrap();
+        content
+    }
+
+    /// Restore `name` from `content` through the real HVF restore seam. It
+    /// clones every blob into the state dir before it looks for a supervisor
+    /// to launch, and the fixture has nothing to launch, so it always fails;
+    /// the returned error says whether the clone got through. `File exists`
+    /// means a leftover from the previous run was in the way.
+    #[cfg(feature = "test-support")]
+    fn restore_into(name: &str, content: &Path) -> String {
+        use mvm_runtime::checkpoint::VmFullRestore as _;
+        let error = mvm_runtime::hvf_restore::HvfVmFullRestore
+            .restore(
+                name,
+                &content.join("rootfs.ext4"),
+                &content.join("memory.bin"),
+                &content.join("machine-id"),
+                None,
+                &[],
+            )
+            .expect_err("the fixture has no launch config to boot from");
+        format!("{error:#}")
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn stop_restore_stop_restore_needs_no_second_stop() {
+        let data = IsolatedDataDir::new();
+        let content = checkpoint_content(data.path());
+        let be = LocalBackend::with_hypervisor("mock");
+        let name = "restored-machine";
+        let state_dir = vm_state_dir(name);
+
+        for round in 1..=3 {
+            let restored = restore_into(name, &content);
+            assert!(
+                !restored.contains("File exists"),
+                "restore {round} must clone into a clean state dir: {restored}"
+            );
+            assert!(
+                state_dir.join("rootfs.ext4").is_file(),
+                "restore {round} must get as far as cloning the rootfs: {restored}"
+            );
+
+            be.stop_machine(&MachineId(name.into()))
+                .await
+                .expect("stop");
+            assert!(
+                !state_dir.exists(),
+                "stop {round} must remove {}",
+                state_dir.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn stop_leaves_the_state_dir_of_a_restore_in_progress() {
+        let data = IsolatedDataDir::new();
+        let content = checkpoint_content(data.path());
+        let be = LocalBackend::with_hypervisor("mock");
+        let name = "restoring-machine";
+        restore_into(name, &content);
+
+        let restore = mvm_runtime::vm::instance_snapshot::lock_resume(name).unwrap();
+        be.stop_machine(&MachineId(name.into()))
+            .await
+            .expect("stop");
+        assert!(
+            vm_state_dir(name).join("rootfs.ext4").is_file(),
+            "a restore holding the machine's lifecycle lock keeps its state dir"
+        );
+
+        drop(restore);
+        be.stop_machine(&MachineId(name.into()))
+            .await
+            .expect("stop");
+        assert!(!vm_state_dir(name).exists());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn stopping_a_machine_with_no_state_creates_no_lifecycle_lock() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+
+        be.stop_machine(&MachineId("never-started".into()))
+            .await
+            .expect("stop");
+
+        assert!(!mvm_core::config::instance_dir("never-started").exists());
     }
 
     #[test]

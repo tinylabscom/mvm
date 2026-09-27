@@ -859,41 +859,6 @@ fn bundle_fetch_prod_refuses_a_tag_reference() {
     assert!(stderr.contains("digest-pinned"), "stderr: {stderr}");
 }
 
-/// The root build script records this binary's features for the bootstrap
-/// helper to mirror. Every name it records must be a feature the root package
-/// declares, or the helper's `cargo build --features` names one that does not
-/// exist. Checked against the manifest rather than a fixed list, so it holds
-/// under any feature selection this test is compiled with.
-#[test]
-fn recorded_features_are_declared_root_features() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).expect("read the root manifest");
-    let parsed: toml::Table = text.parse().expect("parse the root manifest");
-    let declared = parsed
-        .get("features")
-        .and_then(toml::Value::as_table)
-        .expect("the root package declares features");
-
-    let recorded: Vec<&str> = env!("MVMCTL_ENABLED_FEATURES")
-        .split(',')
-        .filter(|name| !name.is_empty())
-        .collect();
-    // Without this, a build script that recorded nothing would pass: the loop
-    // below checks only what was recorded.
-    if cfg!(feature = "default") {
-        assert!(
-            recorded.contains(&"default"),
-            "this test was compiled with default features, so they must be recorded: {recorded:?}"
-        );
-    }
-    for name in recorded {
-        assert!(
-            declared.contains_key(name),
-            "recorded feature {name:?} is not declared by the root package"
-        );
-    }
-}
-
 /// Run `mvmctl agent-session …` against an isolated home.
 fn agent_session(mvm_home: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_mvmctl"))
@@ -1132,6 +1097,94 @@ fn machine_run_output_is_advertised_and_refused_before_boot() {
     assert!(!tmp.path().join("fresh").exists());
 }
 
+fn isolated_mvmctl(home: &std::path::Path) -> Command {
+    #[allow(deprecated)]
+    let mut command = Command::cargo_bin("mvmctl").unwrap();
+    command
+        .env("HOME", home)
+        .env("MVM_HOME", home.join("state"))
+        .env("MVM_NO_AUTO_DEV", "1");
+    command
+}
+
+#[test]
+fn run_refuses_a_denied_env_variable_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "LD_PRELOAD=/tmp/hook-value.so",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a loader variable must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("LD_PRELOAD (loader)"), "stderr: {stderr}");
+    assert!(stderr.contains("--allow-env NAME"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("hook-value"),
+        "the value is never echoed: {stderr}"
+    );
+}
+
+#[test]
+fn run_allow_env_readmits_by_exact_name_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "PYTHONPATH=/srv/lib",
+            "--allow-env",
+            "PYTHONPATH",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an exact-name re-admission passes: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--env",
+            "LD_PRELOAD=/x.so",
+            "--allow-env",
+            "LD_*",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a pattern never re-admits");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("never a pattern"), "stderr: {stderr}");
+}
+
+#[test]
+fn allow_env_is_documented_on_run_and_proc_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    for args in [
+        &["run", "--help"][..],
+        &["machine", "proc", "start", "--help"][..],
+    ] {
+        let out = isolated_mvmctl(tmp.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("--allow-env <NAME>"), "{args:?}: {stdout}");
+    }
+}
+
 #[test]
 fn machine_run_refuses_persistent_environment_before_boot() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1246,5 +1299,95 @@ fn image_boot_verify_refuses_a_manifest_the_lock_does_not_pin() {
     assert!(
         stderr.contains("refused at the manifest-digest stage"),
         "stderr: {stderr}"
+    );
+}
+
+/// `--secret` is shared run surface: both run verbs advertise it.
+#[test]
+fn run_and_machine_run_help_list_the_secret_flag() {
+    for verb in [&["run", "--help"][..], &["machine", "run", "--help"][..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(verb)
+            .output()
+            .expect("run mvmctl help");
+        assert!(
+            out.status.success(),
+            "{verb:?} must exit 0: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("--secret"), "{verb:?} help missing --secret");
+        assert!(
+            text.contains("NAME[:HOST,...]"),
+            "{verb:?} help missing the spec shape"
+        );
+    }
+}
+
+/// An isolated `mvmctl` whose secrets live in the file store, so nothing
+/// reaches the operator's keychain.
+fn isolated_secret_mvmctl(home: &std::path::Path) -> Command {
+    let mut command = isolated_mvmctl(home);
+    command.env("MVM_SECRET_STORE_BACKEND", "file");
+    command
+}
+
+/// A secret the host has never stored refuses the run before anything boots.
+#[test]
+fn run_with_an_unknown_secret_refuses_before_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let out = isolated_secret_mvmctl(home.path())
+        .args(["run", "--secret", "never-stored", "--", "true"])
+        .output()
+        .expect("run mvmctl run");
+    assert!(!out.status.success(), "an unknown secret must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown secret"), "{stderr}");
+    assert!(
+        stderr.contains("mvmctl secret set never-stored"),
+        "the refusal names the fix: {stderr}"
+    );
+}
+
+/// A destination the stored binding does not admit refuses before boot: the
+/// flag can narrow a binding, never widen it.
+#[test]
+fn run_with_a_destination_outside_the_binding_refuses_before_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let stored = isolated_secret_mvmctl(home.path())
+        .args([
+            "secret",
+            "set",
+            "anthropic",
+            "--provider",
+            "anthropic",
+            "--value",
+            "sk-ant-test-only",
+        ])
+        .output()
+        .expect("run mvmctl secret set");
+    assert!(
+        stored.status.success(),
+        "secret set must succeed: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+
+    let out = isolated_secret_mvmctl(home.path())
+        .args([
+            "run",
+            "--secret",
+            "anthropic:collector.evil.test",
+            "--",
+            "true",
+        ])
+        .output()
+        .expect("run mvmctl run");
+    assert!(!out.status.success(), "a widening destination must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("refused before boot"), "{stderr}");
+    assert!(stderr.contains("collector.evil.test"), "{stderr}");
+    assert!(
+        !stderr.contains("sk-ant-test-only"),
+        "a refusal never echoes the value: {stderr}"
     );
 }

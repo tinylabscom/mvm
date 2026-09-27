@@ -93,13 +93,46 @@ pub fn bound_hosts(
                  `mvmctl secret set {address} --host <h> --type <t>`"
             )
         })?;
-        for host in meta.allowed_hosts {
+        for host in plan_binding_hosts(secret, address, &meta)? {
             if !hosts.contains(&host) {
                 hosts.push(host);
             }
         }
     }
     Ok(hosts)
+}
+
+/// The destinations one plan binding's placeholder is valid for.
+///
+/// The operator's stored allow-list (`meta`), narrowed to the binding's own
+/// `destinations` when the plan names any. A plan can only narrow: a declared
+/// destination the stored allow-list does not admit is an error, never an
+/// addition, so a plan cannot talk a credential into reaching somewhere its
+/// owner never bound it to. The same answer feeds the per-VM certificate's
+/// name constraints and the substitution registry, so the two cannot describe
+/// different destination sets for the same binding.
+pub fn plan_binding_hosts(
+    binding: &crate::plan::SecretBinding,
+    address: &str,
+    meta: &SecretBindingMeta,
+) -> Result<Vec<String>> {
+    if binding.destinations.is_empty() {
+        return Ok(meta.allowed_hosts.clone());
+    }
+    let mut narrowed: Vec<String> = Vec::with_capacity(binding.destinations.len());
+    for destination in &binding.destinations {
+        if !mvm_contract::ir::host_is_bound(&meta.allowed_hosts, destination) {
+            anyhow::bail!(
+                "secret `{address}` is bound to {:?}; the plan's destination `{destination}` \
+                 is outside that allow-list and a plan can only narrow it",
+                meta.allowed_hosts
+            );
+        }
+        if !narrowed.contains(destination) {
+            narrowed.push(destination.clone());
+        }
+    }
+    Ok(narrowed)
 }
 
 /// File-backed binding store. Layout: `<base>/<tenant>/<name>.json`,
@@ -258,6 +291,7 @@ mod tests {
             source: crate::plan::SecretSource::Keystore {
                 address: address.into(),
             },
+            destinations: Vec::new(),
         }
     }
 
@@ -271,6 +305,7 @@ mod tests {
                 provider: "vault".into(),
                 path: "kv/token".into(),
             },
+            destinations: Vec::new(),
         };
         assert!(
             bound_hosts(&[external], "local", &store)
@@ -278,6 +313,72 @@ mod tests {
                 .is_empty()
         );
         assert!(bound_hosts(&[], "local", &store).unwrap().is_empty());
+    }
+
+    fn narrowed(address: &str, destinations: &[&str]) -> crate::plan::SecretBinding {
+        let mut binding = keystore_secret("API_KEY", address);
+        binding.destinations = destinations.iter().map(|d| (*d).to_string()).collect();
+        binding
+    }
+
+    fn wide_meta() -> SecretBindingMeta {
+        SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.openai.com".into(), "*.example.com".into()],
+            sigv4: None,
+            provider: None,
+        }
+    }
+
+    #[test]
+    fn a_binding_without_destinations_keeps_the_stored_allow_list() {
+        let hosts = plan_binding_hosts(&narrowed("openai", &[]), "openai", &wide_meta()).unwrap();
+        assert_eq!(hosts, vec!["api.openai.com", "*.example.com"]);
+    }
+
+    #[test]
+    fn plan_destinations_narrow_the_stored_allow_list() {
+        let hosts = plan_binding_hosts(
+            &narrowed("openai", &["eu.example.com", "eu.example.com"]),
+            "openai",
+            &wide_meta(),
+        )
+        .unwrap();
+        assert_eq!(
+            hosts,
+            vec!["eu.example.com"],
+            "only the declared destination remains, once"
+        );
+    }
+
+    #[test]
+    fn a_plan_destination_outside_the_stored_allow_list_is_refused() {
+        let err = plan_binding_hosts(
+            &narrowed("openai", &["api.openai.com", "evil.test"]),
+            "openai",
+            &wide_meta(),
+        )
+        .expect_err("a plan must not widen a binding");
+        let message = format!("{err}");
+        assert!(message.contains("evil.test"), "{message}");
+        assert!(message.contains("only narrow"), "{message}");
+    }
+
+    #[test]
+    fn bound_hosts_follows_the_plan_narrowing() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store.put("local", "openai", &wide_meta()).unwrap();
+        let hosts = bound_hosts(&[narrowed("openai", &["api.openai.com"])], "local", &store)
+            .expect("a narrowed binding resolves");
+        assert_eq!(
+            hosts,
+            vec!["api.openai.com"],
+            "the certificate must permit only what the plan kept"
+        );
+        let err = bound_hosts(&[narrowed("openai", &["evil.test"])], "local", &store)
+            .expect_err("a widening plan must not mint a certificate");
+        assert!(format!("{err}").contains("evil.test"), "{err}");
     }
 
     #[test]

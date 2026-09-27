@@ -89,8 +89,11 @@ pub trait RuntimeView {
 pub trait ReconcileActions {
     /// Tear down a dead-process record's leftover runtime state.
     fn tear_down(&self, name: &str, reg: &VmRegistration) -> Result<(), String>;
-    /// Reap an orphan state dir (basename) that has no record.
-    fn reap_orphan(&self, dir: &str) -> Result<(), String>;
+    /// Reap an orphan state dir (basename) that has no record. `Ok(false)`
+    /// when it turned out not to be an orphan: a lifecycle operation on the
+    /// machine (a restore filling the directory before its supervisor is up)
+    /// owns it, or a supervisor came up since it was classified.
+    fn reap_orphan(&self, dir: &str) -> Result<bool, String>;
     /// Stop the Firecracker of a resume that was never admitted. `Ok(false)`
     /// when there is nothing to stop after all: a resume of `name` is still in
     /// progress in another process, which owns the outcome, or the state has
@@ -237,7 +240,8 @@ pub fn sweep(
                     continue;
                 }
                 match actions.reap_orphan(&dir) {
-                    Ok(()) => report.orphan_state_reaped.push(dir),
+                    Ok(true) => report.orphan_state_reaped.push(dir),
+                    Ok(false) => {}
                     Err(e) => report.errors.push(format!("reap orphan {dir}: {e}")),
                 }
             }
@@ -251,6 +255,57 @@ pub fn sweep(
 }
 
 use mvm_vmm::host::process_liveness::state_dir_has_live_process;
+
+/// Remove a machine's state dir unless something still owns it, holding the
+/// machine's lifecycle lock across the removal. `Ok(true)` when the directory
+/// is gone afterwards (including when there was none); `Ok(false)` when an
+/// owner kept it in place.
+///
+/// A restore creates the state dir and fills it before its supervisor
+/// publishes a pid, so for that whole window the dir has no live owner and no
+/// registry record, which is exactly what an orphan looks like. The restore
+/// holds the machine's lifecycle lock for that window; taking the same lock
+/// here, and keeping it until the directory is gone, is what stops a stop or a
+/// reconcile in another process from deleting it underneath the restore. A
+/// restore that starts after this returns blocks on the lock until the
+/// removal has finished, so it never clones into a half-deleted directory.
+///
+/// Liveness is checked again under the lock: a restore that completed between
+/// the caller's classification and here has left a running supervisor behind.
+pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<bool, String> {
+    // Nothing to remove, and no reason to create a lock file for a machine
+    // that has no state.
+    if !state_dir.exists() {
+        return Ok(true);
+    }
+    let lock = crate::vm::instance_snapshot::try_lock_resume_in(instance_dir)
+        .map_err(|e| format!("{e:#}"))?;
+    let Some(_lifecycle) = lock else {
+        return Ok(false);
+    };
+    if state_dir_has_live_process(state_dir) {
+        return Ok(false);
+    }
+    remove_runtime_dirs(state_dir).map(|()| true)
+}
+
+/// Remove a machine's state dir *and* the directory its sockets live in.
+///
+/// Those are not always the same place. When the state dir is deep enough that
+/// a socket path would overflow macOS's `sun_path` limit, `vm_socket_dir_at`
+/// puts the sockets under a short hashed namespace instead. Removing only the
+/// state dir then leaves the substitution socket behind, and the next launch
+/// under that name dies binding it with "Address already in use".
+///
+/// Absent directories are not an error. The caller owns the decision that
+/// nothing is still running out of them.
+pub fn remove_runtime_dirs(state_dir: &Path) -> Result<(), String> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    if socket_dir != state_dir {
+        remove_state_dir(&socket_dir)?;
+    }
+    remove_state_dir(state_dir)
+}
 
 /// Best-effort recursive removal of a state dir. The dead-process
 /// discrimination already ran in [`classify`], so there is no live process
@@ -329,6 +384,9 @@ fn stop_firecracker_in(state_dir: &Path) -> anyhow::Result<()> {
 /// Real-filesystem [`ReconcileActions`] rooted at the same `vms` dir.
 pub struct FsReconcileActions {
     vms_root: PathBuf,
+    /// Where each machine's lifecycle lock lives: the `instances` dir beside
+    /// `vms_root`, both being children of the same mvm home.
+    instances_root: PathBuf,
     /// The registry an unadmitted-resume stop re-reads once it holds the
     /// machine's resume lock. `None` skips that re-read.
     registry_path: Option<PathBuf>,
@@ -336,9 +394,15 @@ pub struct FsReconcileActions {
 }
 
 impl FsReconcileActions {
+    /// `vms_root` is `<mvm_home>/vms`; the lifecycle locks an orphan reap
+    /// defers to are read from `<mvm_home>/instances`.
     pub fn new(vms_root: impl Into<PathBuf>) -> Self {
+        let vms_root = vms_root.into();
+        let mvm_home = vms_root.parent().unwrap_or(&vms_root);
+        let instances_root = mvm_core::config::instances_root_at(mvm_home);
         Self {
-            vms_root: vms_root.into(),
+            vms_root,
+            instances_root,
             registry_path: None,
             stop_vmm: stop_firecracker_in,
         }
@@ -370,8 +434,8 @@ impl ReconcileActions for FsReconcileActions {
     fn tear_down(&self, _name: &str, reg: &VmRegistration) -> Result<(), String> {
         remove_state_dir(Path::new(&reg.vm_dir))
     }
-    fn reap_orphan(&self, dir: &str) -> Result<(), String> {
-        remove_state_dir(&self.vms_root.join(dir))
+    fn reap_orphan(&self, dir: &str) -> Result<bool, String> {
+        reap_unowned_state_dir(&self.vms_root.join(dir), &self.instances_root.join(dir))
     }
     fn stop_unadmitted(&self, name: &str) -> Result<bool, String> {
         use crate::vm::instance_snapshot::try_lock_resume;
@@ -512,7 +576,7 @@ pub fn reap_orphan_state_dirs_at(
     let actions = FsReconcileActions::new(vms_root);
     let mut reaped = Vec::new();
     for dir in view.orphan_dirs(&known) {
-        if actions.reap_orphan(&dir).is_ok() {
+        if matches!(actions.reap_orphan(&dir), Ok(true)) {
             reaped.push(dir);
         }
     }
@@ -742,10 +806,10 @@ mod tests {
             self.torn_down.borrow_mut().push(reg.vm_dir.clone());
             Ok(())
         }
-        fn reap_orphan(&self, dir: &str) -> Result<(), String> {
+        fn reap_orphan(&self, dir: &str) -> Result<bool, String> {
             self.on_disk.borrow_mut().remove(dir);
             self.reaped.borrow_mut().push(dir.to_string());
-            Ok(())
+            Ok(true)
         }
         fn stop_unadmitted(&self, name: &str) -> Result<bool, String> {
             if self.resuming.contains(name) {
@@ -1161,11 +1225,94 @@ mod tests {
     #[test]
     fn fs_actions_reap_orphan_removes_dir_under_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        make_state_dir(root, "orphan", None);
-        let actions = FsReconcileActions::new(root);
-        actions.reap_orphan("orphan").unwrap();
+        let root = tmp.path().join("vms");
+        make_state_dir(&root, "orphan", None);
+        let actions = FsReconcileActions::new(&root);
+        assert!(actions.reap_orphan("orphan").unwrap());
         assert!(!root.join("orphan").exists());
+    }
+
+    /// A restore fills the state dir before its supervisor is up, so for that
+    /// window the dir has no pid and no record. The machine's lifecycle lock is
+    /// the only thing that tells it apart from an orphan; a reconcile in
+    /// another process must leave it alone while the lock is held.
+    #[test]
+    fn fs_actions_reap_orphan_leaves_a_dir_whose_lifecycle_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vms");
+        make_state_dir(&root, "restoring", None);
+        let instance_dir = mvm_core::config::instances_root_at(tmp.path()).join("restoring");
+        let _restore = crate::vm::instance_snapshot::try_lock_resume_in(&instance_dir)
+            .unwrap()
+            .expect("nothing else holds the lock");
+
+        let actions = FsReconcileActions::new(&root);
+
+        assert!(!actions.reap_orphan("restoring").unwrap());
+        assert!(root.join("restoring").exists(), "the restore keeps its dir");
+    }
+
+    #[test]
+    fn reap_unowned_state_dir_keeps_a_dir_with_a_live_supervisor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vms");
+        let dir = make_state_dir(&root, "restored", Some(std::process::id() as i32));
+
+        let reaped = reap_unowned_state_dir(Path::new(&dir), &tmp.path().join("restored"));
+
+        assert_eq!(reaped, Ok(false));
+        assert!(Path::new(&dir).exists());
+    }
+
+    /// A deep state dir keeps its sockets under a short hashed namespace; a
+    /// reap that removed only the state dir would leave a socket the next
+    /// launch under the same name fails to bind.
+    #[test]
+    fn reap_unowned_state_dir_removes_a_dead_dir_and_its_separate_socket_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("d".repeat(120)).join("vms");
+        let dir = PathBuf::from(make_state_dir(&vms_root, "stopped", None));
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        std::fs::write(socket_dir.join("substitution-endpoint.sock"), b"").unwrap();
+
+        let reaped = reap_unowned_state_dir(&dir, &tmp.path().join("instances").join("stopped"));
+
+        assert_eq!(reaped, Ok(true));
+        assert!(!dir.exists());
+        assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    fn reap_unowned_state_dir_takes_no_lock_for_a_machine_with_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let instance_dir = tmp.path().join("instances").join("never-started");
+
+        let reaped =
+            reap_unowned_state_dir(&tmp.path().join("vms").join("never-started"), &instance_dir);
+
+        assert_eq!(reaped, Ok(true));
+        assert!(!instance_dir.exists());
+    }
+
+    #[test]
+    fn a_held_lifecycle_lock_shields_a_dir_from_reap_orphan_state_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("vms");
+        make_state_dir(&vms_root, "restoring", None);
+        make_state_dir(&vms_root, "dead-orphan", None);
+        let registry_path = tmp.path().join("registry.json");
+        VmNameRegistry::default().save(&registry_path).unwrap();
+        let instance_dir = mvm_core::config::instances_root_at(tmp.path()).join("restoring");
+        let _restore = crate::vm::instance_snapshot::try_lock_resume_in(&instance_dir)
+            .unwrap()
+            .expect("nothing else holds the lock");
+
+        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, None);
+
+        assert_eq!(reaped, vec!["dead-orphan".to_string()]);
+        assert!(vms_root.join("restoring").exists());
     }
 
     #[test]

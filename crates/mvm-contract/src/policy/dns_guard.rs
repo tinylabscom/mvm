@@ -5,11 +5,16 @@ use core::net::IpAddr;
 /// Return whether an address is unsafe to expose through a DNS answer unless
 /// that exact address was explicitly pinned by policy.
 ///
-/// This is intentionally stricter than the TCP-connect mandatory-deny ranges:
-/// private IPv4 networks and IPv6 unique-local addresses are included to stop
-/// an admitted public hostname from rebinding to an internal service.
+/// Every class the shared restricted-address classifier knows is forbidden,
+/// so an admitted public hostname cannot rebind to an internal service.
+/// Whether a pinned answer may still be returned is the caller's decision:
+/// only a re-admittable class can be, and never a metadata or loopback one.
 #[must_use]
 pub fn dns_answer_forbidden(ip: IpAddr) -> bool {
+    crate::policy::restricted_address::classify(ip).is_some() || legacy_forbidden(ip)
+}
+
+fn legacy_forbidden(ip: IpAddr) -> bool {
     // An IPv4-mapped IPv6 answer (`::ffff:a.b.c.d`) reaches the embedded IPv4
     // destination on a dual-stack connect, so classify it as that IPv4 address
     // rather than letting it slip past the IPv4 rules as an opaque IPv6 one.

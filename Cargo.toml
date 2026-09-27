@@ -15,6 +15,11 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The guest's static privilege-drop helper. A leaf over `libc` alone: the
+    # builder image compiles it from source, so its closure is part of that
+    # image's cache key, and a crate it reaches is a crate whose edits rebuild
+    # the image.
+    "crates/mvm-setpriv",
     # GPU compute by API remoting: the per-VM host endpoint that serves
     # guest CUDA/NVML shim RPCs over vsock against the real driver or a
     # deterministic stub. Host-only (std); the guest side of the wire is
@@ -380,6 +385,7 @@ mvm-core = { path = "crates/mvm-core", version = "0.18.0-rc.2" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0-rc.2" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0-rc.2" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0-rc.2" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.18.0-rc.2" }
 mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0-rc.2" }
 mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.18.0-rc.2" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0-rc.2", default-features = false }
@@ -570,11 +576,13 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # the published channel even when the binary runs from a source checkout.
 release-channel = ["mvm-cli/release-channel"]
 
-# Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`.
-# Acquisition mechanics, not product behaviour — a build with this on and one
-# with it off expose exactly the same verbs; the difference is whether the
-# payload the builder VM needs travels inside the binary. Off by default so the
-# only remaining work in `mvm-cli`'s build script stays off the inner loop.
+# Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`,
+# in every profile, failing the build when the toolchain is missing. A release
+# profile embeds without it (`MVM_EMBED=0` opts out) and only warns when it
+# cannot. Acquisition mechanics, not product behaviour — a build with this on
+# and one with it off expose exactly the same verbs; an `mvmctl` without the
+# payload builds it from its checkout when it first needs a builder VM. Off by
+# default so debug builds keep the cross-compile off the inner loop.
 
 # `just embed` and the tag-push release workflow turn it on.
 embed-host-bins = ["mvm-cli/embed-host-bins"]
@@ -736,6 +744,17 @@ cargo-zigbuild = "0.23.0"
 # broken code rather than a stale tool. `scripts/require-nextest.sh` turns that
 # into one actionable line. This is a known-good floor, not a bisected minimum.
 nextest-min = "0.9.143"
+
+# The mutator behind `check-mutation-witnesses --run`. An exact pin, not a
+# floor: accepted misses in xtask/mutation-witness-baseline.json are matched
+# on cargo-mutants' own description text, and a release that attributes a
+# mutant to a different enclosing function renames it. Unpinned, one upstream
+# release can turn a baselined equivalent mutant into a "new" survivor, or
+# make a real one look already accepted. Bump deliberately, together with any
+# baseline descriptions the new version renders differently. The nightly lane
+# installs this version, and the gate refuses both a different installed
+# mutator and outcomes recorded by one.
+cargo-mutants = "27.1.0"
 
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the

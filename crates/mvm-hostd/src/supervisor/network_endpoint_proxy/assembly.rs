@@ -87,7 +87,30 @@ impl SubstitutionService {
             ai_tracker: None,
             instance_id: None,
             instance_metrics: None,
+            admitted: Arc::default(),
+            approver: Arc::new(crate::supervisor::egress_approval::NoApprovalBackend),
+            reflection: super::reflection::ReflectionGuard::default(),
         }
+    }
+
+    /// Answer `ask` route decisions with `approver`.
+    #[must_use]
+    pub fn with_approver(
+        mut self,
+        approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
+    ) -> Self {
+        self.approver = approver;
+        self
+    }
+
+    /// Share `admitted` with the forward leg built over it.
+    #[must_use]
+    pub(crate) fn with_admitted_addresses(
+        mut self,
+        admitted: Arc<super::pinned_dns::AdmittedAddresses>,
+    ) -> Self {
+        self.admitted = admitted;
+        self
     }
 
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
@@ -191,9 +214,14 @@ impl SubstitutionService {
             egress_gate,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
-        let forwarder: Arc<dyn Forwarder> =
-            Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
+        let admitted = Arc::new(super::pinned_dns::AdmittedAddresses::default());
+        let forwarder: Arc<dyn Forwarder> = Arc::new(
+            HardenedForwarder::new(forward_timeout_secs)?
+                .with_proxy(proxy)
+                .with_gate_resolver(Arc::clone(&admitted), Arc::clone(&egress_gate)),
+        );
         let mut service = Self::new(Arc::new(registry), resolver, forwarder, egress_gate)
+            .with_admitted_addresses(admitted)
             .with_tenant(tenant)
             .with_instance_id(instance_id);
         service = service.with_redaction_policy(redaction);
@@ -348,6 +376,7 @@ mod server_tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }];
         let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
@@ -406,6 +435,7 @@ mod server_tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }];
 
         // A policy that opts api.openai.com into entropy redaction. After

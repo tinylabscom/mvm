@@ -30,7 +30,8 @@ Specialized binaries keep privilege and dependency boundaries small:
   access.
 - `mvm-addon-dns` and `mvm-addon-vsock-bridge` expose optional local addon
   services.
-- `mvm-seccomp-apply` and `mvm-setpriv` apply the final sandbox and identity.
+- `mvm-seccomp-apply` applies the final sandbox; `mvm-setpriv`, from the
+  `mvm-setpriv` crate, applies the final identity.
 
 The guest treats host replies as protocol input, while the host treats every
 guest request as untrusted. Secrets and authorization decisions remain

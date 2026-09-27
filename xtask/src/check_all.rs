@@ -151,6 +151,10 @@ pub const GATES: &[Gate] = &[
         crate::check_single_exec_secs_writer::run,
     ),
     (
+        "check-helper-env-hygiene",
+        crate::check_helper_env_hygiene::run,
+    ),
+    (
         "check-single-host-predicate",
         crate::check_single_host_predicate::run,
     ),
@@ -178,6 +182,7 @@ pub const GATES: &[Gate] = &[
         "check-core-runtime-free",
         crate::check_core_runtime_free::run,
     ),
+    ("check-no-cli-shellout", crate::check_no_cli_shellout::run),
     (
         "check-sdk-transport-free",
         crate::check_sdk_transport_free::run,

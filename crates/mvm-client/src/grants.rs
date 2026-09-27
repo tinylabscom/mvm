@@ -16,6 +16,12 @@ use std::path::PathBuf;
 
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 
+/// The requested permission set and its dimensions, next to the record of
+/// what was enforced, so a caller names both from one module.
+pub use mvm_contract::grants::{
+    CpuGrant, DriveGrant, EgressGrant, Grants, WallClockGrant, budget, ceiling,
+};
+
 /// Filename under the per-VM state directory.
 const FILE: &str = "enforced-grants.json";
 

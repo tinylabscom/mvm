@@ -9,7 +9,7 @@ The Python SDK currently exposes both runtime and declarative surfaces.
 
 Current:
 
-- `mvm.Sandbox.create(template, ...)`
+- `mvm.Sandbox.create(image=..., ...)` (live mode boots an image; `template` is record mode only)
 - `sandbox.commands.start(argv, env=...)` — the only method on `commands`
 - `sandbox.exec(*argv, ...)` / `sandbox.aexec(...)` / `sandbox.shell(...)` — one-shot with a captured `ExecResult` (live mode only)
 - `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only
@@ -26,6 +26,23 @@ Planned:
 
 There is no `commands.run(...)`. `sandbox.forward(...)` exists only to refuse:
 ingress is declared before boot through `network=mvm.network(ports=[...])`.
+
+## How the SDK reaches the host
+
+The SDK drives machines in-process through the host library
+`libmvm_hostlib` (a C ABI over `mvm-client`), loaded with `ctypes`. It never
+runs `mvmctl` and has no subprocess fallback. It finds the library, first
+match wins:
+
+1. `MVM_HOSTLIB_PATH`, naming the library file;
+2. `mvm/_native/` inside the installed package (wheels that carry the library
+   are follow-up work);
+3. beside `mvmctl` on `PATH`, including beside the real file behind a symlink.
+
+A missing library raises `MvmTransportError` naming all three. Every failed
+call raises a typed `HostLibraryError` subclass (`MachineNotFoundError`,
+`MachineSpecError`, `MachineBackendError`, …) carrying `code` and `retryable`.
+
 
 ## Decorator
 

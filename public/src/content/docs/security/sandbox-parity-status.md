@@ -128,8 +128,9 @@ documented as such.
 declare a workload, emit canonical IR, and compile entrypoints
 statically. A runtime lifecycle surface also ships in both the Python
 and TypeScript SDKs: `create` / `connect` / `exec` / files / `kill`,
-plus context managers, and in live mode each shells `mvmctl machine
-run` to boot and `mvmctl machine stop` to tear down.
+plus context managers, and in live mode each calls the host library
+`libmvm_hostlib` in-process — `machine.run` to boot under an admitted plan
+and `machine.stop` to tear down — without running `mvmctl`.
 
 Two parts of this row's description are genuinely absent, which is
 what keeps it Planned. There is no `snapshot` method on either

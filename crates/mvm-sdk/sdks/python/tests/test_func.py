@@ -6,21 +6,15 @@ shortcut decorator (plan-0010 phase A). Mirrors the TypeScript SDK's
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 import mvm
 
-FAKE_MVM = (
-    Path(__file__).parent / "fixtures" / "fake-mvm"
-).resolve()
-
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_state() -> None:
     mvm.reset()
-    monkeypatch.setenv("MVM_MVM_BIN", str(FAKE_MVM))
     yield
     mvm.reset()
 

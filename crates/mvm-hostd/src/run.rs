@@ -416,6 +416,7 @@ mod tests {
                 source: mvm_core::plan::SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                destinations: Vec::new(),
             }],
             secret_release: SecretReleasePolicy::PlanBound,
             signed_plan: None,

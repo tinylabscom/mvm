@@ -32,9 +32,16 @@ pub const MACHINE_RM: &str = "machine.rm";
 /// Runs one non-interactive command in a machine. Request: `{"id",
 /// "command": [argv...]}`. Reply: an `ExecResult`.
 pub const MACHINE_EXEC: &str = "machine.exec";
+/// Boots a persisted machine definition. Request: `{"id"}`. Reply: a
+/// `MachineState`. A machine already running is reported, not rebooted.
+pub const MACHINE_START: &str = "machine.start";
+/// Lists every machine on this host — persisted definitions joined with live
+/// ones — with each one's fail-closed `build_mode`. Request: empty. Reply: an
+/// array of inventory records.
+pub const MACHINE_INVENTORY: &str = "machine.inventory";
 
-/// Every method this library answers.
-pub const METHODS: [&str; 7] = [
+/// Every method this library answers through the client.
+pub const METHODS: [&str; 9] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
@@ -42,6 +49,8 @@ pub const METHODS: [&str; 7] = [
     MACHINE_STOP,
     MACHINE_RM,
     MACHINE_EXEC,
+    MACHINE_START,
+    MACHINE_INVENTORY,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -159,6 +168,14 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
             let target: RemoveRequest = parse(request)?;
             client.remove_machine(&MachineId(target.id)).await?;
             Outcome::ok(&Empty {})
+        }
+        MACHINE_START => {
+            let target: MachineRef = parse(request)?;
+            Outcome::ok(&client.start_machine(&MachineId(target.id)).await?)
+        }
+        MACHINE_INVENTORY => {
+            let _: Empty = parse_or_default_empty(request)?;
+            Outcome::ok(&mvm_client::inventory::list_local_inventory(client).await?)
         }
         MACHINE_EXEC => {
             let target: ExecRequest = parse(request)?;
@@ -362,6 +379,45 @@ mod tests {
         let request =
             serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "command": [] })).unwrap();
         let outcome = run(dispatch(&client, MACHINE_EXEC, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn machine_start_boots_the_named_machine() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        run(dispatch(&client, MACHINE_STOP, &request));
+        let outcome = run(dispatch(&client, MACHINE_START, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome)["status"], "running");
+    }
+
+    #[test]
+    fn machine_start_of_an_absent_machine_is_not_found() {
+        let client = MockBackend::default();
+        let outcome = run(dispatch(&client, MACHINE_START, br#"{"id":"ghost"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    /// The inventory joins live machines with persisted definitions and says
+    /// each one's posture, defaulting to production.
+    #[test]
+    fn machine_inventory_lists_live_machines_with_their_posture() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (client, _) = with_machine("alpha");
+        let outcome = run(dispatch(&client, MACHINE_INVENTORY, b""));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        let records = body(&outcome);
+        let alpha = records
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "alpha")
+            .expect("the live machine is listed");
+        assert_eq!(alpha["build_mode"], "prod");
+        let outcome = run(dispatch(&client, MACHINE_INVENTORY, br#"{"all":true}"#));
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
     }
 

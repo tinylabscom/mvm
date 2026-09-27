@@ -220,6 +220,7 @@ fn build_service(
         source: SecretSource::Keystore {
             address: SECRET_ADDRESS.to_string(),
         },
+        destinations: Vec::new(),
     }];
     let (registry, handed) =
         assemble_registry(&plan_secrets, TENANT, &bindings).expect("assemble registry");

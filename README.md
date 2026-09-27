@@ -917,8 +917,10 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
   silently skipped and CI will fail.
 - **No task is done without tests.** Types get serde round-trips; wire/protocol
   code gets tampered-input rejection tests; security paths get positive _and_
-  negative cases. SDK changes must keep the shared conformance fixtures
-  (`tests/machine-fixtures/`) green — that is what keeps the wrappers thin.
+  negative cases. SDK changes must keep the live-transport scenarios
+  (`features/suites/s27_sdk/`) green — both languages must make the same
+  host-library calls — and must never spawn `mvmctl`
+  (`xtask check-no-cli-shellout`).
 - **Reuse first.** Search the workspace before adding a helper — duplicated logic
   is this repo's most common bug source. All `~/.mvm` paths go
   through `mvm-core::config` helpers, never inline `$HOME` joins.

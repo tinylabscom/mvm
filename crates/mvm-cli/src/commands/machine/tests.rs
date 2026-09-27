@@ -91,7 +91,7 @@ fn sdk_machine_fixture(name: &str) -> Vec<String> {
             .join("../../tests/machine-fixtures")
             .join(format!("{name}.argv")),
     )
-    .expect("read shared SDK machine argv fixture")
+    .expect("read machine argv fixture")
     .lines()
     .map(std::string::ToString::to_string)
     .collect()
@@ -128,11 +128,10 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
     }
 }
 
-/// Source-of-truth anchor for the cross-language conformance harness: every
-/// `tests/machine-fixtures/*.argv` the SDKs assert against must be argv the
-/// CLI parser actually accepts, and must map to the verb its first line
-/// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
-/// `stop --name X` when `stop` takes a positional name).
+/// Every `tests/machine-fixtures/*.argv` must be argv the CLI parser accepts
+/// and must map to the verb its first line names, so the corpus documents
+/// real `mvmctl machine` invocations (e.g. `stop` takes a positional name,
+/// never `--name`).
 #[test]
 fn fork_parses_with_as() {
     let args = parse_fork(&["fork", "parent", "--as", "child"]).unwrap();
@@ -1502,108 +1501,13 @@ fn agent_verb_empty_on_transient_path_when_not_specified() {
 }
 
 #[test]
-fn rust_sdk_machine_run_uses_cli_default_deny_preflight() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .command(["true"])
-        .dry_run(true)
-        .json(true)
-        .machine_args()
-        .expect("sdk machine run args");
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI preflight accepts SDK args");
-
-    assert!(summary.dry_run);
-    assert!(!summary.will_execute);
-    assert_eq!(summary.image_kind, "oci");
-    assert_eq!(summary.preflight_network_posture, "deny-all");
-    assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
-    assert_eq!(summary.receipt_network_posture, "deny-all");
-    assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
-}
-
-#[test]
-fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .allow_host("api.example.com")
-        .receipt("/tmp/mvm-sdk-machine.receipt.json")
-        .dry_run(true)
-        .json(true)
-        .command(["true"])
-        .machine_args()
-        .expect("sdk machine run args");
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        SDK_RUN_EGRESS_BACKEND,
-        SDK_RUN_EGRESS_BACKEND,
-    )
-    .expect("CLI receipt input accepts SDK args");
-
-    assert_eq!(
-        summary.preflight_network_posture,
-        "allow-list:api.example.com:443"
-    );
-    assert!(summary.receipt_requested);
-    assert_eq!(
-        summary.receipt_network_posture,
-        summary.preflight_network_posture
-    );
-    assert_eq!(
-        summary.receipt_egress_enforcement,
-        SDK_RUN_EGRESS_ENFORCEMENT
-    );
-}
-
-#[test]
-fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .allow_host("api.example.com")
-        .cpus(4)
-        .memory("1G")
-        .profile("dev")
-        .volume("/tmp/mvm-sdk-src:/work:ro")
-        .env("TOKEN=secret")
-        .env("MODE=test")
-        .timeout(30)
-        .receipt("/tmp/mvm-sdk-machine.receipt.json")
-        .json(true)
-        .dry_run(true)
-        .command(["sh", "-lc", "echo ok"])
-        .machine_args()
-        .expect("sdk machine run args");
-    assert_eq!(sdk_args, sdk_machine_fixture("run-admission"));
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        SDK_RUN_EGRESS_BACKEND,
-        SDK_RUN_EGRESS_BACKEND,
-    )
-    .expect("CLI receipt input accepts SDK args");
-
-    assert_sdk_run_admission_inputs(summary);
-}
-
-#[test]
-fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight() {
+fn fixture_machine_run_default_fixture_uses_cli_default_deny_preflight() {
     let sdk_args = sdk_machine_fixture("run-default");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI preflight accepts Python/TypeScript SDK fixture");
+        .expect("CLI preflight accepts the fixture");
 
     assert!(summary.dry_run);
     assert!(!summary.will_execute);
@@ -1615,17 +1519,17 @@ fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight
 }
 
 #[test]
-fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
+fn fixture_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
     let sdk_args = sdk_machine_fixture("run-allow-host-receipt");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
         &run,
         SDK_RUN_EGRESS_BACKEND,
         SDK_RUN_EGRESS_BACKEND,
     )
-    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    .expect("CLI receipt input accepts the fixture");
 
     assert_eq!(
         summary.preflight_network_posture,
@@ -1643,37 +1547,23 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
 }
 
 #[test]
-fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
+fn fixture_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
     let sdk_args = sdk_machine_fixture("run-admission");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
         &run,
         SDK_RUN_EGRESS_BACKEND,
         SDK_RUN_EGRESS_BACKEND,
     )
-    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    .expect("CLI receipt input accepts the fixture");
 
     assert_sdk_run_admission_inputs(summary);
 }
 
 #[test]
-fn rust_sdk_machine_create_manifest_reaches_cli_unknown_key_gate() {
-    let sdk_args = mvm_sdk::MachineCreate::builder("web")
-        .manifest("mvm.toml")
-        .profile("dev")
-        .force(true)
-        .json(true)
-        .machine_args()
-        .expect("sdk machine create args");
-    assert_eq!(sdk_args, sdk_machine_fixture("create-manifest"));
-
-    assert_manifest_fixture_reaches_unknown_key_gate(sdk_args);
-}
-
-#[test]
-fn python_typescript_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
+fn fixture_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
     assert_manifest_fixture_reaches_unknown_key_gate(sdk_machine_fixture("create-manifest"));
 }
 

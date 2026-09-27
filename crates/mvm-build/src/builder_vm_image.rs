@@ -236,9 +236,9 @@ fn source_checkout_freshness() -> Result<SourceCheckoutFreshness, BuilderVmError
     resolver(&workspace_root)
         .map(|fingerprint| match fingerprint {
             Some(fingerprint) => SourceCheckoutFreshness::Fingerprint(fingerprint),
-            // An ordinary contributor binary has no embedded payload from
-            // which to derive the authoritative identity. Its bootstrap helper
-            // does, so let that helper run the canonical readiness decision.
+            // This process has no payload from which to derive the
+            // authoritative identity; a bootstrap helper that does runs the
+            // canonical readiness decision instead.
             None => SourceCheckoutFreshness::BootstrapPreflight,
         })
         .map_err(|error| {

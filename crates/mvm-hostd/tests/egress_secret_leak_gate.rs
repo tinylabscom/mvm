@@ -120,6 +120,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         source: SecretSource::Keystore {
             address: "openai".into(),
         },
+        destinations: Vec::new(),
     }];
     let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
         plan_secrets: &plan,

@@ -1,56 +1,58 @@
 /**
- * Remote invocation — the TypeScript half of Tier C.
+ * Remote invocation — the TypeScript half of function dispatch.
  *
- * A **declared subset** of the Python surface, not a full port. The
- * sizing pass found one half of Python's dispatch that has no TypeScript
- * form at all, so this module implements what is portable and refuses
- * what is not, rather than pretending:
+ * A function marked with {@link func} runs inside a workload's microVM. The
+ * SDK reaches the host only through the in-process host library, and that
+ * library has no function-dispatch method yet, so the two modes are:
  *
- * * **Real-VM invocation** — implemented. Encodes `[args, kwargs]`, feeds
- *   it to `mvmctl invoke` over stdin, and decodes stdout.
- * * **`MVM_NO_VM=1` local dispatch — not implemented, permanently.**
- *   Python derives the wrapper's argv from the function object itself
- *   (`__module__`, `__name__`, `inspect.getfile`). JavaScript cannot ask
- *   a function which module defined it, `fn.name` does not survive
- *   minification, and a source path is only recoverable by parsing a
- *   stack trace — which fails for any function received rather than
- *   defined locally. Setting `MVM_NO_VM=1` here raises
- *   `NoVmIntrospectionError` rather than silently doing something else.
- * * **Sessions** — an active `session(...)` body attaches its warm VM.
- *   Cross-workload dispatch through `workload_ref` opts out, since a
- *   session belongs to one workload.
+ * * **`MVM_NO_VM=1` — local dispatch.** The call runs the wrapped function in
+ *   this process, but through the same wire discipline a microVM call would
+ *   use: `[args, kwargs]` is encoded with the declared format and checked
+ *   against the payload cap, decoded back, handed to the function, and its
+ *   result is encoded and decoded again. A function that only works because
+ *   it received a live object, or returned something the wire cannot carry,
+ *   fails here rather than on its first real deployment.
+ * * **Otherwise — refused** with {@link MvmTransportError}, naming the
+ *   escape hatch. Nothing falls back to anything else.
  *
- * The error types come from the Rust registry via `_errors/types.js`;
- * this module is what raises them, which is why they are emitted into
- * TypeScript at all.
+ * {@link workload_ref} handles name a function in another workload, so they
+ * have no local function to run and are refused in both modes.
+ *
+ * The error types come from the Rust registry via `_errors/types.js`.
  */
 
-import * as child from "node:child_process";
-
-import { resolveCliBin } from "./_cli.js";
-import { currentSessionId } from "./_session.js";
 import {
   EmittingContextError,
   MsgpackUnavailable,
   MvmTransportError,
   NoVmIntrospectionError,
   PayloadTooLarge,
-  RemoteError,
 } from "./_errors/types.js";
 
-const ENVELOPE_MARKER = "MVM_ENVELOPE: ";
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
-const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const DEFAULT_INVOKE_TIMEOUT_SEC = 60;
+
+/** Deepest nesting a decoded value may have; matches the Python SDK and the
+ *  guest-side function wrappers, so a local run refuses what a real one would. */
+export const MAX_RESULT_NESTING_DEPTH = 64;
+
+/** Why a host-side call cannot reach a function inside a microVM today. */
+export const REMOTE_DISPATCH_UNAVAILABLE =
+  "dispatching a function-entrypoint call into a microVM from a host process is not " +
+  "available through the in-process host library yet; set MVM_NO_VM=1 to run the " +
+  "function locally";
 
 /** Read a positive number from the environment, falling back on anything unparseable. */
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
-  if (raw === undefined) return fallback;
+  if (raw === undefined || raw === "") return fallback;
   const parsed = Number(raw);
   // Python's `env_float` / `env_int` silently fall back on a malformed
   // value; match that rather than inventing a new failure mode.
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function noVm(): boolean {
+  return process.env.MVM_NO_VM === "1";
 }
 
 function checkEmittingContext(callSite: string): void {
@@ -68,138 +70,112 @@ function checkId(label: string, value: string): void {
   }
 }
 
-function encode(format: string, args: unknown[], kwargs: Record<string, unknown>): Buffer {
+function checkFormat(format: string): void {
   if (format === "msgpack") {
-    // Python's SDK raises this when msgpack is declared but absent. The
-    // TypeScript SDK ships no msgpack codec at all, so the condition is
-    // unconditional rather than an import probe.
+    // Python raises this when msgpack is declared but not installed. The
+    // TypeScript SDK ships no msgpack codec at all, so it is unconditional.
     throw new MsgpackUnavailable(
       "the TypeScript SDK has no msgpack codec; declare `format: \"json\"` on the entrypoint",
     );
   }
-  return Buffer.from(JSON.stringify([args, kwargs]), "utf-8");
+  if (format !== "json") {
+    throw new RangeError(`unknown serialization format: ${JSON.stringify(format)}`);
+  }
 }
 
-function decodeEnvelope(body: string): RemoteError | null {
-  let parsed: unknown;
+/**
+ * Refuse a value JSON cannot carry faithfully. `JSON.stringify` quietly
+ * turns `NaN` and `Infinity` into `null`; Python's encoder writes them and
+ * its decoder refuses them. Refusing at encode time is the same outcome.
+ */
+function checkFinite(value: unknown, seen: Set<object> = new Set()): void {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new MvmTransportError(`value contains a non-finite number (${String(value)})`);
+    }
+    return;
+  }
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  for (const child of Object.values(value as Record<string, unknown>)) checkFinite(child, seen);
+}
+
+function encodeJson(value: unknown): Buffer {
+  checkFinite(value);
+  let text: string | undefined;
   try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
+    text = JSON.stringify(value);
+  } catch (err) {
+    throw new MvmTransportError(`failed to encode value as JSON: ${(err as Error).message}`);
   }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const env = parsed as Record<string, unknown>;
-  const { kind, error_id, message } = env;
-  if (typeof kind !== "string" || typeof error_id !== "string" || typeof message !== "string") {
-    return null;
-  }
-  return new RemoteError({ kind, error_id, message });
+  // A bare `undefined` (a function with no return) has no JSON form; the
+  // Python side sends `None`, which is `null`.
+  return Buffer.from(text ?? "null", "utf-8");
 }
 
-/** Find a structured envelope in the wrapper's stderr, mirroring the Python scan. */
-function parseErrorEnvelope(stderr: string): RemoteError | null {
-  for (const line of stderr.split("\n")) {
-    const idx = line.indexOf(ENVELOPE_MARKER);
-    if (idx < 0) continue;
-    const found = decodeEnvelope(line.slice(idx + ENVELOPE_MARKER.length).trim());
-    if (found !== null) return found;
+function checkDepth(value: unknown, depth = 0): void {
+  if (depth > MAX_RESULT_NESTING_DEPTH) {
+    throw new MvmTransportError(`decoded value exceeds max nesting depth ${MAX_RESULT_NESTING_DEPTH}`);
   }
-  const stripped = stderr.trim();
-  if (!stripped) return null;
-  const last = stripped.split("\n").at(-1)?.trim() ?? "";
-  if (last.startsWith("{") && last.endsWith("}")) return decodeEnvelope(last);
-  return null;
+  if (value === null || typeof value !== "object") return;
+  for (const child of Object.values(value as Record<string, unknown>)) checkDepth(child, depth + 1);
 }
 
-interface InvokeOptions {
-  callSite: string;
-  fnSelector?: string;
-  /** Defaults to true; `workload_ref` opts out. */
-  useActiveSession?: boolean;
+/**
+ * Decode a JSON payload the way a result from a guest is decoded: bounded
+ * nesting, and a parse failure reported as a transport fault. `JSON.parse`
+ * already refuses the non-finite literals Python's decoder guards against.
+ * Duplicate keys are not checked: this module only decodes what its own
+ * encoder produced, and `JSON.stringify` cannot emit one.
+ */
+function decodeJson(data: Buffer): unknown {
+  if (data.length === 0) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(data.toString("utf-8"));
+  } catch (err) {
+    throw new MvmTransportError(`failed to decode JSON: ${(err as Error).message}`);
+  }
+  checkDepth(value);
+  return value;
 }
 
-/** Invoke `functionName` in `workloadId` and return its decoded result. */
-export function invokeSync(
-  workloadId: string,
-  format: string,
-  args: unknown[],
-  kwargs: Record<string, unknown>,
-  options: InvokeOptions,
-): unknown {
-  checkEmittingContext(options.callSite);
-  checkId("workload_id", workloadId);
-
-  if (process.env.MVM_NO_VM === "1") {
-    // The unportable half. Refused explicitly so the mode fails loudly
-    // rather than appearing to work against a real VM.
-    throw new NoVmIntrospectionError(
-      "MVM_NO_VM=1 has no TypeScript implementation: it dispatches by introspecting " +
-        "the local function's module and source path, which JavaScript cannot recover " +
-        "from a function value. Run against a real microVM instead.",
-    );
-  }
-
-  const payload = encode(format, args, kwargs);
-  const payloadCap = envNumber("MVM_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES);
-  if (payload.byteLength > payloadCap) {
+/** Encode `[args, kwargs]` and hold it to `MVM_MAX_PAYLOAD_BYTES`. */
+function encodePayload(workloadId: string, args: unknown[], kwargs: Record<string, unknown>): Buffer {
+  const payload = encodeJson([args, kwargs]);
+  const cap = envNumber("MVM_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES);
+  if (payload.byteLength > cap) {
     throw new PayloadTooLarge(
       `encoded payload for ${workloadId} is ${payload.byteLength} bytes, exceeding ` +
-        `MVM_MAX_PAYLOAD_BYTES=${payloadCap}. Hint: pass large blobs via a mounted ` +
+        `MVM_MAX_PAYLOAD_BYTES=${cap}. Hint: pass large blobs via a mounted ` +
         "volume rather than function args.",
     );
   }
+  return payload;
+}
 
-  const bin = resolveCliBin("remote invocation");
-  const argv = ["invoke"];
-  // An active `session(...)` body attaches its warm VM, matching Python's
-  // `_prepare_invoke`. Cross-workload dispatch opts out: a session is
-  // scoped to one workload and must not leak into a call against another.
-  if (options.useActiveSession !== false) {
-    const sessionId = currentSessionId();
-    if (sessionId !== null) argv.push("--session", sessionId);
+function roundTrip(value: unknown): unknown {
+  return decodeJson(encodeJson(value));
+}
+
+/**
+ * Run `local` in this process as if it had been dispatched into
+ * `workloadId`. An error `local` throws propagates unchanged. When `local`
+ * returns a promise, so does this, settling with the round-tripped result.
+ */
+function dispatchLocal(
+  workloadId: string,
+  format: string,
+  local: (...args: unknown[]) => unknown,
+  args: unknown[],
+): unknown {
+  checkFormat(format);
+  const decoded = decodeJson(encodePayload(workloadId, args, {})) as [unknown[], Record<string, unknown>];
+  const result = local(...decoded[0]);
+  if (result instanceof Promise) {
+    return result.then(roundTrip);
   }
-  if (options.fnSelector !== undefined) argv.push("--fn", options.fnSelector);
-  argv.push("--stdin", "-", "--", workloadId);
-
-  const timeoutMs = envNumber("MVM_INVOKE_TIMEOUT_SEC", DEFAULT_INVOKE_TIMEOUT_SEC) * 1000;
-  const maxBuffer = envNumber("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES);
-
-  const result = child.spawnSync(bin, argv, {
-    input: payload,
-    timeout: timeoutMs,
-    maxBuffer,
-  });
-
-  if (result.error !== undefined) {
-    const code = (result.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") {
-      throw new MvmTransportError(`mvmctl invoke ${workloadId} timed out after ${timeoutMs / 1000}s`);
-    }
-    if (code === "ENOBUFS") {
-      throw new MvmTransportError(
-        `mvmctl invoke ${workloadId} exceeded ${maxBuffer}-byte output cap`,
-      );
-    }
-    throw new MvmTransportError(`failed to spawn mvmctl: ${result.error.message}`);
-  }
-
-  const stderr = (result.stderr ?? Buffer.alloc(0)).toString("utf-8");
-  if (result.status !== 0) {
-    const envelope = parseErrorEnvelope(stderr);
-    if (envelope !== null) throw envelope;
-    throw new MvmTransportError(
-      `mvmctl invoke ${workloadId} exited ${result.status}: ${stderr.trim() || "(no stderr)"}`,
-    );
-  }
-
-  const stdout = (result.stdout ?? Buffer.alloc(0)).toString("utf-8");
-  try {
-    return JSON.parse(stdout);
-  } catch (err) {
-    throw new MvmTransportError(
-      `mvmctl invoke ${workloadId} returned undecodable output: ${(err as Error).message}`,
-    );
-  }
+  return roundTrip(result);
 }
 
 /** A function that runs inside a workload. */
@@ -219,12 +195,19 @@ export class RemoteFunction {
     this.local = local;
   }
 
-  /** Invoke inside the microVM and return the decoded result. */
+  /**
+   * Call the function as its workload would receive it.
+   *
+   * Under `MVM_NO_VM=1` this runs {@link local} in-process through the wire
+   * encoding; a promise-returning function yields a promise. Otherwise it
+   * throws {@link MvmTransportError}: the host library cannot dispatch into
+   * a microVM yet.
+   */
   sync(...args: unknown[]): unknown {
-    return invokeSync(this.workload_id, this.format, args, {}, {
-      callSite: "RemoteFunction.sync(...)",
-      fnSelector: this.local.name || undefined,
-    });
+    checkEmittingContext("RemoteFunction.sync(...)");
+    checkId("workload_id", this.workload_id);
+    if (!noVm()) throw new MvmTransportError(REMOTE_DISPATCH_UNAVAILABLE);
+    return dispatchLocal(this.workload_id, this.format, this.local, args);
   }
 }
 
@@ -246,8 +229,8 @@ export function func(
 /**
  * A handle onto another workload, dispatching by attribute name.
  *
- * `ref.some_function(...)` invokes `some_function` in that workload.
- * Python does this with `__getattr__`; the equivalent here is a `Proxy`.
+ * `ref.some_function(...)` names `some_function` in that workload. Python
+ * does this with `__getattr__`; the equivalent here is a `Proxy`.
  */
 export interface WorkloadRef {
   readonly id: string;
@@ -255,7 +238,14 @@ export interface WorkloadRef {
   [callable: string]: unknown;
 }
 
-/** Build a {@link WorkloadRef} for `workloadId`. */
+/**
+ * Build a {@link WorkloadRef} for `workloadId`.
+ *
+ * Every call through it is refused: it names a function in another
+ * workload, which only a microVM dispatch could reach. Under `MVM_NO_VM=1`
+ * the refusal is {@link NoVmIntrospectionError}, because there is no local
+ * function to run in its place.
+ */
 export function workload_ref(workloadId: string, format: string = "json"): WorkloadRef {
   checkId("workload_id", workloadId);
   const own: Record<string, unknown> = { id: workloadId, format };
@@ -264,12 +254,17 @@ export function workload_ref(workloadId: string, format: string = "json"): Workl
       if (typeof property !== "string" || property in target) {
         return target[property as string];
       }
-      return (...args: unknown[]) =>
-        invokeSync(workloadId, format, args, {}, {
-          callSite: `workload_ref(${workloadId}).${property}(...)`,
-          fnSelector: property,
-          useActiveSession: false,
-        });
+      return () => {
+        checkEmittingContext(`workload_ref(${workloadId}).${property}(...)`);
+        if (noVm()) {
+          throw new NoVmIntrospectionError(
+            `workload_ref(${workloadId}).${property} names a function in another workload; ` +
+              "MVM_NO_VM=1 runs only functions defined in this process, and there is no " +
+              "local function to run in its place",
+          );
+        }
+        throw new MvmTransportError(REMOTE_DISPATCH_UNAVAILABLE);
+      };
     },
   }) as WorkloadRef;
 }

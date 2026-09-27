@@ -7,7 +7,20 @@ run `cargo xtask gen-stubs` from the workspace root.
 """
 
 from mvm._errors.types import (
+    CODE_ERRORS,
     EmittingContextError,
+    HostLibraryAbiError,
+    HostLibraryEmbedderError,
+    HostLibraryError,
+    HostLibraryInputError,
+    HostLibraryInternalError,
+    MachineBackendError,
+    MachineConflictError,
+    MachineNotFoundError,
+    MachineRejectedError,
+    MachineSpecError,
+    MachineUnauthorizedError,
+    MachineUnavailableError,
     MsgpackUnavailable,
     MvmTransportError,
     NoVmIntrospectionError,
@@ -29,7 +42,20 @@ from mvm._errors.types import (
 )
 
 __all__ = [
+    "CODE_ERRORS",
     "EmittingContextError",
+    "HostLibraryAbiError",
+    "HostLibraryEmbedderError",
+    "HostLibraryError",
+    "HostLibraryInputError",
+    "HostLibraryInternalError",
+    "MachineBackendError",
+    "MachineConflictError",
+    "MachineNotFoundError",
+    "MachineRejectedError",
+    "MachineSpecError",
+    "MachineUnauthorizedError",
+    "MachineUnavailableError",
     "MsgpackUnavailable",
     "MvmTransportError",
     "NoVmIntrospectionError",

@@ -55,7 +55,7 @@ fn endpoint_command(
     vm_name: &str,
     device_ordinal: Option<u32>,
 ) -> Command {
-    let mut command = Command::new(endpoint);
+    let mut command = mvm_core::env_hygiene::helper_command(endpoint);
     command
         .arg("--listen")
         .arg(listen)

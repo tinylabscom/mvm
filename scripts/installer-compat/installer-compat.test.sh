@@ -449,10 +449,19 @@ expect_fails "check-upgrade: a release in the walk that reports the wrong versio
 # --- docs-install-smoke.sh ----------------------------------------------------
 
 # A page shaped like the Linux install page, run against the checkout's
-# install.sh through the URL override. The installer's baked default is
-# published on the local server so the one-liner has something to install.
+# install.sh through the URL override. The one-liner installs the newest
+# stable release the releases API lists — v2.1.0 here, past a newer
+# prerelease and another train — and the smoke must expect exactly that. The
+# installer's baked default is published too, as the fallback it would be.
 baked="$(sed -n 's/^DEFAULT_VERSION="\(.*\)"$/\1/p' install.sh)"
 publish "$baked" new "${baked#v}" no
+mkdir -p "$work/srv/repos/tinylabscom/mvm"
+printf '[%s,%s,%s,%s]' \
+  "$(release boot-image/v9.0.0 2026-09-22T00:00:00Z false false $sums $linux $mac $arm "mvmctl-$target.tar.gz")" \
+  "$(release v3.0.0 2026-09-21T00:00:00Z true false $sums $linux $mac $arm "mvmctl-$target.tar.gz")" \
+  "$(release v2.1.0 2026-09-20T00:00:00Z false false $sums $linux $mac $arm "mvmctl-$target.tar.gz")" \
+  "$(release v2.0.0 2026-09-19T00:00:00Z false false $sums $linux $mac $arm "mvmctl-$target.tar.gz")" \
+  > "$work/srv/repos/tinylabscom/mvm/releases"
 
 write_page() {
   # write_page <file> <pin command>
@@ -482,11 +491,17 @@ write_page "$work/good-page.md" "curl -fsSL https://runmvm.example/install.sh | 
 write_page "$work/broken-page.md" "MVM_VERSION=v2.0.0 curl -fsSL https://runmvm.example/install.sh | sh"
 
 mkdir -p "$work/smoke-home" "$work/broken-home"
-expect_status 0 "docs-install-smoke: the one-liner installs the baked default, the pin installs the pinned release, verify runs" \
-  env HOME="$work/smoke-home" CI=true sh $DIR/docs-install-smoke.sh "$work/good-page.md" "file://$PWD/install.sh"
+expect_status 0 "docs-install-smoke: the one-liner installs the newest stable release, the pin installs the pinned release, verify runs" \
+  env HOME="$work/smoke-home" CI=true MVM_UPDATE_API_URL="$MVM_UPDATE_DOWNLOAD_URL" \
+  sh $DIR/docs-install-smoke.sh "$work/good-page.md" "file://$PWD/install.sh"
+case "$LAST_OUTPUT" in
+  *'"One-liner" installed mvmctl 2.1.0'*) ok "docs-install-smoke: the one-liner's expectation came from the releases API" ;;
+  *) bad "docs-install-smoke: expected the one-liner to install v2.1.0"; printf '%s\n' "$LAST_OUTPUT" | tail -n 5 ;;
+esac
 expect_fails "docs-install-smoke: a pin that sets MVM_VERSION on curl instead of sh is caught" \
   "expected 'mvmctl 2.0.0'" \
-  env HOME="$work/broken-home" CI=true sh $DIR/docs-install-smoke.sh "$work/broken-page.md" "file://$PWD/install.sh"
+  env HOME="$work/broken-home" CI=true MVM_UPDATE_API_URL="$MVM_UPDATE_DOWNLOAD_URL" \
+  sh $DIR/docs-install-smoke.sh "$work/broken-page.md" "file://$PWD/install.sh"
 expect_fails "docs-install-smoke: refuses to install into \$HOME outside CI" "runs only in CI" \
   env HOME="$work/smoke-home" CI= sh $DIR/docs-install-smoke.sh "$work/good-page.md" "file://$PWD/install.sh"
 

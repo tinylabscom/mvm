@@ -265,7 +265,7 @@ fn run_stage0_qemu(
         BuilderEndpointTransport::Vsock { port: egress_port },
         identity_material.spawn_config(),
     )?;
-    let mut cmd = Command::new("timeout");
+    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
     cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
@@ -1037,7 +1037,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let guest_cid = allocate_qemu_builder_guest_cid();
     let timeout_secs = builder_vm_timeout()?.as_secs();
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
-    let mut cmd = Command::new("timeout");
+    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
     cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
     if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
@@ -1303,7 +1303,7 @@ fn run_build_qemu(
     // 10. Launch QEMU, serial → console.log, wrapped in `timeout`.
     let timeout_secs = builder_vm_timeout()?.as_secs();
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
-    let mut cmd = Command::new("timeout");
+    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
     cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
     if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {

@@ -69,3 +69,8 @@ Feature: mvmctl top-level CLI surface
     When I run mvmctl with "ops mcp --help"
     Then the command exits with code 0
     And the help output contains "stdio"
+
+  Scenario: the MCP stdio transport can bind granted drive tools to one machine
+    When I run mvmctl with "ops mcp stdio --help"
+    Then the command exits with code 0
+    And the help output contains "--machine"

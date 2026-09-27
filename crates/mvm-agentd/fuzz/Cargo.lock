@@ -1054,6 +1054,7 @@ dependencies = [
  "libc",
  "mvm-contract",
  "mvm-core",
+ "mvm-setpriv",
  "nix",
  "rand",
  "seccompiler",
@@ -1251,6 +1252,13 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "mvm-setpriv"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

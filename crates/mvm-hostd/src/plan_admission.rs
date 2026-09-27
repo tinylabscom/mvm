@@ -1787,6 +1787,43 @@ fn apply_admitted_grants(
         .context("applying the admitted plan's grants to the started VM")
 }
 
+/// Apply the admitted plan's grants to a VM that has just started, and undo
+/// the launch if they cannot be applied.
+///
+/// Every launch path that starts a VM itself and then applies its grants goes
+/// through here, so they share one failure posture: a backend that cannot
+/// report what bounded the VM stops it, the chain records `plan.failed` at the
+/// `grants` stage, and the error comes back. A caller never gets to substitute
+/// an all-`Declared` answer for a failed application, because that answer
+/// would then be signed into `plan.grants_enforced` as if it were the tier
+/// the host achieved.
+///
+/// `Declared` is still a legitimate *successful* answer: a host with no
+/// mechanism for a dimension reports it that way, and the boot proceeds. Only
+/// an application that errored refuses.
+///
+/// `backend` must be the object that started `vm_id`. A backend rebuilt from a
+/// name is a different object, and one that keeps per-run state in memory has
+/// nothing to read back for a VM it did not start.
+pub fn apply_admitted_grants_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants(backend, vm_id, admitted).map_err(|err| {
+        undo_launch(UndoLaunch {
+            backend,
+            vm_id,
+            admitted,
+            emitter,
+            stage: "grants",
+            reason: "grants could not be applied",
+            err,
+        })
+    })
+}
+
 /// The four post-admission gates between `plan.admitted` and the backend
 /// start, run in order. On refusal the failing stage's wire label is
 /// returned alongside the error so the caller can emit a terminal
@@ -2021,24 +2058,11 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
         .context("backend start after signed-plan admission")
     {
         Ok(vm_id) => {
-            let enforced_grants = match apply_admitted_grants(backend, &vm_id, &admitted) {
-                Ok(enforced) => enforced,
-                Err(err) => {
-                    // Undo the launch: a VM whose grants could not be applied is
-                    // running without the bounds it was admitted under, and
-                    // leaving it up would mean the only record of the run says
-                    // it was bounded.
-                    return Err(undo_launch(UndoLaunch {
-                        backend,
-                        vm_id: &vm_id,
-                        admitted: &admitted,
-                        emitter: params.emitter,
-                        stage: "grants",
-                        reason: "grants could not be applied",
-                        err,
-                    }));
-                }
-            };
+            // A VM whose grants could not be applied is running without the
+            // bounds it was admitted under; the helper stops it rather than
+            // leaving a run whose only record says it was bounded.
+            let enforced_grants =
+                apply_admitted_grants_or_undo_launch(backend, &vm_id, &admitted, params.emitter)?;
 
             // Record what this boot committed, so every later admission counts
             // it. A machine running without a record is invisible to the
@@ -5277,6 +5301,67 @@ mod tests {
         assert!(
             !chain.contains("grants_memory_max_bytes") && !chain.contains("grants_tasks_max"),
             "a declared ceiling must not carry a value: {chain}"
+        );
+    }
+
+    /// A backend that cannot apply the admitted grants to the VM it just
+    /// started must not leave that VM running, and must not leave a
+    /// `plan.grants_enforced` entry behind: the boot fails at the `grants`
+    /// stage and the chain says so.
+    #[test]
+    fn a_grant_that_cannot_be_applied_undoes_the_launch() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mock = mvm_runtime::MockBackend::new().with_failing_apply_grants();
+        let backend = mvm_runtime::AnyBackend::Mock(mock.clone());
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-grants-fail".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let audit_dir = dir.path().join("audit");
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&seed),
+            &audit_dir,
+        )
+        .expect("emitter");
+
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-grants-fail"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
+            },
+        )
+        .expect_err("a boot whose grants could not be applied must fail");
+
+        assert!(
+            format!("{err:#}").contains("applying the admitted plan's grants"),
+            "{err:#}"
+        );
+        assert_eq!(mock.count(), 0, "the started VM must have been stopped");
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain written");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(
+            chain.contains("\"grants\""),
+            "the failing stage is named: {chain}"
+        );
+        assert!(
+            !chain.contains("plan.grants_enforced"),
+            "no enforcement may be recorded for grants that were never applied: {chain}"
         );
     }
 

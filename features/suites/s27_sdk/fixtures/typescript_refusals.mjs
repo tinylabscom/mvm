@@ -1,9 +1,15 @@
 // Refusal-path fixture (TypeScript). Twin of `python_refusals.py`.
+import "./_recording_hostlib.mjs";
 import * as mvm from "../../../../crates/mvm-sdk/sdks/typescript/dist/index.js";
 
 const verdicts = {};
 
-const sandbox = mvm.Sandbox.create("python-3.12", { workloadId: "bdd-refusals" });
+// A sealed (prod) machine must refuse the dev-only process verbs client-side.
+// The recorder reports build_mode=prod for this fixture.
+const sandbox = mvm.Sandbox.create(
+  { image: "docker.io/library/python:3.12-slim" },
+  { workloadId: "bdd-refusals" },
+);
 try {
   sandbox.commands.start(["python", "-c", "print('ok')"]);
   verdicts.sealed_commands_start = "admitted";

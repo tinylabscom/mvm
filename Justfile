@@ -21,10 +21,12 @@ install-hooks:
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> .githooks/"
 
-# Provision the pinned cross-compile toolchain the embed step (mvm-cli/build.rs)
-# needs: the exact zig from the `ziglang` PyPI package + the musl rust targets.
-# Homebrew's `zig` drifts to newer, incompatible releases (fails downstream with
-# `CacheCheckFailed`); build.rs auto-detects the `ziglang`-installed zig instead.
+# Provision the pinned cross-compile toolchain the Linux host binaries are built
+# with — by a release `cargo build`, or by an `mvmctl` built without them: the
+# exact zig from the `ziglang` PyPI package, the musl rust targets, and the
+# pinned cargo-zigbuild. Homebrew's `zig` drifts to newer, incompatible releases
+# (fails downstream with `CacheCheckFailed`); the `ziglang`-installed zig is
+# auto-detected instead.
 
 # Run once per machine (or after a toolchain pin bump).
 toolchain-embed:
@@ -32,11 +34,15 @@ toolchain-embed:
     set -euo pipefail
     RUST=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
     ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
-    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl targets"
+    ZIGBUILD=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['cargo-zigbuild'])")
+    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl targets + cargo-zigbuild ${ZIGBUILD}"
     python3 -m pip install --quiet "ziglang==${ZIG}"
     rustup toolchain install "${RUST}" --profile minimal
     rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl --toolchain "${RUST}"
-    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets"
+    if [[ "$(cargo-zigbuild --version 2>/dev/null || true)" != "cargo-zigbuild ${ZIGBUILD}" ]]; then
+      cargo install cargo-zigbuild --version "${ZIGBUILD}" --locked
+    fi
+    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets + cargo-zigbuild ${ZIGBUILD}"
 
 # Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
 #
@@ -375,6 +381,18 @@ e2e-docs:
 e2e-source-bootstrap:
     ./scripts/e2e-source-bootstrap.sh
 
+# What a new user gets: install a release into a throwaway HOME under /tmp with
+# this checkout's install.sh — builder bootstrap included — then run the
+# README's `machine run --image alpine` with stdin closed and require its output
+# within a time budget. The release workflow runs the same script before it
+# promotes a tag. Omit VERSION to test whatever the one-liner installs today.
+# Boots a real microVM; never touches your own ~/.mvm or ~/.local.
+#
+
+# Install a release as a new user would and run the first command
+smoke-fresh-install VERSION="":
+    ./scripts/smoke-fresh-install.sh {{ VERSION }}
+
 # Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
 # suite creates, so it never touches a machine you made.
 #
@@ -469,10 +487,10 @@ build-libkrun-supervisor *ARGS:
 # Build an mvmctl that carries the Linux host binaries the builder VM needs,
 # plus the native per-VM helpers it spawns beside the resulting executable.
 #
-# The cross-compile is off by default, so a plain `cargo build` produces an
-# mvmctl that can run every host-side verb but cannot bootstrap a builder VM —
-# `host_binaries::extract` refuses and names this recipe. Run it when you are
-# about to boot a VM. Note that it and a plain `cargo build` write the same
+# Not required to boot a VM: `cargo build --release` embeds the host binaries by
+# default, and an mvmctl built without them builds them itself the first time
+# it needs a builder VM. This recipe does both halves in one go and embeds in a
+# debug build too. Note that it and a plain `cargo build` write the same
 # `target/<profile>/mvmctl` under different feature sets, so alternating the two
 
 # relinks mvmctl; that is why this is a deliberate step and not part of `build`.
@@ -672,7 +690,9 @@ mutation-surface:
 
 # Mutate the claim surface and ratchet survivors against the baseline.
 # HOURS: this is the nightly lane's command, not an inner-loop check.
-# Needs `cargo install cargo-mutants cargo-nextest`.
+# Needs cargo-nextest and the exact cargo-mutants pinned under
+# [workspace.metadata.mvm.toolchain] in Cargo.toml — the run refuses any other,
+# because accepted misses are matched on the text that version renders.
 #
 # No isolation wrapper here on purpose. `--run` executes security code with
 # its check removed, so it must not reach a real mvm state root — and that
@@ -742,14 +762,15 @@ _release-prep VERSION:
         -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
         -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
     rm Cargo.toml.bak
-    # Stable release PRs also advance the installer's checked-in default. A
-    # prerelease must remain opt-in, matching GitHub's releases/latest
-    # behavior and the installer's historical contract.
-    if [[ "$V" != *-* ]]; then
-        sed -i.bak -E "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"v$V\"/" install.sh
-        rm install.sh.bak
-        grep -qxF "DEFAULT_VERSION=\"v$V\"" install.sh
+    # The installer's checked-in fallback follows the newest *promoted*
+    # release, with the archive hashes its signed manifest carries — never the
+    # version this PR prepares: that tag does not exist yet, has no hashes, and
+    # has not passed the first-run smoke that promotes it. Left as it is, with
+    # a warning, when that release cannot be authenticated.
+    if ./scripts/pin-installer-default.sh --newest install.sh; then
         git add install.sh
+    else
+        echo "WARN: install.sh's offline fallback is unchanged — see the reason above." >&2
     fi
     cargo update -w
     # The runtime overlay, SDK sidecar and initramfs take their VERSION from

@@ -852,6 +852,8 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
+        action_budget: None,
+        protected_paths: Default::default(),
         sdk_uses_sidecar: true,
     };
 
@@ -1378,6 +1380,7 @@ mod tests {
             source: crate::plan::SecretSource::Keystore {
                 address: "api-key".into(),
             },
+            destinations: Vec::new(),
         }];
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.secrets, inp.secrets);

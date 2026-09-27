@@ -168,6 +168,10 @@ docs commit went out as #3581). Under the
       (delegating to the entrypoint uid) — on a kernel without cgroups the
       mount skips quietly, so sealed guests boot identically.
 
+      **Parked (2026-09-25), low priority:** the template's start script is
+      fixed (`unshare -Urmpf`) and its image builds; no pod has run yet. See the
+      plan's W4 progress list.
+
       **Blocker #3599 reopened (2026-09-24):** the 2026-09-23 "upstream
       kernel bug under virtualization" root cause was a reproducer artifact.
       Every probe ran `unshare -Urmp` without `--fork`, so the namespace's
@@ -4784,3 +4788,10 @@ writes the plan:
 - [x] Add a regression test that rejects the retired scripts, recipe, and stale
       downloader guidance.
 - [x] Prepare the issue-closing change for protected merge-queue delivery.
+- [x] Enforce the protected-paths policy at the output-collection
+      chokepoint: `PathRule::ProtectedPath` in `mvm-fs` refuses the whole
+      collection when a guest-authored tree touches a protected class,
+      reusing the standing whole-collection refusal + chain-signed audit
+      path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
+      collection gate).
+

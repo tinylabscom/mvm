@@ -1613,6 +1613,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "ingress/tls".to_string(),
             },
+            destinations: Vec::new(),
         });
         cfg.ingress = vec![
             IngressMapping::builder()
@@ -1673,6 +1674,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         });
         let err = mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
             &cfg, false,
@@ -1693,6 +1695,7 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         });
         assert!(
             mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(

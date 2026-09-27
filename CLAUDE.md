@@ -44,32 +44,40 @@ binaries (`mvm-host-vm-init`, `mvm-builderd`) as static
 `aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
 See Plan 115 / ADR-004.
 
-That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
-the only work `build.rs` still does. Run it when you are about to boot a VM:
+That cross-compile is the only work `build.rs` still does, and it runs in
+exactly two cases: a **release-profile** build (`cargo build --release`, or any
+profile inheriting from `release`), and a build with the `embed-host-bins`
+feature. `MVM_EMBED=0` opts a release build out. A debug build — which is what
+`cargo check`, clippy and nextest use — never cross-compiles.
+
+When a release build finds the pinned toolchain missing it does not fail: it
+prints a `cargo:warning=` naming `just toolchain-embed` and ships the unembedded
+table. The explicit feature keeps failing hard, because it was asked for by
+name.
+
+Every build **restores** the payload from the content store at
+`~/.cache/mvm/embed` when the store holds bytes keyed to this tree — the key is
+the dependency closure + `Cargo.lock` + pinned toolchain, and each entry carries
+the SHA-256 it was published with, so a changed entry is refused rather than
+embedded. That is why a debug `cargo build` usually carries the payload too.
+
+An `mvmctl` that still has no payload builds it **in-process** the first time it
+needs a builder VM: from the source checkout it was compiled from, into that
+same store, with the same `cargo zigbuild` the build script runs
+(`host_binaries::source`). It prints one line on stderr first saying what it is
+building and roughly how long it takes; `-v` streams the compiler output. It
+never compiles a second `mvmctl`. The next plain `cargo build` restores those
+bytes and embeds them without compiling. Only `mvmctl` does this — a test binary
+or other consumer of `mvm-cli` gets the refusal from `host_binaries::extract`
+instead — and only in a source checkout: an official release binary always
+carries its payload.
+
+`just embed` remains for building every host binary in one go:
 
 ```sh
 just embed                    # build and invoke ./target/debug/mvmctl
 just embed --release          # build and invoke ./target/release/mvmctl
 ```
-
-A plain `cargo build` never cross-compiles, but it does **restore** the payload
-from the content store at `~/.cache/mvm/embed` when the store holds bytes keyed
-to this tree — the same key (dependency closure + `Cargo.lock` + pinned
-toolchain) the embedding arm trusts when it skips a rebuild. That matters
-because both variants write the same `target/<profile>/mvmctl`: the last cargo
-invocation owns the file, and a cached zero-compile build is enough to swap it.
-Restoring means one `just embed` sticks. On a miss (fresh clone, an edit to the
-payload's own sources, `MVM_EMBED_NO_CACHE=1`) the arm writes the empty table as
-before — it compiles nothing, so a payload it cannot prove is one it does not
-ship.
-
-Bare `just embed` builds the **debug** profile; use `just embed --release` for a
-release binary, or the release one is left untouched. Without a payload `mvmctl`
-runs every host-side verb but cannot bootstrap a builder VM —
-`host_binaries::extract` refuses with the profile-correct rebuild rather than
-extracting an empty directory. The tag-push release workflow always turns the
-feature on, so a downloaded binary is self-sufficient; `just release-build`
-carries it too.
 
 On macOS the recipe also replaces any globally configured compiler-cache
 wrapper with `scripts/rustc-macos-loader.sh` for this explicit build. Cargo
@@ -83,11 +91,8 @@ the library exists. Cargo may replay warning text cached by compilation units
 built before this repair; a new warning has a new `dyld[PID]` and indicates the
 current strip step still failed.
 
-Without embedding, `mvmctl` runs every host-side verb but cannot bootstrap a
-builder VM. Rebuild and invoke the same profile: a bare `mvmctl` that resolves
-to `target/release/mvmctl` is not repaired by a debug-only `just embed`. The
-tag-push release workflow always turns the feature on, so a downloaded binary
-is self-sufficient.
+The tag-push release workflow always turns the feature on, so a downloaded
+binary is self-sufficient.
 
 After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
 the source sidecar explicitly:
@@ -100,9 +105,10 @@ The command is complete only after both glibc and musl variants report that
 they were cached successfully. A builder-egress endpoint exiting on SIGTERM is
 normal one-shot teardown, not a failed sidecar build.
 
-Provision it with one command — it installs the exact pinned zig (from the
-`ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus
-the musl rust targets:
+Provision the toolchain with one command — it installs the exact pinned zig
+(from the `ziglang` PyPI package, read out of
+`[workspace.metadata.mvm.toolchain]`), the musl rust targets, and the pinned
+cargo-zigbuild:
 
 ```sh
 just toolchain-embed
@@ -110,9 +116,9 @@ just toolchain-embed
 
 Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
 incompatible with the pinned `cargo-zigbuild` and fail with a cryptic
-`CacheCheckFailed`. `build.rs` auto-detects the `ziglang`-installed zig and, if
-the pinned zig is missing, errors with the exact fix. Override the zig binary
-with `MVM_EMBED_ZIG=/path/to/zig` if needed.
+`CacheCheckFailed`. The build script and `mvmctl` both auto-detect the
+`ziglang`-installed zig and, if the pinned zig is missing, name the exact fix.
+Override the zig binary with `MVM_EMBED_ZIG=/path/to/zig` if needed.
 
 End-users running a downloaded mvmctl don't need any of this — the
 binaries are already embedded.
@@ -166,7 +172,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-20-crate Cargo workspace under `crates/` (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, and `mvm-hostlib` was added at the top of the graph), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 23 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
+26-crate Cargo workspace under `crates/` (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the five GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim`/`mvm-gpu-shim-core` were added, and `mvm-setpriv` was split out of `mvm-agentd` as a leaf), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 29 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
 
 **Libraries, low → high:**
 
@@ -179,7 +185,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-backends` -- the concrete VMM mechanics behind that seam: `driver/{fc,hvf,libkrun,qemu}.rs` (the `VmmDriver` impls), their `*_process.rs` host-process siblings, `fc/`, and `mock.rs`. There is no `legacy` module — the `*_process.rs` files were briefly named `*_legacy` during the backend split and nothing in them is legacy. Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
 - `mvm-http` -- a minimal HTTP/1.1-over-rustls client, deliberately smaller than a general one (no HTTP/2, redirects, pooling, proxy, compression), to keep the hyper/tower stack out of the shipped `mvmctl` closure.
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
-- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
+- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. It is the one Rust library an embedder depends on: it also re-exports the launch request's parts (`RootfsSource`, `Grants`, `HostPort`), the guest payload types in its `guest` module, inventory records, plan types, the error codes, and the workload authoring surface as `mvm_client::authoring`. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
 - `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries.
 - `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
 - `mvm-observability` -- tracing subscriber assembly for the host-side binaries.
@@ -190,8 +196,9 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
+- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`, and it has to stay one: the builder image compiles it from source, so its closure is part of the builder image's cache key, and every crate it reaches is a crate whose edits rebuild that image. `mvm-agentd` depends on it, never the reverse.
 - `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
-- `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`, plus the DevOnly `guest.*` process and file methods, answered by `mvm_client::guest` (the implementation `mvmctl machine proc`/`fs`/`cp` use). A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
+- `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`, plus the admitted local launch (`machine.run`/`machine.create`, through `LaunchRequest`), the DevOnly `guest.*` process and file methods, answered by `mvm_client::guest` (the implementation `mvmctl machine proc`/`fs`/`cp` use), and handle-and-poll process output streams (`guest.proc.stream.*`). A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. The SDKs never run `mvmctl` and have no subprocess fallback; `xtask check-no-cli-shellout` fails the build if SDK source reaches for a process API. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
 
 `xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).

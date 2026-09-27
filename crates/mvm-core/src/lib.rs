@@ -17,8 +17,7 @@ pub mod error_codes;
 pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled
-// by `mvm-client` (which adds the in-process `LocalBackend`) and by `mvm-sdk`'s
-// `client-facade`.
+// by `mvm-client`, which adds the in-process `LocalBackend`.
 #[cfg(feature = "client")]
 pub mod client;
 pub mod config;
@@ -30,6 +29,9 @@ pub(crate) mod digest_shape;
 /// Real on-disk footprint of a path — the one measurement behind every
 /// "how much would this reclaim" counter in the CLI.
 pub mod disk_usage;
+/// The denylist for environment variables that change what a process loads or
+/// runs, applied to guest env passthrough and to every host helper spawn.
+pub mod env_hygiene;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.

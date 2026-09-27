@@ -1,35 +1,30 @@
-"""Sandbox — imperative runtime SDK. SDK port Phase 7b +
-Plan 73 Followup H-live.
+"""Sandbox — the imperative runtime SDK.
 
-The decorator surface (``@mvm.app(...)``) is static; the host
-parses the source AST and never imports the script. The runtime
-surface (``Sandbox.create(...)``) is imperative: the host *does*
-execute the user's Python script (per S2 in the SDK plan — a
-documented departure), with the SDK reconfigured to either record
-each ``Sandbox`` method call into a :class:`RuntimeRecording` or
-shell each call to ``mvmctl`` against a real microVM, depending
-on the active mode.
+The decorator surface (``@mvm.app(...)``) is static; the host parses the
+source AST and never imports the script. The runtime surface
+(``Sandbox.create(...)``) is imperative: the host *does* execute the user's
+Python script, with the SDK configured either to record each ``Sandbox``
+method call into a runtime recording or to carry it out against a real
+microVM, depending on the active mode.
 
 Two modes are live:
 
-- ``MVM_SDK_MODE=record`` (the original Phase 7b contract):
-  every ``Sandbox`` call appends to an in-process recording. The
-  host's ``mvmctl compile`` / ``mvmctl run --mode plan`` verbs
-  lower the recording via ``compile_recording``.
-- ``MVM_SDK_MODE=live`` (Plan 73 Followup H-live): every
-  ``Sandbox`` call shells to ``$MVM_CLI_BIN`` (``mvmctl machine run``,
-  ``mvmctl machine proc start``, ``mvmctl fs write``, ``mvmctl machine stop``)
-  against a real microVM. The shell is dispatched by
-  :class:`_LiveTransport` below.
+- ``MVM_SDK_MODE=record`` (the default): every ``Sandbox`` call appends to an
+  in-process recording. The host's ``mvmctl build compile`` /
+  ``mvmctl run --mode plan`` verbs lower the recording via
+  ``compile_recording``.
+- ``MVM_SDK_MODE=live``: every ``Sandbox`` call goes to the host library,
+  loaded in-process (see ``mvm._hostlib``), against a real microVM. The
+  library runs the same admission, audit and guest-agent paths the CLI does,
+  so a sandbox booted here is admitted exactly like one booted from a shell.
 
 ``MVM_SDK_MODE=plan`` remains an error here — the host's
-``mvmctl run --mode plan`` verb is what runs a Sandbox script
-under that transport; the SDK itself never enters "plan" mode
-directly.
+``mvmctl run --mode plan`` verb is what runs a Sandbox script under that
+transport; the SDK itself never enters "plan" mode directly.
 
 Wire shape (matches the Rust ``RuntimeRecording`` serde types,
-``deny_unknown_fields`` on both sides — a typo'd field name fails
-closed at the Rust boundary)::
+``deny_unknown_fields`` on both sides — a typo'd field name fails closed at
+the Rust boundary)::
 
     {
       "workload_id": "etl",
@@ -64,15 +59,11 @@ import json
 import os
 import re
 import secrets
-import shlex
-import subprocess
 import sys
-import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from mvm import _ir
-from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
+from mvm import _hostlib, _ir
 from mvm._dsl import literal as _literal_value
 # Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
 # `_env/vars.py`. Re-exported from this module for existing importers.
@@ -81,6 +72,30 @@ from mvm._env.vars import (
     MVM_SDK_OUT_PATH_ENV,
     MVM_SDK_RUN_PROFILE_ENV,
 )
+from mvm._errors.types import HostLibraryError, MvmTransportError
+from mvm._hostabi.methods import (
+    GUEST_CP,
+    GUEST_FS_LIST,
+    GUEST_FS_MKDIR,
+    GUEST_FS_READ,
+    GUEST_FS_REMOVE,
+    GUEST_FS_RENAME,
+    GUEST_FS_STAT,
+    GUEST_FS_WRITE,
+    GUEST_PROC_KILL,
+    GUEST_PROC_SIGNAL,
+    GUEST_PROC_START,
+    GUEST_PROC_STDIN,
+    MACHINE_INVENTORY,
+    MACHINE_RUN,
+    MACHINE_STOP,
+)
+from mvm._live import (
+    decode_bytes,
+    egress_problem,
+    encode_bytes,
+    stream_process,
+)
 from mvm._runtime.runtime import (
     RuntimeFsEntry,
     RuntimeFsStat,
@@ -88,7 +103,6 @@ from mvm._runtime.runtime import (
 
 __all__ = [
     "DEFAULT_TTL_SECONDS",
-    "MVM_CLI_BIN_ENV",
     "MVM_SDK_RUN_PROFILE_ENV",
     "ExecResult",
     "FsEntry",
@@ -99,6 +113,7 @@ __all__ = [
     "RecordingNotActiveError",
     "Sandbox",
     "SandboxDevOnly",
+    "SandboxInfo",
     "SandboxLiveError",
     "SandboxModeError",
     "current_recording",
@@ -111,10 +126,11 @@ __all__ = [
 class ExecResult:
     """Result of a one-shot ``Sandbox.exec(...)`` call.
 
-    ``exit_code`` is the child's exit code (0 on success). ``stdout``
-    and ``stderr`` are captured strings — exec is a one-shot that
-    *captures* the streams rather than forwarding them, which is the
-    distinction from ``commands.start`` + ``proc wait``."""
+    ``exit_code`` is the child's exit code (0 on success; ``128 + signal``
+    when a signal ended it; 124 when its timeout did). ``stdout`` and
+    ``stderr`` are captured strings — exec is a one-shot that *captures* the
+    streams rather than forwarding them, which is the distinction from
+    ``commands.start`` + ``ProcessHandle.wait``."""
 
     exit_code: int
     stdout: str
@@ -155,6 +171,8 @@ class ProcessHandle:
         timeout: float | None = None,
         on_event: Callable[[ProcessStreamEvent], None] | None = None,
     ) -> ProcessResult:
+        """Wait for the process to end, calling ``on_event`` for each chunk of
+        output in the order it arrived."""
         return self._transport.process_wait(self.token, timeout=timeout, on_event=on_event)
 
     def send_stdin(self, data: bytes | str) -> None:
@@ -181,17 +199,15 @@ class SandboxInfo:
     live: bool
 
 
-#: Plan ``Considerations to fold in or defer`` — every
-#: ``Sandbox.create()`` sets a default 30-minute TTL so the
-#: orchestrator can reap orphaned VMs after a crashed record-mode
-#: script.
+#: Every ``Sandbox.create()`` sets a default 30-minute TTL so the host can
+#: reap a VM that a crashed script left behind.
 DEFAULT_TTL_SECONDS = 1800
 
 
 class SandboxModeError(RuntimeError):
-    """Raised when the configured ``MVM_SDK_MODE`` isn't supported by
-    this SDK build (e.g. ``MVM_SDK_MODE=plan`` against the in-process
-    SDK — plan mode lives in the host CLI, not here)."""
+    """Raised when a call cannot be carried out in the configured
+    ``MVM_SDK_MODE`` (e.g. ``MVM_SDK_MODE=plan``, which lives in the host CLI,
+    or a live-mode option the host library has no faithful form for)."""
 
 
 class RecordingNotActiveError(RuntimeError):
@@ -201,50 +217,30 @@ class RecordingNotActiveError(RuntimeError):
 
 
 class SandboxLiveError(RuntimeError):
-    """Raised when a live-mode shell to ``mvmctl`` fails. Carries the
-    failing argv, exit code, and captured stderr so user scripts can
-    see exactly which verb refused and why."""
+    """Raised when the SDK cannot make sense of a live-mode exchange: a reply
+    of the wrong shape, a machine that is not there to attach to, a value it
+    will not forward.
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        argv: list[str] | None = None,
-        exit_code: int | None = None,
-        stderr: str | None = None,
-    ) -> None:
+    Refusals from the host library itself are not rewrapped into this type:
+    they arrive as the typed ``HostLibraryError`` subclass the library named
+    (``MachineSpecError``, ``MachineNotFoundError``, ...), carrying its
+    ``code`` and ``retryable`` flag, so a caller can tell a policy refusal
+    from a transient backend failure without parsing a message."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
-        self.argv = list(argv) if argv else []
-        self.exit_code = exit_code
-        self.stderr = stderr or ""
-
-    def __str__(self) -> str:
-        # The captured stderr is the only place the refusing verb says *why*.
-        # Storing it on the exception and rendering only the summary line was
-        # the same as not capturing it: a failing `mvmctl` shell surfaced as
-        # "failed with exit code 1" and nothing else, and the diagnosis had to
-        # be re-run by hand outside the SDK. The docstring above promised this
-        # and the type did not deliver it.
-        parts = [super().__str__()]
-        if self.argv:
-            parts.append("command: " + shlex.join(self.argv))
-        detail = self.stderr.strip()
-        if detail:
-            parts.append("stderr:\n" + detail)
-        return "\n".join(parts)
+        self.code = code
 
 
 class SandboxDevOnly(SandboxLiveError):
-    """Raised when the SDK refuses a live-mode ``commands.start``
-    call because the resolved template is a *prod* template.
+    """Raised when the SDK refuses a live-mode guest operation because the
+    machine is not a development build.
 
-    The guest agent's runtime profile and signed grant refuse DevOnly
-    process-control requests in production. The agent itself fails closed, but the SDK refuses
-    *before* any vsock traffic so a user typo doesn't make a
-    spurious round-trip. ``commands.start`` is the only Sandbox
-    surface that hits ``proc start``; ``files.write`` and
-    ``kill`` route to verbs that are available in prod builds
-    too."""
+    The guest agent's runtime profile and signed grant refuse DevOnly process
+    and filesystem requests in production, so the agent fails closed on its
+    own. The SDK refuses first anyway, before any call reaches the library:
+    a typo against a sealed machine should not cost a round-trip, and should
+    not leave a refused request in the audit log."""
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -354,21 +350,16 @@ def _resolve_mode() -> str:
     ``python sandbox.py`` invoked by the CLI works without an env
     var.
 
-    Accepts ``record`` (Phase 7b record transport, in-process
-    recording) and ``live`` (Plan 73 Followup H-live, shells to
-    ``mvmctl``). ``plan`` belongs to the host CLI's
-    ``mvmctl run --mode plan`` verb — not a valid value here, so
-    we refuse it with an actionable hint."""
+    Accepts ``record`` (in-process recording) and ``live`` (the host
+    library). Live mode does not look for the library here: it is loaded on
+    the first call that needs it, and a missing one surfaces there as a
+    ``MvmTransportError`` naming every place it looked. ``plan`` belongs to
+    the host CLI's ``mvmctl run --mode plan`` verb — not a valid value here,
+    so we refuse it with an actionable hint."""
     raw = os.environ.get(MVM_SDK_MODE_ENV, "record").strip().lower()
     if raw == "record":
         return "record"
     if raw == "live":
-        try:
-            resolve_cli_bin(purpose="MVM_SDK_MODE=live")
-        except RuntimeError as exc:
-            raise SandboxModeError(
-                str(exc)
-            ) from exc
         return "live"
     if raw == "plan":
         raise SandboxModeError(
@@ -507,19 +498,42 @@ def _reject_live_option(name: str, reason: str) -> None:
     )
 
 
-def _format_allow_host(host: Any, port: Any) -> str:
-    if not isinstance(host, str) or not host or host in {
-        "*",
-        "0.0.0.0",
-        "::",
-        "0.0.0.0/0",
-        "::/0",
-    }:
-        _reject_live_option("network.egress", "allowlist hosts must be specific")
-    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
-        _reject_live_option("network.egress", "allowlist ports must be 1..65535")
-    rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return f"{rendered_host}:{port}"
+def _egress_target(host: Any, port: Any) -> dict[str, Any]:
+    problem = egress_problem(host, port)
+    if problem is not None:
+        _reject_live_option("network.egress", problem)
+    return {"host": host, "port": port}
+
+
+def _ingress_mapping(port: Any) -> str:
+    """One declared ingress mapping as the ``host:guest`` string the host
+    library takes. Only the shape the NIC-less port relay actually provides
+    is accepted, so a mapping cannot be declared with one meaning and booted
+    with another."""
+    if (
+        not isinstance(port, dict)
+        or port.get("proto") != "tcp"
+        or port.get("transform") != "opaque"
+        or port.get("host_addr") != "127.0.0.1"
+        or port.get("guest_addr") != "127.0.0.1"
+    ):
+        raise SandboxModeError(
+            "Sandbox live mode currently accepts only opaque TCP ingress "
+            "bound to host and guest 127.0.0.1"
+        )
+    host, guest = port.get("host"), port.get("guest")
+    for value in (host, guest):
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 65535:
+            raise SandboxModeError("Sandbox live mode ingress ports must be 1..65535")
+    return f"{host}:{guest}"
+
+
+@dataclass(frozen=True)
+class _LiveOptions:
+    """The subset of ``Sandbox.create`` options the host library can carry."""
+
+    egress: list[dict[str, Any]]
+    ports: list[str]
 
 
 def _lower_live_options(
@@ -529,62 +543,143 @@ def _lower_live_options(
     tags: dict[str, str] | None,
     resources: Any,
     network: Any,
-) -> list[str]:
-    """Lower the subset with exact CLI equivalents; reject everything else.
+) -> _LiveOptions:
+    """Lower the options with an exact host-library equivalent; reject the rest.
 
     Live mode must never accept an option and then silently boot a different
-    workload. Secret references also stay off argv by construction.
+    workload. Secret references also stay out of the request by construction.
     """
-    argv: list[str] = []
     if env:
         _reject_live_option(
             "env",
-            "persistent creation cannot deliver environment; declare it in the image "
-            "or pass env to Sandbox.commands.start",
+            "the launch cannot deliver environment to the workload yet; declare it "
+            "in the image or pass env to Sandbox.commands.start",
         )
-
     if include:
-        _reject_live_option("include", "the live CLI has no source-bundle equivalent")
+        _reject_live_option("include", "the host library has no source-bundle equivalent")
     if tags:
-        _reject_live_option("tags", "the live CLI has no tag equivalent")
+        _reject_live_option("tags", "the host library has no tag equivalent")
     if resources is not None:
         _reject_live_option(
             "resources",
-            "rootfs_size_mb has no live CLI equivalent, so partial lowering is refused",
+            "rootfs_size_mb has no host-library equivalent, so partial lowering is refused",
         )
 
     encoded_network = _encode_network(network)
     if encoded_network is None:
-        return argv
-    unknown = set(encoded_network) - {
-        "mode",
-        "egress",
-        "ports",
-        "peers",
-        "dns",
-    }
+        return _LiveOptions(egress=[], ports=[])
+    unknown = set(encoded_network) - {"mode", "egress", "ports", "peers", "dns"}
     if unknown:
         _reject_live_option("network", f"unknown fields: {sorted(unknown)}")
     if encoded_network.get("mode", "none") != "none":
         _reject_live_option("network.mode", "only the NIC-less `none` mode is supported")
     if encoded_network.get("peers"):
-        _reject_live_option("network.peers", "the live CLI has no peer equivalent")
+        _reject_live_option("network.peers", "the host library has no peer equivalent")
     if encoded_network.get("dns") is not None:
-        _reject_live_option("network.dns", "the live CLI has no DNS equivalent")
+        _reject_live_option("network.dns", "the host library has no DNS equivalent")
 
+    ports = [_ingress_mapping(port) for port in encoded_network.get("ports") or []]
     egress = encoded_network.get("egress")
     if egress is None:
-        return argv
+        return _LiveOptions(egress=[], ports=ports)
     if not isinstance(egress, dict) or set(egress) != {"allowlist"}:
         _reject_live_option("network.egress", "expected only an allowlist")
     allowlist = egress.get("allowlist")
     if not isinstance(allowlist, list):
         _reject_live_option("network.egress", "allowlist must be a list")
+    targets = []
     for entry in allowlist:
         if not isinstance(entry, dict) or set(entry) != {"host", "port"}:
             _reject_live_option("network.egress", "entries must contain host and port")
-        argv.extend(["--allow-host", _format_allow_host(entry["host"], entry["port"])])
-    return argv
+        targets.append(_egress_target(entry["host"], entry["port"]))
+    return _LiveOptions(egress=targets, ports=ports)
+
+
+_RUN_PROFILES = ("restrictive", "standard", "dev", "permissive")
+
+
+def _run_profile() -> str | None:
+    """The security profile ``mvmctl run`` handed this script, if any.
+
+    Validated here rather than left to the library so a typo fails before a
+    boot is attempted, with the variable named in the message."""
+    profile = os.environ.get(MVM_SDK_RUN_PROFILE_ENV)
+    if profile is None:
+        return None
+    profile = profile.strip().lower()
+    if profile not in _RUN_PROFILES:
+        raise SandboxModeError(
+            f"{MVM_SDK_RUN_PROFILE_ENV}={profile!r} is invalid — expected one of: "
+            + ", ".join(_RUN_PROFILES)
+        )
+    return profile
+
+
+def _literal_env(env: dict[str, Any] | None, operation: str) -> dict[str, str]:
+    """Reduce ``env`` to plain strings, refusing anything that is not a literal.
+
+    A secret reference has to be resolved by the host's substitution endpoint;
+    forwarding it here would either leak the reference as a value or put the
+    secret itself into a guest environment, and both are wrong."""
+    out: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        if not isinstance(key, str) or not key:
+            raise TypeError(f"`{operation}` env keys must be non-empty str")
+        if isinstance(value, str):
+            out[key] = value
+            continue
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            value = _dataclass_to_dict(value)
+        if (
+            not isinstance(value, dict)
+            or value.get("kind") != "literal"
+            or not isinstance(value.get("value"), str)
+        ):
+            raise SandboxLiveError(
+                f"`{operation}` env {key!r} carries a non-literal value; live mode "
+                "only forwards literal env vars (secrets are injected by the host, "
+                "never passed through the SDK)."
+            )
+        out[key] = value["value"]
+    return out
+
+
+def _parse_run_reply(reply: Any) -> tuple[str, str]:
+    """Pull ``(vm_id, build_mode)`` out of a ``machine.run`` reply.
+
+    ``build_mode`` must be exactly ``dev`` or ``prod``: it is what unlocks the
+    DevOnly guest verbs client-side, so a reply that names neither is treated
+    as malformed rather than guessed at."""
+    if not isinstance(reply, dict):
+        raise SandboxLiveError(f"machine.run returned a malformed reply: {reply!r}")
+    machine = reply.get("machine")
+    name = machine.get("name") if isinstance(machine, dict) else None
+    if not isinstance(name, str) or not name:
+        raise SandboxLiveError("machine.run reply is missing a non-empty `machine.name`")
+    build_mode = reply.get("build_mode")
+    if build_mode not in ("dev", "prod"):
+        raise SandboxLiveError(
+            f"machine.run reply build_mode={build_mode!r}; expected 'dev' or 'prod'"
+        )
+    return name, build_mode
+
+
+def _attached_build_mode(records: Any, *, vm_id: str) -> str:
+    """Re-derive ``build_mode`` for an attached machine from the inventory.
+
+    Fail-closed by construction: only an explicit ``"dev"`` returns
+    ``"dev"``; a ``"prod"`` / missing / unknown value returns ``"prod"``, so a
+    stale or hostile record can never *open* the dev-only guest verbs — it
+    can only keep them shut. Raises :class:`SandboxLiveError` when ``vm_id``
+    is not in the inventory (there is nothing to attach to)."""
+    if not isinstance(records, list):
+        raise SandboxLiveError(
+            f"machine.inventory must return a list; got {type(records).__name__}"
+        )
+    for record in records:
+        if isinstance(record, dict) and record.get("name") == vm_id:
+            return "dev" if record.get("build_mode") == "dev" else "prod"
+    raise SandboxLiveError(f"no machine named {vm_id!r} in the machine inventory; is it running?")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -601,18 +696,17 @@ class _Commands:
     def start(
         self, argv: list[str], *, env: dict[str, Any] | None = None
     ) -> ProcessHandle | None:
-        """Record or shell a ``commands.start(argv, env=...)`` op.
+        """Record or run a ``commands.start(argv, env=...)`` op.
 
         In record mode the *last* ``commands.start`` in the recording
         becomes the workload's entrypoint; everything earlier
         becomes a ``before_start`` hook in declaration order.
 
-        In live mode the call shells to ``mvmctl proc start <vm>``
-        against the running microVM. The SDK refuses with
-        :class:`SandboxDevOnly` if the resolved template is a
-        prod template (the agent's W4.3 ``do_exec`` strip would
-        refuse anyway, but the SDK fails closed first to avoid a
-        spurious vsock round-trip — ADR-001 claim 4)."""
+        In live mode the process starts in the running microVM and a
+        :class:`ProcessHandle` comes back. The SDK refuses with
+        :class:`SandboxDevOnly` if the machine is not a development build —
+        the guest agent would refuse too, but the SDK fails closed first so a
+        mistake never reaches the machine (security claim 4)."""
         if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
             raise TypeError("argv must be a list[str]")
         if not argv:
@@ -644,7 +738,7 @@ class _Files:
         create_parents: bool = False,
         follow_symlinks: bool = False,
     ) -> None:
-        """Record or shell a ``files.write(path, content)`` op.
+        """Record or perform a ``files.write(path, content)`` op.
 
         In record mode: ``content`` is bytes (passed through
         verbatim) or str (utf-8 encoded). The recording stores
@@ -652,9 +746,7 @@ class _Files:
         emits a ``before_start`` shell hook that ``base64 -d``s
         back to the file.
 
-        In live mode: the same bytes stream via stdin into
-        ``mvmctl fs write <vm> <path>`` — ``mvmctl fs write``
-        already accepts stdin when ``--content`` is omitted."""
+        In live mode the bytes are written into the running guest."""
         if not isinstance(path, str) or not path:
             raise ValueError("path must be a non-empty str")
         if isinstance(content, str):
@@ -723,233 +815,99 @@ class _Files:
 
 
 class _LiveTransport:
-    """Live-mode transport — shells each Sandbox call to the host's
-    ``mvmctl`` binary.
+    """Live mode's handle on one running machine, spoken to through the host
+    library.
 
-    Created by :meth:`Sandbox.create` when ``MVM_SDK_MODE=live``.
-    Holds the resolved ``mvmctl`` binary path, the generated
-    ``vm_id``, and the template's ``build_mode`` ("dev" / "prod")
-    parsed from ``mvmctl machine run --up-json``'s stdout envelope. The
-    ``build_mode`` is what the SDK uses to enforce the W4.3
-    dev-only ``proc start`` rule client-side."""
+    Holds the machine's name, which every ``machine.*`` and ``guest.*``
+    method takes as its ``id``, and the ``build_mode`` the library resolved
+    for it. The ``build_mode`` is what the SDK uses to refuse DevOnly guest
+    operations client-side."""
 
-    SCHEMA_VERSION = 1
-
-    def __init__(
-        self,
-        *,
-        mvm_cli_bin: str,
-        vm_id: str,
-        build_mode: str,
-    ) -> None:
-        self.mvm_cli_bin = mvm_cli_bin
+    def __init__(self, *, vm_id: str, build_mode: str) -> None:
         self.vm_id = vm_id
         self.build_mode = build_mode
         self._killed = False
+
     @classmethod
-    def for_source(
+    def boot(
         cls,
         *,
-        source_kind: str,
-        source: str,
+        image: str,
         workload_id: str,
         ttl_seconds: int,
-        create_args: list[str],
-        boot_command: list[str] | None,
-        ports: list[dict[str, Any]],
+        options: _LiveOptions,
+        command: list[str] | None,
     ) -> "_LiveTransport":
-        """Run ``mvmctl machine run`` with a typed boot source and parse its
-        JSON envelope. Raises
-        :class:`SandboxLiveError` on any failure."""
-        try:
-            mvm_cli_bin = resolve_cli_bin(purpose="Sandbox live mode")
-        except RuntimeError as exc:
-            raise SandboxModeError(str(exc)) from exc
-        # Generate a short, validatable VM id. `mvmctl machine run` rejects
-        # names that don't match its validator; alphanumerics with
-        # a hyphen are safe.
+        """Boot a transient machine from ``image`` and wrap it.
+
+        ``command`` is forwarded even though the in-process launcher refuses a
+        command override today: the refusal then comes from the library, as a
+        ``MachineSpecError`` saying why, and the call starts working unchanged
+        when the launcher learns to honour it."""
+        profile = _run_profile()
+        # A short, validatable name. The library rejects names outside its
+        # validator; lowercase alphanumerics with hyphens are always safe.
         suffix = secrets.token_hex(4)
         vm_id = f"sdk-{workload_id[:24]}-{suffix}".lower()
         vm_id = "".join(c if (c.isalnum() or c == "-") else "-" for c in vm_id)
 
-        argv = [
-            mvm_cli_bin,
-            "machine",
-            "run",
-        ]
-        if not ports:
-            argv.append("-d")
-        argv.extend(["--up-json", "--name", vm_id])
-        profile = os.environ.get(MVM_SDK_RUN_PROFILE_ENV)
+        request: dict[str, Any] = {
+            "image": image,
+            "mode": "transient",
+            "name": vm_id,
+            "ttl_seconds": ttl_seconds,
+        }
         if profile is not None:
-            profile = profile.strip().lower()
-            if profile not in {"restrictive", "standard", "dev", "permissive"}:
-                raise SandboxModeError(
-                    f"{MVM_SDK_RUN_PROFILE_ENV}={profile!r} is invalid — expected one of: "
-                    "restrictive, standard, dev, permissive"
-                )
-            argv.extend(["--profile", profile])
-        argv.extend(["--manifest" if source_kind == "manifest" else "--image", source])
-        argv.extend(create_args)
-        argv.extend(["--ttl", f"{ttl_seconds}s"])
-        for port in ports:
-            if (
-                port.get("proto") != "tcp"
-                or port.get("transform") != "opaque"
-                or port.get("host_addr") != "127.0.0.1"
-                or port.get("guest_addr") != "127.0.0.1"
-            ):
-                raise SandboxModeError(
-                    "Sandbox live mode currently accepts only opaque TCP ingress "
-                    "bound to host and guest 127.0.0.1"
-                )
-            argv.extend(["--port", f"{port['host']}:{port['guest']}"])
-        if boot_command is not None:
-            argv.append("--")
-            argv.extend(boot_command)
-        try:
-            result = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=argv,
-            ) from exc
-
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`mvmctl machine run` failed with exit code {result.returncode}",
-                argv=argv,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-
-        envelope = _parse_up_envelope(result.stdout, argv=argv)
-        return cls(
-            mvm_cli_bin=mvm_cli_bin,
-            vm_id=envelope["vm_id"],
-            build_mode=envelope["build_mode"],
-        )
+            request["profile"] = profile
+        if options.ports:
+            request["ports"] = options.ports
+        if options.egress:
+            request["egress"] = options.egress
+        if command is not None:
+            request["command"] = command
+        name, build_mode = _parse_run_reply(_hostlib.call(MACHINE_RUN, request))
+        return cls(vm_id=name, build_mode=build_mode)
 
     @classmethod
-    def for_existing(cls, *, vm_id: str) -> "_LiveTransport":
+    def attach(cls, *, vm_id: str) -> "_LiveTransport":
         """Attach to an already-running machine by name.
 
-        Shells ``mvmctl machine ls --json`` and re-derives the
-        machine's ``build_mode`` from its listing entry — the attach
-        path never boots, so there is no ``--up-json`` envelope to
-        read it from. Fails closed: only an explicit
-        ``build_mode == "dev"`` unlocks the dev-only exec path; a
-        prod / missing / unknown value resolves to ``"prod"`` so the
-        same guard that protects :meth:`for_template` also protects
-        the attach path (security claim 4). Raises
-        :class:`SandboxLiveError` when no machine of that name is
-        listed (there is nothing to attach to)."""
-        try:
-            mvm_cli_bin = resolve_cli_bin(purpose="Sandbox.connect")
-        except RuntimeError as exc:
-            raise SandboxModeError(str(exc)) from exc
-        argv = [mvm_cli_bin, "machine", "ls", "--json"]
-        try:
-            result = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=argv,
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`mvmctl machine ls --json` failed with exit code {result.returncode}",
-                argv=argv,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-        build_mode = _derive_attached_build_mode(
-            result.stdout, vm_id=vm_id, argv=argv
-        )
-        return cls(mvm_cli_bin=mvm_cli_bin, vm_id=vm_id, build_mode=build_mode)
+        The attach path never boots, so there is no ``machine.run`` reply to
+        read ``build_mode`` from; it comes from the machine inventory instead,
+        resolved fail-closed (see :func:`_attached_build_mode`) so the guard
+        that protects a booted sandbox also protects an attached one
+        (security claim 4)."""
+        records = _hostlib.call(MACHINE_INVENTORY)
+        return cls(vm_id=vm_id, build_mode=_attached_build_mode(records, vm_id=vm_id))
 
-    def commands_start(
-        self, argv: list[str], env: dict[str, Any] | None
-    ) -> ProcessHandle:
-        """Shell ``mvmctl proc start <vm> -e ... -- <argv>``.
-
-        Refuses with :class:`SandboxDevOnly` when the resolved
-        template is prod (ADR-001 claim 4). The agent fails
-        closed anyway; the SDK refuses first so a typo doesn't
-        emit a spurious vsock request."""
-        if self.build_mode != "dev":
-            raise SandboxDevOnly(
-                f"`commands.start` requires a dev-mode template; resolved template "
-                f"build_mode={self.build_mode!r}. ADR-001 security claim 4 "
-                f"strips the agent's `do_exec` handler in prod builds — re-build the "
-                f"template with `mvmctl template build --dev <name>`, or use "
-                f"`files.write` to stage inputs into the running VM instead.",
-                argv=["machine", "proc", "start", self.vm_id, *argv],
-            )
-        shell = [self.mvm_cli_bin, "machine", "proc", "start", self.vm_id]
-        if env:
-            # `mvmctl machine proc start` expects `-e KEY=VALUE` pairs.
-            # We only forward literal env values in live mode;
-            # secret_ref values would need the host keystore round-trip
-            # the orchestrator owns.
-            for key, value in env.items():
-                if isinstance(value, str):
-                    shell += ["-e", f"{key}={value}"]
-                elif isinstance(value, dict) and value.get("kind") == "literal":
-                    shell += ["-e", f"{key}={value['value']}"]
-                else:
-                    # secret_ref / unknown — refuse rather than leak.
-                    raise SandboxLiveError(
-                        f"`commands.start` env {key!r} carries a non-literal value; "
-                        f"live mode only forwards literal env vars (secrets must be "
-                        f"injected via the host keystore + `--secret` on `mvmctl machine run`).",
-                        argv=shell,
-                    )
-        shell += ["--", *argv]
-        return self._start_process(shell)
-
-    def _require_dev(self, operation: str, argv: list[str]) -> None:
+    def _require_dev(self, operation: str) -> None:
         if self.build_mode != "dev":
             raise SandboxDevOnly(
                 f"`{operation}` requires a dev-mode template; resolved template "
-                f"build_mode={self.build_mode!r}. The guest policy refuses this "
-                "runtime operation on production templates.",
-                argv=argv,
+                f"build_mode={self.build_mode!r}. The guest agent refuses DevOnly "
+                "process and filesystem requests on production builds — re-build the "
+                "image as a dev build, or bake the inputs into the image instead."
             )
 
-    def _start_process(self, shell: list[str]) -> ProcessHandle:
-        try:
-            result = subprocess.run(shell, check=False, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`mvmctl machine proc start` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-        token = result.stdout.strip()
-        if not token:
-            raise SandboxLiveError(
-                "`mvmctl machine proc start` produced no pid_token on stdout",
-                argv=shell,
-                stderr=result.stderr,
-            )
+    def _start(
+        self, argv: list[str], env: dict[str, Any] | None, cwd: str | None, operation: str
+    ) -> ProcessHandle:
+        request: dict[str, Any] = {"id": self.vm_id, "argv": list(argv)}
+        literal = _literal_env(env, operation)
+        if literal:
+            request["env"] = literal
+        if cwd is not None:
+            request["cwd"] = cwd
+        reply = _hostlib.call(GUEST_PROC_START, request)
+        token = reply.get("token") if isinstance(reply, dict) else None
+        if not isinstance(token, str) or not token:
+            raise SandboxLiveError(f"guest.proc.start returned no process token: {reply!r}")
         return ProcessHandle(self, token)
+
+    def commands_start(self, argv: list[str], env: dict[str, Any] | None) -> ProcessHandle:
+        """Start ``argv`` in the guest and return its handle."""
+        self._require_dev("commands.start")
+        return self._start(argv, env, None, "commands.start")
 
     def commands_exec(
         self,
@@ -959,33 +917,9 @@ class _LiveTransport:
         timeout: float | None = None,
         cwd: str | None = None,
     ) -> ExecResult:
-        """One-shot exec: shell ``mvmctl proc start ... -- argv`` to
-        obtain a ``pid_token``, then ``mvmctl proc wait <pid_token>``
-        to capture stdout/stderr/exit. Refuses with
-        :class:`SandboxDevOnly` when the resolved template is prod
-        (matches ``commands_start``'s policy — ADR-001 claim
-        4)."""
-        self._require_dev("exec", ["machine", "proc", "start", self.vm_id, *argv])
-
-        # 1) `proc start` → pid_token on stdout.
-        start_shell: list[str] = [self.mvm_cli_bin, "machine", "proc", "start", self.vm_id]
-        if env:
-            for key, value in env.items():
-                if isinstance(value, str):
-                    start_shell += ["-e", f"{key}={value}"]
-                elif isinstance(value, dict) and value.get("kind") == "literal":
-                    start_shell += ["-e", f"{key}={value['value']}"]
-                else:
-                    raise SandboxLiveError(
-                        f"`exec` env {key!r} carries a non-literal value; live mode "
-                        f"only forwards literal env vars (secrets must be injected via "
-                        f"the host keystore + `--secret` on `mvmctl machine run`).",
-                        argv=start_shell,
-                    )
-        if cwd is not None:
-            start_shell += ["--cwd", cwd]
-        start_shell += ["--", *argv]
-        result = self._start_process(start_shell).wait(timeout=timeout)
+        """Start ``argv`` in the guest and wait for it, capturing its output."""
+        self._require_dev("exec")
+        result = self._start(argv, env, cwd, "exec").wait(timeout=timeout)
         return ExecResult(
             exit_code=result.exit_code,
             stdout=result.stdout.decode("utf-8", errors="replace"),
@@ -999,97 +933,30 @@ class _LiveTransport:
         timeout: float | None = None,
         on_event: Callable[[ProcessStreamEvent], None] | None = None,
     ) -> ProcessResult:
-        self._require_dev("process wait", ["machine", "proc", "wait", self.vm_id, token])
-        shell = [self.mvm_cli_bin, "machine", "proc", "wait", self.vm_id, token]
-        if timeout is not None:
-            shell += ["--timeout", str(int(timeout))]
-        try:
-            proc = subprocess.Popen(shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-
-        def drain(stream: str, source: Any) -> None:
-            while chunk := source.read(65536):
-                chunks[stream].extend(chunk)
-                if on_event is not None:
-                    on_event(ProcessStreamEvent(stream, chunk))
-
-        readers = [
-            threading.Thread(target=drain, args=(name, source), daemon=True)
-            for name, source in (("stdout", proc.stdout), ("stderr", proc.stderr))
-            if source is not None
-        ]
-        for reader in readers:
-            reader.start()
-        try:
-            proc.wait(timeout=timeout + 5 if timeout is not None else None)
-        except subprocess.TimeoutExpired as exc:
-            proc.kill()
-            raise SandboxLiveError(
-                "`mvmctl machine proc wait` did not return before its timeout",
-                argv=shell,
-            ) from exc
-        for reader in readers:
-            reader.join()
-        return ProcessResult(proc.returncode, bytes(chunks["stdout"]), bytes(chunks["stderr"]))
+        self._require_dev("process wait")
+        on_chunk = None
+        if on_event is not None:
+            on_chunk = lambda stream, data: on_event(ProcessStreamEvent(stream, data))  # noqa: E731
+        output = stream_process(
+            self.vm_id, token, timeout=timeout, on_chunk=on_chunk, error=SandboxLiveError
+        )
+        return ProcessResult(output.exit_code, output.stdout, output.stderr)
 
     def process_stdin(self, token: str, data: bytes) -> None:
-        self._require_dev("process stdin", ["machine", "proc", "stdin", self.vm_id, token])
-        self._run_bytes([self.mvm_cli_bin, "machine", "proc", "stdin", self.vm_id, token], data)
+        self._require_dev("process stdin")
+        _hostlib.call(
+            GUEST_PROC_STDIN, {"id": self.vm_id, "token": token, "data_b64": encode_bytes(data)}
+        )
 
     def process_signal(self, token: str, signum: int) -> None:
         if not isinstance(signum, int) or isinstance(signum, bool) or signum <= 0:
             raise ValueError("signum must be a positive integer")
-        self._require_dev("process signal", ["machine", "proc", "signal", self.vm_id, token])
-        self._run_shell([self.mvm_cli_bin, "machine", "proc", "signal", self.vm_id, token, str(signum)])
+        self._require_dev("process signal")
+        _hostlib.call(GUEST_PROC_SIGNAL, {"id": self.vm_id, "token": token, "signum": signum})
 
     def process_kill(self, token: str) -> None:
-        self._require_dev("process kill", ["machine", "proc", "kill", self.vm_id, token])
-        self._run_shell([self.mvm_cli_bin, "machine", "proc", "kill", self.vm_id, token])
-
-    def _run_bytes(self, shell: list[str], data: bytes) -> None:
-        try:
-            result = subprocess.run(shell, input=data, check=False, capture_output=True)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr.decode("utf-8", errors="replace"),
-            )
-
-    def _run_json(self, shell: list[str]) -> Any:
-        try:
-            result = subprocess.run(shell, check=False, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise SandboxLiveError(
-                f"`{' '.join(shell)}` returned invalid JSON: {exc.msg}",
-                argv=shell,
-                stderr=result.stdout,
-            ) from exc
+        self._require_dev("process kill")
+        _hostlib.call(GUEST_PROC_KILL, {"id": self.vm_id, "token": token})
 
     def files_write(
         self,
@@ -1100,58 +967,52 @@ class _LiveTransport:
         create_parents: bool = False,
         follow_symlinks: bool = False,
     ) -> None:
-        """Shell ``mvmctl fs write <vm> <path>`` with the file
-        bytes piped through stdin. The mvmctl verb accepts stdin
-        when ``--content`` is omitted."""
-        self._require_dev("files.write", ["machine", "fs", "write", self.vm_id, path])
-        shell = [self.mvm_cli_bin, "machine", "fs", "write", self.vm_id, path, "--mode", str(mode)]
-        if create_parents:
-            shell.append("--create-parents")
-        if follow_symlinks:
-            shell.append("--follow-symlinks")
-        self._run_bytes(shell, data)
+        self._require_dev("files.write")
+        _hostlib.call(
+            GUEST_FS_WRITE,
+            {
+                "id": self.vm_id,
+                "path": path,
+                "data_b64": encode_bytes(data),
+                "mode": mode,
+                "create_parents": create_parents,
+                "follow_symlinks": follow_symlinks,
+            },
+        )
 
     def files_read(self, path: str, *, offset: int, length: int) -> bytes:
         if offset < 0 or length < 0:
             raise ValueError("offset and length must be non-negative")
-        self._require_dev("files.read", ["machine", "fs", "read", self.vm_id, path])
-        shell = [
-            self.mvm_cli_bin, "machine", "fs", "read", self.vm_id, path,
-            "--offset", str(offset), "--length", str(length),
-        ]
-        try:
-            result = subprocess.run(shell, check=False, capture_output=True)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}", argv=shell
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr.decode("utf-8", errors="replace"),
-            )
-        return result.stdout
+        self._require_dev("files.read")
+        reply = _hostlib.call(
+            GUEST_FS_READ, {"id": self.vm_id, "path": path, "offset": offset, "length": length}
+        )
+        data = reply.get("data_b64") if isinstance(reply, dict) else None
+        return decode_bytes(data, "data_b64", SandboxLiveError)
 
     def files_list(self, path: str) -> list[FsEntry]:
-        self._require_dev("files.list", ["machine", "fs", "ls", self.vm_id, path])
-        parsed = self._run_json([self.mvm_cli_bin, "machine", "fs", "ls", self.vm_id, path, "--json"])
-        if not isinstance(parsed, list):
-            raise SandboxLiveError("filesystem listing must be a JSON array")
+        """List ``path``. The agent caps a listing's size; past the cap the
+        entries it returned are all there is."""
+        self._require_dev("files.list")
+        reply = _hostlib.call(GUEST_FS_LIST, {"id": self.vm_id, "path": path})
+        entries = reply.get("entries") if isinstance(reply, dict) else None
+        if not isinstance(entries, list):
+            raise SandboxLiveError("filesystem listing reply has no `entries` array")
         try:
-            return [FsEntry(name=item["name"], kind=item["kind"], size=int(item["size"])) for item in parsed]
+            return [
+                FsEntry(name=item["name"], kind=item["kind"], size=int(item["size"]))
+                for item in entries
+            ]
         except (KeyError, TypeError, ValueError) as exc:
             raise SandboxLiveError("filesystem listing returned an invalid payload") from exc
 
     def files_stat(self, path: str, *, follow_symlinks: bool) -> FsStat:
-        self._require_dev("files.stat", ["machine", "fs", "stat", self.vm_id, path])
-        shell = [self.mvm_cli_bin, "machine", "fs", "stat", self.vm_id, path, "--json"]
-        if not follow_symlinks:
-            shell.append("--no-follow")
-        parsed = self._run_json(shell)
+        self._require_dev("files.stat")
+        parsed = _hostlib.call(
+            GUEST_FS_STAT, {"id": self.vm_id, "path": path, "follow_symlinks": follow_symlinks}
+        )
         if not isinstance(parsed, dict):
-            raise SandboxLiveError("filesystem stat must be a JSON object")
+            raise SandboxLiveError("filesystem stat reply must be a JSON object")
         try:
             return FsStat(
                 canonical_path=parsed["canonical_path"],
@@ -1164,191 +1025,50 @@ class _LiveTransport:
             raise SandboxLiveError("filesystem stat returned an invalid payload") from exc
 
     def files_mkdir(self, path: str, *, parents: bool, mode: int) -> None:
-        self._require_dev("files.mkdir", ["machine", "fs", "mkdir", self.vm_id, path])
-        shell = [self.mvm_cli_bin, "machine", "fs", "mkdir", self.vm_id, path, "--mode", str(mode)]
-        if parents:
-            shell.append("--parents")
-        self._run_shell(shell)
+        self._require_dev("files.mkdir")
+        _hostlib.call(
+            GUEST_FS_MKDIR, {"id": self.vm_id, "path": path, "mode": mode, "parents": parents}
+        )
 
     def files_remove(self, path: str, *, recursive: bool) -> None:
-        self._require_dev("files.remove", ["machine", "fs", "rm", self.vm_id, path])
-        shell = [self.mvm_cli_bin, "machine", "fs", "rm", self.vm_id, path]
-        if recursive:
-            shell.append("--recursive")
-        self._run_shell(shell)
+        self._require_dev("files.remove")
+        _hostlib.call(GUEST_FS_REMOVE, {"id": self.vm_id, "path": path, "recursive": recursive})
 
     def files_move(self, source: str, destination: str) -> None:
-        self._require_dev("files.move", ["machine", "fs", "mv", self.vm_id, source, destination])
-        self._run_shell([self.mvm_cli_bin, "machine", "fs", "mv", self.vm_id, source, destination])
+        self._require_dev("files.move")
+        _hostlib.call(GUEST_FS_RENAME, {"id": self.vm_id, "from": source, "to": destination})
 
-    def cp(self, source: str, destination: str) -> None:
-        """Shell ``mvmctl cp <source> <destination>``. Endpoints use
-        ``VM:/absolute/path`` for the guest side; `mvmctl machine cp` reads the
-        host file and streams it over the agent fs RPC (and back)."""
-        self._require_dev("copy", ["machine", "cp", source, destination])
-        shell = [self.mvm_cli_bin, "machine", "cp", source, destination]
-        try:
-            result = subprocess.run(shell, check=False, capture_output=True)
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`mvmctl machine cp` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr.decode("utf-8", errors="replace"),
-            )
+    def cp(self, direction: str, host_path: str, guest_path: str) -> None:
+        """Copy one file across the host/guest boundary.
+
+        The host path is made absolute here because the library resolves it
+        in this process, and an absolute path is what a reader of the audit
+        entry needs to see."""
+        self._require_dev("copy")
+        _hostlib.call(
+            GUEST_CP,
+            {
+                "id": self.vm_id,
+                "direction": direction,
+                "host_path": os.path.abspath(host_path),
+                "guest_path": guest_path,
+            },
+        )
 
     def kill(self) -> None:
-        """Shell ``mvmctl machine stop <vm>``. Idempotent — repeated kills
-        from the context manager + an explicit `sb.kill()` are
-        coalesced so we don't trip on a double-down."""
+        """Stop the machine. Idempotent — the context manager and an explicit
+        ``sb.kill()`` both land here, and the second call must not try again.
+
+        A failure is reported on stderr, not raised: this is the cleanup
+        path, often running while another exception unwinds, and a machine
+        that is already gone (its TTL reaped it) is the usual cause."""
         if self._killed:
             return
         self._killed = True
-        # `--yes` skips the interactive confirmation prompt; the sandbox tears
-        # down non-interactively.
-        shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id, "--yes"]
         try:
-            result = subprocess.run(
-                shell,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        if result.returncode != 0:
-            # Print but don't raise — kill is the cleanup path; a
-            # failure here usually means the VM was already torn
-            # down by the orchestrator's TTL reaper.
-            sys.stderr.write(
-                f"mvm-sdk live: `mvmctl machine stop {self.vm_id}` exited "
-                f"with {result.returncode}: {result.stderr}\n"
-            )
-
-    def _run_shell(self, shell: list[str]) -> None:
-        try:
-            result = subprocess.run(
-                shell,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        # Mirror the SDK's "user prints to their own stdout"
-        # contract: the wrapped verbs' stdout is the SDK's value
-        # for the call (e.g. proc start prints a pid token), so
-        # forward it verbatim. stderr goes to our stderr.
-        if result.stdout:
-            sys.stdout.write(result.stdout)
-        if result.stderr:
-            sys.stderr.write(result.stderr)
-        if result.returncode != 0:
-            raise SandboxLiveError(
-                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
-                argv=shell,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-
-
-def _parse_up_envelope(stdout: str, *, argv: list[str]) -> dict[str, str]:
-    """Parse ``mvmctl machine run --up-json`` stdout. The envelope is a single
-    JSON line; trailing newlines tolerated. Raises
-    :class:`SandboxLiveError` if the envelope is malformed."""
-    line = stdout.strip()
-    if not line:
-        raise SandboxLiveError(
-            "`mvmctl machine run --up-json` produced empty stdout — expected a JSON envelope.",
-            argv=argv,
-        )
-    try:
-        parsed = json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise SandboxLiveError(
-            f"`mvmctl machine run --up-json` stdout is not valid JSON: {exc.msg}",
-            argv=argv,
-            stderr=line,
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise SandboxLiveError(
-            f"`mvmctl machine run --up-json` envelope must be a JSON object; got {type(parsed).__name__}",
-            argv=argv,
-        )
-    schema = parsed.get("schema_version")
-    if schema != _LiveTransport.SCHEMA_VERSION:
-        raise SandboxLiveError(
-            f"`mvmctl machine run --up-json` envelope schema_version={schema!r}; "
-            f"SDK supports {_LiveTransport.SCHEMA_VERSION}",
-            argv=argv,
-        )
-    vm_id = parsed.get("vm_id")
-    build_mode = parsed.get("build_mode")
-    if not isinstance(vm_id, str) or not vm_id:
-        raise SandboxLiveError(
-            "`mvmctl machine run --up-json` envelope is missing a non-empty `vm_id` field.",
-            argv=argv,
-        )
-    if build_mode not in ("dev", "prod"):
-        raise SandboxLiveError(
-            f"`mvmctl machine run --up-json` envelope build_mode={build_mode!r}; "
-            f"expected 'dev' or 'prod'.",
-            argv=argv,
-        )
-    return {"vm_id": vm_id, "build_mode": build_mode}
-
-
-def _derive_attached_build_mode(
-    stdout: str, *, vm_id: str, argv: list[str]
-) -> str:
-    """Re-derive ``build_mode`` for an attached machine from
-    ``mvmctl machine ls --json`` output.
-
-    The listing is a JSON array of machine entries; we match on the
-    ``name`` field. Fail-closed by construction: only an explicit
-    ``"dev"`` returns ``"dev"``; a ``"prod"`` / missing / unknown
-    value returns ``"prod"``, so a stale or hostile listing can never
-    *open* the dev-only exec path — it can only keep it shut. Raises
-    :class:`SandboxLiveError` when ``vm_id`` is absent from the
-    listing (there is nothing to attach to)."""
-    line = stdout.strip()
-    if not line:
-        raise SandboxLiveError(
-            f"`mvmctl machine ls --json` produced no output; cannot attach to {vm_id!r}.",
-            argv=argv,
-        )
-    try:
-        parsed = json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise SandboxLiveError(
-            f"`mvmctl machine ls --json` stdout is not valid JSON: {exc.msg}",
-            argv=argv,
-            stderr=line,
-        ) from exc
-    if not isinstance(parsed, list):
-        raise SandboxLiveError(
-            f"`mvmctl machine ls --json` must be a JSON array; got "
-            f"{type(parsed).__name__}",
-            argv=argv,
-        )
-    for entry in parsed:
-        if isinstance(entry, dict) and entry.get("name") == vm_id:
-            return "dev" if entry.get("build_mode") == "dev" else "prod"
-    raise SandboxLiveError(
-        f"no machine named {vm_id!r} in `mvmctl machine ls`; is it running?",
-        argv=argv,
-    )
+            _hostlib.call(MACHINE_STOP, {"id": self.vm_id})
+        except (HostLibraryError, MvmTransportError) as exc:
+            sys.stderr.write(f"mvm-sdk live: stopping {self.vm_id} failed: {exc}\n")
 
 
 class Sandbox:
@@ -1357,11 +1077,10 @@ class Sandbox:
 
     Construct via :meth:`Sandbox.create`. Under ``MVM_SDK_MODE=record``
     the constructor sets up an in-process recording; under
-    ``MVM_SDK_MODE=live`` it shells ``mvmctl machine run`` to boot a real
-    microVM and stashes the resulting handle on
-    ``self._live``. Supports context-manager usage; ``__exit__``
-    issues a ``kill`` (record-mode: appends a kill op; live-mode:
-    shells ``mvmctl machine stop``)."""
+    ``MVM_SDK_MODE=live`` it boots a real microVM through the host library
+    and stashes the resulting handle on ``self._live``. Supports
+    context-manager usage; ``__exit__`` issues a ``kill`` (record mode:
+    appends a kill op; live mode: stops the machine)."""
 
     def __init__(
         self,
@@ -1391,25 +1110,25 @@ class Sandbox:
     ) -> "Sandbox":
         """Start a new sandbox session.
 
-        ``template`` resolves to a base image on the Rust side (see
-        ``runtime::resolve_base_image``); in record mode unknown
-        templates fail at lower time, not here, because the wire
-        shape preserves them verbatim. In live mode unknown
-        templates fail when ``mvmctl machine run --manifest <template>``
-        rejects them — that failure surfaces as
-        :class:`SandboxLiveError` here.
-
         ``template`` selects a manifest/template source; ``image`` selects an
-        OCI source. Exactly one must be provided. ``command`` overrides the
-        OCI image command in live mode and records the same entrypoint in
-        record mode. Live mode refuses ``env`` because persistent creation
-        cannot carry it; declare environment in the image or pass ``env`` to
-        ``Sandbox.commands.start``. Record mode continues to encode ``env``
-        in the workload declaration.
+        OCI reference, an absolute path, or ``flake:<ref>#<attr>``. Exactly
+        one must be provided. In record mode ``template`` is preserved
+        verbatim and resolved to a base image on the Rust side, so an unknown
+        template fails at lower time, not here.
+
+        Live mode boots only from ``image``: the host library has no
+        template launch, so ``template`` raises :class:`SandboxModeError`
+        before anything is booted. ``command`` overrides the image command;
+        the in-process launcher refuses a command override today, and that
+        refusal arrives as ``MachineSpecError``. Live mode also refuses
+        ``env``, ``include``, ``tags`` and ``resources``, which it cannot
+        carry faithfully; pass ``env`` to ``Sandbox.commands.start`` instead.
+        Record mode continues to encode all of them in the workload
+        declaration.
 
         ``workload_id`` defaults to the resolved template (the CLI
         overrides with the script's basename when invoked via
-        ``mvmctl compile``)."""
+        ``mvmctl build compile``)."""
         mode = _resolve_mode()  # raises if MVM_SDK_MODE is invalid
         global _recording
         if _recording is not None or _live_sandbox_active():
@@ -1445,21 +1164,26 @@ class Sandbox:
         wid = workload_id or source
 
         if mode == "live":
-            create_args = _lower_live_options(
+            if template is not None:
+                raise SandboxModeError(
+                    f"Sandbox live mode cannot boot template {template!r}: the host "
+                    "library launches images only. Pass `image=` (an OCI reference, "
+                    "an absolute path, or `flake:<ref>#<attr>`), or run the script "
+                    "under record mode."
+                )
+            options = _lower_live_options(
                 env=env,
                 include=include,
                 tags=tags,
                 resources=resources,
                 network=network,
             )
-            live = _LiveTransport.for_source(
-                source_kind="manifest" if template is not None else "image",
-                source=source,
+            live = _LiveTransport.boot(
+                image=source,
                 workload_id=wid,
                 ttl_seconds=ttl_seconds,
-                create_args=create_args,
-                boot_command=command,
-                ports=list((_encode_network(network) or {}).get("ports", [])),
+                options=options,
+                command=command,
             )
             sb = cls(wid, live=live)
             _register_live(sb)
@@ -1495,23 +1219,19 @@ class Sandbox:
         process.
 
         Unlike :meth:`create`, ``connect`` never boots a VM — it binds
-        to a machine that is already up. Because it does not boot, it
-        has no ``--up-json`` envelope to read the machine's
-        ``build_mode`` from, so it re-derives it from
-        ``mvmctl machine ls --json`` (see
-        :meth:`_LiveTransport.for_existing`).
+        to a machine that is already up, and reads its ``build_mode`` from
+        the machine inventory.
 
-        The dev-only exec guard is inherited unchanged: the derived
+        The dev-only guard is inherited unchanged: the derived
         ``build_mode`` is never defaulted to ``"dev"`` — a prod /
         missing / unknown value resolves to ``"prod"``, so
         ``connect(...).exec(...)`` / ``.commands.start(...)`` on a
         sealed prod machine raises :class:`SandboxDevOnly` exactly like
         the ``create`` path (security claim 4).
 
-        Always a live operation: it resolves the mvm CLI regardless of
-        ``MVM_SDK_MODE`` (attaching to a running VM has no record-mode
-        meaning). Raises :class:`SandboxLiveError` when no machine of
-        that name is listed."""
+        Always a live operation, regardless of ``MVM_SDK_MODE``: attaching
+        to a running VM has no record-mode meaning. Raises
+        :class:`SandboxLiveError` when no machine of that name exists."""
         if not isinstance(id, str) or not id:
             raise ValueError("Sandbox.connect requires a non-empty machine id")
         if _recording is not None or _live_sandbox_active():
@@ -1520,7 +1240,7 @@ class Sandbox:
                 "Sandbox.kill() or exit the `with` block before "
                 "attaching to another machine."
             )
-        live = _LiveTransport.for_existing(vm_id=id)
+        live = _LiveTransport.attach(vm_id=id)
         sb = cls(id, live=live)
         _register_live(sb)
         return sb
@@ -1561,10 +1281,9 @@ class Sandbox:
         """One-shot: run ``argv`` inside the sandbox, collect
         stdout/stderr/exit, return :class:`ExecResult`.
 
-        Convenience over ``commands.start`` + the underlying
-        ``mvmctl proc wait`` round-trip. Refuses with
-        :class:`SandboxDevOnly` when the resolved template is prod
-        (ADR-001 claim 4) — no silent fallback.
+        Convenience over ``commands.start`` + ``ProcessHandle.wait``.
+        Refuses with :class:`SandboxDevOnly` when the machine is not a dev
+        build (security claim 4) — no silent fallback.
 
         Live mode only: in record mode the call raises
         :class:`SandboxModeError` because the recording's lowering
@@ -1623,9 +1342,6 @@ class Sandbox:
     def copy_in(self, host_path: str, guest_path: str) -> None:
         """Copy a host file into the running sandbox at ``guest_path``.
 
-        Shells ``mvmctl cp <host_path> <vm>:<guest_path>`` — the host
-        file streams into the guest over the agent fs RPC.
-
         Live mode only: in record mode this raises
         :class:`SandboxModeError`. To stage a file declaratively for a
         recorded workload, use ``files.write(guest_path, content)``.
@@ -1640,13 +1356,10 @@ class Sandbox:
                 "MVM_SDK_MODE=record use `files.write(path, content)` to "
                 "stage a file declaratively."
             )
-        self._live.cp(host_path, f"{self._live.vm_id}:{guest_path}")
+        self._live.cp("host_to_guest", host_path, guest_path)
 
     def copy_out(self, guest_path: str, host_path: str) -> None:
         """Copy a file out of the running sandbox to ``host_path``.
-
-        Shells ``mvmctl cp <vm>:<guest_path> <host_path>`` — the guest
-        file streams back over the agent fs RPC.
 
         Live mode only: pulling a file out of a running VM has no
         record-mode meaning, so in record mode this raises
@@ -1661,7 +1374,7 @@ class Sandbox:
                 "`Sandbox.copy_out` is a live-mode operation; it pulls a "
                 "file from a running VM and has no record-mode meaning."
             )
-        self._live.cp(f"{self._live.vm_id}:{guest_path}", host_path)
+        self._live.cp("guest_to_host", host_path, guest_path)
 
     def forward(self, host_port: int, guest_port: int) -> None:
         """Refuse dynamic ingress changes after admission.
@@ -1686,8 +1399,8 @@ class Sandbox:
         In record mode, appends a ``kill`` op (the Rust lowering
         drops these; the microVM TTL is the orchestrator's job, but
         the bookkeeping is preserved through the recording so
-        tooling can introspect intent). In live mode, shells
-        ``mvmctl machine stop <vm>``."""
+        tooling can introspect intent). In live mode, stops the
+        machine."""
         if self._live is not None:
             self._live.kill()
             _clear_live()
@@ -1705,8 +1418,8 @@ class Sandbox:
         return self
 
     async def __aexit__(self, *_exc: Any) -> None:
-        # Same teardown as `__exit__`, off the event loop so a slow
-        # `mvmctl machine stop` doesn't block the caller's loop.
+        # Same teardown as `__exit__`, off the event loop: stopping a
+        # machine waits on the VMM, and the caller's loop should not.
         await asyncio.to_thread(self.kill)
 
 

@@ -1,7 +1,7 @@
 """Refusal-path fixture (Python).
 
 Emits a JSON verdict per refusal the host-side SDK is supposed to enforce
-*before* any CLI call. Each entry records whether the SDK refused and the
+*before* any guest call reaches the host library. Each entry records whether the SDK refused and the
 exception type it raised, so the scenario asserts the refusal rather than
 merely the absence of a crash.
 """
@@ -9,13 +9,14 @@ merely the absence of a crash.
 import json
 import os
 
+import _recording_hostlib  # noqa: F401  (installs the recorder)
 import mvm
 
 verdicts = {}
 
 # A sealed (prod) machine must refuse the dev-only process verbs client-side.
-# The recording double reports build_mode=prod for this fixture.
-sandbox = mvm.Sandbox.create("python-3.12", workload_id="bdd-refusals")
+# The recorder reports build_mode=prod for this fixture.
+sandbox = mvm.Sandbox.create(image="docker.io/library/python:3.12-slim", workload_id="bdd-refusals")
 try:
     sandbox.commands.start(["python", "-c", "print('ok')"])
     verdicts["sealed_commands_start"] = "admitted"

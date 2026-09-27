@@ -417,10 +417,11 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 /// 1. The flake itself (`flake.nix` + `flake.lock`) — controls
 ///    which `nixpkgs` rev, which `mkGuest` shape, which `microvm.nix`,
 ///    which packages get installed.
-/// 2. The embedded host-binary bytes — `build.rs` cross-compiles the
-///    in-VM PID-1 + egress-proxy binaries (`cargo build -p mvm-build
-///    --bin <name>`) and embeds the bytes in mvmctl; injected into the
-///    rootfs at boot. The byte hash captures the bin source, the
+/// 2. The bytes of the embedded host binaries the rootfs bakes — `build.rs`
+///    cross-compiles the in-VM PID-1 and builder daemon (`cargo build -p
+///    mvm-build --bin <name>`) and embeds the bytes in mvmctl, and the flake
+///    installs them. The rest of the payload is not installed and not folded.
+///    The byte hash captures the bin source, the
 ///    `mvm-build` lib, its deps, AND the cross-compile toolchain in one
 ///    shot — strictly more than the per-crate `src/` hash this replaced
 ///    (which also broke when the two former top-level `crates/<name>/`
@@ -429,11 +430,12 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    ([`BUILDER_FLAKE_NIX_INPUTS`]): the shared library, the guest recipes,
 ///    the kernel configs, and the runtime-overlay flake.
 /// 4. The Rust source of `mvm-setpriv`, the one Rust binary the flake compiles
-///    itself (`cargo build --package mvm-agentd --bin mvm-setpriv`) rather
+///    itself (`cargo build --package mvm-setpriv --bin mvm-setpriv`) rather
 ///    than taking from mvmctl's embedded payload: every workspace crate
-///    `mvm-agentd` reaches, the `Cargo.lock` entries of their non-dev
-///    dependency closure, and the root-manifest tables that change how that
-///    closure compiles (see `setpriv_source`).
+///    `mvm-setpriv` reaches (only itself; it is a leaf over `libc`), the
+///    `Cargo.lock` entries of their non-dev dependency closure, and the
+///    root-manifest tables that change how that closure compiles (see
+///    `mvm_build::source_closure`).
 ///
 /// The workspace `Cargo.lock` as a whole is deliberately not hashed, so a
 /// dependency bump outside those two binaries' closures does not rebuild the
@@ -465,6 +467,21 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 /// The embedded-binary layer folds `(name, sha256_hex)` under a
 /// `host-bin\0` domain tag (see `fold_embedded_binary_identity`).
 pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
+    let payload = crate::host_binaries::source::host_payload_if_any()
+        .context("produce the Linux host binaries the builder image is fingerprinted by")?;
+    let identities: Vec<(&str, &str)> = payload
+        .iter()
+        .map(|bin| (bin.name.as_str(), bin.sha256_hex.as_str()))
+        .collect();
+    fingerprint_builder_vm_sources(builder_flake_dir, &identities)
+}
+
+/// [`builder_vm_source_fingerprint`] over a given payload, as
+/// `(name, sha256_hex)` pairs in table order.
+pub(super) fn fingerprint_builder_vm_sources(
+    builder_flake_dir: &str,
+    payload: &[(&str, &str)],
+) -> Result<String> {
     let flake_dir = std::path::Path::new(builder_flake_dir);
     let workspace_root = workspace_root_for_builder_flake(flake_dir)?;
     let mut hasher = Sha256::new();
@@ -481,17 +498,16 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
         hash_named_file(&mut hasher, name, &path)?;
     }
 
-    // Layer 2: the embedded host-binary identity (`mvm-host-vm-init`,
-    // `mvm-builderd`). `build.rs` cross-compiles them and embeds the bytes
-    // in mvmctl; Stage 0 installs those bytes into the rootfs. Hashing the
+    // Layer 2: the baked host-binary identity (`mvm-host-vm-init`,
+    // `mvm-builderd`). `build.rs` cross-compiles them and embeds the bytes in
+    // mvmctl, or a binary built without them produces the same bytes from its
+    // checkout; Stage 0 installs those bytes into the rootfs. Hashing the
     // bytes captures the bin source, the `mvm-build` lib, its dep closure, AND
     // the cross-compile toolchain (a gnu→musl switch yields different bytes
     // from identical source) in one shot. (`build.rs` reruns the cross-compile
     // when its real inputs change, so a rebuilt binary's bytes shift this
     // layer.)
-    for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
-        fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
-    }
+    fold_baked_binary_identities(&mut hasher, payload);
 
     // Layer 3: every Nix source outside its own directory that the flake
     // reaches. A change to any of them changes the built image, and a
@@ -507,32 +523,35 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
 
     // Layer 4: the one Rust binary the flake compiles from workspace source
     // itself, so it has no embedded bytes to fold into layer 2.
-    super::setpriv_source::fold_setpriv_source_identity(&mut hasher, &workspace_root)?;
+    mvm_build::source_closure::fold_package_source_identity(
+        &mut hasher,
+        &workspace_root,
+        mvm_build::source_closure::SETPRIV_PACKAGE,
+    )?;
 
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// The Nix sources, relative to the workspace root, that the builder-vm flake
-/// imports from outside its own directory: the shared library (mkGuest, the
-/// workspace filter, the host-binaries manifest), the guest package recipes,
-/// the kernel configs, and the runtime-overlay flake. The top-level `nix`
-/// flake is listed because a build reaches the recipes through it.
-///
-/// A test holds this list to the flakes' actual import sites, so adding an
-/// import without listing it fails rather than going stale.
-pub(super) const BUILDER_FLAKE_NIX_INPUTS: &[&str] = &[
-    "nix/flake.nix",
-    "nix/flake.lock",
-    "nix/lib",
-    "nix/packages",
-    "nix/images/kernel",
-    "nix/images/runtime-overlay",
-];
+/// Shared with the local image cache key of a pair-built builder image, which
+/// reads the same sources.
+pub(super) use mvm_build::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
+
+/// Fold the identity of each payload binary the builder image bakes, in
+/// payload order. The seed and bootstrap-support binaries drive Stage 0 but
+/// are never installed in what it produces, so rebuilding one leaves the
+/// image, and this key, as it was.
+pub(super) fn fold_baked_binary_identities(hasher: &mut Sha256, payload: &[(&str, &str)]) {
+    for &(name, sha256_hex) in payload {
+        if crate::host_binaries::manifest::is_baked_into_rootfs(name) {
+            fold_embedded_binary_identity(hasher, name, sha256_hex);
+        }
+    }
+}
 
 /// Fold one embedded host-binary's identity into the fingerprint.
 /// Keyed on `(name, sha256_hex)` so a rebuilt binary's byte change —
-/// the authoritative signal that the in-VM PID-1 / egress-proxy source
-/// or toolchain shifted — busts the Stage 0 cache key. The `host-bin\0`
+/// the authoritative signal that the baked binary's source or toolchain
+/// shifted — busts the Stage 0 cache key. The `host-bin\0`
 /// domain tag keeps these entries from colliding with the file-hash
 /// layers above.
 pub(super) fn fold_embedded_binary_identity(hasher: &mut Sha256, name: &str, sha256_hex: &str) {

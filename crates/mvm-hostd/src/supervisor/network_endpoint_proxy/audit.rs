@@ -8,7 +8,8 @@ use super::prepare::{PreparedFlow, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
     ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
-    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_substituted,
+    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_reflection_scrubbed,
+    emit_secret_substituted,
 };
 
 /// The sorted, de-duplicated category list a `secret.redacted` entry carries.
@@ -154,6 +155,69 @@ impl SubstitutionService {
         for proof in proofs {
             if let Err(e) = emit_rewrite_proof(recorder, dest, phase, proof).await {
                 tracing::warn!(error = %e, "secret.rewrite_proof audit emit failed");
+            }
+        }
+    }
+
+    /// Record one route decision: `host.route.decided` with the route, the
+    /// rule that decided (or `otherwise` / `ambiguous_path`), the outcome, the
+    /// destination, a fixed-set method label, and — for a refusal — its fixed
+    /// reason. No path, header or body byte is recorded.
+    pub(super) async fn audit_route_decision(
+        &self,
+        decision: &mvm_contract::policy::routes::RouteDecision,
+        destination: &str,
+        method: &'static str,
+        refused: Option<&'static str>,
+    ) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        let mut labels = vec![
+            ("route".to_string(), decision.route_id.clone()),
+            ("rule".to_string(), decision.decided_by.label()),
+            ("outcome".to_string(), decision.outcome.label().to_string()),
+            ("destination".to_string(), destination.to_string()),
+            ("method".to_string(), method.to_string()),
+            (
+                "verdict".to_string(),
+                if refused.is_some() {
+                    "refused"
+                } else {
+                    "forwarded"
+                }
+                .to_string(),
+            ),
+        ];
+        if let Some(reason) = refused {
+            labels.push(("reason".to_string(), reason.to_string()));
+        }
+        if let Err(e) = recorder
+            .record_unbound(
+                crate::supervisor::audit_recorder::EventCategory::Host,
+                "host.route.decided",
+                labels,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "host.route.decided audit emit failed");
+        }
+    }
+
+    /// Emit one `secret.reflection_scrubbed` per binding whose value a
+    /// response carried back. Metadata only: the name and how many times,
+    /// never the value. Best-effort, like every entry on this path.
+    pub(super) async fn audit_reflection_scrubbed(
+        &self,
+        counts: &super::reflection::ScrubCounts,
+        destination: Option<&str>,
+    ) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        for (name, count) in counts {
+            if let Err(e) = emit_secret_reflection_scrubbed(recorder, name, dest, *count).await {
+                tracing::warn!(error = %e, "secret.reflection_scrubbed audit emit failed");
             }
         }
     }
@@ -597,6 +661,43 @@ mod server_tests {
         let logged = std::fs::read_to_string(&chain).unwrap_or_default();
         assert!(!logged.contains("secret.substituted"), "{logged}");
         assert!(!logged.contains("secret.forward_outcome"), "{logged}");
+    }
+
+    /// A request to the metadata service or a private range is refused on the
+    /// typed path too, and the chain records the class, not a generic denial.
+    #[tokio::test]
+    async fn a_restricted_address_refusal_records_its_class() {
+        let dir = tempdir().unwrap();
+        let (service, ph, chain) = recorded_service(
+            dir.path(),
+            std::sync::Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::new(
+                mvm_contract::policy::projection::CanonicalEgress::Unrestricted,
+            )),
+        );
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.20.30.40/internal",
+        ] {
+            let resp = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: url.into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(
+                matches!(resp, WireResponse::Refused { .. }),
+                "{url}: {resp:?}"
+            );
+        }
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("cloud_metadata"), "{logged}");
+        assert!(logged.contains("private_range"), "{logged}");
+        assert!(
+            !logged.contains("meta-data"),
+            "no path in the chain: {logged}"
+        );
     }
 
     /// A claim-10 refusal lands one chain-signed entry naming the refused

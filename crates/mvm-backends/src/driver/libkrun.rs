@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -253,7 +253,7 @@ fn bounded_supervisor_command(
     state_dir: &Path,
 ) -> mvm_core::spawn_scope::BoundCommand {
     mvm_core::spawn_scope::bind_spawn(
-        Command::new(supervisor),
+        mvm_core::env_hygiene::helper_command(supervisor),
         &spec.name,
         state_dir,
         &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)

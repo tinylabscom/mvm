@@ -265,7 +265,7 @@ pub struct ImageSetRequirement {
 }
 
 /// Every role published once per guest architecture.
-const ARCH_BOUND_ROLES: [ImageSetRole; 9] = [
+const ARCH_BOUND_ROLES: [ImageSetRole; 10] = [
     ImageSetRole::BuilderVm,
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
@@ -275,6 +275,7 @@ const ARCH_BOUND_ROLES: [ImageSetRole; 9] = [
     ImageSetRole::SdkSidecar(GuestLibc::Glibc),
     ImageSetRole::SdkSidecar(GuestLibc::Musl),
     ImageSetRole::Stage0BootstrapKernel,
+    ImageSetRole::Initramfs,
 ];
 
 impl ImageSetRequirement {

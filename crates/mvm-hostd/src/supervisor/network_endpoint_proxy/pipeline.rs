@@ -18,11 +18,15 @@ use super::prepare::{
     BodyPlaceholderScan, PLACEHOLDER_OUTSIDE_HEADERS, PreparedFlow, REASON_PLACEHOLDER_IN_BODY,
     UNPARSEABLE_DESTINATION, destination_host,
 };
+use super::reflection::{ScrubCounts, StreamingScrubber, body_is_readable, merge_counts};
 use crate::keyholder::{NetworkEndpoint, find_placeholder};
 use crate::supervisor::ai_meter;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
 use crate::supervisor::reversible_replacement::StreamingReinjector;
 use crate::supervisor::secret_audit::ForwardOutcome;
+
+/// Why a response was refused because its encoding hid it from the scrub.
+const REASON_RESPONSE_ENCODED: &str = "response_encoded_unscannable";
 
 /// Typed FlowMux request ceiling, independent of transport frame size.
 const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -62,6 +66,11 @@ impl SubstitutionService {
         self.audit_handoff(&flow).await;
         match self.forwarder.forward(request).await {
             Ok(mut response) => {
+                if let Err(refusal) = self.scrub_buffered_response(&flow, &mut response).await {
+                    self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                        .await;
+                    return refusal;
+                }
                 let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
                 self.audit_completed_flow(&flow, &reinject_proofs).await;
                 self.audit_forward_outcome(&flow, ForwardOutcome::Completed)
@@ -366,12 +375,80 @@ impl SubstitutionService {
             .await
     }
 
+    /// Refuse a response the endpoint cannot read while it holds a value that
+    /// could be in it. `Err` carries the refusal for the workload; the chain
+    /// entry is written here.
+    async fn refuse_unreadable_response(
+        &self,
+        flow: &PreparedFlow,
+        headers: &[(String, String)],
+    ) -> Result<(), WireResponse> {
+        if body_is_readable(headers) {
+            return Ok(());
+        }
+        self.audit_fail_closed(flow.destination.as_deref(), REASON_RESPONSE_ENCODED)
+            .await;
+        Err(WireResponse::Refused {
+            message: "response is content-encoded and cannot be checked for a reflected \
+                      credential; refusing (fail-closed)"
+                .into(),
+        })
+    }
+
+    /// Scrub a whole buffered response of every value substituted so far.
+    async fn scrub_buffered_response(
+        &self,
+        flow: &PreparedFlow,
+        response: &mut ForwardResponse,
+    ) -> Result<(), WireResponse> {
+        let Some(set) = self.reflection.snapshot() else {
+            return Ok(());
+        };
+        self.refuse_unreadable_response(flow, &response.headers)
+            .await?;
+        let mut counts = ScrubCounts::new();
+        for (_, value) in &mut response.headers {
+            *value = set.scrub_str(value, &mut counts);
+        }
+        let body_counts_before: u64 = counts.values().sum();
+        response.body = set.scrub(&response.body, &mut counts);
+        if counts.values().sum::<u64>() != body_counts_before {
+            // The body changed length; a declared length would now be wrong.
+            let len = response.body.len().to_string();
+            for (name, value) in &mut response.headers {
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.clone_from(&len);
+                }
+            }
+        }
+        self.audit_reflection_scrubbed(&counts, flow.destination.as_deref())
+            .await;
+        Ok(())
+    }
+
     async fn transform_response_stream(
         self: &Arc<Self>,
         mut flow: PreparedFlow,
         mut upstream: ForwardStreamResponse,
         ai_meta: Option<AiRequestMeta>,
     ) -> Result<ForwardStreamResponse, WireResponse> {
+        // A reflected credential is scrubbed before any other transform sees
+        // the response, headers first, so nothing downstream ever holds it.
+        let scrub_set = self.reflection.snapshot();
+        let mut scrub_counts = ScrubCounts::new();
+        if let Some(set) = &scrub_set {
+            if let Err(refusal) = self
+                .refuse_unreadable_response(&flow, &upstream.headers)
+                .await
+            {
+                self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                    .await;
+                return Err(refusal);
+            }
+            for (_, value) in &mut upstream.headers {
+                *value = set.scrub_str(value, &mut scrub_counts);
+            }
+        }
         // Reinject and redact response headers before any body byte can cross
         // to the guest. HTTP transfer framing belongs to the upstream leg, not
         // FlowMux; remove it because transforms may change decoded length.
@@ -416,6 +493,7 @@ impl SubstitutionService {
         tokio::spawn(async move {
             // Every exit below yields how the forward ended, and the outcome is
             // recorded once, after the block, whichever exit was taken.
+            let mut scrubber = scrub_set.map(StreamingScrubber::new);
             let outcome = async {
                 let mut redactor = StreamingRedactor::new();
                 let mut ai_body_buffer = if meter_streaming {
@@ -431,6 +509,10 @@ impl SubstitutionService {
                             let _ = sender.send(Err(error)).await;
                             return ForwardOutcome::ResponseFailed;
                         }
+                    };
+                    let chunk = match scrubber.as_mut() {
+                        Some(scrubber) => scrubber.push(&chunk),
+                        None => chunk,
                     };
                     if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
                         buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
@@ -472,7 +554,18 @@ impl SubstitutionService {
                         return ForwardOutcome::Canceled;
                     }
                 }
-                let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+                // What the scrubber held back for a value that might have
+                // continued is decided now, and goes through the same
+                // transforms as every other byte.
+                let held_back = scrubber
+                    .as_mut()
+                    .map(StreamingScrubber::finish)
+                    .unwrap_or_default();
+                let (mut reintroduced_tail, proofs) =
+                    reinjector.push(&mut flow.replacement_flow, &held_back);
+                reinject_proofs.extend(proofs);
+                let (tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+                reintroduced_tail.extend(tail);
                 reinject_proofs.extend(proofs);
                 let (ready, hits) = match redactor.push(
                     &service.redactor,
@@ -542,6 +635,15 @@ impl SubstitutionService {
                 ForwardOutcome::Completed
             }
             .await;
+            // Scrubbed occurrences are recorded on every exit, a failed or
+            // canceled body included: what matters is that the destination
+            // sent the value back, not whether the guest read to the end.
+            if let Some(scrubber) = &scrubber {
+                merge_counts(&mut scrub_counts, scrubber.counts().clone());
+            }
+            service
+                .audit_reflection_scrubbed(&scrub_counts, response_destination.as_deref())
+                .await;
             service.audit_forward_outcome(&flow, outcome).await;
         });
 

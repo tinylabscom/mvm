@@ -161,3 +161,22 @@ Feature: machine run request contract
     Then the command exits with code 1
     And the error output contains "unknown runtime"
     And the error output contains "python"
+
+  # A loader, shell, interpreter, or password-manager session variable changes
+  # what the guest process runs before its own code starts. The caller typed it,
+  # so the run refuses and names it, without echoing the value.
+  Scenario: machine run refuses a denied environment variable by name
+    When I run mvmctl with "machine run --image alpine --dry-run --env LD_PRELOAD=/tmp/hook.so -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "LD_PRELOAD (loader)"
+    And the error output contains "--allow-env NAME"
+
+  Scenario: machine run re-admits a denied variable by its exact name
+    When I run mvmctl with "machine run --image alpine --dry-run --env PYTHONPATH=/srv/lib --allow-env PYTHONPATH -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+
+  Scenario: machine run refuses a pattern as a re-admission
+    When I run mvmctl with "machine run --image alpine --dry-run --env LD_PRELOAD=/tmp/hook.so --allow-env LD_* -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "never a pattern"

@@ -96,6 +96,25 @@
         }
       ]
     },
+    "EgressTarget": {
+      "additionalProperties": false,
+      "description": "One outbound destination the workload may reach. Each one lands in the signed plan's egress grant, which is what the host egress gate reads.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
     "FsEntry": {
       "additionalProperties": false,
       "description": "One entry in an `FsList` response.",
@@ -625,6 +644,122 @@
       "title": "StdinRequest",
       "type": "object"
     },
+    "GuestProcStreamCloseReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestProcStreamCloseRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "CloseRequest",
+      "type": "object"
+    },
+    "GuestProcStreamNextReply": {
+      "properties": {
+        "done": {
+          "description": "The process has ended and the stream is closed.",
+          "type": "boolean"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/definitions/StreamEvent"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How it ended; present exactly when `done`."
+        }
+      },
+      "required": [
+        "done",
+        "events"
+      ],
+      "title": "NextReply",
+      "type": "object"
+    },
+    "GuestProcStreamNextRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wait_ms": {
+          "default": null,
+          "description": "How long to wait for a first chunk. At most [`MAX_WAIT_MS`].",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "NextRequest",
+      "type": "object"
+    },
+    "GuestProcStreamOpenReply": {
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "OpenReply",
+      "type": "object"
+    },
+    "GuestProcStreamOpenRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "description": "Bounds the wait on the guest; the stream ends `timed_out` past it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "token"
+      ],
+      "title": "OpenRequest",
+      "type": "object"
+    },
     "GuestProcWaitReply": {
       "properties": {
         "outcome": {
@@ -791,6 +926,217 @@
           "type": "string"
         }
       ]
+    },
+    "MachineCreateReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineCreateRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.create` request: a persistent definition, never booted here.",
+      "properties": {
+        "backend": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "egress": {
+          "items": {
+            "$ref": "#/definitions/EgressTarget"
+          },
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "image": {
+          "type": "string"
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "image",
+        "name"
+      ],
+      "title": "CreateRequest",
+      "type": "object"
     },
     "MachineExecReply": {
       "description": "A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.",
@@ -980,6 +1326,19 @@
         "id"
       ],
       "title": "MachineRef",
+      "type": "object"
+    },
+    "MachineInventoryReply": {
+      "items": {
+        "description": "A machine inventory record; the shape is owned by the client inventory module. `name` and `build_mode` (`dev` or `prod`) are always present.",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "MachineInventoryRequest": {
+      "additionalProperties": false,
+      "description": "A request that carries nothing.",
+      "title": "Empty",
       "type": "object"
     },
     "MachineListReply": {
@@ -1192,6 +1551,406 @@
       "title": "RemoveRequest",
       "type": "object"
     },
+    "MachineRunReply": {
+      "description": "A `machine.run` reply.",
+      "properties": {
+        "build_mode": {
+          "description": "`dev` or `prod`, resolved fail-closed the way the machine inventory resolves it. Only `dev` admits the DevOnly `guest.*` methods.",
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/definitions/MachineState"
+        },
+        "plan_id": {
+          "description": "Content-addressed id of the admitted plan, for correlating with the chain-signed audit log.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "build_mode",
+        "machine",
+        "plan_id"
+      ],
+      "title": "RunReply",
+      "type": "object"
+    },
+    "MachineRunRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.run` request.",
+      "properties": {
+        "backend": {
+          "default": null,
+          "description": "Hypervisor override; the host's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": [],
+          "description": "Command override. The in-process launcher refuses a non-empty one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "egress": {
+          "items": {
+            "$ref": "#/definitions/EgressTarget"
+          },
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Guest environment. The in-process launcher refuses a non-empty one.",
+          "type": "object"
+        },
+        "force": {
+          "default": false,
+          "description": "Persistent only: recreate a same-name definition whose config differs.",
+          "type": "boolean"
+        },
+        "image": {
+          "description": "What to boot: an OCI reference (optionally `oci:`-prefixed), an absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`.",
+          "type": "string"
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/RunMode"
+        },
+        "name": {
+          "default": null,
+          "description": "Required for a persistent machine; generated for a transient one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ports": {
+          "default": [],
+          "description": "Opaque TCP ingress, each written `host:guest`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Security profile; `standard` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl_seconds": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "title": "RunRequest",
+      "type": "object"
+    },
+    "MachineStartReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineStartRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRef",
+      "type": "object"
+    },
+    "MachineState": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
     "MachineStatus": {
       "oneOf": [
         {
@@ -1295,6 +2054,49 @@
           "type": "string"
         }
       ]
+    },
+    "RunMode": {
+      "description": "Whether the machine outlives the caller's session.",
+      "oneOf": [
+        {
+          "description": "Boots without a persisted definition; cleaned up when it exits or its TTL lapses.",
+          "enum": [
+            "transient"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Persists a definition under the machine's name, then boots it.",
+          "enum": [
+            "persistent"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "StreamEvent": {
+      "description": "One chunk of output.",
+      "properties": {
+        "data_b64": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/definitions/StreamName"
+        }
+      },
+      "required": [
+        "data_b64",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamName": {
+      "description": "Which output stream a chunk came from.",
+      "enum": [
+        "stdout",
+        "stderr"
+      ],
+      "type": "string"
     },
     "WaitOutcome": {
       "description": "How a waited-on process ended.",
@@ -1593,6 +2395,57 @@
       "title": "GuestProcStdin",
       "type": "object"
     },
+    "guest_proc_stream_close": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamCloseReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamCloseRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamClose",
+      "type": "object"
+    },
+    "guest_proc_stream_next": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamNextReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamNextRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamNext",
+      "type": "object"
+    },
+    "guest_proc_stream_open": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamOpenReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamOpenRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamOpen",
+      "type": "object"
+    },
     "guest_proc_wait": {
       "additionalProperties": false,
       "properties": {
@@ -1608,6 +2461,23 @@
         "reply"
       ],
       "title": "GuestProcWait",
+      "type": "object"
+    },
+    "machine_create": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineCreateReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineCreateRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineCreate",
       "type": "object"
     },
     "machine_exec": {
@@ -1642,6 +2512,23 @@
         "reply"
       ],
       "title": "MachineInspect",
+      "type": "object"
+    },
+    "machine_inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineInventoryReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineInventoryRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineInventory",
       "type": "object"
     },
     "machine_list": {
@@ -1695,6 +2582,40 @@
       "title": "MachineRm",
       "type": "object"
     },
+    "machine_run": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineRunReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineRunRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineRun",
+      "type": "object"
+    },
+    "machine_start": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineStartReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineStartRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineStart",
+      "type": "object"
+    },
     "machine_stop": {
       "additionalProperties": false,
       "properties": {
@@ -1715,11 +2636,15 @@
   },
   "required": [
     "backend_capabilities",
+    "machine_create",
     "machine_exec",
     "machine_inspect",
+    "machine_inventory",
     "machine_list",
     "machine_logs",
     "machine_rm",
+    "machine_run",
+    "machine_start",
     "machine_stop",
     "guest_cp",
     "guest_fs_list",
@@ -1734,6 +2659,9 @@
     "guest_proc_signal",
     "guest_proc_start",
     "guest_proc_stdin",
+    "guest_proc_stream_close",
+    "guest_proc_stream_next",
+    "guest_proc_stream_open",
     "guest_proc_wait"
   ],
   "title": "HostAbi",

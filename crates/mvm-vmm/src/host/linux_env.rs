@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::Write as _;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::OnceLock;
 
 use mvm_core::linux_env::LinuxEnv;
@@ -20,7 +20,7 @@ impl LinuxEnv for NativeEnv {
             return Ok(output);
         }
 
-        Command::new("bash")
+        mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .output()
             .with_context(|| "Failed to run command on host")
@@ -37,7 +37,7 @@ impl LinuxEnv for NativeEnv {
             );
         }
 
-        let output = Command::new("bash")
+        let output = mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .stdin(Stdio::inherit())
             .stdout(if crate::host::ui::is_chrome_routed_to_stderr() {
@@ -72,7 +72,7 @@ impl LinuxEnv for NativeEnv {
             return Ok(output);
         }
 
-        Command::new("bash")
+        mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -369,6 +369,7 @@ pub fn default_env() -> &'static dyn LinuxEnv {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+    use std::process::Command;
 
     #[test]
     fn test_create_linux_env_returns_env() {

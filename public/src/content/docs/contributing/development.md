@@ -7,7 +7,7 @@ description: Getting started as a contributor to mvm.
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
 - **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed when a source build has to produce Linux helper binaries on demand, or when building a release artifact with `release-artifact-bootstrap`. End-users running a downloaded `mvmctl` don't need them.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just toolchain-embed` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
@@ -37,35 +37,36 @@ development prerequisites explicitly.
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 
-# Source-checkout contributors exercising Linux helper/release builds:
-# install the *pinned* zig + the Linux cross-targets for the active
-# toolchain. Do NOT `brew install zig` — Homebrew's zig drifts off the
-# pinned cargo-zigbuild and fails with a cryptic CacheCheckFailed.
+# Source-checkout contributors: install the *pinned* zig, the Linux
+# cross-targets for the active toolchain and the pinned cargo-zigbuild. Do NOT
+# `brew install zig` — Homebrew's zig drifts off the pinned cargo-zigbuild and
+# fails with a cryptic CacheCheckFailed.
 just toolchain-embed
 
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
 
-# `bootstrap` and any VM boot need the embedded Linux host binaries, whose
-# cross-compile is opt-in. Build with them when you are about to boot:
-just embed
-cargo run --features embed-host-bins -- bootstrap
+# A VM boot needs the Linux host binaries. This mvmctl builds them itself the
+# first time it needs a builder VM, and says so before it starts.
+cargo run -- bootstrap
 ```
 
-> **Note — `just embed` vs `cargo build`.** The cross-compile of the embedded
-> Linux host binaries is the only work `mvm-cli`'s build script still does, and
-> it is off by default so it stays off the edit/check/test loop. A plain
-> `cargo build` gives you an `mvmctl` with every host-side verb; it just cannot
-> bootstrap a builder VM, and says so with this recipe named. The two write the
-> same `target/<profile>/mvmctl` under different feature sets, so alternating
-> them relinks `mvmctl` — run `just embed` when you are about to boot a VM, not
-> as part of the inner loop. Released binaries always carry the payload.
+> **Note — where the Linux host binaries come from.** Their musl cross-compile
+> is the only work `mvm-cli`'s build script still does. A release build
+> (`cargo build --release`) embeds them by default; set `MVM_EMBED=0` to opt
+> out, and a release build that finds the toolchain missing warns and carries
+> on without them. A debug build — the one `cargo check`, clippy and nextest use
+> — never cross-compiles, so the edit/check/test loop stays fast.
 >
-> Two things follow. Bare `just embed` builds the **debug** profile, so use
-> `just embed --release` if that is the binary you invoke. And a plain
-> `cargo build` restores the payload from `~/.cache/mvm/embed` when the store
-> has bytes keyed to this tree, so one `just embed` is not undone by the next
-> ordinary build.
+> Either way the result lands in the content store at `~/.cache/mvm/embed`,
+> keyed to the sources it was built from, and every build restores from there:
+> a debug `cargo build` after a release one carries the payload without
+> compiling it. An `mvmctl` that still has none builds it in-process the first
+> time it needs a builder VM, into the same store — one status line on stderr
+> first, the compiler output with `-v` — so the next `cargo build` embeds it.
+> It never compiles a second `mvmctl`. `just embed` (or `just embed --release`)
+> builds the whole set up front, per-VM helpers included. Released binaries
+> always carry the payload.
 
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain

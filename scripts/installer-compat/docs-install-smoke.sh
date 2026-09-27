@@ -60,8 +60,19 @@ fi
 
 installer_copy="$(physical_tmpdir)/install.sh"
 curl -fsSL "$url" -o "$installer_copy" || fail "could not fetch the installer from $url"
-default="$(sed -n 's/^DEFAULT_VERSION="\(.*\)"$/\1/p' "$installer_copy")"
-[ -n "$default" ] || fail "the installer at $url bakes no DEFAULT_VERSION"
+baked="$(sed -n 's/^DEFAULT_VERSION="\(.*\)"$/\1/p' "$installer_copy")"
+[ -n "$baked" ] || fail "the installer at $url bakes no DEFAULT_VERSION"
+
+# The one-liner installs the newest stable release, and the baked one only
+# when the releases API has none to offer.
+case "$(uname -m)" in
+  x86_64) target="x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
+  *) fail "unsupported arch $(uname -m)" ;;
+esac
+default="$(newest_stable_release "$target")" \
+  || fail "could not read the releases API to learn what the one-liner installs"
+[ -n "$default" ] || default="$baked"
 
 bin="$HOME/.local/bin"
 [ ! -e "$bin/mvmctl" ] || fail "$bin/mvmctl already exists; this smoke needs a machine without mvm"

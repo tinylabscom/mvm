@@ -220,6 +220,7 @@ impl PreparedOutputs {
                 continue;
             }
             let destination = PathBuf::from(&grant.host_path);
+            let protected = plan.protected_paths.matcher();
             let collected = mvm_fs::output::collect_from_ext4(&mvm_fs::output::OutputCollection {
                 image: &output.image,
                 destination: &destination,
@@ -227,6 +228,7 @@ impl PreparedOutputs {
                     max_bytes: grant.max_bytes,
                     max_entries: grant.max_entries,
                 },
+                protected: protected.as_ref(),
             });
             match collected {
                 Ok(collected) => {

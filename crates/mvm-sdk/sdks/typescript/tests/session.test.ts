@@ -1,111 +1,95 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MvmTransportError } from "../src/_errors/types.js";
+import { SESSION_UNAVAILABLE, Session, currentSessionId, session } from "../src/_session.js";
+import { HostRecorder, uninstallRecorder } from "./_recorder.js";
 
-import { Session, currentSessionId, session } from "../src/_session.js";
+let host: HostRecorder;
 
-/**
- * A stand-in `mvmctl` that answers the two session verbs.
- *
- * `session start` prints a fresh id derived from the workload, so a test
- * can tell two concurrent sessions apart; `session stop` records the
- * teardown so a test can assert it happened.
- */
-let tmp: string;
-let fakeCli: string;
-let stopLog: string;
-
-beforeAll(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mvm-session-test-"));
-  stopLog = path.join(tmp, "stops.log");
-  fakeCli = path.join(tmp, "mvmctl");
-  fs.writeFileSync(
-    fakeCli,
-    `#!/bin/bash
-if [ "$1" = "session" ] && [ "$2" = "start" ]; then
-  # argv: session start -- <workload_id>
-  echo "sid-$4"
-  exit 0
-fi
-if [ "$1" = "session" ] && [ "$2" = "stop" ]; then
-  echo "$3" >> "${stopLog}"
-  exit 0
-fi
-exit 64
-`,
-    { mode: 0o755 },
-  );
-  process.env.MVM_CLI_BIN = fakeCli;
+beforeEach(() => {
+  // A session makes no host call in either mode; the recorder proves it.
+  host = new HostRecorder().install();
 });
 
-afterAll(() => {
-  delete process.env.MVM_CLI_BIN;
-  fs.rmSync(tmp, { recursive: true, force: true });
+afterEach(() => {
+  uninstallRecorder();
+  delete process.env.MVM_NO_VM;
 });
 
-function stops(): string[] {
-  if (!fs.existsSync(stopLog)) return [];
-  return fs.readFileSync(stopLog, "utf-8").trim().split("\n").filter(Boolean);
-}
+describe("session without MVM_NO_VM", () => {
+  it("refuses before the body runs", () => {
+    let ran = false;
+    expect(() =>
+      session("wl-a", () => {
+        ran = true;
+      }),
+    ).toThrow(MvmTransportError);
+    expect(ran).toBe(false);
+    expect(() => session("wl-a", () => undefined)).toThrow(SESSION_UNAVAILABLE);
+    expect(host.calls).toEqual([]);
+  });
 
-describe("session", () => {
-  it("exposes the started id inside the body and nothing outside it", () => {
+  it("rejects a malformed workload id first", () => {
+    expect(() => session("-rf", () => undefined)).toThrow(/must be a non-empty string/);
+  });
+});
+
+describe("session under MVM_NO_VM=1", () => {
+  beforeEach(() => {
+    process.env.MVM_NO_VM = "1";
+  });
+
+  it("exposes a local id inside the body and nothing outside it", () => {
     expect(currentSessionId()).toBeNull();
     const seen = session("wl-a", (s) => {
       expect(s).toBeInstanceOf(Session);
       expect(s.workload_id).toBe("wl-a");
+      expect(String(s)).toBe(s.id);
       return currentSessionId();
     });
-    expect(seen).toBe("sid-wl-a");
+    expect(seen).toMatch(/^local-[0-9a-f]{16}$/);
+    expect(currentSessionId()).toBeNull();
+    expect(host.calls).toEqual([]);
+  });
+
+  it("returns the body's value and re-raises its error", () => {
+    expect(session("wl", () => 42)).toBe(42);
+    expect(() =>
+      session("wl", () => {
+        throw new Error("body failed");
+      }),
+    ).toThrow("body failed");
     expect(currentSessionId()).toBeNull();
   });
 
-  it("stops the session when the body returns", () => {
-    const before = stops().length;
-    session("wl-stop", () => undefined);
-    expect(stops().slice(before)).toContain("sid-wl-stop");
-  });
-
-  it("stops the session when the body throws, and re-raises", () => {
-    const before = stops().length;
-    expect(() => {
-      session("wl-throw", () => {
-        throw new Error("body failed");
-      });
-    }).toThrow("body failed");
-    // Teardown must not mask the body's failure, and must still happen.
-    expect(stops().slice(before)).toContain("sid-wl-throw");
+  it("mints a fresh id per session", () => {
+    const first = session("wl", () => currentSessionId());
+    const second = session("wl", () => currentSessionId());
+    expect(first).not.toBe(second);
   });
 
   it("keeps concurrent sessions from seeing each other", async () => {
-    // This is the property the callback shape was chosen for. A
-    // module-level variable with `using` would fail here: whichever body
-    // started last would win, and both would observe the same id.
-    const observe = async (workload: string, delayMs: number) =>
-      session(workload, async () => {
+    // The property the callback shape was chosen for: a module-level
+    // variable would let whichever body started last win for both.
+    const observe = (workload: string, delayMs: number) =>
+      session(workload, async (s) => {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
-        return currentSessionId();
+        return [s.id, currentSessionId()];
       });
-
     const [first, second] = await Promise.all([observe("wl-1", 20), observe("wl-2", 5)]);
-    expect(first).toBe("sid-wl-1");
-    expect(second).toBe("sid-wl-2");
+    expect(first[1]).toBe(first[0]);
+    expect(second[1]).toBe(second[0]);
+    expect(first[0]).not.toBe(second[0]);
     expect(currentSessionId()).toBeNull();
   });
 
-  it("waits for an async body before stopping", async () => {
-    const before = stops().length;
-    let finished = false;
-    await session("wl-async", async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      // The session must still be live here; a teardown that did not
-      // await the promise would already have stopped it.
-      expect(currentSessionId()).toBe("sid-wl-async");
-      finished = true;
+  it("stays visible across an await in an async body", async () => {
+    let inside: string | null = null;
+    const id = await session("wl-async", async (s) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inside = currentSessionId();
+      return s.id;
     });
-    expect(finished).toBe(true);
-    expect(stops().slice(before)).toContain("sid-wl-async");
+    expect(inside).toBe(id);
   });
 });

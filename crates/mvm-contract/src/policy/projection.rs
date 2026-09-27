@@ -101,7 +101,15 @@ impl CanonicalEgress {
     /// The single decision function both enforcement layers must
     /// agree with. Mandatory-deny is checked first and is
     /// unconditional — no grant shape can override it.
+    ///
+    /// A private-range address (RFC1918, IPv6 unique-local, multicast,
+    /// reserved) is admitted only by a rule that names it specifically: a
+    /// literal address or a CIDR inside that private range, which is also
+    /// what a pinned allow-list host lowers to. An unrestricted grant, or a
+    /// rule for a supernet such as `0.0.0.0/0`, names no private address and
+    /// so admits none. See [`crate::policy::restricted_address`].
     pub fn permits(&self, proto: &Proto, ip: IpAddr, port: u16) -> bool {
+        use crate::policy::restricted_address::{classify, grant_readmits};
         if is_mandatory_deny(ip) {
             return false;
         }
@@ -109,8 +117,10 @@ impl CanonicalEgress {
             return false;
         }
         match self {
-            Self::Unrestricted => true,
-            Self::Rules(rules) => rules.iter().any(|r| r.permits(proto, ip, port)),
+            Self::Unrestricted => classify(ip).is_none(),
+            Self::Rules(rules) => rules
+                .iter()
+                .any(|r| r.permits(proto, ip, port) && grant_readmits(&r.net, ip)),
         }
     }
 }
@@ -475,7 +485,15 @@ fn covers(covering: &CanonicalRule, covered: &CanonicalRule) -> bool {
 pub fn clamp(requested: &CanonicalEgress, resolved: &CanonicalEgress) -> CanonicalEgress {
     match (requested, resolved) {
         (CanonicalEgress::Unrestricted, _) => resolved.clone(),
-        (CanonicalEgress::Rules(_), CanonicalEgress::Unrestricted) => requested.clone(),
+        // An unrestricted resolved policy names no private address, so it
+        // cannot back a requested rule that re-admits one: such a rule is
+        // dropped rather than let the request widen what was resolved.
+        (CanonicalEgress::Rules(req), CanonicalEgress::Unrestricted) => CanonicalEgress::Rules(
+            req.iter()
+                .filter(|r| !crate::policy::restricted_address::names_readmittable_range(&r.net))
+                .cloned()
+                .collect(),
+        ),
         (CanonicalEgress::Rules(req), CanonicalEgress::Rules(res)) => CanonicalEgress::Rules(
             req.iter()
                 .filter(|r| res.iter().any(|s| covers(s, r)))
@@ -495,15 +513,19 @@ pub fn wasi_allows(egress: &WasiEgress, proto: &Proto, ip_addr: IpAddr, port: u1
     if is_banned_ssh_flow(proto, port) {
         return false;
     }
+    use crate::policy::restricted_address::{classify, grant_readmits};
     match egress {
-        WasiEgress::Unrestricted => true,
+        WasiEgress::Unrestricted => classify(ip_addr).is_none(),
         WasiEgress::Grants(grants) => grants.iter().any(|g| {
             g.proto == *proto
                 && g.port_lo <= port
                 && port <= g.port_hi
                 && match &g.target {
-                    WasiTarget::PinnedHost { ips, .. } => ips.contains(&ip_addr),
-                    WasiTarget::Net(net) => net.contains(&ip_addr),
+                    // A pinned host names each of its addresses exactly.
+                    WasiTarget::PinnedHost { ips, .. } => {
+                        ips.contains(&ip_addr) && grant_readmits(&host_net(ip_addr), ip_addr)
+                    }
+                    WasiTarget::Net(net) => net.contains(&ip_addr) && grant_readmits(net, ip_addr),
                 }
         }),
     }

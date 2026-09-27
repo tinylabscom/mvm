@@ -16,13 +16,26 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum Transport {
     /// Read and write newline-delimited JSON-RPC on stdin/stdout
-    Stdio,
+    Stdio {
+        /// Bind drive tools to this machine when its signed plan grants them
+        #[arg(long)]
+        machine: Option<String>,
+    },
 }
 
 pub(in crate::commands) fn run(args: Args) -> Result<()> {
     match args.transport {
-        Transport::Stdio => {
-            let server = mvm_mcp::McpServer::new(Arc::new(mvm_client::LocalBackend::new()));
+        Transport::Stdio { machine } => {
+            let client: Arc<dyn mvm_client::MvmClient> = Arc::new(mvm_client::LocalBackend::new());
+            let drive = machine
+                .as_deref()
+                .map(mvm_client::drive::LocalDrive::bind)
+                .transpose()?
+                .flatten();
+            let server = match drive {
+                Some(drive) => mvm_mcp::McpServer::new(client).with_drive(Arc::new(drive)),
+                None => mvm_mcp::McpServer::new(client),
+            };
             let stdin = io::stdin();
             let stdout = io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;

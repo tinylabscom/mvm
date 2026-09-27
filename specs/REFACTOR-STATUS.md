@@ -1,17 +1,58 @@
 # Refactor status
 
-Last updated: 2026-09-24
+Last updated: 2026-09-26
 
 ## In progress
 
-- [ ] **`machine run` is never silent.**
-      `specs/plans/2026-09-24-machine-run-never-silent.md`. A shared stderr
-      status board (live TTY line, deferred `[mvm]` phase lines, plain
-      heartbeats), in-guest nix progress condensed from the builder console,
-      OCI byte progress, and lock waits that name and queue behind a live
-      holder instead of failing. Open: kernel cache re-check after a Stage 0
-      wait, tracing writer routing, remaining silent short locks, the triple
-      guest-binary build, and a live HVF cold-run check.
+- [ ] **Agent-sandbox product surface — tracking issue #3731.**
+      `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
+      microVM / vsock / signed-plan security core and close every
+      product-surface gap on top of it. One issue per workstream:
+  - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+    - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
+    - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
+    - [x] `xtask check-no-cli-shellout`, in `check-all`
+    - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
+    - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
+    - [ ] command override / guest env / template sources in the in-process launcher; in-VM function dispatch; log follow; live-boot SDK scenario
+  - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
+    - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
+    - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
+    - [ ] injection modes (`query_param`, `url_path`, `basic_auth`)
+    - [ ] endpoint routes on persistent machines
+  - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
+    - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
+    - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding
+    - [x] `examples/claude-code` binds the key with `--secret`; no raw key in the guest
+    - [x] response-path scrub of reflected values (`secret.reflection_scrubbed`)
+    - [x] secret source references (`--from env://|file://|keychain://|op://|bw://`)
+    - [x] provider routes with credential headers (gitlab, gemini added)
+    - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
+    - [ ] OAuth2 — #3743
+  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+  - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
+  - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
+  - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+  - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
+  - [ ] PS-09 detachable sessions and console reattach — #3719
+  - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
+  - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
+  - [x] PS-12 environment hygiene denylist — #3722
+  - [ ] PS-13 tool-level privileges — #3723
+  - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
+  - [ ] PS-16 Nix developer experience — #3725
+  - [ ] PS-17 task-runner surface — #3726
+  - [ ] PS-18 docs per capability and per agent — #3727
+  - [ ] PS-19 fewer feature flags — #3728
+  - [ ] PS-20 unreachable CLI surface and stale references — #3729
+  - [ ] PS-21 CLI thin over `mvm-client` — #3730
+- [x] **One `mvmctl`, one command: the host payload without a second binary.**
+      `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
+      build shared between `build.rs` and `mvmctl`; release builds embed by
+      default (`MVM_EMBED=0` opts out, a missing toolchain warns); a
+      payload-less `mvmctl` builds the set in-process into the content store
+      with a status line first; the second-`mvmctl` bootstrap-helper compile
+      deleted.
 
 - [x] **Base-image CVE gate — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. Rootfs OS inventory
@@ -93,7 +134,9 @@ Last updated: 2026-09-24
       #3599 is reopened: its "upstream kernel bug" was an `unshare -p`
       probe without `--fork` (fails the same on bare metal), so template
       integration, E2E, and docs are unproven rather than blocked until a
-      real k3s pod runs on the `workload-k8s` kernel.
+      real k3s pod runs on the `workload-k8s` kernel. Parked 2026-09-25 as
+      low priority: template start script fixed and image builds; no pod
+      has run (plan W4 records the progress).
 
 - [ ] **GPU compute by API remoting over vsock.**
       Epic #3560; `specs/plans/2026-09-20-gpu-over-vsock.md`; ADR-053 (amends ADR-029's
@@ -512,6 +555,12 @@ Last updated: 2026-09-24
       remap the mount-namespace privilege it requires. The full PR matrix and
       exact-head live Firecracker witness pass.
 
+- [x] **A failed grant application refuses the CLI boot.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A4.2, issue #3304. The CLI
+      start path stops the VM and records `plan.failed` instead of signing an
+      all-`Declared` tier into `plan.grants_enforced`, and applies the grants
+      on the backend that started the VM rather than one rebuilt from its name.
+
 - [x] **Canonical user-config and MVM child paths.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
       canonical config path and tenant parser; named helpers for every direct
@@ -562,12 +611,17 @@ Last updated: 2026-09-24
       executable example (#3258) is complete: one pinned native-agent recipe
       feeds both example flakes, signed Workload IR carries the `SecretRef`,
       `mvm.toml` admits only the model API, and the documented-surface suite
-      owns an offline live smoke witness and audit verification. Open: the
-      SDK's argv transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
-      with its versioned ABI and read-only machine methods; the bindings that
-      replace the argv transport are next), MCP (#3262) — whose existing tool surface is now pinned
-      by a checked-in contract fixture, so the new tools land as reviewed
-      contract changes — and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
+      owns an offline live smoke witness and audit verification. The SDK's argv
+      transport (#3261) is gone: both SDKs load `libmvm_hostlib` in-process
+      (ABI 1.2, launch and streamed output included) and `xtask
+      check-no-cli-shellout` holds the line (#3711). Open: converging the
+      in-process launcher with the CLI's `machine run` front half, and the rest
+      of WS-S. WS3's MCP
+      surface (#3262) is done: `mvmctl ops mcp stdio --machine <name>` binds
+      the six `mvm.drive.*` tools to one machine's verified drive grant through
+      `mvm_client::drive::LocalDrive`; they are not listed without the grant,
+      and a tool the explicit risk table does not classify is denied. Makes the
+      AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
@@ -3852,7 +3906,7 @@ resume` takes a `current_head` and refuses when it differs from the
     fixture
   - [~] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs.
     The CLI boot path now calls `apply_grants` (via
-    `mvm_client::enforced_grants_after_start`), records the tier per-VM,
+    `apply_admitted_grants_or_undo_launch`, fatal on failure), records the tier per-VM,
     emits `plan.grants_enforced` on the chain, warns when a requested bound
     did not happen, and surfaces the achieved tier in `machine inspect`.
     Two `dormant-controls.toml` entries keep it from going unreachable
@@ -3875,5 +3929,13 @@ resume` takes a `current_head` and refuses when it differs from the
             and every member, and `xtask release-boot-image validate` refuses
             any mirrored file the root does not account for. Checked against
             the real `image-set/v0.1.0` bytes.
-      - [ ] W7.2 window signals · W7.3 rollback drill · W7.4 support docs.
+      - [x] W7.2 window signals · W7.3 rollback drill · W7.4 support docs.
+            Window closed 2026-09-25 after `v0.18.0-rc.2` and
+            `image-set/v0.1.1`: guest-image-boot green on 17 of 17 merge
+            runs, rollback drilled both ways by lock edit alone.
       - [ ] W8 waves 0–4 and the re-measure (gated on W7 evidence).
+            - [x] Wave 0: deletion inventory re-scanned from `main` (80
+                  files, four classes); waves re-sequenced to 0.5a/0.5b,
+                  1+2, 3, 4.
+            - [x] Wave 0.5a: the initramfs is a required signed root
+                  member; `images.lock` pins `image-set/v0.2.1`.

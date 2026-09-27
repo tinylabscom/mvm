@@ -1,6 +1,4 @@
 fn main() -> anyhow::Result<()> {
-    mvm_cli::declare_binary_features(env!("MVMCTL_ENABLED_FEATURES"));
-
     // On macOS, Virtualization.framework requires the main thread to pump
     // NSRunLoop for VM lifecycle callbacks. Run the CLI on a background
     // thread and keep the main thread available for the RunLoop.

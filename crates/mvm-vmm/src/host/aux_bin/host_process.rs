@@ -189,14 +189,15 @@ fn current_exe_dir() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
-/// A path that would run `mvmctl`, or build one.
+/// A path that would run `mvmctl`, or compile what only `mvmctl` carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliSpawn {
     /// Running an `mvmctl` to bootstrap the builder VM image or build the SDK
     /// sidecar.
     BuilderBootstrapHelper,
-    /// `cargo build --bin mvmctl` to produce that helper.
-    BuilderBootstrapHelperBuild,
+    /// `cargo zigbuild` of the Linux host binaries an `mvmctl` built without
+    /// them produces from its source checkout.
+    HostPayloadBuild,
     /// Running the current executable as the builder VM's egress supervisor.
     BuilderEgressSupervisor,
     /// Running `mvmctl machine restart` for a workload that failed its
@@ -216,8 +217,8 @@ impl CliSpawn {
             Self::BuilderBootstrapHelper => {
                 "bootstrapping the builder VM image would run `mvmctl`".to_string()
             }
-            Self::BuilderBootstrapHelperBuild => {
-                "bootstrapping the builder VM image would run `cargo build --bin mvmctl`"
+            Self::HostPayloadBuild => {
+                "producing the Linux host binaries a builder VM needs would run `cargo zigbuild`"
                     .to_string()
             }
             Self::BuilderEgressSupervisor => {
@@ -237,7 +238,7 @@ impl CliSpawn {
     fn remedy(&self) -> &'static str {
         match self {
             Self::BuilderBootstrapHelper
-            | Self::BuilderBootstrapHelperBuild
+            | Self::HostPayloadBuild
             | Self::BuilderEgressSupervisor => {
                 "Bootstrap this host with `mvmctl bootstrap` first, then retry."
             }
@@ -390,7 +391,7 @@ mod tests {
 
         for spawn in [
             CliSpawn::BuilderBootstrapHelper,
-            CliSpawn::BuilderBootstrapHelperBuild,
+            CliSpawn::HostPayloadBuild,
             CliSpawn::BuilderEgressSupervisor,
         ] {
             let err = host

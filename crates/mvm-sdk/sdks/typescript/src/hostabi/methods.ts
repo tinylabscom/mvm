@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 1;
+export const ABI_MINOR = 2;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -21,11 +21,17 @@ export interface HostAbiMethod {
 /** Reports what the backend can do. */
 export const BACKEND_CAPABILITIES = "backend.capabilities";
 
+/** Persists a machine definition without booting it. */
+export const MACHINE_CREATE = "machine.create";
+
 /** Runs one non-interactive command in a machine. */
 export const MACHINE_EXEC = "machine.exec";
 
 /** Inspects one machine. */
 export const MACHINE_INSPECT = "machine.inspect";
+
+/** Lists every machine on this host with its dev/prod posture. */
+export const MACHINE_INVENTORY = "machine.inventory";
 
 /** Lists machines, optionally filtered. */
 export const MACHINE_LIST = "machine.list";
@@ -35,6 +41,12 @@ export const MACHINE_LOGS = "machine.logs";
 
 /** Removes a machine, stopping it first when needed. */
 export const MACHINE_RM = "machine.rm";
+
+/** Boots a machine through the admitted local launch. */
+export const MACHINE_RUN = "machine.run";
+
+/** Boots a persisted machine definition. */
+export const MACHINE_START = "machine.start";
 
 /** Stops a machine. Idempotent. */
 export const MACHINE_STOP = "machine.stop";
@@ -78,16 +90,29 @@ export const GUEST_PROC_START = "guest.proc.start";
 /** Writes a tracked process's stdin, base64-encoded. */
 export const GUEST_PROC_STDIN = "guest.proc.stdin";
 
+/** Closes a process output stream. Idempotent. */
+export const GUEST_PROC_STREAM_CLOSE = "guest.proc.stream.close";
+
+/** Returns the process output that has arrived, and how it ended. */
+export const GUEST_PROC_STREAM_NEXT = "guest.proc.stream.next";
+
+/** Opens a stream over a guest process's output. */
+export const GUEST_PROC_STREAM_OPEN = "guest.proc.stream.open";
+
 /** Waits for a guest process to end, returning its output. */
 export const GUEST_PROC_WAIT = "guest.proc.wait";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
+  "machine.create": { key: "machine_create", classification: "prod_safe", summary: "Persists a machine definition without booting it." },
   "machine.exec": { key: "machine_exec", classification: "prod_safe", summary: "Runs one non-interactive command in a machine." },
   "machine.inspect": { key: "machine_inspect", classification: "prod_safe", summary: "Inspects one machine." },
+  "machine.inventory": { key: "machine_inventory", classification: "prod_safe", summary: "Lists every machine on this host with its dev/prod posture." },
   "machine.list": { key: "machine_list", classification: "prod_safe", summary: "Lists machines, optionally filtered." },
   "machine.logs": { key: "machine_logs", classification: "prod_safe", summary: "Returns captured console output, base64-encoded." },
   "machine.rm": { key: "machine_rm", classification: "prod_safe", summary: "Removes a machine, stopping it first when needed." },
+  "machine.run": { key: "machine_run", classification: "prod_safe", summary: "Boots a machine through the admitted local launch." },
+  "machine.start": { key: "machine_start", classification: "prod_safe", summary: "Boots a persisted machine definition." },
   "machine.stop": { key: "machine_stop", classification: "prod_safe", summary: "Stops a machine. Idempotent." },
   "guest.cp": { key: "guest_cp", classification: "dev_only", summary: "Copies a file between the host and the guest." },
   "guest.fs.list": { key: "guest_fs_list", classification: "dev_only", summary: "Lists a directory in the guest." },
@@ -102,5 +127,8 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "guest.proc.signal": { key: "guest_proc_signal", classification: "dev_only", summary: "Signals a tracked guest process." },
   "guest.proc.start": { key: "guest_proc_start", classification: "dev_only", summary: "Starts a process in the guest." },
   "guest.proc.stdin": { key: "guest_proc_stdin", classification: "dev_only", summary: "Writes a tracked process's stdin, base64-encoded." },
+  "guest.proc.stream.close": { key: "guest_proc_stream_close", classification: "dev_only", summary: "Closes a process output stream. Idempotent." },
+  "guest.proc.stream.next": { key: "guest_proc_stream_next", classification: "dev_only", summary: "Returns the process output that has arrived, and how it ended." },
+  "guest.proc.stream.open": { key: "guest_proc_stream_open", classification: "dev_only", summary: "Opens a stream over a guest process's output." },
   "guest.proc.wait": { key: "guest_proc_wait", classification: "dev_only", summary: "Waits for a guest process to end, returning its output." },
 };

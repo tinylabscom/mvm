@@ -7,6 +7,7 @@
 //! clock-/env-/fs-dependent logic stays in `mvm-core::policy`, which
 //! re-exports these modules at their existing paths.
 
+pub mod action_budget;
 pub mod approval;
 pub mod audit;
 pub mod bundle;
@@ -16,7 +17,10 @@ pub mod dns_pin;
 pub mod network_policy;
 pub mod policies;
 pub mod projection;
+pub mod protected_paths;
 pub mod redaction;
 pub mod resolver;
+pub mod restricted_address;
 pub mod reversible_replacement;
+pub mod routes;
 pub mod security;

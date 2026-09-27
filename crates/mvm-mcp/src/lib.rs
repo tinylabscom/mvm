@@ -8,6 +8,11 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, OnceLock};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use mvm_client::drive::{
+    DriveError, DriveFileOperation, EntrypointEvent, FsResult, InputFrame, LocalDrive,
+};
 use mvm_client::dto::{
     LogOpts, MachineFilter, MachineId, MachineSpec, MachineStatus, PauseOpts, ReconfigureRequest,
     ResumeOpts,
@@ -28,6 +33,33 @@ const CATALOG_TTL_MS: u64 = 300_000;
 const UNKNOWN_TOOL: &str = "unknown tool";
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Drive operations the MCP adapter exposes. Production uses [`LocalDrive`];
+/// tests inject a recording implementation without booting a machine.
+pub trait DriveTools: Send + Sync {
+    fn open(&self, cwd: &str) -> Result<String, DriveError>;
+    fn write(&self, frame: InputFrame, eof: bool) -> Result<usize, DriveError>;
+    fn next_event(&self) -> Result<Option<EntrypointEvent>, DriveError>;
+    fn file(&self, operation: DriveFileOperation) -> Result<FsResult, DriveError>;
+}
+
+impl DriveTools for LocalDrive {
+    fn open(&self, cwd: &str) -> Result<String, DriveError> {
+        self.open(cwd)
+    }
+
+    fn write(&self, frame: InputFrame, eof: bool) -> Result<usize, DriveError> {
+        self.write(frame, eof)
+    }
+
+    fn next_event(&self) -> Result<Option<EntrypointEvent>, DriveError> {
+        self.next_event()
+    }
+
+    fn file(&self, operation: DriveFileOperation) -> Result<FsResult, DriveError> {
+        self.file(operation)
+    }
+}
 
 /// Bounds applied before allocating or emitting protocol payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +106,7 @@ pub enum ServerError {
 /// Stateless request adapter with one process-lifetime capability snapshot.
 pub struct McpServer {
     client: Arc<dyn MvmClient>,
+    drive: Option<Arc<dyn DriveTools>>,
     capabilities: OnceLock<BackendCapabilityReport>,
     limits: ServerLimits,
 }
@@ -85,11 +118,20 @@ impl McpServer {
         Self::with_limits(client, ServerLimits::default())
     }
 
+    /// Bind the drive tools to one verified grant. A server never given one
+    /// neither lists nor accepts any `mvm.drive.*` tool.
+    #[must_use]
+    pub fn with_drive(mut self, drive: Arc<dyn DriveTools>) -> Self {
+        self.drive = Some(drive);
+        self
+    }
+
     /// Construct a server with explicit transport/output bounds.
     #[must_use]
     pub fn with_limits(client: Arc<dyn MvmClient>, limits: ServerLimits) -> Self {
         Self {
             client,
+            drive: None,
             capabilities: OnceLock::new(),
             limits,
         }
@@ -195,7 +237,9 @@ impl McpServer {
             }
             "tools/list" => match parse_params::<ListParams>(params) {
                 Ok(list) if list.cursor.is_none() => match self.capabilities().await {
-                    Ok(report) => response_result(id, tools_result(&report.operations)),
+                    Ok(report) => {
+                        response_result(id, tools_result(&report.operations, self.drive.is_some()))
+                    }
                     Err(failure) => response_error_classified(id, -32603, &failure),
                 },
                 Ok(_) => response_error(id, -32602, "tool catalog has no further page"),
@@ -210,7 +254,7 @@ impl McpServer {
                     Ok(report) => report,
                     Err(failure) => return response_error_classified(id, -32603, &failure),
                 };
-                if !tool_enabled(&call.name, &report.operations) {
+                if !tool_enabled(&call.name, &report.operations, self.drive.is_some()) {
                     return response_error(id, -32602, "unknown or unavailable tool");
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
@@ -387,8 +431,106 @@ impl McpServer {
                     .map_err(ToolFailure::backend)?;
                 Ok(json!({"ok": true}))
             }
+            "mvm.drive.open" => {
+                let args = parse_arguments::<DriveOpenArgs>(arguments)?;
+                let holder = self.drive()?.open(&args.cwd).map_err(ToolFailure::Drive)?;
+                Ok(json!({"holder": holder}))
+            }
+            "mvm.drive.write" => {
+                let args = parse_arguments::<DriveWriteArgs>(arguments)?;
+                let payload = B64
+                    .decode(args.data_b64)
+                    .map_err(|_| ToolFailure::Input("data_b64 must be valid base64".into()))?;
+                let accepted = self
+                    .drive()?
+                    .write(
+                        InputFrame {
+                            seq: args.seq,
+                            payload,
+                        },
+                        args.eof,
+                    )
+                    .map_err(ToolFailure::Drive)?;
+                Ok(json!({"accepted": accepted}))
+            }
+            "mvm.drive.events" => {
+                parse_arguments::<EmptyArgs>(arguments)?;
+                let event = self.drive()?.next_event().map_err(ToolFailure::Drive)?;
+                serde_json::to_value(event).map_err(ToolFailure::serialization)
+            }
+            "mvm.drive.files.read" => {
+                let args = parse_arguments::<DriveReadArgs>(arguments)?;
+                let result = self
+                    .drive()?
+                    .file(DriveFileOperation::Read {
+                        path: args.path,
+                        offset: args.offset,
+                        length: args.length,
+                        follow_symlinks: args.follow_symlinks,
+                    })
+                    .map_err(ToolFailure::Drive)?;
+                match result {
+                    FsResult::Read {
+                        content,
+                        total_size,
+                    } => Ok(json!({"data_b64": B64.encode(content), "total_size": total_size})),
+                    other => Err(ToolFailure::Input(format!(
+                        "drive read returned an unexpected response: {other:?}"
+                    ))),
+                }
+            }
+            "mvm.drive.files.write" => {
+                let args = parse_arguments::<DriveFileWriteArgs>(arguments)?;
+                let content = B64
+                    .decode(args.data_b64)
+                    .map_err(|_| ToolFailure::Input("data_b64 must be valid base64".into()))?;
+                let result = self
+                    .drive()?
+                    .file(DriveFileOperation::Write {
+                        path: args.path,
+                        content,
+                        mode: args.mode,
+                        create_parents: args.create_parents,
+                        follow_symlinks: args.follow_symlinks,
+                        offset: args.offset,
+                        truncate: args.truncate,
+                    })
+                    .map_err(ToolFailure::Drive)?;
+                match result {
+                    FsResult::Write { bytes_written } => {
+                        Ok(json!({"bytes_written": bytes_written}))
+                    }
+                    other => Err(ToolFailure::Input(format!(
+                        "drive write returned an unexpected response: {other:?}"
+                    ))),
+                }
+            }
+            "mvm.drive.files.list" => {
+                let args = parse_arguments::<DriveListArgs>(arguments)?;
+                let result = self
+                    .drive()?
+                    .file(DriveFileOperation::List {
+                        path: args.path,
+                        follow_symlinks: args.follow_symlinks,
+                    })
+                    .map_err(ToolFailure::Drive)?;
+                match result {
+                    FsResult::List { entries, truncated } => {
+                        Ok(json!({"entries": entries, "truncated": truncated}))
+                    }
+                    other => Err(ToolFailure::Input(format!(
+                        "drive list returned an unexpected response: {other:?}"
+                    ))),
+                }
+            }
             _ => Err(ToolFailure::Input(UNKNOWN_TOOL.into())),
         }
+    }
+
+    fn drive(&self) -> Result<&dyn DriveTools, ToolFailure> {
+        self.drive
+            .as_deref()
+            .ok_or(ToolFailure::Drive(DriveError::NotGranted))
     }
 
     fn tool_success(&self, value: Value) -> Value {
@@ -562,10 +704,10 @@ fn server_meta() -> Value {
     Value::Object(server_meta_object())
 }
 
-fn tools_result(operations: &ClientOperationCapabilities) -> Value {
+fn tools_result(operations: &ClientOperationCapabilities, drive_granted: bool) -> Value {
     let tools: Vec<Value> = tool_catalog()
         .iter()
-        .filter(|tool| tool.offered(operations))
+        .filter(|tool| tool.offered(operations, drive_granted))
         .map(ToolSpec::to_value)
         .collect();
     json!({
@@ -577,10 +719,10 @@ fn tools_result(operations: &ClientOperationCapabilities) -> Value {
     })
 }
 
-fn tool_enabled(name: &str, operations: &ClientOperationCapabilities) -> bool {
+fn tool_enabled(name: &str, operations: &ClientOperationCapabilities, drive_granted: bool) -> bool {
     tool_catalog()
         .iter()
-        .any(|tool| tool.name == name && tool.offered(operations))
+        .any(|tool| tool.name == name && tool.offered(operations, drive_granted))
 }
 
 /// Which client operation must be served before a tool is advertised.
@@ -592,9 +734,20 @@ type OperationGate = fn(&ClientOperationCapabilities) -> bool;
 struct ToolSpec {
     name: &'static str,
     description: &'static str,
-    /// `None` is offered by every client.
-    requires: Option<OperationGate>,
+    gate: ToolGate,
     input_schema: Value,
+}
+
+/// What must hold before a tool is advertised or callable.
+#[derive(Clone, Copy)]
+enum ToolGate {
+    /// Offered by every client.
+    Always,
+    /// Offered when the client serves this operation.
+    Operation(OperationGate),
+    /// Offered only when this server is bound to a machine whose signed plan
+    /// grants drive access. Without the grant the tool is not listed at all.
+    DriveGrant,
 }
 
 impl ToolSpec {
@@ -602,7 +755,7 @@ impl ToolSpec {
         Self {
             name,
             description,
-            requires: None,
+            gate: ToolGate::Always,
             input_schema,
         }
     }
@@ -616,17 +769,66 @@ impl ToolSpec {
         Self {
             name,
             description,
-            requires: Some(requires),
+            gate: ToolGate::Operation(requires),
             input_schema,
         }
     }
 
-    fn offered(&self, operations: &ClientOperationCapabilities) -> bool {
-        self.requires.is_none_or(|gate| gate(operations))
+    fn drive(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+        Self {
+            name,
+            description,
+            gate: ToolGate::DriveGrant,
+            input_schema,
+        }
+    }
+
+    /// Whether this tool is advertised and callable. A tool the risk table
+    /// does not classify is never offered, whatever its gate says.
+    fn offered(&self, operations: &ClientOperationCapabilities, drive_granted: bool) -> bool {
+        tool_risk(self.name).is_some()
+            && match self.gate {
+                ToolGate::Always => true,
+                ToolGate::Operation(gate) => gate(operations),
+                ToolGate::DriveGrant => drive_granted,
+            }
     }
 
     fn to_value(&self) -> Value {
         json!({"name":self.name, "description":self.description, "inputSchema":self.input_schema})
+    }
+}
+
+/// Explicit risk classification. Absence is deny: a newly specified tool is
+/// neither advertised nor callable until this table names its posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolRisk {
+    ReadOnly,
+    Mutating,
+    Interactive,
+}
+
+fn tool_risk(name: &str) -> Option<ToolRisk> {
+    match name {
+        "mvm.backend_capabilities"
+        | "mvm.machine.list"
+        | "mvm.machine.inspect"
+        | "mvm.machine.logs"
+        | "mvm.drive.events"
+        | "mvm.drive.files.read"
+        | "mvm.drive.files.list" => Some(ToolRisk::ReadOnly),
+        "mvm.machine.create"
+        | "mvm.machine.run"
+        | "mvm.machine.start"
+        | "mvm.machine.stop"
+        | "mvm.machine.pause"
+        | "mvm.machine.resume"
+        | "mvm.machine.remove"
+        | "mvm.machine.reconfigure"
+        | "mvm.machine.set_ttl"
+        | "mvm.drive.files.write" => Some(ToolRisk::Mutating),
+        "mvm.machine.exec" | "mvm.drive.open" | "mvm.drive.write" => Some(ToolRisk::Interactive),
+        _ => None,
     }
 }
 
@@ -739,6 +941,48 @@ fn build_tool_catalog() -> Vec<ToolSpec> {
             object_schema(
                 json!({"id":{"type":"string"},"expires_at":{"type":["string","null"]}}),
                 &["id"],
+            ),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.open",
+            "Start the program selected by the signed drive grant.",
+            object_schema(json!({"cwd":{"type":"string"}}), &["cwd"]),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.write",
+            "Write one ordered base64 input frame to the driven program.",
+            object_schema(
+                json!({"seq":{"type":"integer","minimum":0},"data_b64":{"type":"string"},"eof":{"type":"boolean"}}),
+                &["seq", "data_b64"],
+            ),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.events",
+            "Read the next queued event from the driven program without waiting.",
+            empty_schema(),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.files.read",
+            "Read bounded bytes from a path inside the granted workspace roots.",
+            object_schema(
+                json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"length":{"type":"integer","minimum":0},"follow_symlinks":{"type":"boolean"}}),
+                &["path", "length"],
+            ),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.files.write",
+            "Write bounded base64 bytes inside the granted workspace roots.",
+            object_schema(
+                json!({"path":{"type":"string"},"data_b64":{"type":"string"},"mode":{"type":"integer","minimum":0,"maximum":4095},"create_parents":{"type":"boolean"},"follow_symlinks":{"type":"boolean"},"offset":{"type":"integer","minimum":0},"truncate":{"type":"boolean"}}),
+                &["path", "data_b64"],
+            ),
+        ),
+        ToolSpec::drive(
+            "mvm.drive.files.list",
+            "List a directory inside the granted workspace roots.",
+            object_schema(
+                json!({"path":{"type":"string"},"follow_symlinks":{"type":"boolean"}}),
+                &["path"],
             ),
         ),
     ]
@@ -896,6 +1140,8 @@ enum ToolFailure {
     /// The client call succeeded but this server could not turn its result
     /// into JSON: a fault in the tool server, not the backend.
     Internal(&'static str),
+    /// The shared local drive controller refused or failed the operation.
+    Drive(DriveError),
 }
 
 impl ToolFailure {
@@ -918,6 +1164,10 @@ impl ToolFailure {
                 tool_error(&message, error.code(), error.retryable())
             }
             Self::Internal(message) => tool_error(message, INTERNAL_ERROR_CODE, false),
+            Self::Drive(error) => {
+                let message = format!("drive operation failed: {error}");
+                tool_error(&message, error.code(), error.retryable())
+            }
         }
     }
 }
@@ -1048,6 +1298,65 @@ struct SetTtlArgs {
     expires_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveOpenArgs {
+    cwd: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveWriteArgs {
+    seq: u64,
+    data_b64: String,
+    #[serde(default)]
+    eof: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveReadArgs {
+    path: String,
+    #[serde(default)]
+    offset: Option<u64>,
+    length: u64,
+    #[serde(default = "default_true")]
+    follow_symlinks: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveFileWriteArgs {
+    path: String,
+    data_b64: String,
+    #[serde(default = "default_file_mode")]
+    mode: u32,
+    #[serde(default)]
+    create_parents: bool,
+    #[serde(default)]
+    follow_symlinks: bool,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default = "default_true")]
+    truncate: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveListArgs {
+    path: String,
+    #[serde(default = "default_true")]
+    follow_symlinks: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_file_mode() -> u32 {
+    0o644
+}
+
 enum Frame {
     Eof,
     Oversized,
@@ -1133,23 +1442,42 @@ mod tests {
                 tool.name
             );
             assert!(
-                tool_enabled(tool.name, &serving_all),
+                tool_enabled(tool.name, &serving_all, true),
                 "`{}` is specified but no client ever offers it: its gate must read a \
                  `ClientOperationCapabilities` field, or the tool must be `ToolSpec::always`",
                 tool.name
             );
-            if tool.requires.is_none() {
-                continue;
+            assert!(
+                tool_risk(tool.name).is_some(),
+                "`{}` is specified but has no explicit risk classification",
+                tool.name
+            );
+            match tool.gate {
+                ToolGate::Always => continue,
+                ToolGate::DriveGrant => {
+                    assert!(
+                        !tool.offered(&serving_all, false),
+                        "`{}` must be absent without a drive grant",
+                        tool.name
+                    );
+                    assert!(
+                        tool.offered(&serving_none, true),
+                        "`{}` must be enabled by the drive grant alone",
+                        tool.name
+                    );
+                    continue;
+                }
+                ToolGate::Operation(_) => {}
             }
             assert!(
-                !tool.offered(&serving_none),
+                !tool.offered(&serving_none, false),
                 "`{}` is declared gated but a client serving no operations still offers it; \
                  use `ToolSpec::always` if that is the intent",
                 tool.name
             );
             let enabling: Vec<&String> = keys
                 .iter()
-                .filter(|key| tool.offered(&operations_serving(std::slice::from_ref(*key))))
+                .filter(|key| tool.offered(&operations_serving(std::slice::from_ref(*key)), false))
                 .collect();
             assert_eq!(
                 enabling.len(),
@@ -1160,8 +1488,83 @@ mod tests {
         }
 
         assert!(
-            !tool_enabled("mvm.machine.unspecified", &serving_all),
+            !tool_enabled("mvm.machine.unspecified", &serving_all, true),
             "a tool absent from the catalog must never be offered"
+        );
+    }
+
+    /// A tool the risk table does not name is neither advertised nor
+    /// callable, even on a server where every gate it could have is open.
+    #[test]
+    fn mcp_unclassified_tool_is_denied() {
+        let serving_all = operations_serving(&operation_keys());
+        for tool in [
+            ToolSpec::always("mvm.test.unclassified", "not classified", empty_schema()),
+            ToolSpec::gated(
+                "mvm.test.unclassified",
+                "not classified",
+                |_| true,
+                empty_schema(),
+            ),
+            ToolSpec::drive("mvm.test.unclassified", "not classified", empty_schema()),
+        ] {
+            assert!(tool_risk(tool.name).is_none());
+            assert!(
+                !tool.offered(&serving_all, true),
+                "an unclassified tool was offered through its gate"
+            );
+        }
+    }
+
+    fn advertised_names(result: &Value) -> BTreeSet<String> {
+        result["tools"]
+            .as_array()
+            .expect("tool list")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// With every client operation served, the drive tools are listed and
+    /// callable exactly when the server holds a drive grant.
+    #[test]
+    fn mcp_tool_absent_when_grant_absent() {
+        let serving_all = operations_serving(&operation_keys());
+        let drive_tools: BTreeSet<String> = tool_catalog()
+            .iter()
+            .filter(|tool| matches!(tool.gate, ToolGate::DriveGrant))
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(
+            drive_tools,
+            [
+                "mvm.drive.events",
+                "mvm.drive.files.list",
+                "mvm.drive.files.read",
+                "mvm.drive.files.write",
+                "mvm.drive.open",
+                "mvm.drive.write",
+            ]
+            .map(str::to_string)
+            .into(),
+        );
+
+        let ungranted = advertised_names(&tools_result(&serving_all, false));
+        assert!(
+            ungranted.is_disjoint(&drive_tools),
+            "drive tools listed without a grant: {ungranted:?}"
+        );
+        for name in &drive_tools {
+            assert!(
+                !tool_enabled(name, &serving_all, false),
+                "`{name}` callable"
+            );
+        }
+
+        let granted = advertised_names(&tools_result(&serving_all, true));
+        assert!(
+            granted.is_superset(&drive_tools),
+            "drive tools missing under a grant: {granted:?}"
         );
     }
 

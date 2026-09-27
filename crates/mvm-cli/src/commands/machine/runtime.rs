@@ -48,17 +48,7 @@ fn run_persistent(
     let name = resolve_machine_run_name(&args)?;
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
-    let secret_refs =
-        mvm_client::admission::secrets::load_workload_ir(args.run.from_workload_ir.as_deref())?
-            .map(|workload| {
-                mvm_client::admission::secrets::workload_machine_refs(&workload, "local")
-            });
-    if let Some(references) = secret_refs.as_deref() {
-        mvm_client::secret::SecretService::local()
-            .context("opening the local secret service")?
-            .validate_for_admission("local", references)
-            .context("validating workload secret references")?;
-    }
+    let secret_refs = persistent_secret_refs(&args)?;
 
     if args.run.dry_run {
         let summary = machine_start_preflight_summary(
@@ -90,6 +80,36 @@ fn run_persistent(
     }
 
     run_persistent_post_start(cli, cfg, &args, &name)
+}
+
+/// The secret references a persistent machine records beside its spec: those
+/// its workload IR declares plus its `--secret` flags, validated fail-closed
+/// before anything is recorded or booted. `None` when the invocation names no
+/// secret source at all, which leaves a machine's existing record untouched.
+fn persistent_secret_refs(
+    args: &MachineRunArgs,
+) -> Result<Option<Vec<mvm_client::secret::MachineSecretRef>>> {
+    let declared =
+        mvm_client::admission::secrets::load_workload_ir(args.run.from_workload_ir.as_deref())?
+            .map(|workload| {
+                mvm_client::admission::secrets::workload_machine_refs(&workload, "local")
+            });
+    let flagged = mvm_client::admission::run_secrets::resolve_run_secret_specs(
+        crate::commands::vm::run_secrets::merged_secret_specs(&args.run)?,
+        "local",
+    )?;
+    if declared.is_none() && flagged.is_empty() {
+        return Ok(None);
+    }
+    let references = mvm_client::admission::run_secrets::with_run_secret_flag_refs(
+        declared.unwrap_or_default(),
+        flagged,
+    )?;
+    mvm_client::secret::SecretService::local()
+        .context("opening the local secret service")?
+        .validate_for_admission("local", &references)
+        .context("validating workload secret references")?;
+    Ok(Some(references))
 }
 
 fn persist_and_boot_machine(
@@ -409,13 +429,15 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     let machine_name = resolve_entrypoint_machine_name(&args)?;
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
+    let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
         args.run.net,
         args.run.network_preset,
-        &args.run.allow_host,
+        &routes.with_allow_host(&args.run.allow_host),
         &[],
     )?
-    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget));
+    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
+    .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
@@ -424,6 +446,8 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         cpus: args.run.cpus,
         memory_mib,
         from_workload_ir: args.run.from_workload_ir.clone(),
+        secret_flags: args.run.secret.clone(),
+        manifest_secrets: crate::commands::vm::run_secrets::project_secret_specs(&args.run)?,
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
         machine_name,

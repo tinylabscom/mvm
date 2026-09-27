@@ -43,6 +43,7 @@ mod check_guest_binary_lists;
 mod check_guest_entropy_seed;
 mod check_guest_images_no_builder_tools;
 mod check_guest_init_parity;
+mod check_helper_env_hygiene;
 mod check_honesty;
 mod check_image_lock;
 mod check_image_reproducibility;
@@ -52,6 +53,7 @@ mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_nextest_groups;
+mod check_no_cli_shellout;
 mod check_no_display_on_secret_types;
 mod check_no_guest_tool_client;
 mod check_no_host_nix;
@@ -228,6 +230,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_guest_agent_runtime_free::run(&workspace)
         }
+        Some("check-no-cli-shellout") => {
+            let workspace = workspace_root();
+            check_no_cli_shellout::run(&workspace)
+        }
         Some("check-sdk-transport-free") => {
             let workspace = workspace_root();
             check_sdk_transport_free::run(&workspace)
@@ -255,6 +261,10 @@ fn main() -> Result<()> {
         Some("check-single-grants-projection") => {
             let workspace = workspace_root();
             check_single_grants_projection::run(&workspace)
+        }
+        Some("check-helper-env-hygiene") => {
+            let workspace = workspace_root();
+            check_helper_env_hygiene::run(&workspace)
         }
         Some("check-single-exec-secs-writer") => {
             let workspace = workspace_root();
@@ -380,11 +390,31 @@ fn main() -> Result<()> {
             // itself is opt-in because it costs hours.
             let write = args.iter().any(|a| a == "--write-baseline");
             let run = args.iter().any(|a| a == "--run");
-            let mode = match (write, run) {
-                (true, true) => check_mutation_witnesses::Mode::RewriteBaseline,
-                (true, false) => check_mutation_witnesses::Mode::RepinSurface,
-                (false, true) => check_mutation_witnesses::Mode::Run,
-                (false, false) => check_mutation_witnesses::Mode::PinOnly,
+            // `--verify-outcomes <dir>` judges the output a run left behind,
+            // so a shard its timeout stopped still gets a verdict naming the
+            // files it never reached.
+            let verify = args
+                .iter()
+                .position(|a| a == "--verify-outcomes")
+                .map(|i| {
+                    args.get(i + 1).map(PathBuf::from).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--verify-outcomes needs the directory a --run wrote its \
+                             cargo-mutants output to"
+                        )
+                    })
+                })
+                .transpose()?;
+            let mode = match (write, run, verify) {
+                (false, false, Some(dir)) => check_mutation_witnesses::Mode::VerifyOutcomes(dir),
+                (_, _, Some(_)) => anyhow::bail!(
+                    "--verify-outcomes judges a finished run's output; it cannot be combined \
+                     with --run or --write-baseline"
+                ),
+                (true, true, None) => check_mutation_witnesses::Mode::RewriteBaseline,
+                (true, false, None) => check_mutation_witnesses::Mode::RepinSurface,
+                (false, true, None) => check_mutation_witnesses::Mode::Run,
+                (false, false, None) => check_mutation_witnesses::Mode::PinOnly,
             };
             // `--package <name>` shards a `--run` so each CI job finishes
             // inside the six-hour job cap; unset means the whole surface. A
@@ -509,7 +539,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -547,6 +577,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-public-function-names            Ratchet public f/f_with_* sibling pairs down module by module"
+            );
+            eprintln!(
+                "  check-no-cli-shellout                   Assert no SDK source spawns a process or resolves mvmctl to run it"
             );
             eprintln!(
                 "  check-sdk-transport-free                Assert mvm-sdk's default build (the cdylib closure) pulls no mvm-http/rustls/ring/tokio"
@@ -651,7 +684,7 @@ fn main() -> Result<()> {
                 "  check-dormant-controls                 Security-relevant controls declare whether they have a production caller; the dormant list may only shrink"
             );
             println!(
-                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --write-baseline re-pins (add --run to also re-record misses)"
+                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --verify-outcomes <dir> judges a run's output and names unmeasured files; --write-baseline re-pins (add --run to also re-record misses)"
             );
             println!(
                 "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"

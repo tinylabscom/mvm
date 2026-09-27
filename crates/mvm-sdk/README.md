@@ -10,7 +10,7 @@ user-facing language SDKs it generates types for, co-located here:
 - **Ergonomic layer** — hand-authored declarative DSL (`@mvm.func` /
   `@mvm.app` in Python; `mvm.app(...)` higher-order functions in TypeScript)
   and native runtime adapters. These wrappers preserve language-appropriate
-  decorators, callbacks, async behavior, and subprocess policy while lowering
+  decorators, callbacks and async behavior while lowering
   into the generated contracts.
 
 See `python/README.md` and `typescript/README.md` for the per-language
@@ -29,54 +29,30 @@ it validates SDK-originated execution data. `mvm-capture` and
 The builder API constructs a validated `mvm_contract::ir::Workload`. `emit`
 canonicalizes that IR and writes it to `MVM_IR_OUT` or stdout for the build
 tooling to consume. Decorator parsing and runtime-recording modules translate
-language authoring constructs into the same IR. Machine wrappers build
-`mvmctl machine ...` argument vectors and delegate lifecycle, admission,
-artifact verification, and persistence to the CLI instead of reimplementing
-those security-sensitive paths.
+language authoring constructs into the same IR. This crate does not drive
+machines: booting, driving and stopping one is `mvm-client`'s job, and that
+crate re-exports this one as `mvm_client::authoring`, so a Rust program needs
+only the one dependency.
 
 Optional features keep secondary surfaces out of the base closure:
-`schema` enables schema emission, `client-facade` exposes the shared
-`MvmClient` contract, and `deploy-remote` enables the HTTP deployment path.
+`schema` enables schema emission and `deploy-remote` enables the HTTP
+deployment path.
 
-## Machine lifecycle wrappers
+## Machine lifecycle
 
-Python, TypeScript, and Rust expose machine-oriented lifecycle wrappers that
-mirror the beginner `mvmctl machine ...` command group. These wrappers are thin
-host automation surfaces: they route through `mvmctl machine ...` instead of
-reimplementing OCI pull, admission, artifact verification, networking, receipts,
-audit, or persistent machine state.
+The Python and TypeScript SDKs drive machines in-process through
+`libmvm_hostlib` (`crates/mvm-hostlib`), the C ABI over `mvm-client`. Neither
+SDK runs `mvmctl`: no process is spawned per call, and there is no subprocess
+fallback. `xtask check-no-cli-shellout` fails the build if SDK source reaches
+for a process API or resolves the CLI to run it.
 
-- Python: `mvm.Machine.run/create/check_artifact/start/exec/shell/stop`
-- TypeScript: `Machine.run/create/checkArtifact/start/exec/shell/stop`
-- Rust: `mvm_sdk::{MachineRun, MachineCreate, MachineCheckArtifact, Machine}` builders
+- Python: `mvm.Sandbox`, `mvm.Machine`
+- TypeScript: `Sandbox`, `Machine`
+- Rust: `mvm_client::LocalBackend` and the `MvmClient` trait, directly
 
-The Rust API is builder-oriented for embedders:
-
-```rust
-use mvm_sdk::{Machine, MachineCheckArtifact, MachineRun};
-
-let result = MachineRun::builder()
-    .image("alpine")
-    .net(true)
-    .command(["uname", "-a"])
-    .run()?;
-
-let vm = Machine::named("devbox")?;
-vm.exec(["echo", "hello"]).run()?;
-
-let artifact = MachineCheckArtifact::builder("app.mvm")
-    .json(true)
-    .run()?;
-# Ok::<(), mvm_sdk::MachineError>(())
-```
-
-`check_artifact` / `checkArtifact` / `MachineCheckArtifact` is read-only and
-still shells through `mvmctl machine check-artifact`; SDKs do not verify `.mvm`
-artifacts privately or bypass CLI admission preview logic.
-
-Golden argv fixtures shared across all three surfaces live in
-`tests/machine-fixtures/` — keeping the Python/TypeScript/Rust wrappers
-building the same `mvmctl machine ...` argv is what keeps the wrappers thin.
+Admission, audit, OCI resolution and persistent machine state stay in
+`mvm-client`; the library is a thin JSON-in/JSON-out veneer over it. How the
+SDKs find the library is documented in `crates/mvm-hostlib/README.md`.
 
 ## Single source of truth
 

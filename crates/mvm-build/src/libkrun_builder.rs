@@ -2245,7 +2245,7 @@ fn spawn_supervisor_in_background(
         ))
     })?;
 
-    let mut command = Command::new(supervisor_path);
+    let mut command = mvm_core::env_hygiene::helper_command(supervisor_path);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout_log))
@@ -6191,7 +6191,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "live: needs a working libkrun builder VM image and host libkrun runtime"]
+    #[ignore = "live: needs a working libkrun builder VM image, host libkrun runtime, and MVM_BUILDER_VM_BOOTSTRAP_BIN"]
     fn live_libkrun_builder_runtime_overlay_is_read_only() {
         assert!(
             libkrun_sys::is_available(),
@@ -6210,8 +6210,10 @@ mod tests {
 
         let workspace_root =
             builder_vm_source_checkout_root().expect("source checkout must contain workspace root");
+        // A test binary supplies no host binaries of its own, so the helper is
+        // the `mvmctl` named by the override.
         let bootstrap_helper = resolve_builder_vm_bootstrap_bin(&workspace_root)
-            .expect("builder VM bootstrap helper must build from source checkout");
+            .expect("set MVM_BUILDER_VM_BOOTSTRAP_BIN to an mvmctl built from this checkout");
         env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &bootstrap_helper);
 
         let image = ensure_builder_vm_image()

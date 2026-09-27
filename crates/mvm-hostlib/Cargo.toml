@@ -33,6 +33,14 @@ tokio = { workspace = true, features = ["rt"] }
 # feature keeps schemars out of the shipped cdylib, mirroring mvm-agentd.
 schemars = { version = "0.8", optional = true }
 
+[dev-dependencies]
+# The launch methods are tested against the real local client driving the
+# in-memory mock hypervisor, under an isolated MVM_HOME, so the admitted-boot
+# path they call is the one that ships.
+mvm-client = { workspace = true, features = ["test-support"] }
+mvm-core = { workspace = true, features = ["client", "test-support"] }
+tempfile.workspace = true
+
 [features]
 # Derives JsonSchema on the ABI request/reply types so the emitters can write
 # the SDK-codegen input. Never enabled for the library artifact itself.

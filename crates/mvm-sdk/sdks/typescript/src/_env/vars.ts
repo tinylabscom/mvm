@@ -4,15 +4,13 @@
  * DO NOT EDIT BY HAND — `cargo xtask check-stubs` fails on drift.
  */
 
-/** Overrides the path to the `mvmctl` binary the SDKs shell out to. */
-export const MVM_CLI_BIN_ENV = "MVM_CLI_BIN";
-
 /** Selects the SDK's execution mode (for example `live` or `record`). */
 export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
 
 /**
  * Carries an explicitly selected security profile from `mvmctl run`
- * into the live SDK's nested `mvmctl machine run` invocation.
+ * into the machine a live-mode `Sandbox` boots through the host
+ * library.
  */
 export const MVM_SDK_RUN_PROFILE_ENV = "MVM_SDK_RUN_PROFILE";
 
@@ -23,15 +21,9 @@ export const MVM_SDK_RUN_PROFILE_ENV = "MVM_SDK_RUN_PROFILE";
 export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
 
 /**
- * Overrides the per-call timeout, in seconds, applied to a `mvmctl
- * machine` subprocess. Both language wrappers read it and give up at
- * the deadline rather than waiting forever.
+ * Names the `libmvm_hostlib` file the SDKs load in-process.
+ * Consulted before any other location; `mvmctl run --mode live` sets
+ * it to the library installed beside itself, so a script it runs
+ * drives the same build.
  */
-export const MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC";
-
-/**
- * Overrides the cap, in bytes, on captured output from a `mvmctl
- * machine` subprocess. Both language wrappers read it and report an
- * overflow as an overflow.
- */
-export const MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES";
+export const MVM_HOSTLIB_PATH_ENV = "MVM_HOSTLIB_PATH";

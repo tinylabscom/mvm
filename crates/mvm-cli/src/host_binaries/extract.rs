@@ -1,29 +1,13 @@
-//! Idempotent extraction of embedded host-vm binaries to a
-//! content-hashed dir under the supplied cache root (typically
-//! `~/.mvm/cache/host-bins`). Re-verifies each binary's SHA-256
-//! against the embedded constant on every call — a corrupted or
-//! tampered on-disk cache fails closed.
+//! Idempotent extraction of the host-vm payload to a content-hashed dir
+//! under the supplied cache root (typically `~/.mvm/cache/host-bins`).
+//! Re-verifies each binary's SHA-256 against the payload's on every call — a
+//! corrupted or tampered on-disk cache fails closed.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::embedded::EMBEDDED;
-
-/// Refuse before touching the cache when this binary carries no payload.
-///
-/// Without this the empty table extracts an empty directory and every caller
-/// fails later, somewhere else, as a missing file — the failure would be read
-/// as a corrupted cache rather than as a build that was never asked to embed
-/// anything.
-fn require_embedded_payload() -> std::io::Result<()> {
-    if !EMBEDDED.is_empty() {
-        return Ok(());
-    }
-    Err(std::io::Error::other(no_payload_message(cfg!(
-        debug_assertions
-    ))))
-}
+use super::source::{PayloadBinary, host_payload};
 
 /// The refusal, naming the rebuild for *this* binary's profile.
 ///
@@ -31,7 +15,7 @@ fn require_embedded_payload() -> std::io::Result<()> {
 /// sent to it is never replaced — and a `PATH` carrying `target/release` ahead
 /// of `target/debug` keeps resolving to the one that refused. The profile has
 /// to travel with the instruction or the instruction cannot work.
-fn no_payload_message(debug_profile: bool) -> String {
+pub(crate) fn no_payload_message(debug_profile: bool) -> String {
     let (profile, binary) = if debug_profile {
         ("", "./target/debug/mvmctl")
     } else {
@@ -47,9 +31,18 @@ fn no_payload_message(debug_profile: bool) -> String {
     )
 }
 
+/// Extract this process's payload under `cache_root`.
+///
+/// Refuses before touching the cache when there is no payload. Without that the
+/// empty table extracts an empty directory and every caller fails later,
+/// somewhere else, as a missing file — the failure would be read as a corrupted
+/// cache rather than as a build that was never asked to embed anything.
 pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
-    require_embedded_payload()?;
-    let combined_hash = combined_hash_hex();
+    extract_payload(host_payload()?, cache_root)
+}
+
+fn extract_payload(payload: &[PayloadBinary], cache_root: &Path) -> std::io::Result<PathBuf> {
+    let combined_hash = combined_hash_hex(payload);
     let target = cache_root.join(&combined_hash);
     std::fs::create_dir_all(&target)?;
     // Lock the parent + restrict its perms.
@@ -57,13 +50,13 @@ pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
     let _ = std::fs::set_permissions(cache_root, perm.clone());
     let _ = std::fs::set_permissions(&target, perm);
 
-    for bin in EMBEDDED.iter() {
-        let final_path = target.join(bin.name);
-        if final_path.exists() && verify_sha(&final_path, bin.sha256_hex)? {
+    for bin in payload {
+        let final_path = target.join(&bin.name);
+        if final_path.exists() && verify_sha(&final_path, &bin.sha256_hex)? {
             continue;
         }
-        write_atomic(&final_path, bin.bytes, 0o755)?;
-        if !verify_sha(&final_path, bin.sha256_hex)? {
+        write_atomic(&final_path, &bin.contents()?, 0o755)?;
+        if !verify_sha(&final_path, &bin.sha256_hex)? {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("post-extract SHA mismatch for {}", bin.name),
@@ -86,10 +79,10 @@ pub fn ensure_boot_host_binaries(cache_root: &Path) -> anyhow::Result<BootHostBi
     Ok(BootHostBinaries { dir, stage0_init })
 }
 
-fn combined_hash_hex() -> String {
+fn combined_hash_hex(payload: &[PayloadBinary]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    for bin in EMBEDDED.iter() {
+    for bin in payload {
         h.update(bin.name.as_bytes());
         h.update(bin.sha256_hex.as_bytes());
     }
@@ -127,10 +120,11 @@ fn rand_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{combined_hash_hex, no_payload_message};
+    use crate::host_binaries::source::{CompiledIn, PayloadSource};
 
     #[test]
     fn combined_hash_is_sha256_hex() {
-        let hash = combined_hash_hex();
+        let hash = combined_hash_hex(&CompiledIn.load().unwrap());
         assert_eq!(hash.len(), 64);
         assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }

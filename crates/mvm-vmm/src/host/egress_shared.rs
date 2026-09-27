@@ -208,6 +208,7 @@ pub fn plan_json_with_one_bound_secret() -> String {
             source: SecretSource::Keystore {
                 address: "test-key".into(),
             },
+            destinations: Vec::new(),
         }])
         .build();
     serde_json::to_string(&plan).expect("serialize admitted plan fixture")
@@ -375,6 +376,7 @@ mod phase_a_tests {
                 source: mvm_core::plan::SecretSource::Keystore {
                     address: "test-key".into(),
                 },
+                destinations: Vec::new(),
             }])
             .build();
         plan.ingress.push(

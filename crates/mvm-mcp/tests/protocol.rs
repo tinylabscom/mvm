@@ -1,13 +1,91 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use mvm_client::drive::{DriveError, DriveFileOperation, EntrypointEvent, FsResult, InputFrame};
 use mvm_client::dto::{MachineFilter, MachineId, MachineStatus};
 use mvm_client::mock::MockBackend;
 use mvm_client::{ClientOperationCapabilities, MvmClient};
-use mvm_mcp::{CURRENT_PROTOCOL_VERSION, McpServer, ServerLimits};
+use mvm_mcp::{CURRENT_PROTOCOL_VERSION, DriveTools, McpServer, ServerLimits};
 use serde_json::{Value, json};
+
+struct GrantedDrive;
+
+impl DriveTools for GrantedDrive {
+    fn open(&self, _: &str) -> Result<String, DriveError> {
+        panic!("tool discovery must not execute drive.open")
+    }
+
+    fn write(&self, _: InputFrame, _: bool) -> Result<usize, DriveError> {
+        panic!("tool discovery must not execute drive.write")
+    }
+
+    fn next_event(&self) -> Result<Option<EntrypointEvent>, DriveError> {
+        panic!("tool discovery must not execute drive.events")
+    }
+
+    fn file(&self, _: DriveFileOperation) -> Result<FsResult, DriveError> {
+        panic!("tool discovery must not execute drive.files")
+    }
+}
+
+#[derive(Default)]
+struct RecordingDrive {
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl RecordingDrive {
+    fn record(&self, call: &'static str) {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call);
+    }
+}
+
+impl DriveTools for RecordingDrive {
+    fn open(&self, _: &str) -> Result<String, DriveError> {
+        self.record("open");
+        Ok("holder-1".into())
+    }
+
+    fn write(&self, frame: InputFrame, _: bool) -> Result<usize, DriveError> {
+        self.record("write");
+        Ok(frame.payload.len())
+    }
+
+    fn next_event(&self) -> Result<Option<EntrypointEvent>, DriveError> {
+        self.record("events");
+        Ok(Some(EntrypointEvent::Exit { code: 0 }))
+    }
+
+    fn file(&self, operation: DriveFileOperation) -> Result<FsResult, DriveError> {
+        match operation {
+            DriveFileOperation::Read { .. } => {
+                self.record("files.read");
+                Ok(FsResult::Read {
+                    content: b"ok".to_vec(),
+                    total_size: 2,
+                })
+            }
+            DriveFileOperation::Write { content, .. } => {
+                self.record("files.write");
+                Ok(FsResult::Write {
+                    bytes_written: u64::try_from(content.len()).expect("fixture length fits u64"),
+                })
+            }
+            DriveFileOperation::List { .. } => {
+                self.record("files.list");
+                Ok(FsResult::List {
+                    entries: Vec::new(),
+                    truncated: false,
+                })
+            }
+            DriveFileOperation::Stat { .. } => panic!("MCP does not expose drive stat"),
+        }
+    }
+}
 
 fn current_request(id: u64, method: &str, extra: Value) -> String {
     let mut params = extra.as_object().cloned().expect("params object");
@@ -127,6 +205,52 @@ async fn every_mock_operation_routes_through_the_facade() {
             .await
             .expect("mock list")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn every_drive_tool_routes_through_the_shared_controller() {
+    let drive = Arc::new(RecordingDrive::default());
+    let client: Arc<dyn MvmClient> = Arc::new(MockBackend::default());
+    let server = McpServer::new(client).with_drive(drive.clone());
+
+    let cases = [
+        ("mvm.drive.open", json!({"cwd":"/workspace"})),
+        (
+            "mvm.drive.write",
+            json!({"seq":0,"data_b64":"aGk=","eof":false}),
+        ),
+        ("mvm.drive.events", json!({})),
+        (
+            "mvm.drive.files.read",
+            json!({"path":"/workspace/a","length":2}),
+        ),
+        (
+            "mvm.drive.files.write",
+            json!({"path":"/workspace/b","data_b64":"aGk="}),
+        ),
+        ("mvm.drive.files.list", json!({"path":"/workspace"})),
+    ];
+    for (offset, (name, arguments)) in cases.into_iter().enumerate() {
+        let response = call(
+            &server,
+            100 + u64::try_from(offset).unwrap(),
+            name,
+            arguments,
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], false, "{name}: {response}");
+    }
+    assert_eq!(
+        *drive.calls.lock().unwrap_or_else(PoisonError::into_inner),
+        [
+            "open",
+            "write",
+            "events",
+            "files.read",
+            "files.write",
+            "files.list"
+        ]
     );
 }
 
@@ -311,8 +435,16 @@ fn operations_serving(keys: &[String]) -> ClientOperationCapabilities {
     serde_json::from_value(Value::Object(fields)).expect("known operation keys deserialize")
 }
 
-async fn advertised_tools(operations: ClientOperationCapabilities) -> Vec<Value> {
-    let server = McpServer::new(Arc::new(MockBackend::default().with_operations(operations)));
+async fn advertised_tools(
+    operations: ClientOperationCapabilities,
+    drive_granted: bool,
+) -> Vec<Value> {
+    let client: Arc<dyn MvmClient> = Arc::new(MockBackend::default().with_operations(operations));
+    let server = if drive_granted {
+        McpServer::new(client).with_drive(Arc::new(GrantedDrive))
+    } else {
+        McpServer::new(client)
+    };
     request(&server, 80, "tools/list", json!({})).await["result"]["tools"]
         .as_array()
         .expect("tools")
@@ -344,14 +476,14 @@ fn sort_keys(value: Value) -> Value {
 /// every client is offered it), sorted by name, keys sorted, pretty-printed.
 async fn normalized_tool_contract() -> String {
     let keys = operation_keys();
-    let always: Vec<String> = advertised_tools(ClientOperationCapabilities::default())
+    let always: Vec<String> = advertised_tools(ClientOperationCapabilities::default(), false)
         .await
         .iter()
         .map(tool_name)
         .collect();
     let mut gates: BTreeMap<String, String> = BTreeMap::new();
     for key in &keys {
-        for tool in advertised_tools(operations_serving(std::slice::from_ref(key))).await {
+        for tool in advertised_tools(operations_serving(std::slice::from_ref(key)), false).await {
             let name = tool_name(&tool);
             if !always.contains(&name) {
                 gates.insert(name, key.clone());
@@ -359,7 +491,14 @@ async fn normalized_tool_contract() -> String {
         }
     }
 
-    let mut tools = advertised_tools(operations_serving(&keys)).await;
+    let drive: Vec<String> = advertised_tools(ClientOperationCapabilities::default(), true)
+        .await
+        .iter()
+        .map(tool_name)
+        .filter(|name| !always.contains(name))
+        .collect();
+
+    let mut tools = advertised_tools(operations_serving(&keys), true).await;
     tools.sort_by_key(tool_name);
     let contract: Vec<Value> = tools
         .into_iter()
@@ -367,6 +506,8 @@ async fn normalized_tool_contract() -> String {
             let name = tool_name(&tool);
             let requires = if always.contains(&name) {
                 Value::Null
+            } else if drive.contains(&name) {
+                Value::String("drive_grant".into())
             } else {
                 let key = gates.get(&name).unwrap_or_else(|| {
                     panic!("`{name}` is not gated by a single client operation")

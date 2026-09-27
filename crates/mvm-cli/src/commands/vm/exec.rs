@@ -73,6 +73,9 @@ pub(in crate::commands) struct Args {
     /// carried by `--launch-plan`.
     #[arg(short, long)]
     pub env: Vec<String>,
+    /// Internal (not a CLI flag): `run --allow-env`.
+    #[arg(skip)]
+    pub allow_env: Vec<String>,
     /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -289,6 +292,9 @@ pub(in crate::commands) struct RunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Allow one HTTP endpoint only, e.g. GET https://h/p/**.
+    #[arg(long = "allow-endpoint", value_name = "[METHOD ]URL")]
+    pub allow_endpoint: Vec<String>,
     /// Cap total AI tokens for this run.
     #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
     pub ai_token_budget: Option<u64>,
@@ -364,6 +370,12 @@ pub(in crate::commands) struct RunArgs {
     /// Inject an environment variable (KEY=VALUE, repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
+    /// Re-admit a denied env variable by exact name. Repeatable.
+    #[arg(long = "allow-env", value_name = "NAME")]
+    pub allow_env: Vec<String>,
+    /// Bind a stored secret; the guest sees only a placeholder.
+    #[arg(long = "secret", value_name = "NAME[:HOST,...]")]
+    pub secret: Vec<String>,
     /// Set a per-command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -495,6 +507,7 @@ impl Default for RunArgs {
             net: false,
             network_preset: None,
             allow_host: Vec::new(),
+            allow_endpoint: Vec::new(),
             ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
@@ -508,6 +521,8 @@ impl Default for RunArgs {
             profile: RunProfile::Standard,
             mounts: Vec::new(),
             env: Vec::new(),
+            allow_env: Vec::new(),
+            secret: Vec::new(),
             timeout: None,
             receipt: None,
             caller_commitment: None,
@@ -579,6 +594,7 @@ impl RunArgs {
             mounts: self.mounts,
             assets: self.assets,
             env: self.env,
+            allow_env: self.allow_env,
             timeout: self.timeout,
             launch_plan: self.launch_plan,
             argv: self.argv,
@@ -681,10 +697,12 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
     let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
+    let routes = super::run_routes::launch_routes(&args)?;
+    let allow_host = routes.with_allow_host(&args.allow_host);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
-        allow_host: &args.allow_host,
+        allow_host: &allow_host,
         peer: &args.peer,
         net: args.net,
         network_preset: args.network_preset,
@@ -693,15 +711,11 @@ pub(in crate::commands) fn run_secure_with_source(
         config: &host_config,
         ai: ai_policy.as_ref(),
     })?;
-    let network_policy = resolved_grants.network_policy.clone();
-    let admit_secrets =
-        mvm_client::admission::secrets::resolve_workload_secrets(args.from_workload_ir.as_deref())?;
-    if !admit_secrets.secrets.is_empty() {
-        // A restored warm parent has already run PID 1, so it cannot receive a
-        // per-boot placeholder token. Secret-bearing launches cold-boot until
-        // warm claims grow an equivalent post-restore handoff.
-        args.warm_pool_size = 0;
-    }
+    let network_policy = resolved_grants
+        .network_policy
+        .clone()
+        .with_routes(routes.routes.clone());
+    let admit_secrets = super::run_secrets::admitted_run_secrets(&mut args)?;
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
@@ -1236,6 +1250,7 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
+    check_run_env(&args.allow_env, &env_pairs, env_args::launch_env(&target))?;
     let selected_backend = crate::exec::select_exec_backend(
         image_ref.is_some(),
         &network_policy,
@@ -1389,7 +1404,9 @@ struct RunReceiptSignature {
     signature_base64: String,
 }
 
+pub(in crate::commands) mod env_args;
 mod preflight;
+use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;
 use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
@@ -1508,21 +1525,6 @@ impl ReceiptOutcome {
             stderr_bytes: output.stderr.len(),
         }
     }
-}
-
-fn parse_env_pair(kv: &str) -> Result<(String, String)> {
-    let (k, v) = kv
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("--env '{kv}': expected KEY=VALUE"))?;
-    if k.is_empty() {
-        anyhow::bail!("--env '{kv}': KEY must not be empty");
-    }
-    if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        || k.starts_with(|c: char| c.is_ascii_digit())
-    {
-        anyhow::bail!("--env '{kv}': KEY must match [A-Za-z_][A-Za-z0-9_]* (got '{k}')");
-    }
-    Ok((k.to_string(), v.to_string()))
 }
 
 fn oci_vsock_proxy_env_for_capabilities(
@@ -2222,6 +2224,10 @@ mod tests {
         );
         assert_eq!(parsed.run.mounts, expected.run.mounts, "--mount default");
         assert_eq!(parsed.run.env, expected.run.env, "--env default");
+        assert_eq!(
+            parsed.run.allow_env, expected.run.allow_env,
+            "--allow-env default"
+        );
         assert_eq!(parsed.run.argv, expected.run.argv, "trailing argv");
         assert_eq!(parsed.sdk.mode, expected.sdk.mode, "--mode default");
         assert_eq!(parsed.sdk.dev, expected.sdk.dev, "--dev default");

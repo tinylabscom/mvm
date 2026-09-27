@@ -970,6 +970,16 @@ pub struct SecretBinding {
     /// `/run/mvm-secrets/<name>` file).
     pub name: String,
     pub source: SecretSource,
+    /// The destinations this binding's placeholder is valid for.
+    ///
+    /// Empty means the whole allow-list the operator stored for the secret.
+    /// A non-empty list narrows that allow-list for this plan only: it can
+    /// never widen it, and the host refuses to assemble a binding that names
+    /// a destination the stored allow-list does not admit. Carried in the
+    /// signed plan so the destinations a credential may reach on this run are
+    /// part of what was signed rather than read from host state afterwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
 }
 
 /// Where a secret comes from. Pluggable providers (Vault, AWS SM,
@@ -1957,6 +1967,7 @@ mod ingress_mapping_tests {
                 provider: "vault".to_string(),
                 path: "ingress/tls".to_string(),
             },
+            destinations: Vec::new(),
         };
         assert_eq!(
             validate_ingress_material(std::slice::from_ref(&mapping), &[external]),
@@ -1968,6 +1979,7 @@ mod ingress_mapping_tests {
             source: SecretSource::Keystore {
                 address: "ingress/tls".to_string(),
             },
+            destinations: Vec::new(),
         };
         validate_ingress_material(&[mapping], &[keystore]).unwrap();
     }

@@ -649,6 +649,7 @@ dependencies = [
  "libc",
  "mvm-contract",
  "mvm-core",
+ "mvm-setpriv",
  "nix",
  "rand",
  "seccompiler",
@@ -754,6 +755,13 @@ dependencies = [
  "libfuzzer-sys",
  "mvm-sdk",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-setpriv"
+version = "0.18.0-rc.2"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

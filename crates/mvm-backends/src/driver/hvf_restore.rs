@@ -28,7 +28,7 @@
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -171,6 +171,12 @@ fn remap_disk(disk: &HvfDisk, anchors: &DeviceAnchors, state_dir: &Path) -> Resu
         state_dir.join(ROOTFS_BLOB)
     } else if anchors.rootfs_verity.as_deref() == Some(disk.path.as_path()) {
         state_dir.join(ROOTFS_VERITY_BLOB)
+    } else if anchors.identity.as_deref() == Some(disk.path.as_path()) {
+        // The FlowMux identity drive travels in the checkpoint content, so the
+        // restore boots from the copy in its own state dir rather than the
+        // parent's path — which a same-identity restore has already reaped, and
+        // which a fork must never share.
+        state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
     } else {
         disk.path.clone()
     };
@@ -317,7 +323,7 @@ fn bounded_restore_command(
     guest_memory_mib: u32,
     inherited: &[RawFd],
 ) -> Result<mvm_core::spawn_scope::BoundCommand> {
-    let mut command = Command::new(supervisor);
+    let mut command = mvm_core::env_hygiene::helper_command(supervisor);
     inherit_descriptors(&mut command, inherited.to_vec());
     let bound = mvm_core::spawn_scope::bind_spawn(
         command,
@@ -812,6 +818,42 @@ mod tests {
     }
 
     #[test]
+    fn child_config_remaps_the_identity_drive_to_the_child_copy() {
+        use mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let mut anchors = materialized(dir);
+        // The captured identity drive is anchored at the parent's path; the
+        // child's own copy travels in the checkpoint content and lands here.
+        anchors.identity = Some(PathBuf::from("/parent").join(IDENTITY_DRIVE_FILE));
+        std::fs::write(dir.join(IDENTITY_DRIVE_FILE), b"child-identity").unwrap();
+        let parent = parent_config(
+            dir,
+            vec![
+                HvfDisk {
+                    path: PathBuf::from("/parent/rootfs.ext4"),
+                    read_only: true,
+                    ephemeral: false,
+                },
+                HvfDisk {
+                    path: PathBuf::from("/parent").join(IDENTITY_DRIVE_FILE),
+                    read_only: true,
+                    ephemeral: false,
+                },
+            ],
+        );
+
+        let cfg = hvf_child_restore_config(&parent, &anchors, &request("child", dir)).unwrap();
+
+        assert_eq!(cfg.disks[0].path, dir.join(ROOTFS_BLOB));
+        assert_eq!(
+            cfg.disks[1].path,
+            dir.join(IDENTITY_DRIVE_FILE),
+            "the identity disk must resolve to the child's own copy, not the parent's path"
+        );
+    }
+
+    #[test]
     fn child_config_refuses_a_writable_disk() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
@@ -1119,7 +1161,7 @@ mod tests {
         ) -> Result<std::process::Child> {
             self.spawned.set(self.spawned.get() + 1);
             assert_eq!(inherited.len(), 2, "RAM and frame are both handed over");
-            let mut command = Command::new("/bin/sh");
+            let mut command = std::process::Command::new("/bin/sh");
             command
                 .args(["-c", self.script])
                 .env("PID_FILE", &cfg.pid_file)

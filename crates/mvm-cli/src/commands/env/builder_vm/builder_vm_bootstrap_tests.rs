@@ -844,17 +844,23 @@ fn builder_vm_stage0_promotion_keeps_existing_valid_cache() {
     validate_builder_vm_stage0_artifacts(&final_dir).expect("existing cache should remain valid");
 }
 
-/// The `Cargo.lock` of the synthetic workspace: `mvm-agentd` depends on
-/// `mvm-core` and `libc`, `mvm-core` on `serde`, and the unrelated crate on
-/// `clap`. `tempfile` is only `mvm-agentd`'s dev-dependency.
+/// The `Cargo.lock` of the synthetic workspace, shaped like the real one:
+/// `mvm-setpriv` depends on `libc` alone, `mvm-agentd` on `mvm-setpriv` and
+/// `mvm-core`, `mvm-core` on `serde`, and the unrelated crate on `clap`.
+/// `tempfile` is only `mvm-setpriv`'s dev-dependency.
 fn synthetic_cargo_lock(libc: &str, clap: &str) -> String {
     format!(
         r#"version = 4
 
 [[package]]
+name = "mvm-setpriv"
+version = "0.1.0"
+dependencies = ["libc", "tempfile"]
+
+[[package]]
 name = "mvm-agentd"
 version = "0.1.0"
-dependencies = ["libc", "mvm-core", "tempfile"]
+dependencies = ["mvm-core", "mvm-setpriv"]
 
 [[package]]
 name = "mvm-core"
@@ -910,14 +916,14 @@ fn write_synthetic_crate(tmp: &std::path::Path, name: &str, deps: &str) {
 /// ```text
 /// tmp/
 ///   Cargo.toml  Cargo.lock
-///   crates/{mvm-agentd,mvm-core,mvm-unrelated}/{Cargo.toml,src/lib.rs}
+///   crates/{mvm-setpriv,mvm-agentd,mvm-core,mvm-unrelated}/{Cargo.toml,src/lib.rs}
 ///   nix/lib/mkguest.nix
 ///   nix/images/builder-vm/{flake.nix,flake.lock}
 /// ```
 ///
-/// The crates are there for layer 4: the flake compiles `mvm-setpriv` from
-/// `mvm-agentd`, so its closure (`mvm-core` included) is part of the key and
-/// `mvm-unrelated` is not. `nix/lib` is present because the flake imports it
+/// The crates are there for layer 4: the flake compiles `mvm-setpriv` from its
+/// own leaf package, so that package and `libc` are part of the key, and
+/// `mvm-agentd`, which depends on the leaf, is not. `nix/lib` is present because the flake imports it
 /// (layer 3) and the dir-walker skip tests exercise it.
 ///
 /// Returns the path of the `nix/images/builder-vm/` dir — the
@@ -936,9 +942,14 @@ fn write_builder_vm_workspace(tmp: &std::path::Path) -> std::path::PathBuf {
     .expect("write Cargo.lock");
     write_synthetic_crate(
         tmp,
+        "mvm-setpriv",
+        "[dependencies]\nlibc.workspace = true\n\n[dev-dependencies]\ntempfile = \"3\"\n",
+    );
+    write_synthetic_crate(
+        tmp,
         "mvm-agentd",
-        "[dependencies]\nlibc.workspace = true\nmvm-core = { path = \"../mvm-core\" }\n\n\
-         [dev-dependencies]\ntempfile = \"3\"\n",
+        "[dependencies]\nmvm-setpriv = { path = \"../mvm-setpriv\" }\n\
+         mvm-core = { path = \"../mvm-core\" }\n",
     );
     write_synthetic_crate(tmp, "mvm-core", "[dependencies]\nserde = \"1\"\n");
     write_synthetic_crate(
@@ -971,25 +982,29 @@ fn fingerprint_after(flake: &std::path::Path, edit: impl FnOnce(&std::path::Path
     builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint")
 }
 
-/// `mvm-setpriv` is compiled by the flake from `mvm-agentd`, so an edit to that
-/// crate, to a workspace crate it depends on, or to a lock entry it resolves
+/// `mvm-setpriv` is compiled by the flake from its own package, so an edit to
+/// that package, to a lock entry it resolves, or to the profile it builds under
 /// changes the image and must change the key.
 #[test]
 fn builder_vm_source_fingerprint_changes_with_setpriv_source() {
     let edits: [WorkspaceEdit; 5] = [
-        ("an mvm-agentd source edit", |root| {
-            std::fs::write(root.join("crates/mvm-agentd/src/lib.rs"), "pub fn g() {}\n")
-                .expect("edit");
+        ("an mvm-setpriv source edit", |root| {
+            std::fs::write(
+                root.join("crates/mvm-setpriv/src/lib.rs"),
+                "pub fn g() {}\n",
+            )
+            .expect("edit");
         }),
-        ("a new file beside mvm-agentd's src", |root| {
-            std::fs::create_dir_all(root.join("crates/mvm-agentd/data")).expect("mkdir");
-            std::fs::write(root.join("crates/mvm-agentd/data/table.txt"), "x").expect("write");
+        ("a new file beside mvm-setpriv's src", |root| {
+            std::fs::create_dir_all(root.join("crates/mvm-setpriv/data")).expect("mkdir");
+            std::fs::write(root.join("crates/mvm-setpriv/data/table.txt"), "x").expect("write");
         }),
-        ("an edit to mvm-core, which mvm-agentd depends on", |root| {
-            std::fs::write(root.join("crates/mvm-core/src/lib.rs"), "pub fn g() {}\n")
-                .expect("edit");
+        ("a manifest edit to mvm-setpriv", |root| {
+            let manifest = root.join("crates/mvm-setpriv/Cargo.toml");
+            let text = std::fs::read_to_string(&manifest).expect("read");
+            std::fs::write(&manifest, format!("{text}\n[features]\nextra = []\n")).expect("edit");
         }),
-        ("a bump of a locked crate mvm-agentd reaches", |root| {
+        ("a bump of a locked crate mvm-setpriv reaches", |root| {
             std::fs::write(
                 root.join("Cargo.lock"),
                 synthetic_cargo_lock("0.2.1", "4.0.0"),
@@ -1017,10 +1032,20 @@ fn builder_vm_source_fingerprint_changes_with_setpriv_source() {
 }
 
 /// The reason the whole lockfile is not hashed: a bump or an edit outside the
-/// closure `mvm-setpriv` is built from cannot change the image.
+/// closure `mvm-setpriv` is built from cannot change the image. That includes
+/// `mvm-agentd` and `mvm-core`, which the helper was compiled from before it
+/// became a leaf.
 #[test]
 fn builder_vm_source_fingerprint_ignores_changes_outside_the_setpriv_closure() {
-    let edits: [WorkspaceEdit; 4] = [
+    let edits: [WorkspaceEdit; 6] = [
+        ("an mvm-agentd source edit", |root| {
+            std::fs::write(root.join("crates/mvm-agentd/src/lib.rs"), "pub fn g() {}\n")
+                .expect("edit");
+        }),
+        ("an mvm-core source edit", |root| {
+            std::fs::write(root.join("crates/mvm-core/src/lib.rs"), "pub fn g() {}\n")
+                .expect("edit");
+        }),
         ("a bump of a crate only mvm-unrelated uses", |root| {
             std::fs::write(
                 root.join("Cargo.lock"),
@@ -1028,17 +1053,17 @@ fn builder_vm_source_fingerprint_ignores_changes_outside_the_setpriv_closure() {
             )
             .expect("edit");
         }),
-        ("an edit to a crate mvm-agentd does not reach", |root| {
+        ("an edit to a crate mvm-setpriv does not reach", |root| {
             std::fs::write(
                 root.join("crates/mvm-unrelated/src/lib.rs"),
                 "pub fn g() {}\n",
             )
             .expect("edit");
         }),
-        ("an mvm-agentd integration test", |root| {
-            std::fs::create_dir_all(root.join("crates/mvm-agentd/tests")).expect("mkdir");
+        ("an mvm-setpriv integration test", |root| {
+            std::fs::create_dir_all(root.join("crates/mvm-setpriv/tests")).expect("mkdir");
             std::fs::write(
-                root.join("crates/mvm-agentd/tests/t.rs"),
+                root.join("crates/mvm-setpriv/tests/t.rs"),
                 "#[test] fn t() {}\n",
             )
             .expect("write");
@@ -1072,15 +1097,15 @@ fn builder_vm_source_fingerprint_ignores_changes_outside_the_setpriv_closure() {
 /// A tree without the crate the flake compiles `mvm-setpriv` from is not one
 /// the flake could build; the key refuses rather than silently hashing less.
 #[test]
-fn builder_vm_source_fingerprint_refuses_a_workspace_without_mvm_agentd() {
+fn builder_vm_source_fingerprint_refuses_a_workspace_without_mvm_setpriv() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let flake = write_builder_vm_workspace(tmp.path());
-    std::fs::remove_dir_all(tmp.path().join("crates/mvm-agentd")).expect("remove crate");
+    std::fs::remove_dir_all(tmp.path().join("crates/mvm-setpriv")).expect("remove crate");
 
     let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
-        .expect_err("a missing mvm-agentd must not produce a key");
+        .expect_err("a missing mvm-setpriv must not produce a key");
 
-    assert!(err.to_string().contains("mvm-agentd"), "{err}");
+    assert!(err.to_string().contains("mvm-setpriv"), "{err}");
 }
 
 #[test]
@@ -1215,6 +1240,116 @@ fn fold_embedded_binary_identity_distinguishes_inputs() {
         hex::encode(h.finalize())
     };
     assert_ne!(base, glued, "name/hash boundary must be unambiguous");
+}
+
+/// Every binary the payload carries, each with the same stand-in digest: the
+/// baked host binaries, then the seed and bootstrap-support binaries.
+fn stand_in_payload() -> Vec<(&'static str, String)> {
+    use crate::host_binaries::manifest::{
+        BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, SEED_BINARIES,
+    };
+    HOST_BINARIES
+        .iter()
+        .map(|bin| bin.name)
+        .chain(SEED_BINARIES.iter().copied())
+        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name))
+        .map(|name| (name, "aa".to_string()))
+        .collect()
+}
+
+/// `payload` with `name`'s digest replaced, as a rebuild of that one binary
+/// leaves it.
+fn with_rebuilt(payload: &[(&'static str, String)], name: &str) -> Vec<(&'static str, String)> {
+    payload
+        .iter()
+        .map(|(bin, digest)| {
+            let digest = if *bin == name { "bb" } else { digest.as_str() };
+            (*bin, digest.to_string())
+        })
+        .collect()
+}
+
+fn as_identities<'a>(payload: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    payload
+        .iter()
+        .map(|(name, digest)| (*name, digest.as_str()))
+        .collect()
+}
+
+fn fingerprint_with(flake: &std::path::Path, payload: &[(&'static str, String)]) -> String {
+    fingerprint_builder_vm_sources(flake.to_str().unwrap(), &as_identities(payload))
+        .expect("fingerprint")
+}
+
+/// A seed or bootstrap-support binary drives Stage 0 but is never installed in
+/// the image it produces, so rebuilding one must not rebuild the image.
+#[test]
+fn builder_vm_source_fingerprint_ignores_seed_and_support_binary_digests() {
+    use crate::host_binaries::manifest::{BOOTSTRAP_SUPPORT_BINARIES, SEED_BINARIES};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flake = write_builder_vm_workspace(tmp.path());
+    let payload = stand_in_payload();
+    let before = fingerprint_with(&flake, &payload);
+
+    let unbaked = SEED_BINARIES
+        .iter()
+        .copied()
+        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name));
+    for name in unbaked {
+        assert_eq!(
+            fingerprint_with(&flake, &with_rebuilt(&payload, name)),
+            before,
+            "a rebuilt {name} must not change the builder image's key"
+        );
+    }
+}
+
+/// A baked host binary is installed in the image, so rebuilding any one of
+/// them must change the key.
+#[test]
+fn builder_vm_source_fingerprint_changes_with_each_baked_binary_digest() {
+    use crate::host_binaries::manifest::HOST_BINARIES;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flake = write_builder_vm_workspace(tmp.path());
+    let payload = stand_in_payload();
+    let before = fingerprint_with(&flake, &payload);
+
+    for bin in HOST_BINARIES {
+        assert_ne!(
+            fingerprint_with(&flake, &with_rebuilt(&payload, bin.name)),
+            before,
+            "a rebuilt {} must change the builder image's key",
+            bin.name
+        );
+    }
+}
+
+/// Layer 2 folds exactly the manifest's baked set: no payload binary outside
+/// `HOST_BINARIES` moves the key, and none inside it is left out.
+#[test]
+fn layer_two_folds_exactly_the_manifest_host_binaries() {
+    use crate::host_binaries::manifest::HOST_BINARIES;
+    let payload = stand_in_payload();
+    let fold = |payload: &[(&'static str, String)]| {
+        let mut h = Sha256::new();
+        fold_baked_binary_identities(&mut h, &as_identities(payload));
+        hex::encode(h.finalize())
+    };
+    let base = fold(&payload);
+
+    let mut folded: Vec<&str> = payload
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| fold(&with_rebuilt(&payload, name)) != base)
+        .collect();
+    folded.sort_unstable();
+    let mut baked: Vec<&str> = HOST_BINARIES.iter().map(|bin| bin.name).collect();
+    baked.sort_unstable();
+    assert_eq!(folded, baked);
+    assert!(
+        payload.len() > baked.len(),
+        "the stand-in payload must carry unbaked binaries for this to test anything"
+    );
 }
 
 #[test]

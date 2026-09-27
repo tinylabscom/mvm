@@ -15,30 +15,43 @@ manifest at `downloads.claude.ai`.
 
 ## Credentials
 
-The guest authenticates with an API key (`sk-ant-…`, from
-platform.claude.com — the browser OAuth flow cannot run in a headless
-guest). Put it in a file and mount that read-only; the wrapper exports it
-if `ANTHROPIC_API_KEY` isn't already set:
+The guest never holds the API key. Store it on the host once, bound to the
+Anthropic API:
 
 ```bash
-mkdir -p ~/.mvm/config/secrets
-printf '%s\n' 'sk-ant-…' > ~/.mvm/config/secrets/anthropic
-chmod 0400 ~/.mvm/config/secrets/anthropic
+mvmctl secret set anthropic --provider anthropic
 ```
 
-**Interim posture, stated honestly:** the guest holds the raw key in
-memory and env. Egress policy limits where it could be sent (the
-allow-list is the API host plus the Console key-check host), but a
-compromised workload could read it. The placeholder-substitution posture
-(guest never sees the key) is the plan's W5.
+The command prompts for the key (`sk-ant-…`, from platform.claude.com; the
+browser OAuth flow cannot run in a headless guest), so it does not land in
+shell history. `--provider anthropic` binds it to `api.anthropic.com` and
+nowhere else.
+
+Every run below passes `--secret anthropic`. The guest then sees
+`ANTHROPIC_API_KEY` set to an opaque `mvm-secret-…` placeholder. Claude Code
+sends that placeholder as its `x-api-key` header; the host network endpoint
+terminates the TLS connection to `api.anthropic.com` under a per-VM
+certificate the guest trusts, swaps the placeholder for the real key, and
+opens its own verified TLS connection to Anthropic. The same placeholder sent
+anywhere else, or in a URL or request body, is refused and recorded in the
+audit log. `mvmctl trust audit tail --chain` shows a `secret.substituted`
+entry for each request that carried the key.
+
+What this does not stop: a compromised agent can still send any request it
+likes to `api.anthropic.com` with your key attached. Use a key with a spend
+limit.
+
+The Console key check Claude Code's interactive mode makes at startup goes
+to `platform.claude.com`, which the `anthropic` binding does not cover. If
+that check needs the key, bind it there too:
+`mvmctl secret set anthropic --host api.anthropic.com --host platform.claude.com --type bearer`.
 
 ## Interactive workbench
 
 ```bash
 mvmctl machine run --flake examples/claude-code --name claude -d \
-  --profile dev \
-  --mount "$PWD/claude-workspace.img:/work:8G:rw" \
-  --mount "$HOME/.mvm/config/secrets:/data/secrets:ro"
+  --profile dev --secret anthropic \
+  --mount "$PWD/claude-workspace.img:/work:8G:rw"
 
 mvmctl machine console claude
 # inside the guest:
@@ -55,28 +68,22 @@ Notes:
   automatically when `/work` is writable, so sessions survive a stop;
   guest `$HOME` is tmpfs and does not.
 - One console session at a time; detach and reattach as needed.
-- A transient secrets share is fine for `mvmctl run`; a **persistent**
-  machine refuses live directory shares, so register the secrets
-  directory as a snapshot-backed volume instead:
-
-  ```bash
-  mvmctl machine volume mount claude --volume secrets \
-    --host "$HOME/.mvm/config/secrets" --guest /data/secrets
-  ```
+- The secret binding is recorded beside the machine and re-validated on
+  every start, and `mvmctl secret rm anthropic` refuses while the machine
+  still names it.
 
 ## Headless (sealed)
 
 ```bash
 echo "Summarize the files under /work/src" | \
   mvmctl machine run --flake examples/claude-code --flake-profile headless \
-    --entrypoint --stdin - \
-    --mount "$PWD/claude-workspace.img:/work:8G:rw" \
-    --mount "$HOME/.mvm/config/secrets:/data/secrets:ro"
+    --entrypoint --stdin - --secret anthropic \
+    --mount "$PWD/claude-workspace.img:/work:8G:rw"
 ```
 
 The task arrives on stdin, the answer leaves on the console/stdout path,
 and the exit code is the run's status. `--bare` skips all discovery
-(hooks, MCP, CLAUDE.md), so the only inputs are the key file, the stdin
+(hooks, MCP, CLAUDE.md), so the only inputs are the placeholder, the stdin
 task, and whatever is mounted under `/work`.
 
 ## Network posture
@@ -101,9 +108,12 @@ straight from npm (slower start, larger closure, glibc-free musl image):
 mvmctl machine run --runtime node --memory 2G \
   --allow-host api.anthropic.com:443 --allow-host registry.npmjs.org:443 \
   --allow-host platform.claude.com:443 \
-  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" --env NODE_USE_ENV_PROXY=1 \
+  --secret anthropic --env NODE_USE_ENV_PROXY=1 \
   -it -- npx -y @anthropic-ai/claude-code@latest
 ```
+
+Never pass the key itself with `--env`: that puts it in the guest's
+environment, which is exactly what `--secret` exists to avoid.
 
 ## Updating the pinned binary
 

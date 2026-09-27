@@ -401,6 +401,7 @@ fn tls_binding() -> mvm_core::plan::SecretBinding {
         source: mvm_core::plan::SecretSource::Keystore {
             address: "ingress/tls".to_string(),
         },
+        destinations: Vec::new(),
     }
 }
 
@@ -541,6 +542,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            destinations: Vec::new(),
         }],
         transport: EndpointTransport::Uds {
             path: "/tmp/mvm-one-transport-bdd.sock".into(),

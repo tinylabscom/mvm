@@ -188,6 +188,11 @@ witnesses = [
     "fn:assert_vsock_only_device_model",
     "fn:fork_restore_refuses_nic",
     "fn:verify_and_resume_refuses_nic_on_restore",
+    "fn:private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it",
+    "fn:metadata_and_the_absolute_ranges_are_never_readmitted",
+    "fn:a_name_that_resolves_inward_is_refused_as_the_address_it_reached",
+    "fn:an_embedded_ipv4_form_is_classified_by_the_address_it_reaches",
+    "fn:the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup",
 ]
 
 [[claim]]
@@ -367,6 +372,8 @@ witnesses = [
     "fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement",
     "fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it",
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
+    "fn:a_grant_that_cannot_be_applied_undoes_the_launch",
+    "fn:a_grant_that_fails_to_apply_refuses_the_cli_boot",
     "fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
     "fn:a_signed_plan_from_the_launch_path_arms_the_timer",
@@ -452,4 +459,41 @@ witnesses = [
     "fn:fresh_install_trust_precedes_verifier_execution",
     "fn:fresh_install_requires_tag_pinned_bundle",
     "fn:fresh_install_has_no_unsigned_fallback",
+]
+
+[[claim]]
+id = "MVM-SEC-22"
+level = "build"
+witness_kinds = ["fn"]
+suite = "cumulative_ledger"
+statement = "A signed execution plan may carry cumulative per-VM action budgets over host-observable seams; absent keeps existing plan bytes identical, present rides signed so a launcher cannot widen a checked ceiling"
+# Phase 0 scope: the signed carrier and its wire stability. Host-side
+# enforcement at the egress, DNS, substitution, input, and output seams
+# lands with the ledger itself.
+witnesses = [
+    "fn:action_budget_defaults_to_no_limits",
+    "fn:action_budget_roundtrips_each_dimension_through_serde",
+    "fn:action_budget_absent_preserves_existing_plan_bytes",
+    "fn:action_budget_extracted_from_signed_envelope",
+]
+
+[[claim]]
+id = "MVM-SEC-23"
+level = "build"
+witness_kinds = ["fn"]
+suite = "protected_paths"
+statement = "A signed execution plan carries a protected-paths policy — enforce over the shipped CI/build/test path set by default, off only as a signed decision — and guest-authored output trees touching a protected class are refused whole at collection with a stable audit tag that never echoes guest-chosen names"
+# Scoped honestly: the collection gate is live. Read-write share admission
+# (Phase 2) and the CLI relaxation flags (Phase 3) are not part of this
+# claim yet; read-only shares remain the supported way to expose protected
+# paths to a guest.
+witnesses = [
+    "fn:protected_paths_policy_roundtrips_through_serde",
+    "fn:default_policy_enforces_the_default_path_set",
+    "fn:matcher_respects_segment_boundaries",
+    "fn:dot_dot_traversal_never_matches",
+    "fn:protected_paths_defaults_to_enforce_and_states_itself_on_the_wire",
+    "fn:a_tree_touching_a_protected_class_is_refused_whole",
+    "fn:benign_trees_collect_under_the_default_policy",
+    "fn:key_material_classes_refuse_at_any_depth",
 ]

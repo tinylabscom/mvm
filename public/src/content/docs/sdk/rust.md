@@ -3,26 +3,36 @@ title: Rust SDK
 description: Rust build-time SDK and Workload IR contract.
 ---
 
-Rust has two SDK surfaces:
+Rust has two SDK surfaces, and one dependency reaches both: `mvm-client`.
 
-- **Authoring** — `mvm-sdk`: build Workload IR (the same IR the Python/TypeScript
-  decorators emit).
-- **Runtime** — `mvm-client`: the `MvmClient` facade for driving machines
-  (create/run/exec/stop/reconfigure), shared with the CLI, the GUI, and the
-  fleet orchestrator.
+- **Authoring** — build Workload IR (the same IR the Python/TypeScript
+  decorators emit). Implemented in `mvm-sdk`; re-exported as
+  `mvm_client::authoring`.
+- **Runtime** — the `MvmClient` facade and the in-process `LocalBackend` for
+  driving machines (launch/create/start/stop/inventory, plus guest process and
+  file operations on a dev machine), shared with the CLI, the GUI, the fleet
+  orchestrator, and — through the `libmvm_hostlib` C ABI — the Python and
+  TypeScript SDKs.
 
-## Authoring — build Workload IR (`mvm-sdk`)
+`mvm-client` also re-exports every type those calls take and return: the
+launch request and its parts (`RootfsSource`, `Grants`, `HostPort`,
+`LaunchVolumeSpec`, `MachineSecretRef`), the results (`LaunchOutcome`,
+`MachineState`, `MachineInventoryRecord`), the guest payloads
+(`mvm_client::guest`), the signed plan types, and the stable error codes
+(`mvm_client::error_codes`).
+
+## Authoring — build Workload IR (`mvm_client::authoring`)
 
 Current:
 
 - Workload and app builders;
 - image, source, resources, network, entrypoint helpers;
 - Workload IR emission;
-- static decorator parsing support in `mvm-sdk`;
+- static decorator parsing support;
 - runtime recording types and lowering.
 
 ```rust
-use mvm_sdk::*;
+use mvm_client::authoring::*;
 
 let workload = workload("worker")
     .app(
@@ -76,6 +86,10 @@ The builder is equivalent to a struct literal — every field stays public — b
 reads far better at call sites and lets new optional fields land without churning
 existing callers.
 
+For ports, a TTL, a profile, or a persistent definition, build a
+`LaunchRequest` and call `LocalBackend::launch`; see the
+[Rust quickstart](/getting-started/rust-quickstart/).
+
 Two `LocalBackend` limits are worth knowing before you build against it:
 
 - `run_machine` and `create_machine` **refuse** a spec with a non-empty `env`.
@@ -83,8 +97,9 @@ Two `LocalBackend` limits are worth knowing before you build against it:
   variables, and dropping them silently would be worse than failing; use the
   CLI run path when a workload needs env.
 - `exec_machine` always returns an error — in-guest exec goes through the
-  guest-agent RPC path, which this backend does not wire. `GatewayBackend`
-  is unaffected.
+  guest-agent RPC path in `mvm_client::guest` (`start_process`,
+  `wait_process`), which a dev machine answers. `GatewayBackend` is
+  unaffected.
 
 ### Embedding it — studio, mvmd, and custom frontends
 

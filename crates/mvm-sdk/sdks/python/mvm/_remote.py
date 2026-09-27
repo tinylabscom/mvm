@@ -1,8 +1,8 @@
-"""Host-side call surface for function-entrypoint workloads (plan-0003 + plan-0010 W5/W6).
+"""Host-side call surface for function-entrypoint workloads.
 
 A ``@mvm.func(...)`` decoration returns a :class:`RemoteFunction` whose
-``__call__`` *is* the remote dispatch — calling the function is calling
-the VM. The local body (for tests) lives on ``f.local``; a synchronous
+``__call__`` *is* the dispatch — calling the function is calling the
+workload. The local body (for tests) lives on ``f.local``; a synchronous
 escape hatch lives on ``f.sync``.
 
 ::
@@ -11,28 +11,27 @@ escape hatch lives on ``f.sync``.
     async def add(a: int, b: int) -> int:
         return a + b
 
-    await add(2, 3)        # dispatches to VM
-    add.local(2, 3)        # in-process call (for unit tests)
+    await add(2, 3)        # dispatches through the workload's wire format
+    add.local(2, 3)        # plain in-process call (for unit tests)
     add.sync(2, 3)         # synchronous escape hatch
 
-Transport contract (matches mvm plan-41 / ADR-0009):
+Where a call runs:
 
-- stdin to ``mvmctl invoke``: encoded ``[args, kwargs]`` per the workload's
-  declared format. JSON is UTF-8 bytes; msgpack is the wire-level binary.
-- stdout from ``mvmctl invoke``: encoded return value in the same format.
-- Non-zero exit + structured stderr envelope (``{kind, error_id, message}``)
-  on user-code failure inside the VM. The SDK parses the envelope and
-  raises :class:`RemoteError`. A non-envelope failure raises
-  :class:`MvmTransportError`.
-
-Cancellation contract (W6): an :class:`asyncio.CancelledError` propagated
-into ``await f(...)`` (e.g. via :func:`asyncio.wait_for`) terminates the
-underlying ``mvmctl`` subprocess: SIGTERM, then SIGKILL after a grace
-period (env: ``MVM_INVOKE_KILL_GRACE_SEC``, default 5s).
-
-Input cap (W6): payload size is checked **after** encode and **before**
-subprocess spawn. The cap is ``MVM_MAX_PAYLOAD_BYTES`` (default
-16 MiB); exceeding raises :class:`PayloadTooLarge`.
+- ``MVM_NO_VM=1``: in this process. The arguments are encoded as
+  ``[args, kwargs]`` in the workload's declared format (JSON or msgpack),
+  size-checked against ``MVM_MAX_PAYLOAD_BYTES``, decoded back, and handed
+  to the wrapped function; its result is encoded, size-checked against
+  ``MVM_MAX_OUTPUT_BYTES``, and decoded with the same hardening the host
+  applies to a result from a microVM (nesting depth, non-finite floats,
+  duplicate keys). What survives the round trip is what the function would
+  receive and return inside a microVM, so a value that would not cross the
+  wire fails here too. An exception the function raises propagates as
+  itself.
+- Otherwise: the SDK loads the host library in-process and never starts a
+  process of its own, and the library has no function-dispatch surface yet,
+  so the call raises :class:`MvmTransportError` saying so. Every check that
+  does not need a microVM still runs first, so an oversized payload or a
+  secret-shaped argument is reported the same way in both modes.
 """
 
 from __future__ import annotations
@@ -43,11 +42,10 @@ import inspect
 import json
 import os
 import re
-import signal
+import threading
 import warnings
 from typing import Any, Awaitable, Callable
 
-from mvm._cli import resolve_cli_bin
 # The error taxonomy is owned by the Rust registry
 # (crates/mvm-sdk/src/error_taxonomy.rs) and generated into
 # `_errors/types.py`. Re-exported here for existing importers.
@@ -64,7 +62,7 @@ from mvm._errors.types import (  # noqa: F401
 
 # Mirror of the IR-side `is_valid_id` rule. Defense-in-depth: even if a
 # caller bypassed the host validator (constructed IR by hand, etc.), the
-# transport layer refuses to spawn mvmctl with a malformed id.
+# dispatch layer refuses a malformed id.
 _VALID_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 
 
@@ -99,20 +97,10 @@ def _check_secret_args(kwargs: dict[str, Any]) -> None:
         raise SecretInArgError(detail)
     warnings.warn(detail, SecretInArgWarning, stacklevel=3)
 
-from mvm._session import current_session_id
-from mvm._subprocess import (
-    DEFAULT_INVOKE_TIMEOUT_SEC,
-    DEFAULT_MAX_OUTPUT_BYTES,
-    TransportOutputOverflow,
-    TransportTimeout,
-    env_float,
-    env_int,
-    run_capped,
-)
 
-# Mirrors `nix/wrappers/python-runner.py::MAX_NESTING_DEPTH`. The wrapper
-# enforces this on inbound; we enforce on the host's outbound-decode path
-# as defense-in-depth in case the substrate is compromised or buggy.
+# Mirrors the guest runner's `MAX_NESTING_DEPTH`. The runner enforces it on
+# what it receives; the host enforces it on what it decodes, so neither side
+# trusts the other to have done it.
 MAX_RESULT_NESTING_DEPTH = 64
 
 __all__ = [
@@ -130,26 +118,32 @@ __all__ = [
 
 
 DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
-DEFAULT_KILL_GRACE_SEC = 5.0
+DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 
 
 # ADR-0010 §2: structural enforcement that the runtime SDK's Layer-3
 # execution surface (.remote(), session(), Session.exec_*) is
 # unreachable during `mvm emit`. The host sets MVM_EMITTING=1
-# when invoking the SDK as the emit subprocess; the guard catches
-# build-time recursion where an entry module tries to call into a VM
-# that doesn't exist yet because the artifact for it is still being
-# built.
+# when invoking the SDK to emit IR; the guard catches build-time
+# recursion where an entry module tries to call into a VM that doesn't
+# exist yet because the artifact for it is still being built.
 EMITTING_ENV_VAR = "MVM_EMITTING"
 
-# Setting MVM_NO_VM=1 routes dispatch through mvmctl's hidden SDK
-# host-wrapper transport, which runs the wrapper directly on the host
-# (no VM boot, no vsock). Per-call module/function/source-path are
-# derived from the wrapped Python function via `inspect`. Only valid
-# for :class:`RemoteFunction` (cross-workload :class:`WorkloadRef`
-# calls have no local fn to introspect).
+# Setting MVM_NO_VM=1 runs a RemoteFunction call in this process, through the
+# same encode and decode path a microVM call takes. Only a RemoteFunction has
+# a local body to run; a WorkloadRef names another workload's function, which
+# this process does not have.
 NO_VM_ENV_VAR = "MVM_NO_VM"
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _check_emitting_context(call_site: str) -> None:
@@ -163,69 +157,26 @@ def _check_emitting_context(call_site: str) -> None:
         )
 
 
+def _no_vm() -> bool:
+    return os.environ.get(NO_VM_ENV_VAR) == "1"
 
 
+def _dispatch_unavailable(call_site: str) -> MvmTransportError:
+    """The refusal for a call that would need a microVM.
+
+    Spelled out in one place because sessions raise it too, and the two
+    should never disagree about what to do instead."""
+    return MvmTransportError(
+        f"{call_site}: dispatching a function-entrypoint call into a microVM from "
+        "a host process is not available through the in-process host library yet. "
+        f"Set {NO_VM_ENV_VAR}=1 to run the function locally through the same "
+        "encode/decode path, or call `.local(...)` for a plain in-process call."
+    )
 
 
-
-
-
-def _no_vm_flags_for(fn: Callable[..., Any], format: str) -> list[str]:
-    """Derive the per-call host-wrapper argv flags from the wrapped fn.
-
-    The Rust side wants `--language` / `--module` / `--function` /
-    `--format` / `--source-path` and uses these to write a temp
-    `wrapper.json` + spawn the embedded oneshot wrapper. Module and
-    function come from the function object itself; the source path is
-    the directory of the file `fn` is defined in.
-
-    A function defined in `__main__` (script-style execution, REPL)
-    has no stable module name the wrapper can import — raise the same
-    determinism error the emit path would.
-    """
-    module = getattr(fn, "__module__", None)
-    function_name = getattr(fn, "__name__", None)
-    if not isinstance(module, str) or not module or module == "__main__":
-        raise NoVmIntrospectionError(
-            f"MVM_NO_VM=1 cannot dispatch a function whose __module__ "
-            f"is {module!r}. Define the function in an importable "
-            "module so the wrapper can locate it."
-        )
-    if not isinstance(function_name, str) or not function_name:
-        raise NoVmIntrospectionError(
-            "MVM_NO_VM=1 cannot dispatch a function with no __name__"
-        )
-    try:
-        source_file = inspect.getfile(fn)
-    except (TypeError, OSError) as exc:
-        raise NoVmIntrospectionError(
-            f"MVM_NO_VM=1 could not locate the source file for "
-            f"{module}.{function_name}: {exc}"
-        ) from exc
-    source_path = os.path.dirname(os.path.abspath(source_file))
-    return [
-        "--language", "python",
-        "--module", module,
-        "--function", function_name,
-        "--format", format,
-        "--source-path", source_path,
-    ]
-
-
-def _locate_mvmctl() -> str:
-    try:
-        return resolve_cli_bin(
-            purpose="remote function dispatch",
-            include_legacy_env=True,
-        )
-    except RuntimeError as exc:
-        raise MvmTransportError(str(exc)) from exc
-
-
-def _encode(format: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bytes:
-    payload = [list(args), dict(kwargs)]
+def _encode_value(format: str, value: Any) -> bytes:
     if format == "json":
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if format == "msgpack":
         try:
             import msgpack
@@ -233,36 +184,40 @@ def _encode(format: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bytes
             raise MsgpackUnavailable(
                 "workload declared format='msgpack' but the msgpack package is not installed"
             ) from exc
-        return msgpack.packb(payload, use_bin_type=True)
+        return msgpack.packb(value, use_bin_type=True)
     raise ValueError(f"unknown serialization format: {format!r}")
 
 
-def _check_depth(value: Any, current: int = 0) -> None:
+def _encode(format: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bytes:
+    return _encode_value(format, [list(args), dict(kwargs)])
+
+
+def _check_depth(value: Any, what: str, current: int = 0) -> None:
     if current > MAX_RESULT_NESTING_DEPTH:
         raise MvmTransportError(
-            f"decoded result exceeds max nesting depth {MAX_RESULT_NESTING_DEPTH}"
+            f"decoded {what} exceeds max nesting depth {MAX_RESULT_NESTING_DEPTH}"
         )
     if isinstance(value, dict):
         for v in value.values():
-            _check_depth(v, current + 1)
+            _check_depth(v, what, current + 1)
     elif isinstance(value, list):
         for v in value:
-            _check_depth(v, current + 1)
+            _check_depth(v, what, current + 1)
 
 
-def _check_no_nonfinite(value: Any) -> None:
+def _check_no_nonfinite(value: Any, what: str) -> None:
     if isinstance(value, float):
         if value != value or value in (float("inf"), float("-inf")):
-            raise MvmTransportError("decoded result contains non-finite float")
+            raise MvmTransportError(f"decoded {what} contains non-finite float")
     elif isinstance(value, dict):
         for v in value.values():
-            _check_no_nonfinite(v)
+            _check_no_nonfinite(v, what)
     elif isinstance(value, list):
         for v in value:
-            _check_no_nonfinite(v)
+            _check_no_nonfinite(v, what)
 
 
-def _decode(format: str, data: bytes) -> Any:
+def _decode(format: str, data: bytes, what: str = "result") -> Any:
     if not data:
         return None
     if format == "json":
@@ -277,7 +232,7 @@ def _decode(format: str, data: bytes) -> Any:
             return out
 
         def reject_const(c: str) -> Any:
-            raise MvmTransportError(f"non-finite JSON constant in result: {c}")
+            raise MvmTransportError(f"non-finite JSON constant in {what}: {c}")
 
         try:
             value = json.loads(
@@ -286,7 +241,7 @@ def _decode(format: str, data: bytes) -> Any:
                 parse_constant=reject_const,
             )
         except json.JSONDecodeError as exc:
-            raise MvmTransportError(f"failed to decode JSON result: {exc}") from exc
+            raise MvmTransportError(f"failed to decode JSON {what}: {exc}") from exc
     elif format == "msgpack":
         try:
             import msgpack
@@ -297,161 +252,108 @@ def _decode(format: str, data: bytes) -> Any:
         try:
             value = msgpack.unpackb(data, raw=False, strict_map_key=True)
         except Exception as exc:
-            raise MvmTransportError(f"failed to decode msgpack result: {exc}") from exc
+            raise MvmTransportError(f"failed to decode msgpack {what}: {exc}") from exc
     else:
         raise ValueError(f"unknown serialization format: {format!r}")
-    _check_depth(value)
-    _check_no_nonfinite(value)
+    _check_depth(value, what)
+    _check_no_nonfinite(value, what)
     return value
 
 
-_ENVELOPE_MARKER = "MVM_ENVELOPE: "
-
-
-def _parse_error_envelope(stderr: bytes) -> RemoteError | None:
-    """Find a structured envelope in the wrapper's stderr.
-
-    Primary path: scan for a line starting with ``MVM_ENVELOPE: `` and
-    parse the JSON suffix. Fallback (for one release of compat with the
-    pre-marker wrapper): treat the last non-empty line as the envelope if
-    it parses as the right-shaped JSON object.
-    """
-    text = stderr.decode("utf-8", errors="replace")
-    for line in text.splitlines():
-        idx = line.find(_ENVELOPE_MARKER)
-        if idx < 0:
-            continue
-        body = line[idx + len(_ENVELOPE_MARKER) :].strip()
-        env = _decode_envelope(body)
-        if env is not None:
-            return env
-    # Fallback: last non-empty stripped line shaped like a JSON object.
-    stripped = text.strip()
-    if not stripped:
-        return None
-    last_line = stripped.splitlines()[-1].strip()
-    if last_line.startswith("{") and last_line.endswith("}"):
-        return _decode_envelope(last_line)
-    return None
-
-
-def _decode_envelope(body: str) -> RemoteError | None:
-    try:
-        env = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(env, dict):
-        return None
-    kind = env.get("kind")
-    error_id = env.get("error_id")
-    message = env.get("message")
-    if not (isinstance(kind, str) and isinstance(error_id, str) and isinstance(message, str)):
-        return None
-    return RemoteError(kind=kind, error_id=error_id, message=message)
-
-
-def _prepare_invoke(
+def _prepare(
     call_site: str,
     workload_id: str,
     format: str,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-    *,
-    fn_selector: str | None = None,
-    use_active_session: bool = True,
-    fn: Callable[..., Any] | None = None,
-) -> tuple[list[str], bytes, float, int, str]:
-    """Run pre-spawn checks shared by sync and async dispatch paths.
+) -> bytes:
+    """Run the checks every dispatch shares and return the encoded payload.
 
-    Returns ``(argv, payload, timeout_sec, output_cap_bytes, command_label)``.
-    Raises before any subprocess spawn, leaving no orphan process behind.
-
-    ``fn_selector``: when set, append ``--fn <name>`` to the argv. The
-    ``WorkloadRef`` proxy passes the attribute the user wrote so the
-    callee's wrapper can dispatch by function name (relevant once
-    ADR-0014 Phase 2 multi-function apps land; single-function callees
-    ignore the selector).
-
-    ``use_active_session``: by default, an active ``mv.session(...)``
-    contextvar adds ``--session <id>`` to the argv. Cross-workload
-    dispatch via :class:`WorkloadRef` opts out — sessions are scoped
-    to a single workload, so a session for workload A must not leak
-    into a call against workload B.
-
-    ``fn``: the wrapped Python function. Required when ``MVM_NO_VM=1``
-    so the SDK can derive module / function / source-path from the
-    local definition and feed them to mvmctl's hidden SDK no-VM transport.
-    ``None`` is fine outside no-VM mode.
-    """
+    These run whether or not the call can go anywhere, so a caller learns
+    about an oversized or secret-bearing call from the check that exists for
+    it rather than from the transport refusal."""
     _check_emitting_context(call_site)
     _check_id("workload_id", workload_id)
     _check_secret_args(kwargs)
     payload = _encode(format, args, kwargs)
-    payload_cap = env_int("MVM_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
+    payload_cap = _env_int("MVM_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
     if len(payload) > payload_cap:
         raise PayloadTooLarge(
             f"encoded payload for {workload_id} is {len(payload)} bytes, "
             f"exceeding MVM_MAX_PAYLOAD_BYTES={payload_cap}. "
             "Hint: pass large blobs via a mounted volume rather than function args."
         )
-    bin_path = _locate_mvmctl()
-    # `--` argv separator: the substrate's CLI parser treats every token
-    # after it as positional, so an id starting with `-` (already rejected
-    # at IR + SDK level, but defense in depth) cannot be misparsed as a
-    # flag. All optional flags must come *before* the separator.
-    no_vm = os.environ.get(NO_VM_ENV_VAR) == "1"
-    if no_vm:
-        if fn is None:
-            raise NoVmIntrospectionError(
-                f"MVM_NO_VM=1 set but no local function available to "
-                f"introspect for {call_site}. no-VM mode is only valid "
-                "for RemoteFunction calls; cross-workload WorkloadRef "
-                "dispatch requires a real VM."
-            )
-        argv: list[str] = [bin_path, "__sdk-no-vm"]
-        command_label = "mvmctl __sdk-no-vm"
-        argv += _no_vm_flags_for(fn, format)
-        # Sessions, --fn, and workload_id don't apply on the local-dispatch
-        # path: the wrapper picks `fn` from the inspected definition, and
-        # there's no warm VM to attach to.
-    else:
-        argv = [bin_path, "invoke"]
-        command_label = "mvmctl invoke"
-        if use_active_session:
-            session_id = current_session_id()
-            if session_id is not None:
-                _check_id("session_id", session_id)
-                argv += ["--session", session_id]
-        if fn_selector is not None:
-            argv += ["--fn", fn_selector]
-    # The SDK always feeds the encoded `[args, kwargs]` payload to
-    # mvmctl over our own stdin pipe; `--stdin -` tells mvmctl to
-    # consume it rather than discarding stdin (default is empty).
-    argv += ["--stdin", "-"]
-    if not no_vm:
-        argv += ["--", workload_id]
-    timeout = env_float("MVM_INVOKE_TIMEOUT_SEC", DEFAULT_INVOKE_TIMEOUT_SEC)
-    cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    return argv, payload, timeout, cap, command_label
+    return payload
 
 
-def _decode_or_raise(
-    workload_id: str,
-    format: str,
-    returncode: int,
-    stdout: bytes,
-    stderr: bytes,
-    command_label: str,
-) -> Any:
-    if returncode != 0:
-        envelope = _parse_error_envelope(stderr)
-        if envelope is not None:
-            raise envelope
-        msg = stderr.decode("utf-8", errors="replace").strip()
-        raise MvmTransportError(
-            f"{command_label} {workload_id} exited {returncode}: {msg or '(no stderr)'}"
+def _local_target(call_site: str, fn: Callable[..., Any] | None) -> Callable[..., Any]:
+    if not _no_vm():
+        raise _dispatch_unavailable(call_site)
+    if fn is None:
+        raise NoVmIntrospectionError(
+            f"{NO_VM_ENV_VAR}=1 is set but {call_site} has no local function to "
+            "run: it names another workload's function, which only that "
+            "workload's microVM has."
         )
-    return _decode(format, stdout)
+    return fn
+
+
+def _decode_call(format: str, payload: bytes) -> tuple[list[Any], dict[str, Any]]:
+    """Decode ``[args, kwargs]`` the way the guest runner would receive it."""
+    decoded = _decode(format, payload, "arguments")
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) != 2
+        or not isinstance(decoded[0], list)
+        or not isinstance(decoded[1], dict)
+    ):
+        raise MvmTransportError("encoded call payload is not an [args, kwargs] pair")
+    return decoded[0], decoded[1]
+
+
+def _round_trip_result(workload_id: str, format: str, result: Any) -> Any:
+    try:
+        encoded = _encode_value(format, result)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MvmTransportError(
+            f"the result of {workload_id} cannot be encoded as {format}: {exc}"
+        ) from exc
+    cap = _env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
+    if len(encoded) > cap:
+        raise MvmTransportError(f"the result of {workload_id} exceeded the {cap}-byte output cap")
+    return _decode(format, encoded)
+
+
+async def _await(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
+
+
+def _run_to_completion(awaitable: Awaitable[Any]) -> Any:
+    """Drive an awaitable from synchronous code.
+
+    ``f.sync(...)`` on an ``async def`` body still has to produce a value.
+    With no loop running on this thread a private one does it. With a loop
+    already running (``f.sync`` called from inside async code) that loop
+    cannot be re-entered, so the body runs on its own loop in a worker thread
+    while this thread waits, which is what blocking in async code means."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_await(awaitable))
+    outcome: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            outcome["value"] = asyncio.run(_await(awaitable))
+        except BaseException as exc:  # re-raised on the calling thread below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=runner, name="mvm-sync-dispatch")
+    worker.start()
+    worker.join()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def _invoke_sync(
@@ -461,45 +363,15 @@ def _invoke_sync(
     kwargs: dict[str, Any],
     *,
     call_site: str = "RemoteFunction.sync(...)",
-    fn_selector: str | None = None,
-    use_active_session: bool = True,
     fn: Callable[..., Any] | None = None,
 ) -> Any:
-    argv, payload, timeout, cap, command_label = _prepare_invoke(
-        call_site,
-        workload_id,
-        format,
-        args,
-        kwargs,
-        fn_selector=fn_selector,
-        use_active_session=use_active_session,
-        fn=fn,
-    )
-    try:
-        proc = run_capped(
-            argv,
-            input_bytes=payload,
-            timeout=timeout,
-            max_output_bytes=cap,
-        )
-    except TransportTimeout as exc:
-        raise MvmTransportError(
-            f"{command_label} {workload_id} timed out after {timeout}s"
-        ) from exc
-    except TransportOutputOverflow as exc:
-        raise MvmTransportError(
-            f"{command_label} {workload_id} exceeded {cap}-byte output cap"
-        ) from exc
-    except FileNotFoundError as exc:
-        raise MvmTransportError(f"failed to spawn mvmctl: {exc}") from exc
-    return _decode_or_raise(
-        workload_id,
-        format,
-        proc.returncode,
-        proc.stdout,
-        proc.stderr,
-        command_label,
-    )
+    payload = _prepare(call_site, workload_id, format, args, kwargs)
+    target = _local_target(call_site, fn)
+    call_args, call_kwargs = _decode_call(format, payload)
+    result = target(*call_args, **call_kwargs)
+    if inspect.isawaitable(result):
+        result = _run_to_completion(result)
+    return _round_trip_result(workload_id, format, result)
 
 
 async def _invoke_async(
@@ -509,106 +381,31 @@ async def _invoke_async(
     kwargs: dict[str, Any],
     *,
     call_site: str = "RemoteFunction.__call__(...)",
-    fn_selector: str | None = None,
-    use_active_session: bool = True,
     fn: Callable[..., Any] | None = None,
 ) -> Any:
-    argv, payload, timeout, cap, command_label = _prepare_invoke(
-        call_site,
-        workload_id,
-        format,
-        args,
-        kwargs,
-        fn_selector=fn_selector,
-        use_active_session=use_active_session,
-        fn=fn,
-    )
-    # `create_subprocess_exec` is the argv-list (no-shell) async spawn
-    # primitive — equivalent of POSIX execve, not shell-style exec.
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-    except FileNotFoundError as exc:
-        raise MvmTransportError(f"failed to spawn mvmctl: {exc}") from exc
-
-    grace = env_float("MVM_INVOKE_KILL_GRACE_SEC", DEFAULT_KILL_GRACE_SEC)
-
-    async def _terminate_process_group() -> None:
-        # SIGTERM the whole group, give the child a grace window to exit
-        # cleanly, then SIGKILL if still alive. `start_new_session=True`
-        # above puts the child in its own process group so we can reach
-        # any grand-children too.
-        if proc.returncode is not None:
-            return
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=grace)
-        except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-
-    try:
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=payload), timeout=timeout
-            )
-        except asyncio.TimeoutError as exc:
-            await _terminate_process_group()
-            raise MvmTransportError(
-                f"{command_label} {workload_id} timed out after {timeout}s"
-            ) from exc
-    except asyncio.CancelledError:
-        await _terminate_process_group()
-        raise
-
-    if len(stdout) > cap or len(stderr) > cap:
-        raise MvmTransportError(
-            f"{command_label} {workload_id} exceeded {cap}-byte output cap"
-        )
-
-    return _decode_or_raise(
-        workload_id,
-        format,
-        proc.returncode or 0,
-        stdout,
-        stderr,
-        command_label,
-    )
+    payload = _prepare(call_site, workload_id, format, args, kwargs)
+    target = _local_target(call_site, fn)
+    call_args, call_kwargs = _decode_call(format, payload)
+    result = target(*call_args, **call_kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    return _round_trip_result(workload_id, format, result)
 
 
 class RemoteFunction:
     """Wraps a decorated function with the host-side call surface.
 
-    ``await f(2, 3)`` is the canonical form — it dispatches the call to
-    the workload's microVM via ``mvmctl invoke``. Calling the function
-    *is* the remote call. Variants:
+    ``await f(2, 3)`` is the canonical form — it dispatches the call through
+    the workload's declared wire format. Calling the function *is* the
+    dispatch. Variants:
 
-    - ``f.local(2, 3)`` — pure in-process call against the wrapped
-      Python body. Useful for unit tests that don't want a microVM in
-      the loop.
+    - ``f.local(2, 3)`` — plain in-process call against the wrapped
+      Python body, with no encoding. Useful for unit tests.
     - ``f.sync(2, 3)`` — synchronous escape hatch that does the same
-      remote dispatch as ``__call__`` but blocks instead of returning a
+      dispatch as ``__call__`` but blocks instead of returning a
       coroutine. Convenient at REPL prompts and in non-async code.
+
+    See the module docstring for where a dispatched call runs today.
     """
 
     def __init__(
@@ -644,7 +441,7 @@ class RemoteFunction:
         )
 
     def sync(self, *args: Any, **kwargs: Any) -> Any:
-        """Synchronous remote dispatch. Same wire path as ``await f(...)``."""
+        """Synchronous dispatch. Same path as ``await f(...)``."""
         return _invoke_sync(
             self._workload_id, self._format, args, kwargs, fn=self._fn
         )
@@ -653,13 +450,14 @@ class RemoteFunction:
 class _BoundRemoteCall:
     """Callable returned by ``WorkloadRef.<attribute>``.
 
-    Bound to a (workload_id, function_name) pair. Calling it dispatches
-    to ``mvmctl invoke <workload> --fn <function>`` through the same
-    transport machinery as :class:`RemoteFunction`. JSON wire format
-    only — cross-workload dispatch defaults to JSON since the caller
-    can't introspect the callee's IR-declared format. Pass
-    ``format="msgpack"`` to :func:`workload_ref` if you know the callee
-    uses msgpack.
+    Bound to a (workload_id, function_name) pair and dispatched through the
+    same checks as :class:`RemoteFunction`. JSON by default, since the caller
+    cannot introspect the callee's declared format; pass ``format="msgpack"``
+    to :func:`workload_ref` if you know the callee uses msgpack.
+
+    A cross-workload call always needs the callee's microVM, so it raises
+    :class:`MvmTransportError` after those checks until the host library can
+    dispatch one.
     """
 
     __slots__ = ("_workload_id", "_function", "_format")
@@ -676,8 +474,6 @@ class _BoundRemoteCall:
             args,
             kwargs,
             call_site=f"WorkloadRef({self._workload_id!r}).{self._function}(...)",
-            fn_selector=self._function,
-            use_active_session=False,
         )
 
     def sync(self, *args: Any, **kwargs: Any) -> Any:
@@ -689,8 +485,6 @@ class _BoundRemoteCall:
             args,
             kwargs,
             call_site=f"WorkloadRef({self._workload_id!r}).{self._function}.sync(...)",
-            fn_selector=self._function,
-            use_active_session=False,
         )
 
     def __repr__(self) -> str:
@@ -712,15 +506,12 @@ class WorkloadRef:
 
         @mv.func(name="caller", depends_on=[math])
         async def add_then_double(a: int, b: int) -> int:
-            s = await math.add(a, b)        # mvmctl invoke math-svc --fn add
+            s = await math.add(a, b)
             return s * 2
 
-    The proxy reuses the same dispatch path as :class:`RemoteFunction`
-    (encode → payload-cap check → spawn ``mvmctl`` → decode envelope),
-    so payload caps, secret-args heuristics, and decoder hardening
-    apply identically. Sessions don't propagate across workload
-    boundaries — a ``mv.session("a")`` context doesn't add ``--session``
-    to a call against workload ``"b"``.
+    The proxy reuses the same dispatch checks as :class:`RemoteFunction`
+    (encode → payload-cap check → secret-args heuristic), so a mistake is
+    reported the same way on both surfaces.
 
     Cross-workload dispatch is JSON by default. Pass ``format="msgpack"``
     to :func:`workload_ref` when calling a callee whose declared format

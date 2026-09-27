@@ -6,6 +6,9 @@ Accepted. Amended 2026-08-17: `run` is a first-class visible top-level
 verb, and the hidden/visible split is restated as three buckets with a
 gate. See "`run` is a first-class transient verb" and "Three visibility
 buckets, and the cost of hiding".
+Amended 2026-09-26: the language SDKs no longer shell out to `mvmctl`;
+they load `libmvm_hostlib` in-process. See "One client contract behind both
+the CLI and the SDK".
 
 ## Context
 
@@ -167,14 +170,25 @@ returns; and `GatewayBackend`, a REST client reachable only when the
 that re-exports the trait, the DTOs, and both backends, so a consumer
 writes one import regardless of transport.
 
-The SDKs do not yet consume this trait directly: `mvm-sdk`'s
-`MachineClient` still deliberately shells out to `mvmctl machine ...` as
-a subprocess, because `mvm-sdk` sits below the runtime in the dependency
-graph and linking `mvm-client`'s local backend directly would form a
-cycle. The trait's relocation to the cycle-free `mvm-core::client` module
-exists specifically to make that convergence possible without breaking
-the dependency direction; the SDK's call sites migrating onto it is
-follow-on work, not yet done.
+The language SDKs converged on it through a library rather than an edge
+out of `mvm-sdk`. `mvm-sdk` sits below the runtime in the dependency graph
+(`mvm-client` depends on it), so linking the local backend there would form
+a cycle. `crates/mvm-hostlib` instead sits at the top of the graph beside
+`mvm-cli`, links `mvm-client`, and exposes it as one versioned C ABI
+(`libmvm_hostlib`: JSON in, JSON out, a status and a paired free). The
+Python and TypeScript SDKs load that library in-process and never run
+`mvmctl`; the `mvm-sdk` subprocess clients (`MachineClient` and the
+subprocess-backed `MvmClient`) are deleted, and `xtask check-no-cli-shellout`
+fails the build if SDK source reaches for a process API or resolves the CLI
+to run it. A Rust embedder uses `mvm-client` directly, which re-exports the
+authoring surface as `mvm_client::authoring`.
+
+The library's launch methods go through `LocalBackend::launch`, the same
+admitted-boot path every in-process launcher uses. That path does not yet
+share the CLI's `machine run` front half (a command override, a template
+slot, guest environment), so those refuse in the library rather than falling
+back to the CLI; converging the two launchers is tracked in the drive-plane
+plan.
 
 ## Consequences
 

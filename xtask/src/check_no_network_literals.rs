@@ -52,6 +52,11 @@ const ALL_RULES: &[Rule] = &[Rule::SubnetLiteral, Rule::EgressPort, Rule::TmpSoc
 /// rule class that the file legitimately needs.
 const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     (
+        "crates/mvm-contract/src/policy/restricted_address.rs",
+        &[Rule::SubnetLiteral],
+        "the RFC1918 ranges the egress classifier refuses by default; a range to deny, never an address anything dials",
+    ),
+    (
         "crates/mvm-core/src/dev_network.rs",
         &[Rule::SubnetLiteral],
         "the canonical dev-subnet definition: owns the 172.16.0.0/24 consts every other site routes through",

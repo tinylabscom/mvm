@@ -4,7 +4,7 @@ Backing: preview
 Validation: each wave lands with the tests and measured evidence named in
 its boxes; unchecked waves remain in progress.
 
-**Status:** IN PROGRESS — W7.1 complete; W7.2–W7.4 open
+**Status:** IN PROGRESS — W7 complete (window closed 2026-09-25); W8 open
 **Date opened:** 2026-09-24
 **Issues:** #3368 (W7 dual-publish window), #3366 (W8 cutover and deletion)
 **Parent plan:** `specs/plans/2026-09-16-image-repository-extraction.md`
@@ -110,8 +110,12 @@ roll back without rebuilding a CLI.
       proposing anything, and it never advanced `[stage0_kernel]`'s tag. It
       now calls `xtask repin-image-lock`, which re-parses the lock it writes
       (6 tests; idempotent on the real `image-set/v0.1.0` root).
-- [ ] Window length: one full CLI release train plus the observations
+- [x] Window length: one full CLI release train plus the observations
       above; extend once if any signal is unavailable, not silently.
+      *Closed 2026-09-25T15:07:55Z* after one CLI release train
+      (`v0.18.0-rc.2`) and one image release (`image-set/v0.1.1`); every
+      signal was available, so the window was not extended. Evidence is in
+      "W7 window close" below.
       *2026-09-24:* the producer revocation channel is live —
       `revocation-list/v1` (tinylabscom/mvm-images#27 moved signing off the
       `revocations/` prefix, whose tags made the channel's own `revocations`
@@ -126,12 +130,21 @@ roll back without rebuilding a CLI.
 
 ### W7.3 Rollback drill
 
-- [ ] On a branch, point `images.lock` at the previous selection (the
+- [x] On a branch, point `images.lock` at the previous selection (the
       explicit `legacy` entry) and run the acquisition/boot lanes
       (guest-image-boot, boot-latency, image check) against it in CI.
       Restore the pin afterwards. The drill must not require rebuilding a
       CLI and must not touch the merge queue's protected state.
-- [ ] Record the drill result in `specs/sprint/delivery/`.
+      *Done 2026-09-25, against `image-set/v0.1.0` rather than `legacy`* (the
+      finding below): forward to `image-set/v0.1.1` through the queue as
+      #3677 (merge-group run 36089819238), back to `v0.1.0` by
+      `xtask repin-image-lock` on `drill/w7-rollback-to-image-set-v0.1.0`
+      (dispatch run 36093777305, green on its second attempt after a
+      transient Nix store error in the flake check). Both boot lanes passed
+      in both directions;
+      no CLI was rebuilt and `main` was never moved back.
+- [x] Record the drill result in `specs/sprint/delivery/`.
+      *Done:* `specs/sprint/delivery/3368-w7-window-close.md`.
 
 *Finding (2026-09-24), before any drill run:* the drill cannot target the
 `legacy` entry as written. A lock whose `[image_set]` names
@@ -177,6 +190,72 @@ non-goal to change.
 Acceptance (carried from the parent plan): no supported CLI version
 receives a 404 or accepts differently signed bytes during the transition.
 
+### W7 window close (2026-09-25)
+
+The window ran from 2026-09-24T19:24:38Z to 2026-09-25T15:07:55Z. Every exit
+criterion recorded in W7.2 was met:
+
+- **Boot lanes.** 17 merge-group runs completed in the window (a further one,
+  #3675, was still in the queue at close). `Guest image boots (mvm-images)`
+  passed on 17 of 17. `Boot latency ceiling` passed on 16 and was skipped on
+  the documentation-only #3668 by its path scope; it failed on none.
+- **Pin-update dry run.** `update-image-pin.yml` dispatch run 36065248466
+  passed, reporting that `images.lock` already pinned `image-set/v0.1.0` — the
+  first green run the workflow has had. Run 36085954556 then verified the
+  `image-set/v0.1.1` root and pushed the lock advance, and failed only at its
+  last step, opening the pull request, which the repository did not permit;
+  the pushed branch was opened by hand as #3677.
+- **Download counts** (GitHub releases API, all assets summed):
+
+  | Release | Window open | Window close |
+  |---|---:|---:|
+  | `mvm-images` `image-set/v0.1.0` | 182 (`image-set.json` 39) | 390 (67) |
+  | `mvm-images` `image-set/v0.1.1` | not yet published | 481 (108) |
+  | `mvm` `boot-image/v0.1.5` (legacy) | 5,118 | 5,139 |
+  | `mvm` `v0.18.0-rc.1` | 418 | 488 |
+
+  The legacy release and the pre-W6 CLI release kept serving downloads while
+  the image-set roots were read by new CLIs: old CLIs used the legacy URLs,
+  new ones the locked manifest.
+- **404s.** No open or closed issue reports a 404 against a legacy asset URL.
+- **Release train.** `v0.18.0-rc.2` (release run 36134611204) published 68
+  assets. Its mirror step verified the pinned `image-set/v0.1.1`, all 29
+  artifacts, with the `mvmctl` being released before anything was signed.
+  Its `verify-release` job waited for the workload kernels, which
+  `kernel-build.yml` attaches separately (dispatch run 36150025746, green),
+  and, re-run once they were attached, failed on three asset-set checks,
+  none of them in the mirror:
+  - The verifier required a per-archive `mvmctl-<target>.tar.gz.sha256` that
+    `release.yml` never uploads. `v0.18.0-rc.1`'s `verify-release` failed on
+    the same check, so the job has never passed. Nothing downloads the file:
+    the installer and `mvmctl update` read the signed
+    `checksums-sha256.txt`. The fix, checking each archive against that
+    manifest, rides with Wave 3's rewrite of the verifier.
+  - The kernel checksum manifests are signed by `kernel-build.yml`, and the
+    verifier accepts only the `release.yml` identity.
+  - The builder-VM `pack-manifest.json` that `release.yml`'s attested-pack
+    job adds is absent from the mirrored builder-VM checksum file, which
+    comes from the image set.
+
+  The last two are the in-tree producers W8 deletes: after Wave 3 the
+  kernels and the builder pack come only from the signed image set.
+  Four release blockers were fixed on the way and none was image-related:
+  #3678 (the release feature set did not compile), #3687
+  (`mvm-gpu-endpoint` was not shipped), #3688 (a removed machine's instance
+  state leaked into its successor), and #3689 (the documented-surface lane
+  did not tolerate the destructive-lab skip).
+- **Rollback drill.** W7.3 above: both directions green, no CLI rebuilt.
+
+`image-set/v0.2.0` in `mvm-images` is a burned tag: its publish step refused,
+fail-closed, because the pinned `mvm` could not parse the new initramfs role,
+and nothing was published under it. The next image set is `image-set/v0.2.1`.
+
+The `legacy` lock-entry retirement date, 2026-12-31, was confirmed by the
+maintainer on 2026-09-25; it had been recorded as a proposal. Pin proposals
+from `update-image-pin.yml` still need the repository setting that lets
+GitHub Actions open pull requests; the maintainer is enabling it, and until
+then a proposal branch is opened by hand, as #3677 was.
+
 ## W8 — cut over, remove duplication, shrink the suite
 
 Goal: delete image construction and canonical image hosting from `mvm`,
@@ -184,11 +263,16 @@ keep the contract/resolver/boot-test surface, and re-measure the release.
 
 Hard gates before any W8 PR:
 
-- [ ] W7 window evidence collected and appended to this file (W7.2 signals
-      plus the W7.3 drill record).
-- [ ] A fresh deletion inventory re-scanned from `main` at W8 start; the
+- [x] W7 window evidence collected and appended to this file (W7.2 signals
+      plus the W7.3 drill record). *Done:* "W7 window close" above.
+- [x] A fresh deletion inventory re-scanned from `main` at W8 start; the
       wave assignments below revalidated ref by ref. The inventory below is
       a 2026-09-24 snapshot (44 crate files, 7 workflows), not a contract.
+      *Done:* `specs/plans/2026-09-24-w8-image-deletion-inventory.md`,
+      scanned at `9ebb81b459`: 80 files outside `specs/` (the same 44 crate
+      files and 7 workflows, plus `kernel-build.yml` and 12 crate files that
+      depend on the flakes through helpers), with twelve findings that
+      re-sequenced the waves below.
 
 ### Deletion inventory (2026-09-24 snapshot)
 
@@ -224,47 +308,98 @@ verify, cache install), `update-image-pin.yml`, the boot witnesses
 (`runtime_boot_bench`, guest-image-boot lane, boot-latency lane), and the
 sibling-checkout selector minus its in-tree arm.
 
-### Waves
+### Waves (re-sequenced 2026-09-24 from the Wave 0 inventory)
 
-- [ ] **Wave 0 — classification and trackers.** Re-scan from `main`,
+Wave 0's inventory (`specs/plans/2026-09-24-w8-image-deletion-inventory.md`)
+changed the plan in three ways: Waves 1 and 2 are compile-coupled and land
+together; three artifacts the CLI still fetches from its own release must move
+to the image set before any workflow wave; and several in-tree-only artifacts
+need an owner in `mvm-images` first.
+
+- [x] **Wave 0 — classification and trackers.** Re-scan from `main`,
       produce the per-ref D/K/E table as a checked-in inventory file under
       `specs/`, open the W8 tracking issue updates. No code changes.
-- [ ] **Wave 1 — `mvm-build`.** Remove the in-tree image-build arms
-      (`InTree` selector variant and its flake invocations, builder-vm and
-      default-microvm image builders, the `build image-set`-style verbs that
-      build from `nix/images`), keeping pair builds (they build from the
-      sibling checkout, not `nix/images`). The tool-builder path exempted
-      from pair routing in W5f is re-pointed at published/fetch acquisition,
-      not at `nix/images`.
-- [ ] **Wave 2 — `mvm-cli`.** Remove the build verbs and bootstrap arms
-      that construct images in-tree; keep install/verify/doctor surfaces.
-- [ ] **Wave 3 — workflows.** Land the workflow D/E set: retire
-      `release-boot-image.yml`, strip image publication/signing from
-      `release.yml`, drop image-build legs from `cache-warm.yml` and the CI
-      lanes, keeping every lane that consumes the published path.
-      *Prerequisite found 2026-09-24:* CLIs built from `main` still download
-      the runtime overlay, SDK sidecar and initramfs from their own
-      `tinylabscom/mvm` `v{version}` release (`download_runtime_overlay`,
-      `download_sdk_sidecar`, `download_initramfs`), under the CLI identity.
-      Stripping the W7.1 mirror from `release.yml` before those three read
-      the image set would make every new CLI 404. The overlay and sidecars
-      are already signed-root members; the initramfs is published by
-      `mvm-images` but is not a root member, and `release.yml` still builds
-      it from `nix/images/initramfs`. Those moves are a Wave 3 precondition,
-      not a follow-up.
-      *Second coupling (2026-09-24):* the overlay, sidecar and initramfs
-      resolvers refuse a `VERSION` that differs from the running CLI's
-      semver, and `nix/images/version.nix` is what `_release-prep` bumps. An
-      image set therefore serves exactly one CLI version: the W7.1 mirror for
-      `v0.18.0` needs a set built at `0.18.0`. Moving these artifacts to the
-      image set means replacing that equality with the set's declared
-      `compatibility` range, or every CLI release still needs an image
-      release.
-- [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`, the E-class
-      reference edits across remaining crates, and live-doc updates
-      (`CLAUDE.md`, `AGENTS.md`, contributor docs) to state that image
-      construction is `mvm-images`-only. Historical specs, ADRs, and
-      delivery notes stay as history.
+      *Done:* the inventory above, with a fourth class (R, re-point) for code
+      that reaches the flakes through a helper rather than a literal path.
+- [x] **Wave 0.5a — the initramfs becomes a signed root member.**
+      `ImageSetRole::Initramfs` enters the `mvm-core` contract (accepted, not
+      yet required by `current_train`), `mvm-images` publishes a per-arch
+      `initramfs` member and derives every artifact `VERSION` from the pinned
+      `mvm` workspace instead of a hand-kept `version.nix`, and one
+      `image-set` release carries both; `images.lock` advances through
+      `update-image-pin.yml` and the requirement then includes the role. The
+      rest of the "only built in-tree" list needs no port: `mvm-images`
+      already publishes the default-tenant `dev` attribute, and it rejected
+      the `workload-k8s` kernel in favour of the rootless-tenant floor
+      (`sources/ignored.tsv`).
+      *Ordering, learned 2026-09-25:* `mvm-images`' publish step verifies the
+      signed set with its own pinned `mvm`, and refuses a role that `mvm`
+      does not parse — `image-set/v0.2.0` (tinylabscom/mvm-images#28) failed
+      there, fail-closed, before anything was published; its tag is
+      immutable and unused. The role lands in `mvm` first, `mvm-images`
+      advances its `mvm` pin to that commit, and the set publishes as
+      `image-set/v0.2.1`.
+      *Done 2026-09-26:* the role landed in `mvm-core` (#3740); `mvm-images`
+      advanced its `mvm` pin to that commit (tinylabscom/mvm-images#30) and
+      published `image-set/v0.2.1` (run 36212970402; root
+      `cbe19a17…d58a`, cosign-verified against `release.yml@refs/tags/image-set/v0.2.1`)
+      with per-architecture `initramfs` members. `images.lock` pins it and
+      `current_train()` now requires the role on both architectures, so a set
+      without it is refused as incomplete.
+- [ ] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
+      sidecar and initramfs are acquired as members of the locked set —
+      digest- and size-checked against the verified root, through the one
+      acquisition boundary moved from `mvm-cli` into `mvm-build` so
+      `mvm-client` can use it — instead of from
+      `tinylabscom/mvm/releases/download/v{version}`. This wave keeps
+      the resolvers' refusal of a `VERSION` that differs from the running
+      CLI, which holds while `main` and the pinned set share a version.
+      `mvm-images` reads that version from the pinned `mvm` workspace
+      instead of `nix/images/version.nix`. Must be on `main` before
+      Wave 3 removes the W7.1 mirror. It does not need a CLI release of its
+      own first: removing the mirror changes only releases cut afterwards,
+      and every one of those contains this wave, while CLIs already released
+      keep reading the assets attached to their own releases, which are
+      never deleted. The first CLI release after Wave 3 — the re-measure
+      release — is therefore the first to ship without a mirror.
+- [ ] **Waves 1+2 — `mvm-build` and `mvm-cli` together.** Remove
+      `ImageSource::InTree`, `in_tree_overlay_checkout_root` and every in-tree
+      build arm; keep pair builds from the sibling checkout. Re-point the
+      source-checkout signal from the in-tree builder flake to
+      `mvm_source_checkout`, and make a contributor build with no sibling
+      fetch the published builder image. New refusal test: an in-tree image
+      build fails with "image construction lives in mvm-images".
+- [ ] **Wave 3 — workflows.** Retire `release-boot-image.yml` and
+      `kernel-build.yml`'s in-tree publication; strip `initramfs-image` and
+      (after 0.5b ships) the W7.1 mirror from `release.yml`; drop the in-tree
+      legs of `cache-warm.yml`, `ci.yml`, `ci-full.yml`, `security.yml` and
+      `kernel-cve-watch.yml`, re-pointing source-path witnesses at the
+      `mvm-images` checkout. `check_workflow_paths.rs`,
+      `github_actions_aarch64_no_kvm.rs` and
+      `scripts/local-aarch64-no-kvm-smoke.sh` move in the same PR.
+- [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`; move
+      `kernel/base.nix` for `nix/packages/qemu-wasm-smoke-image.nix` and the
+      `examples/llm-agent` recipe out of it; retire
+      `check-runtime-overlay-version` with the `_release-prep` bump and
+      re-point `check-guest-binary-lists`, `check-kernel-pin-freshness` and
+      `check-kernel-config-budget`; delete the dead `build-dev-image`;
+      E-class edits and live docs (`CLAUDE.md`, `README.md`, contributor
+      docs).
+
+- [ ] **Release decoupling — set members are identified by the lock, not
+      the CLI version.** With the equality above, every CLI version bump
+      needs an image set rebuilt at the new version and re-pinned before
+      `release-tag`, because the release's end-to-end lanes run the new CLI
+      against the set. That breaks the parent plan's acceptance that a
+      host-only change rebuilds no image. For members acquired from the
+      locked set, compatibility is already established where it belongs:
+      the signed root's digests pin the bytes and its declared
+      `compatibility` is checked against the host at acquisition. Their
+      cache is therefore keyed by the pinned root rather than
+      `CARGO_PKG_VERSION`, and a cache hit is accepted when it came from that
+      root; pair and source builds keep the version equality. Lands after
+      Wave 4 and before the re-measure release, which is the first CLI
+      release it serves. Found 2026-09-25 while sequencing the re-measure.
 - [ ] **Re-measure.** Record release duration, release storage, download
       volume, and failure rate against the pre-W8 baseline; the release
       gate must be at least 25 minutes faster per the parent plan, and
@@ -275,6 +410,10 @@ sibling-checkout selector minus its in-tree arm.
       documented-surface suite's live phase remains the release critical
       path after the image legs are gone, shard it per the parent plan —
       this is intentionally not bundled with any wave above.
+
+After Wave 4, `mvm-images`' source-drift gate (`sources/files.tsv`) still
+maps its images to `mvm`'s `nix/images/`; the first `mvm` pin advance past
+the deletion retires those rows, since the copies stop being copies.
 
 Non-goals: deleting GitHub release assets or historical releases; changing
 the `Released`-arm trust semantics; touching `mvm-images` (its own repo

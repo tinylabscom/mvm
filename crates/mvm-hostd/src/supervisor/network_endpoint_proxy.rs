@@ -32,9 +32,12 @@ mod classify;
 mod forward;
 mod ingress;
 mod listen;
+mod pinned_dns;
 mod pipeline;
 mod prepare;
 mod redaction;
+mod reflection;
+mod routing;
 mod sign;
 
 /// Host-side AF_VSOCK listener for the QEMU (`vhost-vsock`) guest→host
@@ -46,10 +49,13 @@ pub mod vsock;
 
 pub use assembly::{FromPlanError, FromPlanInputs};
 pub(crate) use classify::TerminationMode;
+#[cfg(test)]
+pub(crate) use forward::TestTransport;
 pub use forward::{
     ForwardError, ForwardResponse, ForwardStreamResponse, Forwarder, HardenedForwarder,
 };
 pub use ingress::HostMaterialError;
+pub(crate) use prepare::{PLACEHOLDER_OUTSIDE_HEADERS, REASON_PLACEHOLDER_IN_BODY};
 pub use prepare::{ProxyError, prepare_request};
 
 /// 16 MiB cap on a single routed request/response frame.
@@ -99,6 +105,15 @@ pub struct SubstitutionService {
     /// process-global registry is used.
     instance_metrics:
         Option<Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>>,
+    /// The addresses the egress gate admitted for each destination, shared
+    /// with the forward leg's resolver so it connects to nothing else.
+    admitted: Arc<pinned_dns::AdmittedAddresses>,
+    /// Answers `ask` route decisions. [`crate::supervisor::egress_approval::NoApprovalBackend`]
+    /// until an approval backend is configured, which refuses every one.
+    approver: Arc<dyn crate::supervisor::egress_approval::EgressApprover>,
+    /// Every credential value substituted so far in this VM, so a response
+    /// that echoes one back is scrubbed before it reaches the guest.
+    reflection: reflection::ReflectionGuard,
 }
 
 #[cfg(test)]

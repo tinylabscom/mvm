@@ -24,12 +24,6 @@ mvm-host-services.workspace = true
 # enabling it here would switch schemars on inside `mvm-contract` for every
 # consumer and defeat the gating in `mvm-core`/`mvm-contract`/`mvm-agentd`.
 mvm-contract.workspace = true
-# The subprocess-backed MvmClient facade uses the trait + DTOs from
-# `mvm-core`'s `client` module (behind that crate's `client` feature). Kept off
-# by default so the mvmctl default closure gains no `async-trait`; the facade
-# shells `mvmctl machine` and never links the runtime backend (`mvm-client`'s
-# `LocalBackend`), so no `sdk -> backend -> build -> sdk` cycle forms.
-async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Only the remote deploy transport (`MvmdClient::ship`) speaks HTTPS, and it is
@@ -71,7 +65,6 @@ default = []
 # default; `mvm-cli` turns it on. Everything else in `deploy` — the record
 # types and boot-artifact digests the CLI verifies with — stays unconditional.
 deploy-remote = ["dep:mvm-http"]
-client-facade = ["dep:async-trait", "mvm-core/client"]
 # Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
 # and forward to the IR's own derives, for the three schema-emitter bins below.
 # Off by default: nothing on the `mvmctl` runtime path reads a JSON Schema, and
@@ -122,8 +115,6 @@ path = "src/bin/emit_sdk_ctors.rs"
 # package-scoped, measured nothing here and reported it as clean.
 # Matches mvm-build and mvm-runtime.
 mvm-core = { workspace = true, features = ["test-support"] }
-# Async tests for the subprocess MvmClient impl.
-tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

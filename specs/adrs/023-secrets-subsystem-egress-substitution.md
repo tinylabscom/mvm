@@ -19,8 +19,10 @@ sealing must be a transparent upgrade, never a prerequisite.
 ## Decision
 
 A secret is a reference. The host substitutes the real value into
-outbound traffic at the egress boundary; the guest holds only a
-**named placeholder the user chooses** — `${NAME}` — never the value.
+outbound traffic at the egress boundary; the guest holds only an **opaque
+placeholder the host mints** — `mvm-secret-` and 48 random hex characters,
+one per plan binding — never the value. Each placeholder is valid only for
+the destinations its own binding names.
 
 ### Mechanism — host-side termination of a flow to a bound host, no SDK required
 
@@ -42,18 +44,68 @@ the placeholder on the wire. A plain `curl https://<bound-host> -H
 SDK cooperation, gets the real credential substituted host-side.
 
 The workload never makes its own TLS handshake to the destination for a
-secret-bearing request and never holds the value. The host does not MITM
-the guest's other TLS sessions — only requests routed to a bound
-destination are seen host-side, and only for that destination.
+secret-bearing request and never holds the value. The endpoint originates
+the upstream TLS connection itself and verifies the destination's
+certificate the ordinary way; a destination that fails verification gets
+nothing, and the guest gets a `502`. There is no fallback to relaying the
+guest's own bytes for a bound destination — not on a TLS error, not on an
+exhausted termination budget. The host does not MITM the guest's other TLS
+sessions — only flows to a bound destination are opened host-side, and only
+for that destination.
 
-The default-deny egress proxy is the catch-all underneath: every egress
-packet traverses it. Secret-bearing requests to a bound destination are
-substituted; everything else is policy-checked and leak-scanned — a
-placeholder or a known secret value appearing outside the substitution
-path is dropped and audited. A workload that emits a placeholder toward
-an *unbound* destination gets the placeholder dropped, never a secret —
-substitution only ever fires for a destination the placeholder is bound
-to.
+Within a terminated flow, substitution happens only in request headers, and
+only for a placeholder whose binding admits the flow's destination. A
+placeholder presented to a destination its binding does not name is refused
+before the forward leg runs and recorded as `secret.placeholder_dropped`; one
+in the request URL or body is refused and recorded as `secret.flow_refused`.
+The typed HTTP path applies the same checks. A tunnel to a destination no
+secret is bound to is relayed opaquely, so a placeholder sent down one leaves
+the VM as the meaningless token it is — the endpoint does not see inside it,
+and there is no value in it to leak.
+
+### The response path
+
+Substituting a value puts it on the wire, and a destination can send it
+back: an echo endpoint, an error page quoting the request, an API listing
+the caller's own key. The endpoint therefore remembers every value it has
+substituted in the VM and replaces each occurrence in a response — header or
+body, on every terminated and typed flow — with that binding's placeholder
+before a byte reaches the guest, recording `secret.reflection_scrubbed`
+(name, destination, count; never the value). The set is VM-wide, so a value
+returned on a later request, or by another bound destination, is caught too.
+The body scrub is streaming and carries one value's length across chunk
+boundaries, so a split value is still found.
+
+A compressed body cannot be scanned without decompressing it, and the
+endpoint does not decompress. Of the two fail-closed answers — refuse every
+encoded response, or ask for none — it does both, in that order of
+preference: a VM holding an injected credential sends `Accept-Encoding:
+identity` upstream in place of the client's, which costs bandwidth and nothing
+else, and a response that arrives encoded anyway is refused rather than
+relayed unread. HTTP/2 does not arise: neither the guest-facing terminator
+nor the forward leg negotiates it.
+
+The scrub matches the bytes that were sent. A value returned transformed —
+base64-encoded, split by markup — is not caught, and values under 8 bytes are
+not scrubbed because they cannot be told apart from content. Both are stated
+limits, not holes the design closes.
+
+### Where the destinations come from
+
+`mvmctl secret set` records a secret's destination allow-list and auth type in
+the host binding store. A run binds a stored secret with `--secret
+NAME[:HOST,...]` on `mvmctl run` / `mvmctl machine run`, through a `[secrets]`
+table in the project's `mvm.toml` (names and destinations only; the schema has
+no field for a value), or through a Workload IR declaration. A flag naming a
+secret the manifest declares narrows that entry and cannot widen it. The binding the signed `ExecutionPlan` carries names
+the guest variable, the keystore address and, optionally, a destination list.
+At assembly the endpoint reads the stored allow-list and narrows it to the
+plan's destinations; a plan destination the stored allow-list does not admit
+fails the launch rather than widening the binding. The per-VM CA's name
+constraints and the substitution registry are computed from the same narrowed
+set, so the certificate and the enforcement cannot disagree. Unknown secrets,
+secrets with no binding, and out-of-allow-list destinations are refused before
+the VM boots.
 
 ### Resolver — pluggable, identical story with or without a fleet control plane
 
@@ -62,6 +114,11 @@ allowed-hosts) to material at substitution time. The local backend is the
 OS keyring or an encrypted file (`KeyProvider` in `mvm-core::crypto`:
 `KeyringProvider` layered over a file fallback), configured with `mvmctl
 secret set <NAME> --host <allowed-host> --type sigv4|hmac|bearer|basic`.
+The value can be read, on the host and once, from where it already lives —
+`--from env://…`, `file://…`, `keychain://…`, `op://…` or `bw://…` — instead of
+being typed. The password-manager CLIs run only from `PATH` directories
+outside the current project and `MVM_HOME`, with validated arguments, a
+scrubbed environment and a timeout.
 A fleet-backed resolver implements the same trait against a tenant
 control plane. The placeholder, the egress flow, and the audit trail are
 identical on top; the resolver is an implementation detail the workload
@@ -78,9 +135,9 @@ How a secret is *used* is independent of where its value came from:
   decrypts-signs-zeroizes. Same flow either way; the property only
   strengthens with hardware.
 - **Injected** (`Bearer`, `Basic`): the raw value must hit the wire, so a
-  host component necessarily sees it. It is confined to a minimal jailed
-  injector that terminates TLS to the bound destination, injects,
-  responds, and zeroizes — never written to disk in plaintext, never to
+  host component necessarily sees it. It is confined to the per-VM
+  network endpoint, which terminates the guest's flow, injects, originates
+  verified TLS to the bound destination, and zeroizes — never written to disk in plaintext, never to
   the guest. Blast radius is one audited component scoped to that
   secret's destinations.
 
@@ -97,18 +154,14 @@ process ever sees.
   — never bytes. IR validation refuses a secret reference with no
   `allowed_hosts`: an unbound secret is a build-time error, not a
   runtime surprise.
-- The placeholder handed to the guest is a **user-defined named token,
-  `${NAME}`** (the operator chooses `NAME`). Substitution fires only
-  when `NAME` names a defined secret **and** the request is routed to a
-  destination that secret is bound to; an undefined name passes through
-  untouched. A bare `${NAME}` can textually coincide with the guest's own
-  shell/template `${VAR}` expansion, so operators pick distinctive secret
-  names — but a coincidence is harmless: it substitutes only if the name is
-  a defined secret *and* the flow matches that secret's binding, and the
-  sole outcome is then the intended injection. A leaked placeholder reveals only the *name*, never the value,
-  and cannot be substituted for a destination outside its binding — the
-  security is the destination-binding and host-side-only injection, not the
-  token's opacity.
+- The placeholder handed to the guest is an **opaque token the host
+  mints** at boot from the OS random source, one per plan binding, under the
+  guest variable the binding names. Substitution fires only when the token
+  was minted in this VM's session **and** the request is bound for a
+  destination that binding admits; a token the session never minted is
+  refused. A leaked placeholder reveals nothing about the value and cannot
+  be substituted for a destination outside its binding — the security is the
+  destination binding and host-side-only injection, not the token's opacity.
 - Every substitution emits a `secret.substituted` audit entry (name,
   destination, auth-type — never the value) when the request is handed to the
   forward leg, before any response, so a forward that fails after sending
@@ -125,10 +178,14 @@ process ever sees.
   values are confined to one audited component.
 - The demo path runs with no hardware and no fleet control plane:
   `mvmctl secret set` plus a run.
-- A workload that bypasses cooperative routing and emits a placeholder to
-  an arbitrary host fails safe — placeholder dropped, not substituted.
-  That is a coverage boundary (substitution only fires on the bound
-  path), not a hole.
+- A workload that emits a placeholder to a host its binding does not name
+  fails safe: refused on a terminated or typed flow, carried as an inert
+  token through an opaque one — never substituted. That is a coverage
+  boundary (substitution only fires on the bound path), not a hole.
+- A compromised workload can still use the credential through the
+  placeholder against a bound destination. Substitution keeps the value
+  from being copied out of the VM; it does not limit what the key is used
+  for at that destination.
 
 ## Alternatives considered
 
@@ -171,18 +228,21 @@ exempt_paths:
 
 ### Assertion
 
-The guest receives a named placeholder (`${NAME}`) where its
+The guest receives an opaque host-minted placeholder where its
 credential would go; the host substitution endpoint holds the real value
 and substitutes it on the outbound forward leg, after binding-checking
 the request's destination. Three invariants back this:
 
 - **No secret value reaches a guest-facing artifact.** The env/argv pairs
-  handed to the guest carry only named `${NAME}` placeholders — never
-  the value.
+  handed to the guest carry only opaque placeholders — never the value.
 - **Substitution fires only for bound destinations.** A placeholder bound
   to host A and routed to host B is refused before the forward leg runs.
 - **The audit chain carries no secret bytes.** A successful substitution
   records name, destination, and auth-type — never the value.
+- **A value the destination sends back reaches the guest as its
+  placeholder.** Every substituted value is replaced in response headers and
+  bodies before delivery; an encoded response the endpoint cannot read is
+  refused.
 
 ### CI gate that ratifies the claim
 
@@ -190,8 +250,12 @@ the request's destination. Three invariants back this:
 canary secret through the path on every PR, with three witnesses:
 `fn:handed_placeholders_never_contain_the_secret_value`,
 `fn:substitution_endpoint_refuses_unbound_destination`, and
-`fn:audit_chain_carries_no_secret_value`. `xtask check-claim-catalog`
-resolves these against the tree on every PR.
+`fn:audit_chain_carries_no_secret_value`. The fourth invariant is witnessed
+on the terminated path by
+`fn:a_value_echoed_in_a_header_and_a_split_body_reaches_the_guest_as_its_placeholder`
+and `fn:an_encoded_response_is_refused_rather_than_relayed_unread`
+(`crates/mvm-hostd/src/supervisor/terminator/flow/tests/reflection.rs`).
+`xtask check-claim-catalog` resolves these against the tree on every PR.
 
 ### Status
 

@@ -297,13 +297,12 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       would-be CLI spawn goes through. Declarations are set-once process
       globals rather than environment variables, because mutating the
       environment of a multithreaded host is unsound.
-- [ ] Add `crates/mvm-hostlib` at the top of the dependency graph, beside
+- [x] Add `crates/mvm-hostlib` at the top of the dependency graph, beside
       `mvm-cli`: it links `mvm-client` and exposes one versioned C ABI over the
       `MvmClient` trait plus the drive verbs. Nothing depends on it, so no cycle
-      is possible by construction. The crate, its ABI, the read-only machine
-      methods (`machine.list`, `machine.inspect`, `machine.logs`,
-      `backend.capabilities`) and the DevOnly `guest.proc.*`/`guest.fs.*`
-      methods have landed. Launch and drive methods follow.
+      is possible by construction. ABI 1.2 adds the launch methods
+      (`machine.run`, `machine.create`, `machine.start`), `machine.inventory`,
+      and handle-and-poll process output streams (`guest.proc.stream.*`).
 - [x] Carry an ABI major/minor and a `mvm_hostlib_abi_is_compatible` entry point
       the bindings must call before use, so a mismatched pair fails loudly
       instead of reading a moved struct. Enforced rather than advisory:
@@ -346,19 +345,27 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 - [x] The Python loader (`mvm/_hostlib.py`): `MVM_HOSTLIB_PATH`, then beside
       `mvmctl` on `PATH`, then a typed error; ABI negotiated once; no process
       API in the module.
-- [ ] The bindings load the library in-process. No transport in the rewrite
+- [x] The bindings load the library in-process. No transport in the rewrite
       may spawn a process — not `mvmctl`, and not a helper daemon standing in
-      for it.
-- [ ] Rewrite `_LiveTransport` (`crates/mvm-sdk/sdks/python/mvm/_sandbox.py:728`)
+      for it. Lookup: `MVM_HOSTLIB_PATH`, then packaged with the SDK, then
+      beside `mvmctl` on `PATH`.
+- [x] Rewrite `_LiveTransport` (`crates/mvm-sdk/sdks/python/mvm/_sandbox.py:728`)
       and its TypeScript twin (`sdks/typescript/src/_sandbox.ts:613`) onto that
       ABI. Streaming becomes possible; the one-process-per-call cost goes away.
-- [ ] Add `xtask check-no-cli-shellout`: no file under `crates/mvm-sdk/sdks/`
+      `Machine`, `session` and function dispatch moved too (issue #3711); the
+      pieces the in-process launcher cannot do yet refuse rather than shell out
+      and are tracked under PS-01 in
+      `specs/plans/2026-09-25-agent-sandbox-product-surface.md`.
+- [x] Add `xtask check-no-cli-shellout`: no file under `crates/mvm-sdk/sdks/`
       may reference `subprocess`, `spawnSync`, `execFile`, or `$MVM_CLI_BIN`.
-      The rule is worth nothing if only prose holds it.
-- [ ] Amend ADR-027's §"One client contract behind both the CLI and the SDK" to
+      The rule is worth nothing if only prose holds it. It scans the Python and
+      TypeScript package sources plus `crates/mvm-sdk/src` and
+      `crates/mvm-hostlib/src`, forbids every process API rather than the
+      literal, and fails closed on an empty root.
+- [x] Amend ADR-027's §"One client contract behind both the CLI and the SDK" to
       record the convergence and the new crate. An ADR that says "still
       deliberately shells out" must not survive the change.
-- [ ] Update `specs/plans/2026-08-15-sdk-binding-fan-out.md`, whose whole
+- [x] Update `specs/plans/2026-08-15-sdk-binding-fan-out.md`, whose whole
       costing assumes surface B is an argv builder.
 
 ## WS3 — Typed drive tools over MCP
@@ -377,16 +384,16 @@ Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
       and a real dispatch arm. Re-bless an intended change with
       `MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol tool_surface_matches_the_pinned_contract`
       and review the fixture diff as a contract change.
-- [ ] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
+- [x] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
       `mvm.drive.files.{read,write,list}` over the same ABI.
-- [ ] Gate advertisement on the grant: a tool the plan does not grant is not
+- [x] Gate advertisement on the grant: a tool the plan does not grant is not
       listed, rather than listed and refused.
-- [ ] Adopt a fail-closed classification table — a tool with no explicit risk
+- [x] Adopt a fail-closed classification table — a tool with no explicit risk
       classification is denied, not defaulted. An adjacent computer-use sandbox
       project generates its whole tool surface from a contract crate with a
       pinned contract version and denies anything unclassified; that part is
       worth copying.
-- [ ] Witness: `mcp_tool_absent_when_grant_absent`,
+- [x] Witness: `mcp_tool_absent_when_grant_absent`,
       `mcp_unclassified_tool_is_denied`.
 
 ## WS4 — Close the loose ends the claim rests on
@@ -416,8 +423,8 @@ Issues: [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https:/
 
 - [ ] A contributor can run one documented command and watch an agent work
       inside a sealed microVM.
-- [ ] `rg -n 'subprocess|spawnSync' crates/mvm-sdk/sdks/` returns nothing, and a
-      gate holds it.
+- [x] `rg -n 'subprocess|spawnSync' crates/mvm-sdk/sdks/` returns nothing, and a
+      gate holds it (`xtask check-no-cli-shellout`).
 - [ ] No published page instructs a reader to put a raw credential in a guest.
 - [ ] Every drive refusal is chain-signed, and the BDD scenario asserts the
       guest env held a placeholder and never the secret.

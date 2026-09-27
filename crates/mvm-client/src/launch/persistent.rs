@@ -320,17 +320,21 @@ pub fn start_persistent_oci_machine(
     )?;
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
-    if let Err(err) = crate::start_prepared(backend_name, &start_config) {
-        let err = anyhow::anyhow!("{err}");
-        emit_failed(&admission, "backend-start", &err);
-        return Err(err);
-    }
-    prepared_volumes.commit();
+    let started = match crate::start_prepared(backend_name, &start_config) {
+        Ok(started) => started,
+        Err(err) => {
+            let err = anyhow::anyhow!("{err}");
+            emit_failed(&admission, "backend-start", &err);
+            return Err(err);
+        }
+    };
     // After the start, because a cgroup quota is read back off a process that
     // does not exist until then. This is the call that puts the backend's
     // `apply_grants` on the path `mvmctl` boots: without it the tier is
-    // computed correctly and reported to nobody.
-    super::grants_report::report_enforced_grants(&admission, backend_name, name);
+    // computed correctly and reported to nobody. A failure here has already
+    // stopped the VM, so the volume leases are released rather than committed.
+    super::grants_report::report_enforced_grants(&admission, &started)?;
+    prepared_volumes.commit();
     emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);

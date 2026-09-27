@@ -1,387 +1,232 @@
+/**
+ * `Machine` over the host library.
+ *
+ * The library is replaced by a recorder, so each test pins the exact request
+ * a facade method sends and how the reply comes back.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+
 import * as mvm from "../src/index.js";
-import {
-  machineCheckArtifactArgv,
-  machineCreateArgv,
-  machineExecArgv,
-  machineInspectArgv,
-  machineLogsArgv,
-  machineLsArgv,
-  machineRmArgv,
-  machineRunArgv,
-  machineShellArgv,
-  machineStartArgv,
-  machineStopArgv,
-} from "../src/_machine.js";
-import { resolveCliBin } from "../src/_cli.js";
+import { parseAllowHost } from "../src/_machine.js";
+import { HostRecorder, batch, failure, runReply, uninstallRecorder } from "./_recorder.js";
 
-let tmpDir: string;
-let originalPath: string | undefined;
-
-function writeFixtureMvmctl(exitCode = 0, runStdout = ""): string {
-  const log = path.join(tmpDir, "fixture-calls.log");
-  const script = path.join(tmpDir, "fake-mvmctl");
-  fs.writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set -u
-verb=\${1:-}
-shift || true
-echo "$verb $*" >> ${JSON.stringify(log)}
-if [ "$verb" != "machine" ]; then
-  echo "expected machine verb" >&2
-  exit 64
-fi
-sub=\${1:-}
-shift || true
-echo "machine:$sub $*" >> ${JSON.stringify(log)}
-if [ "$sub" = "run" ]; then
-  printf '%b' ${JSON.stringify(runStdout)}
-fi
-exit ${exitCode}
-`,
-    { mode: 0o755 },
-  );
-  return script;
-}
-
-function readFixtureLog(): string[] {
-  const log = path.join(tmpDir, "fixture-calls.log");
-  if (!fs.existsSync(log)) return [];
-  return fs.readFileSync(log, "utf-8").split("\n").filter((l) => l.length > 0);
-}
-
-// Repo root, resolved from this file rather than the process cwd:
-// tests/ -> typescript/ -> sdks/ -> mvm-sdk/ -> crates/ -> repo root.
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
-
-// The canonical golden argv corpus. The CLI anchors it against the real clap
-// parser and the Rust SDK asserts its builders reproduce it, which is what
-// makes a fixture mean "argv mvmctl actually accepts". Resolving anywhere else
-// silently opts this suite out of that contract.
-export const MACHINE_FIXTURES = path.join(REPO_ROOT, "tests", "machine-fixtures");
-
-function readArgvFixture(name: string): string[] {
-  return fs.readFileSync(path.join(MACHINE_FIXTURES, `${name}.argv`), "utf-8")
-    .split("\n")
-    .filter((line) => line.length > 0);
-}
+let host: HostRecorder;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mvm-sdk-machine-"));
-  originalPath = process.env.PATH;
-  delete process.env.MVM_CLI_BIN;
+  host = new HostRecorder().install();
 });
 
 afterEach(() => {
-  delete process.env.MVM_CLI_BIN;
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  uninstallRecorder();
 });
 
-function writeNamedCli(name: string): string {
-  const script = path.join(tmpDir, name);
-  fs.writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set -u
-exit 0
-`,
-    { mode: 0o755 },
-  );
-  return script;
-}
-
-describe("resolveCliBin", () => {
-  it("prefers the explicit env override", () => {
-    const explicit = writeNamedCli("explicit-cli");
-    writeNamedCli("mvmctl");
-    process.env.MVM_CLI_BIN = explicit;
-    process.env.PATH = tmpDir;
-    expect(resolveCliBin("tests")).toBe(explicit);
-  });
-
-  it("resolves mvmctl on PATH", () => {
-    const cli = writeNamedCli("mvmctl");
-    process.env.PATH = tmpDir;
-    expect(resolveCliBin("tests")).toBe(cli);
-  });
-});
+const STATE = { id: "id-devbox", name: "devbox", status: "stopped" };
 
 describe("Machine.run", () => {
-  it("emits the shared default preflight argv fixture", () => {
-    expect(machineRunArgv({
-      image: "alpine:latest",
-      command: ["true"],
-      json: true,
-      dryRun: true,
-    })).toEqual(readArgvFixture("run-default"));
-  });
-
-  it("emits the shared allow-host receipt preflight argv fixture", () => {
-    expect(machineRunArgv({
-      image: "alpine:latest",
-      command: ["true"],
-      allowHosts: ["api.example.com"],
-      receipt: "/tmp/mvm-sdk-machine.receipt.json",
-      json: true,
-      dryRun: true,
-    })).toEqual(readArgvFixture("run-allow-host-receipt"));
-  });
-
-  it("emits the shared admission parity argv fixture", () => {
-    expect(machineRunArgv({
-      image: "alpine:latest",
-      command: ["sh", "-lc", "echo ok"],
-      allowHosts: ["api.example.com"],
-      cpus: 4,
-      memory: "1G",
-      profile: "dev",
-      volumes: ["/tmp/mvm-sdk-src:/work:ro"],
-      env: ["TOKEN=secret", "MODE=test"],
-      timeout: 30,
-      receipt: "/tmp/mvm-sdk-machine.receipt.json",
-      json: true,
-      dryRun: true,
-    })).toEqual(readArgvFixture("run-admission"));
-  });
-
-  it("shells to mvmctl machine run", () => {
-    const script = writeFixtureMvmctl(0, "hello\n");
-    process.env.MVM_CLI_BIN = script;
-
-    const result = mvm.Machine.run({
-      image: "alpine:latest",
-      command: ["uname", "-a"],
-      net: true,
-      allowHosts: ["example.com:443"],
-      cpus: 1,
-      memory: "256M",
-      profile: "dev",
-      env: ["MODE=test"],
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("hello\n");
-    const text = readFixtureLog().join("\n");
-    expect(text).toContain("machine:run");
-    expect(text).toContain("--image alpine:latest");
-    expect(text).toContain("--net");
-    expect(text).toContain("--allow-host example.com:443");
-    expect(text).toContain("-- uname -a");
-  });
-
-  it("rejects an empty command", () => {
-    expect(() => mvm.Machine.run({ image: "alpine", command: [] })).toThrow(/command/);
-  });
-});
-
-describe("Machine.checkArtifact", () => {
-  it("emits the shared check-artifact argv fixture", () => {
-    expect(machineCheckArtifactArgv({
-      path: "/tmp/app.mvm",
-      key: "/tmp/app.pub",
-      json: true,
-    })).toEqual(readArgvFixture("check-artifact"));
-  });
-
-  it("shells check-artifact through mvmctl machine", () => {
-    const script = writeFixtureMvmctl(0, "{\"runnable_here\":true}\n");
-    process.env.MVM_CLI_BIN = script;
-
-    const result = mvm.Machine.checkArtifact({
-      path: "/tmp/app.mvm",
-      key: "/tmp/app.pub",
-      json: true,
-    });
-
-    expect(result.exitCode).toBe(0);
-    const text = readFixtureLog().join("\n");
-    expect(text).toContain("machine:check-artifact /tmp/app.mvm --key /tmp/app.pub --json");
-  });
-
-  it("rejects an empty path", () => {
-    expect(() => mvm.Machine.checkArtifact({ path: "" })).toThrow(/path/);
-  });
-});
-
-describe("Machine persistent lifecycle", () => {
-  it("emits the shared manifest create argv fixture", () => {
-    expect(machineCreateArgv({
-      name: "web",
-      manifest: "mvm.toml",
-      profile: "dev",
-      force: true,
-      json: true,
-    })).toEqual(readArgvFixture("create-manifest"));
-  });
-
-  it("emits the shared image create argv fixture", () => {
-    // The --image + resources shape the MvmClient facade's create_machine emits.
-    expect(machineCreateArgv({
-      name: "web",
-      image: "alpine:3.20",
-      cpus: 2,
-      memory: "512M",
-    })).toEqual(readArgvFixture("create-image"));
-  });
-
-  it("shells create/start/exec/shell/stop through mvmctl machine", () => {
-    const script = writeFixtureMvmctl();
-    process.env.MVM_CLI_BIN = script;
-
-    const machine = mvm.Machine.create({
-      name: "devbox",
-      manifest: "mvm.toml",
-      profile: "dev",
-      force: true,
-    });
-    machine.start({ dryRun: true });
-    machine.exec(["echo", "hi"], { force: true });
-    machine.shell({ force: true });
-    machine.stop();
-
-    const text = readFixtureLog().join("\n");
-    expect(text).toContain("machine:create devbox --manifest mvm.toml --profile dev --force");
-    expect(text).toContain("machine:start devbox --dry-run");
-    expect(text).toContain("machine:exec devbox --force -- echo hi");
-    expect(text).toContain("machine:shell devbox --force");
-    expect(text).toContain("machine:stop devbox --yes");
-  });
-
-  it("emits the shared start/exec/shell/stop argv fixtures", () => {
-    expect(machineStartArgv("web", {
-      receipt: "/tmp/mvm-sdk-machine.receipt.json",
-      json: true,
-      dryRun: true,
-    })).toEqual(readArgvFixture("start"));
-    expect(machineExecArgv("web", ["sh", "-lc", "echo ok"], { force: true }))
-      .toEqual(readArgvFixture("exec"));
-    expect(machineShellArgv("web", { force: true })).toEqual(readArgvFixture("shell"));
-    // Regression guard: `stop` takes a positional name, not `--name`.
-    expect(machineStopArgv("web")).toEqual(readArgvFixture("stop"));
-  });
-
-  it("emits the shared start-image argv fixture", () => {
-    expect(machineStartArgv("web", { image: "nginx", cpus: 2, memory: "512M" }))
-      .toEqual(readArgvFixture("start-image"));
-  });
-
-  // Mirrors the Rust `fixture_coverage_is_accounted_for` tripwire: a fixture
-  // added without a TypeScript assertion is a silent coverage hole in one of
-  // the three languages the corpus is supposed to bind together.
-  it("asserts every fixture in the shared corpus", () => {
-    const onDisk = fs.readdirSync(MACHINE_FIXTURES)
-      .filter((name) => name.endsWith(".argv") && !name.startsWith("."))
-      .map((name) => name.slice(0, -".argv".length))
-      .sort();
-    expect(onDisk.length).toBeGreaterThan(0);
-    expect(onDisk).toEqual([
-      "check-artifact",
-      "create-image",
-      "create-manifest",
-      "exec",
-      "inspect",
-      "logs",
-      "ls",
-      "rm",
-      "rm-all",
-      "run-admission",
-      "run-allow-host-receipt",
-      "run-default",
-      "shell",
-      "start",
-      "start-image",
-      "stop",
+  it("sends the minimal transient request and returns a handle", () => {
+    host.on("machine.run", runReply("gen-1", "dev"));
+    const machine = mvm.Machine.run("alpine:latest");
+    expect(machine).toBeInstanceOf(mvm.Machine);
+    expect(machine.name).toBe("gen-1");
+    expect(host.calls).toEqual([
+      { method: "machine.run", request: { image: "alpine:latest", mode: "transient" } },
     ]);
   });
 
-  it("emits the shared ls/logs/inspect/rm argv fixtures", () => {
-    expect(machineLsArgv({ json: true })).toEqual(readArgvFixture("ls"));
-    expect(machineLogsArgv("web", { follow: true, lines: 100 })).toEqual(readArgvFixture("logs"));
-    expect(machineInspectArgv("web", { json: true })).toEqual(readArgvFixture("inspect"));
-    expect(machineRmArgv({ names: ["web"], yes: true, json: true })).toEqual(readArgvFixture("rm"));
-    expect(machineRmArgv({ all: true, yes: true, json: true })).toEqual(readArgvFixture("rm-all"));
+  it("sends every option under the library's field names", () => {
+    host.on("machine.run", runReply("web", "prod"));
+    mvm.Machine.run("alpine:latest", {
+      name: "web",
+      command: ["uname", "-a"],
+      env: { A: "1" },
+      cpus: 2,
+      memoryMib: 512,
+      profile: "dev",
+      allowHosts: ["example.com:443", "[2001:db8::1]:8443"],
+      ports: ["8080:80"],
+      ttlSeconds: 600,
+    });
+    expect(host.requests("machine.run")).toEqual([
+      {
+        image: "alpine:latest",
+        mode: "transient",
+        name: "web",
+        command: ["uname", "-a"],
+        env: { A: "1" },
+        cpus: 2,
+        memory_mib: 512,
+        profile: "dev",
+        ports: ["8080:80"],
+        egress: [
+          { host: "example.com", port: 443 },
+          { host: "2001:db8::1", port: 8443 },
+        ],
+        ttl_seconds: 600,
+      },
+    ]);
   });
 
-  it("rejects image and manifest together", () => {
-    expect(() =>
-      mvm.Machine.create({ name: "bad", image: "alpine", manifest: "mvm.toml" }),
-    ).toThrow(/image OR manifest/);
+  it("leaves empty collections out", () => {
+    host.on("machine.run", runReply("x", "dev"));
+    mvm.Machine.run("alpine:latest", { command: [], env: {}, allowHosts: [], ports: [] });
+    expect(host.requests("machine.run")).toEqual([{ image: "alpine:latest", mode: "transient" }]);
   });
 
-  it("surfaces mvmctl failures as MachineError", () => {
-    const script = writeFixtureMvmctl(19);
-    process.env.MVM_CLI_BIN = script;
+  it("passes a command through so the library's refusal is the one raised", () => {
+    host.on("machine.run", failure("INVALID_SPEC", "command overrides are not supported yet"));
+    try {
+      mvm.Machine.run("alpine:latest", { command: ["true"] });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(mvm.MachineSpecError);
+      expect((err as mvm.HostLibraryFailure).code).toBe("INVALID_SPEC");
+    }
+    expect(host.requests("machine.run")[0].command).toEqual(["true"]);
+  });
 
-    expect(() => mvm.Machine.run({ image: "alpine", command: ["true"] })).toThrow(
-      mvm.MachineError,
-    );
+  it("refuses bad arguments before any call", () => {
+    expect(() => mvm.Machine.run("")).toThrow(TypeError);
+    expect(() => mvm.Machine.run("img", { cpus: 0 })).toThrow(RangeError);
+    expect(() => mvm.Machine.run("img", { allowHosts: ["example.com"] })).toThrow(mvm.MachineError);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("reports a reply with no machine name as MachineError", () => {
+    host.on("machine.run", { machine: {}, build_mode: "dev" });
+    expect(() => mvm.Machine.run("img")).toThrow(mvm.MachineError);
   });
 });
 
-// A `mvmctl` that misbehaves in the two ways the wrapper has to survive:
-// it can hang, and it can talk more than the caller can hold.
-function writeMisbehavingMvmctl(opts: { sleepSeconds?: number; stdoutKib?: number }): string {
-  const script = path.join(tmpDir, "slow-mvmctl");
-  fs.writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set -u
-${opts.stdoutKib ? `dd if=/dev/zero bs=1024 count=${opts.stdoutKib} 2>/dev/null | tr '\\0' 'A'` : ""}
-${opts.sleepSeconds ? `sleep ${opts.sleepSeconds}` : ""}
-exit 0
-`,
-    { mode: 0o755 },
+describe("parseAllowHost", () => {
+  it("parses host:port and bracketed IPv6", () => {
+    expect(parseAllowHost("api.example.com:443")).toEqual({ host: "api.example.com", port: 443 });
+    expect(parseAllowHost("10.0.0.1:80")).toEqual({ host: "10.0.0.1", port: 80 });
+    expect(parseAllowHost("[::1]:8080")).toEqual({ host: "::1", port: 8080 });
+  });
+
+  it.each(["example.com", "example.com:", ":443", "::1:443", "[::1]", "[::1]443", "h:0", "h:65536", "h:4x3"])(
+    "refuses %j",
+    (entry) => {
+      expect(() => parseAllowHost(entry)).toThrow(mvm.MachineError);
+    },
   );
-  return script;
-}
+});
 
-describe("Machine subprocess bounds", () => {
-  afterEach(() => {
-    delete process.env[mvm.MVM_MACHINE_TIMEOUT_ENV];
-    delete process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV];
+describe("Machine.create", () => {
+  it("persists a definition and returns a handle", () => {
+    host.on("machine.create", STATE);
+    const machine = mvm.Machine.create("devbox", "alpine:latest", {
+      cpus: 1,
+      memoryMib: 256,
+      profile: "dev",
+      allowHosts: ["example.com:443"],
+      force: true,
+    });
+    expect(machine.name).toBe("devbox");
+    expect(host.requests("machine.create")).toEqual([
+      {
+        name: "devbox",
+        image: "alpine:latest",
+        cpus: 1,
+        memory_mib: 256,
+        profile: "dev",
+        egress: [{ host: "example.com", port: 443 }],
+        force: true,
+      },
+    ]);
   });
 
-  it("stops waiting at the configured timeout and says so", () => {
-    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ sleepSeconds: 3 });
-    process.env[mvm.MVM_MACHINE_TIMEOUT_ENV] = "0.3";
+  it("omits force unless set", () => {
+    host.on("machine.create", STATE);
+    mvm.Machine.create("devbox", "alpine:latest");
+    expect(host.requests("machine.create")).toEqual([{ name: "devbox", image: "alpine:latest" }]);
+  });
+});
 
-    // Naming the cause is the whole point: an unbounded wait that eventually
-    // returns, or a timeout reported as a spawn failure, both send the reader
-    // to the wrong place.
-    expect(() => mvm.Machine.ls()).toThrow(/did not exit within 0\.3s/);
+describe("Machine.ls", () => {
+  it("returns the inventory records", () => {
+    const records = [{ name: "a", build_mode: "dev", status: "running", kind: "transient", source: "oci" }];
+    host.on("machine.inventory", records);
+    expect(mvm.Machine.ls()).toEqual(records);
+    expect(host.calls).toEqual([{ method: "machine.inventory", request: undefined }]);
   });
 
-  it("reports an output overflow as an overflow, not a spawn failure", () => {
-    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ stdoutKib: 2048 });
-    process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV] = "1024";
+  it("refuses a non-array reply", () => {
+    host.on("machine.inventory", {});
+    expect(() => mvm.Machine.ls()).toThrow(mvm.MachineError);
+  });
+});
 
-    let caught: unknown;
+describe("Machine lifecycle", () => {
+  it("start, inspect, stop, and rm address the machine by name", () => {
+    host
+      .on("machine.start", { ...STATE, status: "running" })
+      .on("machine.inspect", STATE)
+      .on("machine.stop", {})
+      .on("machine.rm", {});
+    const machine = new mvm.Machine("devbox");
+    expect(machine.start().status).toBe("running");
+    expect(machine.inspect()).toEqual(STATE);
+    expect(machine.stop()).toBeUndefined();
+    expect(machine.rm()).toBeUndefined();
+    expect(host.calls).toEqual([
+      { method: "machine.start", request: { id: "devbox" } },
+      { method: "machine.inspect", request: { id: "devbox" } },
+      { method: "machine.stop", request: { id: "devbox" } },
+      { method: "machine.rm", request: { id: "devbox" } },
+    ]);
+  });
+
+  it("logs decodes the console and forwards the line limit", () => {
+    host.on("machine.logs", { data_b64: Buffer.from("booted\n").toString("base64") });
+    const machine = new mvm.Machine("devbox");
+    expect(machine.logs()).toBe("booted\n");
+    machine.logs({ lines: 20 });
+    expect(host.requests("machine.logs")).toEqual([{ id: "devbox" }, { id: "devbox", tail_lines: 20 }]);
+  });
+
+  it("propagates typed errors with their flags", () => {
+    host.on("machine.rm", failure("CONFLICT", "stop it first", { status: 5 }));
     try {
-      mvm.Machine.ls();
+      new mvm.Machine("devbox").rm();
+      expect.unreachable();
     } catch (err) {
-      caught = err;
+      expect(err).toBeInstanceOf(mvm.MachineConflictError);
+      const f = err as mvm.HostLibraryFailure;
+      expect([f.code, f.retryable, f.status, f.message]).toEqual(["CONFLICT", false, 5, "stop it first"]);
     }
-    expect(caught).toBeInstanceOf(mvm.MachineError);
-    const message = (caught as Error).message;
-    expect(message).toMatch(/exceeded 1024 bytes/);
-    // The bug this pins: `spawnSync` reports the overflow through
-    // `result.error`, and treating any `result.error` as "could not start the
-    // process" blames the machine for something the machine did fine.
-    expect(message).not.toMatch(/failed to spawn/);
   });
 
-  it("honours the defaults when the env vars are absent", () => {
-    process.env.MVM_CLI_BIN = writeFixtureMvmctl(0, "ok\n");
-    expect(mvm.Machine.run({ image: "alpine", command: ["true"] }).stdout).toBe("ok\n");
+  it("rejects an empty name without a call", () => {
+    expect(() => new mvm.Machine("")).toThrow(TypeError);
+    expect(host.calls).toEqual([]);
+  });
+});
+
+describe("Machine.exec", () => {
+  it("starts through guest.proc.start and collects through the stream", () => {
+    host
+      .on("guest.proc.start", { token: "t1" })
+      .on("guest.proc.stream.open", { stream: 3 })
+      .on("guest.proc.stream.next", batch([["stdout", "hel"]]), batch([["stdout", "lo"], ["stderr", "!"]], { kind: "exited", code: 1 }));
+    const result = new mvm.Machine("devbox").exec(["echo", "hello"], { cwd: "/w", env: { K: "v" }, timeout: 5 });
+    expect(result).toEqual({ exitCode: 1, stdout: "hello", stderr: "!" });
+    expect(host.calls).toEqual([
+      { method: "guest.proc.start", request: { id: "devbox", argv: ["echo", "hello"], env: { K: "v" }, cwd: "/w" } },
+      { method: "guest.proc.stream.open", request: { id: "devbox", token: "t1", timeout_secs: 5 } },
+      { method: "guest.proc.stream.next", request: { stream: 3 } },
+      { method: "guest.proc.stream.next", request: { stream: 3 } },
+    ]);
+  });
+
+  it("surfaces a production machine's refusal as MachineBackendError", () => {
+    host.on("guest.proc.start", failure("BACKEND_ERROR", "DevOnly verbs are refused on a sealed machine"));
+    expect(() => new mvm.Machine("sealed").exec(["id"])).toThrow(mvm.MachineBackendError);
+  });
+
+  it("refuses an empty command without a call", () => {
+    expect(() => new mvm.Machine("devbox").exec([])).toThrow(RangeError);
+    expect(host.calls).toEqual([]);
   });
 });

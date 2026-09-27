@@ -23,7 +23,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-18` | `build` | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | `fn:a_boot_past_the_headroom_is_refused`, `fn:budget_ignores_dead_machines`, `fn:budget_counts_the_configured_maximum_not_current_usage`, `fn:an_empty_host_admits_a_boot_within_headroom`, `fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`, `fn:a_fuel_grant_contributes_no_cpu_share`, `fn:a_live_machine_with_no_charge_record_is_not_counted`, `fn:admission_refuses_a_grant_over_the_ceiling`, `fn:the_ceiling_bounds_memory_even_though_no_one_granted_it`, `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`, `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`, `fn:host_cpu_mechanism_gap_honors_hvf_quota_range`, `fn:relay_config_threads_cpu_share_to_quota_scheduler`, `fn:apply_grants_reads_quota_record_from_state_dir`, `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present`, `fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings`, `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`, `fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement`, `fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it`, `fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain`, `fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism`, `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`, `fn:a_signed_plan_from_the_launch_path_arms_the_timer`, `fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota`, `fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded`, `fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited`, `fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:a_claimed_child_over_the_host_ceiling_is_refused`, `fn:a_claimed_child_within_the_ceiling_is_admitted`, `fn:the_refusal_names_the_ceiling_and_the_request`, `fn:pool_matching_is_unchanged_by_the_bound` |
+| `MVM-SEC-18` | `build` | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | `fn:a_boot_past_the_headroom_is_refused`, `fn:budget_ignores_dead_machines`, `fn:budget_counts_the_configured_maximum_not_current_usage`, `fn:an_empty_host_admits_a_boot_within_headroom`, `fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`, `fn:a_fuel_grant_contributes_no_cpu_share`, `fn:a_live_machine_with_no_charge_record_is_not_counted`, `fn:admission_refuses_a_grant_over_the_ceiling`, `fn:the_ceiling_bounds_memory_even_though_no_one_granted_it`, `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`, `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`, `fn:host_cpu_mechanism_gap_honors_hvf_quota_range`, `fn:relay_config_threads_cpu_share_to_quota_scheduler`, `fn:apply_grants_reads_quota_record_from_state_dir`, `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present`, `fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings`, `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`, `fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement`, `fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it`, `fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain`, `fn:a_grant_that_cannot_be_applied_undoes_the_launch`, `fn:a_grant_that_fails_to_apply_refuses_the_cli_boot`, `fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism`, `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`, `fn:a_signed_plan_from_the_launch_path_arms_the_timer`, `fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota`, `fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded`, `fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited`, `fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant`, `fn:a_claimed_child_over_the_host_ceiling_is_refused`, `fn:a_claimed_child_within_the_ceiling_is_admitted`, `fn:the_refusal_names_the_ceiling_and_the_request`, `fn:pool_matching_is_unchanged_by_the_bound` |
 
 ## agent_surface
 
@@ -55,6 +55,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-09` | `build` | Every published bundle is content-addressed and re-verified | `fn:read_and_verify_bundle`, `fn:verify_plan_bundle` |
 
+## cumulative_ledger
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-22` | `build` | A signed execution plan may carry cumulative per-VM action budgets over host-observable seams; absent keeps existing plan bytes identical, present rides signed so a launcher cannot widen a checked ceiling | `fn:action_budget_defaults_to_no_limits`, `fn:action_budget_roundtrips_each_dimension_through_serde`, `fn:action_budget_absent_preserves_existing_plan_bytes`, `fn:action_budget_extracted_from_signed_envelope` |
+
 ## egress_substitution
 
 | ID | Level | Statement | Witnesses |
@@ -65,7 +71,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore` |
+| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore`, `fn:private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it`, `fn:metadata_and_the_absolute_ranges_are_never_readmitted`, `fn:a_name_that_resolves_inward_is_refused_as_the_address_it_reached`, `fn:an_embedded_ipv4_form_is_classified_by_the_address_it_reaches`, `fn:the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup` |
 
 ## fuzz_surface
 
@@ -102,6 +108,12 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:following_the_console_never_writes_to_it`, `fn:prod_safe_grant_refuses_all_dev_only_requests`, `ci:guest-agent-runtime-boundary` |
+
+## protected_paths
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-23` | `build` | A signed execution plan carries a protected-paths policy — enforce over the shipped CI/build/test path set by default, off only as a signed decision — and guest-authored output trees touching a protected class are refused whole at collection with a stable audit tag that never echoes guest-chosen names | `fn:protected_paths_policy_roundtrips_through_serde`, `fn:default_policy_enforces_the_default_path_set`, `fn:matcher_respects_segment_boundaries`, `fn:dot_dot_traversal_never_matches`, `fn:protected_paths_defaults_to_enforce_and_states_itself_on_the_wire`, `fn:a_tree_touching_a_protected_class_is_refused_whole`, `fn:benign_trees_collect_under_the_default_policy`, `fn:key_material_classes_refuse_at_any_depth` |
 
 ## runtime_overlay
 
