@@ -370,7 +370,8 @@ export class Machine {
       try {
         call(method, { id: this.name });
       } catch (err) {
-        process.stderr.write(`mvm: ${verb} ${this.name} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        // eslint-disable-next-line no-console
+        console.error(`mvm: ${verb} ${this.name} failed: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
     }

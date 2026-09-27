@@ -79,9 +79,8 @@ describe("Machine.run", () => {
       .on("guest.proc.stream.next", batch([], { kind: "exited", code: 0 }))
       .on("machine.stop", failure("NOT_FOUND", "already reaped"));
     const written: string[] = [];
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
-      written.push(String(chunk));
-      return true;
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      written.push(String(line));
     });
     try {
       expect(mvm.Machine.run("alpine:latest", ["true"]).exitCode).toBe(0);

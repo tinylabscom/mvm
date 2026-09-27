@@ -215,12 +215,10 @@ pub fn run_entrypoint_call(
         CallLifecycle::KeepAlive { mode } => {
             if let Some(id) = session_id.as_ref() {
                 bump_invoke_count(id);
-                mvm_core::audit::emit(
-                    mvm_core::audit::LocalAuditKind::SessionStart,
-                    Some(&vm_name),
-                    Some(&format!(
-                        "session={id},template={slot},mode={mode},kept_alive=true"
-                    )),
+                mvm_core::audit_emit!(
+                    SessionStart,
+                    vm: &vm_name,
+                    "session={id},template={slot},mode={mode},kept_alive=true"
                 );
             }
             observer.kept_alive(&vm_name, session_id.as_ref());
