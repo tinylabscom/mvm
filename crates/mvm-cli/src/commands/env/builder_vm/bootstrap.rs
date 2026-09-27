@@ -523,7 +523,7 @@ pub(in crate::commands) mod attested_builder_pack {
     ))]
     use super::SYNTHESIZED_BUILDER_VM_CMDLINE;
     #[cfg(feature = "manifest-verify")]
-    use super::builder_vm_artifact_names;
+    use super::builder_vm_boot_assets;
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
         write_builder_vm_cache_sidecars,
@@ -686,7 +686,7 @@ pub(in crate::commands) mod attested_builder_pack {
             .prefix("mvm-builder-pack-")
             .tempdir()
             .context("creating builder pack staging dir")?;
-        let names = builder_vm_artifact_names(arch);
+        let [kernel_asset, rootfs_asset, cmdline_asset] = builder_vm_boot_assets(arch);
         let manifest_name = format!("builder-vm-{arch}.pack-manifest.json");
         let bundle_name = format!("{manifest_name}.bundle");
         let version = env!("CARGO_PKG_VERSION");
@@ -713,7 +713,7 @@ pub(in crate::commands) mod attested_builder_pack {
             .join("vmlinux")
             .to_string_lossy()
             .into_owned();
-        download_file(&format!("{base_url}/{}", names.kernel), &kernel_dest)
+        download_file(&format!("{base_url}/{kernel_asset}"), &kernel_dest)
             .context("downloading builder pack vmlinux artifact")?;
 
         let rootfs_dest = staging
@@ -721,7 +721,7 @@ pub(in crate::commands) mod attested_builder_pack {
             .join("rootfs.ext4")
             .to_string_lossy()
             .into_owned();
-        download_file(&format!("{base_url}/{}", names.rootfs), &rootfs_dest)
+        download_file(&format!("{base_url}/{rootfs_asset}"), &rootfs_dest)
             .context("downloading builder pack rootfs artifact")?;
 
         // Best-effort: a missing cmdline.txt sidecar has a documented
@@ -731,7 +731,7 @@ pub(in crate::commands) mod attested_builder_pack {
             .join("cmdline.txt")
             .to_string_lossy()
             .into_owned();
-        let _ = download_file(&format!("{base_url}/{}", names.cmdline), &cmdline_dest);
+        let _ = download_file(&format!("{base_url}/{cmdline_asset}"), &cmdline_dest);
 
         Ok(staging)
     }

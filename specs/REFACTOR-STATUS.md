@@ -3945,3 +3945,5 @@ resume` takes a `current_head` and refuses when it differs from the
                   1+2, 3, 4.
             - [x] Wave 0.5a: the initramfs is a required signed root
                   member; `images.lock` pins `image-set/v0.2.1`.
+            - [x] Wave 0.5b: runtime overlay, SDK sidecar and initramfs
+                  come from the pinned set, not the CLI's own release.

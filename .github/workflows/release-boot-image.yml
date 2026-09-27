@@ -303,8 +303,10 @@ jobs:
   # closure. Built per-architecture and per-libc from the same
   # `nix/images/runtime-overlay/` flake as the overlay.
   #
-  # The host-side downloader (`mvm_build::sdk_sidecar::download_sdk_sidecar`)
-  # fetches one arch-and-libc-qualified tarball plus its sha256 sidecar, and installs the
+  # The host-side downloader in clients that predate the image set
+  # (`mvm_build::sdk_sidecar::download_sdk_sidecar` now acquires the sidecar as
+  # an image-set member instead) fetches one arch-and-libc-qualified tarball
+  # plus its sha256 sidecar, and installs the
   # extracted canonical names (`sdk.ext4`, `VERSION`, `checksums-sha256.txt`)
   # into `~/.mvm/cache/sdk-sidecar/<mvmctl-version>/<arch>/<libc>/`. The asset names
   # here are pinned against that Rust constructor by `tests/release_assets.rs`.

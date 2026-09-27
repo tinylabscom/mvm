@@ -1510,6 +1510,7 @@ mod tests {
                 .expect("workspace-relative path");
             let owned = [
                 "crates/mvm-backends/",
+                "crates/mvm-build/",
                 "crates/mvm-cli/",
                 "crates/mvm-client/",
                 "crates/mvm-core/",
