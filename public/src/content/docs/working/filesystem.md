@@ -38,12 +38,12 @@ volume when the guest must produce host-visible changes.
 
 ## Volumes
 
-Managed local volumes are encrypted at rest by `mvm` and must be unlocked before mounting:
+Managed local volumes are encrypted at rest by `mvm` and must be unlocked before mounting. The guest path must sit under `/data` or `/work`:
 
 ```sh
 mvmctl machine volume create agent-cache
 mvmctl machine volume unlock agent-cache
-mvmctl machine volume mount agent-sandbox --volume agent-cache --guest /cache --rw
+mvmctl machine volume mount agent-sandbox --volume agent-cache --guest /data/cache --rw
 ```
 
 Lock the volume again after use:

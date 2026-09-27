@@ -54,6 +54,7 @@ pub mod guest;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod profile;
 pub mod readiness;
 pub mod registration;
 pub mod secret;

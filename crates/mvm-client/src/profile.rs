@@ -1,9 +1,17 @@
-//! The `--profile` presets and the single table of what each one grants.
+//! The machine profile presets and the single table of what each one grants.
+//!
+//! The table lives here rather than in the CLI because two surfaces read it:
+//! `mvmctl`'s `--profile` flag, and the library launch and start paths
+//! (`LocalBackend`, the embedder start host, and through them the host
+//! library), which receive a profile by name. Both have to answer "may this
+//! volume be writable?" from the same row, and the library cannot reach a
+//! table kept in the crate above it. The `clap` feature derives the flag's
+//! parser from the same enum, so the CLI keeps no copy of its own.
 
-use clap::ValueEnum;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum RunProfile {
+/// A named machine profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum RunProfile {
     /// No environment variables or host shares.
     Restrictive,
     /// Environment variables, read-only host directories on transient runs,
@@ -24,7 +32,7 @@ pub(crate) enum RunProfile {
 /// declarations of one policy is four chances to disagree, and the one a
 /// reader would check is not necessarily the one that runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProfileGrants {
+pub struct ProfileGrants {
     /// `--env` is accepted.
     pub env: bool,
     /// `--mount` is accepted at all.
@@ -34,10 +42,11 @@ pub(crate) struct ProfileGrants {
     /// persistent machine cannot attach a live host directory at all; both
     /// refusals are structural, so neither is a row in this table.
     pub host_shares: bool,
-    /// A `:rw` **disk image** (`HOST.img:/GUEST:SIZE:rw`) is accepted. The
-    /// guest writes into its own ext4 image file, never into the host
-    /// filesystem, so persisting data does not have to unseal the guest. The
-    /// guest mount allow-list, not the profile, keeps it off system paths.
+    /// A writable **disk image** is accepted: a `:rw` `HOST.img:/GUEST:SIZE`
+    /// spec, and a managed volume attached read-write. The guest writes into
+    /// its own ext4 image file, never into the host filesystem, so persisting
+    /// data does not have to unseal the guest. The guest mount allow-list,
+    /// not the profile, keeps it off system paths.
     pub writable_disk_images: bool,
     /// The guest gets the dev profile — a dev-shell agent, and DevOnly verbs
     /// on an image that would otherwise be sealed.
@@ -48,7 +57,7 @@ pub(crate) struct ProfileGrants {
 
 impl RunProfile {
     /// Every profile, in increasing order of what it permits.
-    pub(crate) const ALL: [Self; 4] = [
+    pub const ALL: [Self; 4] = [
         Self::Restrictive,
         Self::Standard,
         Self::Dev,
@@ -56,7 +65,7 @@ impl RunProfile {
     ];
 
     /// The name the CLI, the receipt, and the docs all use.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Restrictive => "restrictive",
             Self::Standard => "standard",
@@ -71,12 +80,12 @@ impl RunProfile {
     /// default: a spec carrying a profile nobody recognises should stop the
     /// boot and say so, not be silently treated as whichever preset the
     /// comparison happened to miss.
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
+    pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.as_str() == name)
     }
 
     /// The single declaration of what this profile permits.
-    pub(crate) const fn grants(self) -> ProfileGrants {
+    pub const fn grants(self) -> ProfileGrants {
         match self {
             Self::Restrictive => ProfileGrants {
                 env: false,
@@ -110,7 +119,7 @@ impl RunProfile {
     }
 
     /// One line describing what this profile permits, for `doctor` and help.
-    pub(crate) fn summary(self) -> String {
+    pub fn summary(self) -> String {
         let g = self.grants();
         let mut parts = Vec::new();
         parts.push(if g.env { "env allowed" } else { "no env" });

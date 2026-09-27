@@ -23,6 +23,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
+use mvm_client::profile::RunProfile;
 use mvm_client::volume::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, CreateBlockVolumeRequest,
     EncryptionState, LaunchLeaseRequest, LocalVolumeService, VolumeRecord, VolumeService,
@@ -371,7 +372,7 @@ fn image_size_mib(image: &Path) -> Result<u32> {
     u32::try_from(mib).with_context(|| format!("snapshot image {} is too large", image.display()))
 }
 
-fn mount(
+pub(in crate::commands) fn mount(
     vm_name: &str,
     volume_name: &str,
     host: Option<&str>,
@@ -389,8 +390,6 @@ fn mount_with_service(
     guest: &str,
     rw: bool,
 ) -> Result<()> {
-    // The mvmctl volume surface is the interactive dev lane; the launch path
-    // re-applies the access gate against the machine's admitted profile.
     let request = AttachmentRequest::builder(vm_name, volume_name)?
         .guest_path(guest)
         .access(if rw {
@@ -398,7 +397,7 @@ fn mount_with_service(
         } else {
             AccessMode::ReadOnly
         })
-        .profile(AdmittedProfile::Dev)
+        .profile(registration_profile(vm_name)?)
         .build()?;
     let record = match host {
         Some(host) => {
@@ -433,6 +432,22 @@ fn mount_with_service(
         record.access.is_read_only()
     );
     Ok(())
+}
+
+/// The profile a registration is checked against.
+///
+/// A machine that already has a stored spec is checked against the profile
+/// that spec names, so a writable registration its start would refuse is
+/// refused here, with the same message. A registration may also come before
+/// the machine exists; there is no profile to check yet, so it registers as
+/// the dev lane, and the machine's start applies its own profile.
+fn registration_profile(vm_name: &str) -> Result<AdmittedProfile> {
+    if !mvm_core::config::machine_spec_path(vm_name).exists() {
+        return Ok(RunProfile::Dev.into());
+    }
+    let spec = mvm_runtime::machine::persist::load_machine_spec(vm_name)
+        .with_context(|| format!("reading the stored profile of machine {vm_name:?}"))?;
+    Ok(AdmittedProfile::from_profile_name(&spec.profile))
 }
 
 fn ls(vm_name: &str, json: bool) -> Result<()> {
@@ -503,23 +518,24 @@ pub(crate) fn list_registered_attachments(
 pub(in crate::commands) fn merge_registered_volumes_for_launch(
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
+    profile: AdmittedProfile,
 ) -> Result<PreparedLaunchVolumes> {
-    merge_registered_volumes_with_service(&service(), vm_name, explicit)
+    merge_registered_volumes_with_service(&service(), vm_name, explicit, profile)
 }
 
 fn merge_registered_volumes_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
+    profile: AdmittedProfile,
 ) -> Result<PreparedLaunchVolumes> {
     refresh_registered_host_snapshots_with_service(volume_service, vm_name)?;
-    // Persistent named machines are dev-accessible for their lifetime, so
-    // the dev-tier access gate applies here; locked managed volumes keep
+    // Leased under the machine's own profile; locked managed volumes keep
     // failing closed (the operator unlocks explicitly before launch).
     let request = LaunchLeaseRequest::builder(vm_name)
         .with_context(|| format!("Invalid VM name: {vm_name:?}"))?
         .explicit_volumes(explicit.to_vec())
-        .profile(AdmittedProfile::Dev)
+        .profile(profile)
         .build();
     volume_service
         .acquire_launch_lease(&request)
@@ -656,6 +672,10 @@ mod tests {
 
     use super::*;
 
+    fn dev() -> AdmittedProfile {
+        RunProfile::Dev.into()
+    }
+
     struct DataDirGuard {
         _env: mvm_core::util::test_env::TestEnv,
         tmp: tempfile::TempDir,
@@ -746,7 +766,7 @@ mod tests {
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", true).unwrap();
 
-        let prepared = merge_registered_volumes_for_launch("vm-1", &[]).unwrap();
+        let prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
         assert_eq!(prepared.volumes.len(), 1);
         assert_eq!(prepared.volumes[0].guest, "/data/work");
         assert!(!prepared.volumes[0].read_only);
@@ -766,11 +786,11 @@ mod tests {
         mount("vm-1", "work", None, "/data/work", true).unwrap();
         mount("vm-2", "work", None, "/data/work", true).unwrap();
 
-        let prepared = merge_registered_volumes_for_launch("vm-1", &[]).unwrap();
+        let prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
         drop(prepared);
-        assert!(merge_registered_volumes_for_launch("vm-2", &[]).is_ok());
+        assert!(merge_registered_volumes_for_launch("vm-2", &[], dev()).is_ok());
 
-        let mut prepared = merge_registered_volumes_for_launch("vm-1", &[]).unwrap();
+        let mut prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
         prepared.commit();
         drop(prepared);
         let lock_error = lock("work").unwrap_err();
@@ -778,7 +798,7 @@ mod tests {
             format!("{lock_error:#}").contains("attached to VM \"vm-1\""),
             "got: {lock_error:#}"
         );
-        let error = match merge_registered_volumes_for_launch("vm-2", &[]) {
+        let error = match merge_registered_volumes_for_launch("vm-2", &[], dev()) {
             Ok(_) => panic!("second VM must not acquire an active block lease"),
             Err(error) => error,
         };
@@ -788,7 +808,7 @@ mod tests {
         );
 
         release_volume_leases_for_vm("vm-1").unwrap();
-        assert!(merge_registered_volumes_for_launch("vm-2", &[]).is_ok());
+        assert!(merge_registered_volumes_for_launch("vm-2", &[], dev()).is_ok());
     }
 
     #[test]
@@ -800,7 +820,7 @@ mod tests {
         mount("vm-1", "work", None, "/data/work", false).unwrap();
         lock("work").unwrap();
 
-        let err = merge_registered_volumes_for_launch("vm-1", &[]).unwrap_err();
+        let err = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap_err();
         assert!(format!("{err:#}").contains("locked"), "got: {err:#}");
     }
 
@@ -821,7 +841,7 @@ mod tests {
             encrypted: false,
         };
 
-        let err = merge_registered_volumes_for_launch("vm-1", &[explicit]).unwrap_err();
+        let err = merge_registered_volumes_for_launch("vm-1", &[explicit], dev()).unwrap_err();
         assert!(
             format!("{err:#}").contains("duplicate guest mount path"),
             "got: {err:#}"
@@ -955,7 +975,8 @@ mod tests {
         let registered = volume_service.list_attachments("vm-1").unwrap().remove(0);
         fs::remove_dir_all(&source).unwrap();
 
-        let error = match merge_registered_volumes_with_service(&volume_service, "vm-1", &[]) {
+        let error = match merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev())
+        {
             Ok(_) => panic!("a missing source must refuse before a launch lease is acquired"),
             Err(error) => error,
         };

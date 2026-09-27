@@ -3881,3 +3881,101 @@ fn start_resolver_recreates_with_force() {
     }
     assert_eq!(spec.image.as_deref(), Some("ubuntu:24.04"));
 }
+
+/// An unlocked managed block volume named `state`, registered read-write
+/// against `machine`. Registered before the machine has a spec, so no profile
+/// is applied until the machine starts.
+fn register_writable_state_volume(machine: &str) {
+    use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
+    let volumes = LocalVolumeService::new();
+    volumes
+        .create_block_volume(
+            &CreateBlockVolumeRequest::builder("state")
+                .expect("volume name")
+                .capacity_mib(16)
+                .build()
+                .expect("create request"),
+        )
+        .expect("create volume");
+    volumes.unlock_volume("state").expect("unlock");
+    crate::commands::vm::volume::mount(machine, "state", None, "/data/state", true)
+        .expect("a machine with no spec yet takes the registration");
+}
+
+/// `machine start` leases a writable registered volume under the profile the
+/// machine's spec names, exactly where a writable `--mount` disk image is
+/// accepted: `standard`, `dev` and `permissive` take it, `restrictive` and a
+/// name that is not a profile do not.
+#[test]
+fn machine_start_leases_a_writable_registered_volume_under_the_spec_profile() {
+    use mvm_client::launch::machine_start::StartHost as _;
+
+    let _state = IsolatedMachineState::new();
+    register_writable_state_volume("web");
+    for profile in ["standard", "dev", "permissive"] {
+        let mut spec = spec_fixture("web");
+        spec.profile = profile.to_string();
+        let prepared = super::lifecycle::CliStartHost::for_spec(&spec, false)
+            .prepare_volumes("web", &[])
+            .unwrap_or_else(|e| panic!("{profile}: {e:#}"));
+        assert_eq!(prepared.volumes.len(), 1, "{profile}");
+        assert_eq!(prepared.volumes[0].guest, "/data/state");
+        assert!(!prepared.volumes[0].read_only, "{profile}");
+        // Dropped uncommitted, so the next profile can take the lease.
+    }
+    for (profile, named) in [
+        ("restrictive", "profile \"restrictive\""),
+        ("dev-mode", "no recognised profile"),
+    ] {
+        let mut spec = spec_fixture("web");
+        spec.profile = profile.to_string();
+        let message = match super::lifecycle::CliStartHost::for_spec(&spec, false)
+            .prepare_volumes("web", &[])
+        {
+            Ok(_) => panic!("{profile} must refuse a writable registered volume"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(message.contains("does not permit writable"), "{message}");
+        assert!(message.contains(named), "{message}");
+    }
+}
+
+/// A registration against a machine that already has a spec is checked
+/// against that spec's profile, so `restrictive` refuses `--rw` at
+/// registration rather than at the next start. Read-only stays accepted, and
+/// a `standard` machine takes the writable registration.
+#[test]
+fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
+    use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
+
+    let _state = IsolatedMachineState::new();
+    let volumes = LocalVolumeService::new();
+    volumes
+        .create_block_volume(
+            &CreateBlockVolumeRequest::builder("state")
+                .expect("volume name")
+                .capacity_mib(16)
+                .build()
+                .expect("create request"),
+        )
+        .expect("create volume");
+    volumes.unlock_volume("state").expect("unlock");
+    let mut restrictive = spec_fixture("locked");
+    restrictive.profile = "restrictive".to_string();
+    save_machine_spec(&restrictive, false).expect("save restrictive spec");
+    save_machine_spec(&spec_fixture("open"), false).expect("save standard spec");
+
+    let message = format!(
+        "{:#}",
+        crate::commands::vm::volume::mount("locked", "state", None, "/data/state", true)
+            .expect_err("restrictive refuses a writable registration")
+    );
+    assert!(message.contains("does not permit writable"), "{message}");
+    assert!(message.contains("profile \"restrictive\""), "{message}");
+    assert!(volumes.list_attachments("locked").expect("list").is_empty());
+
+    crate::commands::vm::volume::mount("locked", "state", None, "/data/ro", false)
+        .expect("restrictive still takes a read-only registration");
+    crate::commands::vm::volume::mount("open", "state", None, "/data/state", true)
+        .expect("standard takes a writable registration");
+}
