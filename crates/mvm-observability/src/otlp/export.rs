@@ -14,7 +14,7 @@ use mvm_http::{HeaderValue, Url, header};
 
 use super::config::OtlpConfig;
 use super::encode::{ResourceInfo, encode_batch};
-use super::record::SpanRecord;
+use super::record::{EventRecord, SpanRecord};
 
 /// Spans held while the export thread is busy. Beyond this they are dropped.
 const QUEUE_CAPACITY: usize = 2048;
@@ -28,16 +28,23 @@ const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 /// What crosses the queue.
 pub(crate) enum Message {
     Span(Box<SpanRecord>),
+    /// An event with no enclosing span, captured as its own record rather
+    /// than silently dropped. The payload is carried for the proper-signal
+    /// exporter this trace-signal one is not; until that lands, only the
+    /// capture side reads it.
+    Event(#[allow(dead_code)] Box<EventRecord>),
     /// Wakes a thread idle in `recv_timeout` so shutdown need not wait out the
     /// flush interval.
     Shutdown,
 }
 
-/// The sending half, held by the layer. Cloning shares the drop counter.
+/// The sending half, held by the layer. Cloning shares the loss counters.
 #[derive(Clone)]
 pub(crate) struct SpanQueue {
     tx: SyncSender<Message>,
     dropped: Arc<AtomicU64>,
+    dropped_events: Arc<AtomicU64>,
+    unexported_events: Arc<AtomicU64>,
 }
 
 impl SpanQueue {
@@ -51,8 +58,34 @@ impl SpanQueue {
         }
     }
 
+    /// Offer a standalone event without waiting. A full or closed queue drops
+    /// it and counts the loss separately from spans.
+    pub(crate) fn offer_event(&self, event: EventRecord) {
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            self.tx.try_send(Message::Event(Box::new(event)))
+        {
+            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn dropped_events(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
+    }
+
+    /// Standalone events the export thread received but held back: this
+    /// exporter speaks the trace signal only, and exporting them through
+    /// their proper signal is separate work. Counted so the deferral is
+    /// evidence rather than a silent drop.
+    pub(crate) fn note_unexported_event(&self) {
+        self.unexported_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn unexported_events(&self) -> u64 {
+        self.unexported_events.load(Ordering::Relaxed)
     }
 }
 
@@ -63,6 +96,8 @@ pub(crate) fn span_queue(capacity: usize) -> (SpanQueue, Receiver<Message>) {
         SpanQueue {
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            unexported_events: Arc::new(AtomicU64::new(0)),
         },
         rx,
     )
@@ -111,7 +146,11 @@ impl ExportGuard {
         // at its next receive; the wake-up is only for an idle thread.
         let _ = self.queue.tx.try_send(Message::Shutdown);
         let _ = self.done.recv_timeout(bound.min(self.wait));
-        if let Some(line) = dropped_report(self.queue.dropped()) {
+        for line in loss_report(
+            self.queue.dropped(),
+            self.queue.dropped_events(),
+            self.queue.unexported_events(),
+        ) {
             eprintln!("{line}");
         }
         true
@@ -124,9 +163,25 @@ impl Drop for ExportGuard {
     }
 }
 
-fn dropped_report(dropped: u64) -> Option<String> {
-    (dropped > 0)
-        .then(|| format!("otlp: {dropped} span(s) dropped because the export queue was full"))
+fn loss_report(dropped: u64, dropped_events: u64, unexported_events: u64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if dropped > 0 {
+        lines.push(format!(
+            "otlp: {dropped} span(s) dropped because the export queue was full"
+        ));
+    }
+    if dropped_events > 0 {
+        lines.push(format!(
+            "otlp: {dropped_events} standalone event(s) dropped because the export queue was full"
+        ));
+    }
+    if unexported_events > 0 {
+        lines.push(format!(
+            "otlp: {unexported_events} standalone event(s) captured but not exported — this \
+             exporter sends the trace signal only"
+        ));
+    }
+    lines
 }
 
 /// A place for the process's one [`ExportGuard`] that any code path can reach.
@@ -267,10 +322,11 @@ pub(crate) fn start_with_sink<K: BatchSink>(
     let shutdown = Arc::new(AtomicBool::new(false));
     let (done_tx, done) = std::sync::mpsc::channel();
     let thread_shutdown = Arc::clone(&shutdown);
+    let thread_queue = queue.clone();
     thread::Builder::new()
         .name("mvm-otlp-export".into())
         .spawn(move || {
-            worker.run(&rx, &thread_shutdown);
+            worker.run(&rx, &thread_shutdown, &thread_queue);
             let _ = done_tx.send(());
         })?;
     let guard = ExportGuard {
@@ -284,7 +340,7 @@ pub(crate) fn start_with_sink<K: BatchSink>(
 }
 
 impl<K: BatchSink> Worker<K> {
-    fn run(mut self, rx: &Receiver<Message>, shutdown: &AtomicBool) {
+    fn run(mut self, rx: &Receiver<Message>, shutdown: &AtomicBool, queue: &SpanQueue) {
         let mut reporter = FailureReporter::default();
         let mut batch = Vec::with_capacity(MAX_BATCH);
         let mut deadline: Option<Instant> = None;
@@ -301,6 +357,10 @@ impl<K: BatchSink> Worker<K> {
                         deadline = None;
                     }
                 }
+                // This exporter speaks the trace signal only. The event was
+                // captured and crossed the bounded queue; holding it back
+                // here is a counted, reported deferral, not a silent drop.
+                Ok(Message::Event(_)) => queue.note_unexported_event(),
                 Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     self.flush(&mut batch, &mut reporter);
@@ -311,7 +371,7 @@ impl<K: BatchSink> Worker<K> {
                 break;
             }
         }
-        self.drain(rx, &mut batch, &mut reporter);
+        self.drain(rx, &mut batch, &mut reporter, queue);
     }
 
     /// Send what is already queued, without waiting for more. Bounded by the
@@ -321,9 +381,14 @@ impl<K: BatchSink> Worker<K> {
         rx: &Receiver<Message>,
         batch: &mut Vec<SpanRecord>,
         reporter: &mut FailureReporter,
+        queue: &SpanQueue,
     ) {
         let spans = rx.try_iter().take(QUEUE_CAPACITY).filter_map(|m| match m {
             Message::Span(span) => Some(*span),
+            Message::Event(_) => {
+                queue.note_unexported_event();
+                None
+            }
             Message::Shutdown => None,
         });
         for span in spans {
@@ -522,9 +587,13 @@ mod tests {
     }
 
     #[test]
-    fn the_dropped_span_report_names_the_count_and_is_silent_at_zero() {
-        assert!(dropped_report(0).is_none());
-        assert!(dropped_report(4).unwrap().contains("4 span(s) dropped"));
+    fn the_loss_report_names_each_nonzero_count_and_is_silent_at_zero() {
+        assert!(loss_report(0, 0, 0).is_empty());
+        let lines = loss_report(4, 2, 3);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("4 span(s) dropped"));
+        assert!(lines[1].contains("2 standalone event(s) dropped"));
+        assert!(lines[2].contains("3 standalone event(s) captured but not exported"));
     }
 
     #[test]
