@@ -52,19 +52,35 @@ fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -
                 .expect("a literal attribute is valid"),
         };
         let build = crate::commands::env::builder_vm::ensure_pair_built(checkout, target)?;
-        let fingerprint = build.key.digest().as_str().to_string();
-        mvm_build::sdk_sidecar::install_source_built_sidecar(
-            &build.entry.dir,
-            &cache_root,
-            version,
-            arch,
-            libc,
-            &fingerprint,
-        )?;
+        install_pair_sidecar(&build, &cache_root, version, arch, libc)?;
         ui::success(&format!(
             "SDK sidecar ({libc}) built from the selected image checkout and cached."
         ));
     }
+    Ok(())
+}
+
+/// Install one libc variant from a pair-built sidecar entry, stamped with the
+/// pair identity. The entry's files carry the producer's manifest names, so
+/// this goes through the same staging install the launch path uses rather
+/// than handing the entry directory to the fixed-layout installer.
+#[cfg(feature = "builder-vm")]
+fn install_pair_sidecar(
+    build: &mvm_build::image_source::PairBuild,
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+) -> Result<()> {
+    let fingerprint = build.key.digest().as_str().to_string();
+    mvm_client::launch::pair_stage::install_pair_sidecar(
+        &build.entry,
+        &fingerprint,
+        cache_root,
+        version,
+        arch,
+        libc,
+    )?;
     Ok(())
 }
 
@@ -117,5 +133,106 @@ mod tests {
             rendered.contains("image construction lives in mvm-images"),
             "{rendered}"
         );
+    }
+
+    /// A pair-built sidecar entry names its files the way the image
+    /// repository's manifest emitter does (`sdk-sidecar-<libc>-<arch>-sdk.ext4`
+    /// and so on), not by the canonical names the sidecar installer reads. The
+    /// explicit `build sdk-sidecar build` verb must install from such an entry
+    /// for both libc variants, the same as the launch path does.
+    #[test]
+    fn a_pair_built_sidecar_entry_installs_both_libc_variants() {
+        use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact};
+        use mvm_build::image_source::{ImageBuildRole, PairBuild};
+        use mvm_core::image_set::ImageSetRole;
+        use mvm_core::packs::Sha256Hex;
+        use mvm_core::util::test_env::TestEnv;
+
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        let home = pair.tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        env.set("MVM_HOME", &home);
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+
+        for (libc, attr) in [
+            (GuestLibc::Glibc, "sdk-sidecar-image"),
+            (GuestLibc::Musl, "sdk-sidecar-image-musl"),
+        ] {
+            let image = sidecar_ext4_bytes(libc);
+            let version_file = format!("{version}\n");
+            let checksums = format!(
+                "{}  sdk.ext4\n{}  VERSION\n",
+                Sha256Hex::from_bytes(&image).as_str(),
+                Sha256Hex::from_bytes(version_file.as_bytes()).as_str(),
+            );
+            let entry = pair.publish(
+                ImageBuildRole::RuntimeOverlay,
+                attr,
+                &[(
+                    ImageSetRole::SdkSidecar(libc),
+                    None,
+                    vec![
+                        TestArtifact {
+                            name: "sdk.ext4",
+                            bytes: image,
+                            format: "ext4",
+                        },
+                        TestArtifact {
+                            name: "VERSION",
+                            bytes: version_file.into_bytes(),
+                            format: "text",
+                        },
+                        TestArtifact {
+                            name: "checksums-sha256.txt",
+                            bytes: checksums.into_bytes(),
+                            format: "text",
+                        },
+                    ],
+                    &["virtio_blk"],
+                )],
+            );
+            let build = PairBuild {
+                key: entry.key.clone(),
+                entry,
+                built: true,
+            };
+
+            install_pair_sidecar(&build, &cache_root, version, arch, libc)
+                .unwrap_or_else(|error| panic!("installing the {libc} sidecar: {error:#}"));
+
+            let resolved =
+                mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.into())
+                    .resolve(&arch.to_string(), libc)
+                    .unwrap_or_else(|error| panic!("the {libc} sidecar resolves: {error:#}"));
+            assert_eq!(resolved.version, version);
+        }
+    }
+
+    /// A minimal sidecar ext4 whose cdylib names `libc`, the one property the
+    /// resolver proves about the payload.
+    fn sidecar_ext4_bytes(libc: GuestLibc) -> Vec<u8> {
+        use mvm_fs::ext4::{Node, Owner};
+        let nodes = vec![
+            Node::Dir {
+                path: "/lib".into(),
+                mode: 0o555,
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            },
+            Node::File {
+                path: "/lib/libmvm_host_services.so".into(),
+                mode: 0o555,
+                data: mvm_fs::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            },
+        ];
+        mvm_fs::ext4::build_image(nodes, &Default::default()).expect("build sidecar ext4 fixture")
     }
 }

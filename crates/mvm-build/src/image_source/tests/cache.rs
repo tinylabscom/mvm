@@ -447,6 +447,47 @@ fn a_crash_mid_publish_leaves_no_visible_entry() {
     assert!(orphan.is_dir(), "a young orphan may belong to a live build");
 }
 
+/// A producer ahead of this build emits a manifest the parser refuses. The
+/// refused publish must leave nothing behind — no staging directory, no entry
+/// — so the next run, against a producer this build understands, publishes
+/// under the same key as though the refusal never happened.
+#[test]
+fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    let staged = fx.cache.stage(&key).unwrap();
+    let staged_dir = staged.dir().to_path_buf();
+    std::fs::write(staged.dir().join(kernel_name(key.arch)), KERNEL).unwrap();
+    let mut manifest = manifest_json(&fx.recorded(&key), key.arch, &kernel_name(key.arch), KERNEL);
+    manifest["compatibility"]["builder_boot_abi"] = serde_json::json!(1);
+    std::fs::write(
+        staged.dir().join(LOCAL_SET_MANIFEST_NAME),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = fx.cache.publish(staged, &fx.ctx()).unwrap_err();
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("builder_boot_abi"), "{rendered}");
+    assert!(
+        rendered.contains(&staged_dir.display().to_string()),
+        "the refusal names the staged entry: {rendered}"
+    );
+    assert!(
+        !staged_dir.exists(),
+        "the refused staging directory is removed"
+    );
+    assert!(fx.staging_children().is_empty(), "no staging left behind");
+    assert!(!fx.cache.entry_dir(&key).exists(), "nothing was published");
+    assert!(matches!(fx.lookup(&key), CacheLookup::Miss));
+
+    assert!(matches!(fx.publish(&key), PublishOutcome::Published(_)));
+    let entry = expect_hit(fx.lookup(&key));
+    assert_eq!(entry.dir, fx.cache.entry_dir(&key));
+    assert!(fx.staging_children().is_empty());
+}
+
 #[test]
 fn an_abandoned_staging_directory_is_reaped() {
     let fx = Fixture::new();

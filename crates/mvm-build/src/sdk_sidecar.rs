@@ -81,9 +81,18 @@ pub enum SdkSidecarBuildError {
     #[error(transparent)]
     Transport(#[from] RuntimeOverlayError),
 
-    /// Underlying io failure while staging or installing.
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    /// An io failure while staging or installing, naming the operation and
+    /// the path it failed on.
+    #[error("{op} {}: {source}", .path.display())]
+    Io {
+        /// What was being done: "copying", "renaming", ...
+        op: &'static str,
+        /// The path the operation failed on.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
 
     /// The computed cache path or the staged file set was not usable.
     #[error("SDK sidecar install invalid: {reason}")]
@@ -107,6 +116,20 @@ pub enum SdkSidecarBuildError {
         /// The architecture whose image did not identify its libc.
         arch: GuestArch,
     },
+}
+
+/// Map an io failure on `path` into [`SdkSidecarBuildError::Io`].
+fn io_at(op: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> SdkSidecarBuildError {
+    let path = path.to_path_buf();
+    move |source| SdkSidecarBuildError::Io { op, path, source }
+}
+
+/// A fresh temporary directory, its failure naming where it was being made.
+fn temp_dir() -> Result<tempfile::TempDir, SdkSidecarBuildError> {
+    tempfile::tempdir().map_err(io_at(
+        "creating a temporary directory in",
+        &std::env::temp_dir(),
+    ))
 }
 
 /// Download the SDK sidecar for `arch` and `libc` as a member of the image set
@@ -155,7 +178,7 @@ pub fn download_sdk_sidecar_from(
         return Err(SdkSidecarBuildError::UnknownLibc { arch });
     }
     let names = SdkSidecarArtifactNames::for_target(&arch.to_string(), libc);
-    let tmp = tempfile::tempdir()?;
+    let tmp = temp_dir()?;
     let archive_local = tmp.path().join(&names.archive);
     image_set
         .fetch_member_artifact(
@@ -181,9 +204,9 @@ pub fn install_sdk_sidecar_archive(
     cache_root: &Path,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     let arch_dir = arch.to_string();
-    let tmp = tempfile::tempdir()?;
+    let tmp = temp_dir()?;
     let extracted = tmp.path().join("extracted");
-    std::fs::create_dir(&extracted)?;
+    std::fs::create_dir(&extracted).map_err(io_at("creating", &extracted))?;
     crate::runtime_overlay::extract_release_archive(archive, &extracted, &SIDECAR_ARCHIVE_MEMBERS)?;
     verify_sidecar_dir_integrity(&extracted)?;
 
@@ -230,8 +253,11 @@ pub fn install_source_built_sidecar(
             reason: "source fingerprint is empty".to_string(),
         });
     }
+    require_canonical_sidecar_files(source)?;
     verify_sidecar_dir_integrity(source)?;
-    let produced_version = std::fs::read_to_string(source.join(SDK_SIDECAR_VERSION_FILE))?;
+    let version_path = source.join(SDK_SIDECAR_VERSION_FILE);
+    let produced_version =
+        std::fs::read_to_string(&version_path).map_err(io_at("reading", &version_path))?;
     if produced_version.trim() != version {
         return Err(SdkSidecarBuildError::InstallInvalid {
             reason: format!(
@@ -255,6 +281,28 @@ pub fn install_source_built_sidecar(
     )
 }
 
+/// Refuse a source directory that does not hold the canonical file set,
+/// naming the first missing path. The integrity check below reads these files
+/// by their canonical names and would otherwise surface a bare `ENOENT` with
+/// no path — which is how a directory holding the files under other names
+/// (a pair cache entry, whose files carry the producer's manifest names)
+/// reads to an operator.
+fn require_canonical_sidecar_files(source: &Path) -> Result<(), SdkSidecarBuildError> {
+    for name in SIDECAR_ARCHIVE_MEMBERS {
+        let path = source.join(name);
+        if !path.is_file() {
+            return Err(SdkSidecarBuildError::InstallInvalid {
+                reason: format!(
+                    "source-built sidecar directory {} has no {name} (expected {})",
+                    source.display(),
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn install_sidecar_with_fingerprint(
     source: &Path,
     cache_root: &Path,
@@ -274,11 +322,11 @@ fn install_sidecar_with_fingerprint(
                     layout.artifact_dir.display()
                 ),
             })?;
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
     let staging = stage_sidecar_artifact(parent, arch, source)?;
     if let Some(fingerprint) = fingerprint {
         let marker = staging.join(LOCAL_SOURCE_FINGERPRINT_FILE);
-        std::fs::write(&marker, format!("{fingerprint}\n"))?;
+        std::fs::write(&marker, format!("{fingerprint}\n")).map_err(io_at("writing", &marker))?;
         crate::runtime_overlay::set_cache_perms(&marker)?;
     }
     promote_staging(&staging, &layout.artifact_dir)?;
@@ -297,12 +345,12 @@ fn stage_sidecar_artifact(
     // A previous interrupted install of our own pid would otherwise be merged
     // into rather than replaced.
     if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
+        std::fs::remove_dir_all(&staging).map_err(io_at("removing", &staging))?;
     }
     // A run killed before its rename orphans a staging dir under another pid
     // that nothing else would ever clean up.
     crate::cache_install::reap_stale_staging(parent, arch);
-    std::fs::create_dir(&staging)?;
+    std::fs::create_dir(&staging).map_err(io_at("creating", &staging))?;
 
     for name in SIDECAR_ARCHIVE_MEMBERS {
         let from = source.join(name);
@@ -312,7 +360,7 @@ fn stage_sidecar_artifact(
             });
         }
         let to = staging.join(name);
-        std::fs::copy(&from, &to)?;
+        std::fs::copy(&from, &to).map_err(io_at("copying", &from))?;
         crate::runtime_overlay::set_cache_perms(&to)?;
     }
     Ok(staging)
@@ -325,9 +373,10 @@ fn stage_sidecar_artifact(
 /// resolver re-reads on every launch anyway.
 fn promote_staging(staging: &Path, artifact_dir: &Path) -> Result<(), SdkSidecarBuildError> {
     if artifact_dir.exists() {
-        std::fs::remove_dir_all(artifact_dir)?;
+        std::fs::remove_dir_all(artifact_dir).map_err(io_at("removing", artifact_dir))?;
     }
-    std::fs::rename(staging, artifact_dir)?;
+    std::fs::rename(staging, artifact_dir)
+        .map_err(io_at("renaming the staged sidecar into", artifact_dir))?;
     Ok(())
 }
 
@@ -686,6 +735,57 @@ mod tests {
         assert_eq!(
             std::fs::read(layout_of(cache.path(), GuestLibc::Musl).image).unwrap(),
             old_image
+        );
+    }
+
+    /// A directory holding the sidecar under other names — a pair cache
+    /// entry, whose files carry the producer's `<role>-<arch>-<name>` names —
+    /// is refused with the missing canonical path named, not a bare `ENOENT`.
+    #[test]
+    fn source_built_install_names_the_missing_canonical_file() {
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        stage_sidecar_dir(
+            staged.path(),
+            FIXTURE_VERSION,
+            &sidecar_ext4_bytes(GuestLibc::Musl),
+        );
+        for name in SIDECAR_ARCHIVE_MEMBERS {
+            std::fs::copy(
+                staged.path().join(name),
+                source
+                    .path()
+                    .join(format!("sdk-sidecar-musl-aarch64-{name}")),
+            )
+            .unwrap();
+        }
+
+        let error = install_source_built_sidecar(
+            source.path(),
+            cache.path(),
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            GuestLibc::Musl,
+            "source-digest",
+        )
+        .expect_err("a directory without the canonical names must be refused");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                &source
+                    .path()
+                    .join(SDK_SIDECAR_IMAGE_FILE)
+                    .display()
+                    .to_string()
+            ),
+            "the error must name the missing path: {rendered}"
+        );
+        assert!(
+            !layout_of(cache.path(), GuestLibc::Musl)
+                .artifact_dir
+                .exists()
         );
     }
 
