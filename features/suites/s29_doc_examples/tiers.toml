@@ -114,6 +114,11 @@ tier = "exec"
 fixture = "release-signature"
 
 [[command]]
+path = "explain"
+tier = "parse"
+reason = "names a completed machine whose refusal history belongs to the caller"
+
+[[command]]
 path = "env uninstall"
 tier = "exec"
 env = { MVM_INSTALL_DIR = "sandbox/bin", MVM_INSTALL_LIB_DIR = "sandbox/lib/mvm" }

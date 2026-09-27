@@ -207,6 +207,28 @@ fn explain_help_lists_run_id_and_json() {
         "help is missing --tenant:\n{help}"
     );
     assert!(help.contains("--json"), "help is missing --json:\n{help}");
+    assert!(
+        help.contains("egress refusals"),
+        "help does not say explain reports egress refusals:\n{help}"
+    );
+}
+
+/// Following a machine's output is where its egress refusals appear live, so
+/// the flag that does it says so.
+#[test]
+fn machine_logs_follow_help_mentions_egress_refusals() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "logs", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("Follow output and egress refusals live"),
+        "`machine logs --help` does not say --follow shows egress refusals:\n{help}"
+    );
 }
 
 #[test]
