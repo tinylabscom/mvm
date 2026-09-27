@@ -75,29 +75,21 @@ fn a_member_of_another_size_is_refused_before_it_is_hashed() {
     assert!(!dest.exists());
 }
 
+/// Every role is a required member, so an absent one is refused when the set
+/// is acquired, named by role and architecture, rather than at lookup.
 #[test]
-fn an_absent_member_is_named_by_role_and_arch() {
+fn a_set_missing_a_required_member_is_refused_naming_it() {
     let _env = unsigned_env();
     let served = tempfile::tempdir().unwrap();
-    let set =
-        PublishedImageSet::acquire_from(ImageSetFixture::complete().serve_from(served.path()))
-            .unwrap();
+    let fixture = ImageSetFixture::complete()
+        .without_member(ImageSetRole::Initramfs, MemberTarget::Arch(ARCH));
 
-    let err = set
-        .artifact(ImageSetRole::Initramfs, MemberTarget::Arch(ARCH), "x")
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ImageSetMemberError::NoMember {
-                role: ImageSetRole::Initramfs,
-                target: MemberTarget::Arch(GuestArch::Aarch64),
-                ..
-            }
-        ),
-        "{err}"
-    );
-    let rendered = err.to_string();
+    let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .err()
+        .expect("a set missing a required member must be refused");
+
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("incomplete"), "{rendered}");
     assert!(rendered.contains("initramfs/aarch64"), "{rendered}");
 }
 

@@ -1042,23 +1042,26 @@ mod tests {
         assert!(!cache_root.join("0.18.0").exists());
     }
 
-    /// Published sets carry no initramfs yet, and the current train does not
-    /// require one — so this refusal comes from the member lookup, names the
-    /// role and arch, and is the one the negative cache records.
+    /// The initramfs is a required member, so a set that omits it for an
+    /// architecture is refused when it is acquired, naming the member, and
+    /// never reaches the download or the cache.
     #[test]
-    fn download_initramfs_refuses_a_set_without_an_initramfs_for_the_arch() {
+    fn a_set_without_an_initramfs_for_the_arch_is_refused_before_download() {
         let mut env = TestEnv::new();
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("cache");
-        let fixture = with_initramfs(served_initramfs_archive("0.18.0"));
-        let set = acquire(&fixture, &tmp.path().join("served"), &mut env);
+        let fixture = with_initramfs(served_initramfs_archive("0.18.0")).without_member(
+            mvm_core::image_set::ImageSetRole::Initramfs,
+            mvm_core::image_set::MemberTarget::Arch(GuestArch::X86_64),
+        );
 
-        let err = download_initramfs_from(&set, "0.18.0", GuestArch::X86_64, &cache_root)
-            .expect_err("a set without the member must be refused");
+        let err = PublishedImageSet::acquire_from(fixture.serve_from(&tmp.path().join("served")))
+            .err()
+            .expect("a set without the member must be refused");
 
-        assert!(is_absent_from_image_set(&err), "{err:?}");
-        assert!(err.to_string().contains("initramfs/x86_64"), "{err}");
-        assert!(!cache_root.join("0.18.0").exists());
+        assert!(format!("{err:#}").contains("initramfs/x86_64"), "{err:#}");
+        assert!(!cache_root.exists());
     }
 
     fn initramfs_archive_bytes(
