@@ -60,7 +60,7 @@ fn assert_job_contains(workflow_name: &str, job: &str, expected: &str) {
 fn canonical_bdd_workflow_runs_the_full_suite() {
     let contents = workflow("bdd.yml");
     assert!(contents.contains("  workflow_call:"));
-    assert!(contents.contains("run: just bdd"));
+    assert!(contents.contains("run: just bdd::run"));
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
         "MVM_KERNEL_SOURCE: download",
         "packages: libcap-ng-dev lld qemu-system-x86 qemu-utils",
         "sudo chmod 666 /dev/kvm",
-        "run: just bdd-live-ci",
+        "run: just bdd::live-ci",
     ] {
         assert!(
             live.contains(expected),
@@ -88,14 +88,14 @@ fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
 
 #[test]
 fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
-    let justfile = fs::read_to_string("Justfile").expect("read Justfile");
-    let recipe = justfile
-        .split("\nbdd-live-ci:\n")
+    let bdd_mod = fs::read_to_string("just/bdd/mod.just").expect("read bdd module");
+    let recipe = bdd_mod
+        .split("\nlive-ci:\n")
         .nth(1)
-        .expect("Justfile must define bdd-live-ci")
+        .expect("bdd module must define live-ci")
         .split("\n\n")
         .next()
-        .expect("bdd-live-ci recipe has a body");
+        .expect("live-ci recipe has a body");
 
     assert!(recipe.contains("MVM_BDD_LIVE=1"));
     assert!(recipe.contains("MVM_BDD_ONLY_TAG=ci_live"));

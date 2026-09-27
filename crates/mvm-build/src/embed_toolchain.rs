@@ -107,7 +107,7 @@ pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
     }
     Err(format!(
         "zig {zig_pin} is required to cross-compile the embedded host binaries but was not \
-         found. Install it with `just toolchain-embed` (recommended — it installs the exact \
+         found. Install it with `just payload::toolchain` (recommended — it installs the exact \
          pinned zig and the musl Rust targets), put zig {zig_pin} on PATH, or set \
          MVM_EMBED_ZIG=/path/to/zig. Homebrew's `zig` is usually a newer, incompatible \
          release that fails downstream with `CacheCheckFailed`."
@@ -152,7 +152,7 @@ pub fn try_rustup_cargo_and_rustc(
 
     Err(format!(
         "Rust toolchain {toolchain} with target {target} is required for embedded host binaries. \
-         Install it with `just toolchain-embed`, or with `rustup toolchain install {toolchain} \
+         Install it with `just payload::toolchain`, or with `rustup toolchain install {toolchain} \
          --profile minimal` followed by `rustup target add {target} --toolchain {toolchain}`, or \
          set MVM_EMBED_CARGO and MVM_EMBED_RUSTC to an equivalent pinned toolchain"
     ))

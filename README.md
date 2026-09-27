@@ -809,7 +809,7 @@ attestation.
 ## Documentation
 
 Every `mvmctl` command printed in this README **or anywhere in the website
-docs** is a checked assertion, not prose. `just bdd` extracts all of them —
+docs** is a checked assertion, not prose. `just bdd::run` extracts all of them —
 currently 600+ invocations across 130+ pages, each with `file:line` provenance —
 and verifies each at one of three tiers:
 
@@ -829,7 +829,7 @@ not an escape hatch — a command that never existed is either fixed or declared
 under `[[planned]]` with a reason. Commands stranded outside a code fence, which
 render as broken prose and silently drop out of extraction, fail too.
 
-`just bdd` also checks every CLI option including hidden internal ones, and
+`just bdd::run` also checks every CLI option including hidden internal ones, and
 exercises the SDK fixtures. The merge queue additionally runs a KVM-backed fast
 witness for the persistent-machine path above: create, start, exec, logs,
 inspect, stop, and remove all operate one real Firecracker guest before the
@@ -858,7 +858,7 @@ Contributions are welcome. The short version:
 
 ```bash
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
-just install-hooks        # pre-commit hook: auto-runs cargo fmt --all
+just maint::hooks        # pre-commit hook: auto-runs cargo fmt --all
 
 # Recommended: enter the pinned contributor environment.
 nix develop
@@ -947,8 +947,8 @@ independently:
 
 | Release train   | Tag pattern          | What it releases                                 | Workflow file                              | Key command                    |
 | --------------- | -------------------- | ------------------------------------------------ | ------------------------------------------ | ------------------------------ |
-| **CLI release** | `v*` (e.g. `v1.2.3`) | `mvmctl` binary, initramfs, crates.io packages   | `.github/workflows/release.yml`            | `just release <version>`       |
-| **Boot image**  | `boot-image/v*`      | Rootfs, builder VM, runtime overlay, SDK sidecar | `.github/workflows/release-boot-image.yml` | `just release-image <version>` |
+| **CLI release** | `v*` (e.g. `v1.2.3`) | `mvmctl` binary, initramfs, crates.io packages   | `.github/workflows/release.yml`            | `just release::pr <version>`       |
+| **Boot image**  | `boot-image/v*`      | Rootfs, builder VM, runtime overlay, SDK sidecar | `.github/workflows/release-boot-image.yml` | `just release::image <version>` |
 
 **Why two trains?** The CLI and boot image have independent lifecycles:
 
@@ -966,11 +966,11 @@ publishes Rust crates to crates.io. It runs on `v*` tags and produces:
 - `checksums-sha256.txt` (combined checksums)
 - SBOM (`sbom.cdx`)
 
-To prepare the next version from conventional commits, run `just release`.
-To choose the version explicitly, run `just release 1.2.3`. Both commands run
+To prepare the next version from conventional commits, run `just release::pr`.
+To choose the version explicitly, run `just release::pr 1.2.3`. Both commands run
 the local release gates, update the workspace and Nix package versions, prepend
 the generated changelog, and open a `release/v<version>` pull request. After
-that pull request merges, run `just release-tag 1.2.3`; it tags the merged
+that pull request merges, run `just release::tag 1.2.3`; it tags the merged
 `origin/main` commit and triggers the CLI workflow.
 
 The workflow runs on tag push and:
@@ -996,7 +996,7 @@ microVM:
 - `sdk-sidecar-{arch}-{libc}.tar.gz` (SDK server runtime, per libc)
 - `default-microvm-*` (default prod image: vmlinux, verity-sealed rootfs)
 
-To publish a boot image release, run `just release-image 1.2.3`. The command
+To publish a boot image release, run `just release::image 1.2.3`. The command
 refreshes `origin/main`, refuses to reuse an existing tag, and tags the merged
 main commit as `boot-image/v1.2.3`. Pushing that tag triggers the boot-image
 workflow.

@@ -8,7 +8,7 @@ workload microVMs. Because the config is custom, the public Nix cache has no
 substitute for them. Installed binaries use the published, hash-verified
 workload kernel on a cold cache. A source checkout builds the dedicated kernel
 automatically on the first image-backed run through Stage 0, then reuses it.
-`mvmctl build kernel build` or `just kernel-workload` remains available when you
+`mvmctl build kernel build` or `just kernel::workload` remains available when you
 want to prewarm the cache explicitly.
 
 ## Build a kernel
@@ -107,7 +107,7 @@ also applies to `machine run --image`:
 
 ```bash
 # Prefer the matching hash-verified release kernel, even from a source checkout.
-MVM_KERNEL_SOURCE=download just kernel-workload
+MVM_KERNEL_SOURCE=download just kernel::workload
 
 # The same policy applies to the first image-backed run.
 MVM_KERNEL_SOURCE=download mvmctl machine run --image python:3.12 -- python -V

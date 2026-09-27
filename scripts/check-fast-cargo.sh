@@ -76,7 +76,7 @@ fi
 # lane's sub-build resolves its toolchain by the literal name `nightly` — from
 # `crates/mvm-hostd/ebpf/rust-toolchain.toml` and two `cargo +nightly`
 # invocations — so a dated pin there leaves `+nightly` on a rustup-auto-installed
-# toolchain with no `rust-src`, and `just build-ebpf` fails asking for it.
+# toolchain with no `rust-src`, and `just check::ebpf` fails asking for it.
 # Tying the count to the `cargo +nightly` that forces it means removing the
 # hardcoding forces removing the exemption, rather than leaving a hole behind.
 floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci.yml || true)"

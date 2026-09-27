@@ -727,7 +727,7 @@ jobs:
   # release path calls, gated on the narrower `bdd` scope.
   # The single owner of the Gherkin suite, and gated on `code` rather than the
   # narrower `bdd` scope because it inherited `ci-linux-coverage.sh`'s trigger
-  # along with its `just bdd`. `bdd` is a strict subset of `code` — `crates/`
+  # along with its `just bdd::run`. `bdd` is a strict subset of `code` — `crates/`
   # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
   # both cover `features/` and the Justfile — so this widening admits exactly
   # the runs the Linux lane was already covering and no others.
@@ -1016,7 +1016,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # No uv, Node or `just` here. All three existed for the `just bdd` this
+      # No uv, Node or `just` here. All three existed for the `just bdd::run` this
       # lane no longer runs — the suite builds the TypeScript SDK, which is what
       # needed Node and uv. What is left is the wasm/no_std targets, the browser
       # demo (wasm-pack plus a system python3) and the ext4 oracle, none of which
@@ -1059,7 +1059,7 @@ jobs:
 
       # The one lane that must keep a floating nightly, and not by oversight.
       # `crates/mvm-hostd/ebpf/rust-toolchain.toml` pins `channel = "nightly"`,
-      # and both the bpf-linker install below and `just build-ebpf` say
+      # and both the bpf-linker install below and `just check::ebpf` say
       # `cargo +nightly` — they resolve the toolchain *by that name*. Installing
       # a dated nightly instead leaves `+nightly` pointing at whatever rustup
       # auto-installs, which carries no `rust-src`, and the build dies asking
@@ -1099,7 +1099,7 @@ jobs:
           tool: just
 
       - name: Build the eBPF object
-        run: just build-ebpf
+        run: just check::ebpf
 
       - name: Run mvm-hostd eBPF telemetry load/attach test
         run: cargo test -p mvm-hostd --features ebpf-telemetry --lib

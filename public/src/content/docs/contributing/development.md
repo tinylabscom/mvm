@@ -7,7 +7,7 @@ description: Getting started as a contributor to mvm.
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
 - **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just toolchain-embed` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
@@ -41,7 +41,7 @@ cd mvm
 # cross-targets for the active toolchain and the pinned cargo-zigbuild. Do NOT
 # `brew install zig` — Homebrew's zig drifts off the pinned cargo-zigbuild and
 # fails with a cryptic CacheCheckFailed.
-just toolchain-embed
+just payload::toolchain
 
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
@@ -71,9 +71,9 @@ cargo run -- bootstrap
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain
 > *name*. When that pin changes (a version bump), rustup resolves a fresh
-> toolchain that carries none of the Linux cross-targets, so `just check-linux`
+> toolchain that carries none of the Linux cross-targets, so `just check::linux`
 > or an `mvmctl` build fails with `error[E0463]: can't find crate for core …
-> target may not be installed`. Re-run `just toolchain-embed` to reinstall the
+> target may not be installed`. Re-run `just payload::toolchain` to reinstall the
 > targets for the new toolchain.
 
 Or run the bootstrap script on a fresh machine:
@@ -90,14 +90,14 @@ just build
 
 # Prebuild the guest runtime overlay once so later required-overlay boots
 # can reuse the cached artifact instead of rebuilding guest binaries.
-just runtime-overlay
+just check::overlay
 
 # Run CLI
-just run -- --help
+just check::run -- --help
 
 # Boot a throwaway workload — the (headless) builder VM auto-bootstraps
 # on first use, then the workload boots on the platform's default backend.
-just run -- machine run --image alpine -- uname -a
+just check::run -- machine run --image alpine -- uname -a
 
 # Release build (stripped, LTO)
 just release-build
@@ -126,13 +126,13 @@ prebuilding it is useful when you want the first interactive run to be warm:
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-just run -- build kernel build --which builder
+just check::run -- build kernel build --which builder
 
 # Or both kernels:
-just run -- build kernel build --all
+just check::run -- build kernel build --all
 
 # The same policy applies to the direct kernel recipe:
-MVM_KERNEL_SOURCE=download just kernel-workload
+MVM_KERNEL_SOURCE=download just kernel::workload
 ```
 
 To skip the kernel compile entirely on a fresh machine, boot the builder
@@ -140,7 +140,7 @@ VM on a published kernel (once a release has shipped one):
 
 ```bash
 # Build only the rootfs locally; fetch + hash-verify the kernel.
-just run -- --kernel-source download bootstrap
+just check::run -- --kernel-source download bootstrap
 # `auto` downloads if available, else compiles in-image (the default).
 ```
 
@@ -162,13 +162,13 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-just run -- build kernel build --which workload
+just check::run -- build kernel build --which workload
 
 # 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
 #    throwaway VM and confirm the in-guest agent answers over vsock.
-just run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
-just run -- machine boot-report smoke   # "control plane  ready" == good
-just run -- machine stop smoke
+just check::run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
+just check::run -- machine boot-report smoke   # "control plane  ready" == good
+just check::run -- machine stop smoke
 ```
 
 Two sharp edges worth knowing:
@@ -199,7 +199,7 @@ Two sharp edges worth knowing:
 just test
 
 # Test a single crate
-just test-crate mvm-core
+just tests::crate mvm-core
 
 # Run tests matching a filter
 just test "test_snapshot"
@@ -338,8 +338,8 @@ is an analysis aid; the chain-signed audit log remains the record of what ran.
 ## Linting and Formatting
 
 ```bash
-just fmt          # Format all code
-just clippy       # Lint (zero warnings required)
+just lints::fmt          # Format all code
+just lints::clippy       # Lint (zero warnings required)
 just lint         # Both format check + clippy
 ```
 
@@ -390,29 +390,29 @@ Beyond the standard build/test/lint cycle, mvmctl provides commands for managing
 
 ```bash
 # First-time host setup (installs deps, stages the builder VM image)
-just run -- bootstrap
+just check::run -- bootstrap
 # `init` is a different verb: it scaffolds mvm.toml + flake.nix in a project dir
-just run -- init ./my-app
+just check::run -- init ./my-app
 
 # Bundled image catalog — browse the entries `init --catalog` can scaffold from
-just run -- catalog list            # browse bundled catalog
-just run -- catalog search http     # search by name/tag
-just run -- catalog info minimal    # show one entry
+just check::run -- catalog list            # browse bundled catalog
+just check::run -- catalog search http     # search by name/tag
+just check::run -- catalog info minimal    # show one entry
 # (`mvmctl image` is a different namespace: pull/ls/inspect/rm of cached OCI images.)
 
 # Named dev networks
-just run -- network create isolated # create a named network
-just run -- network list            # list all networks
-just run -- machine run --flake .  # attach VM to a network
+just check::run -- network create isolated # create a named network
+just check::run -- network list            # list all networks
+just check::run -- machine run --flake .  # attach VM to a network
 
 # Interactive console (PTY-over-vsock, no SSH) — `console` lives under `machine`
-just run -- machine console myvm            # interactive shell
-just run -- machine console myvm --command "uname -a"  # one-shot exec
+just check::run -- machine console myvm            # interactive shell
+just check::run -- machine console myvm --command "uname -a"  # one-shot exec
 
 # Cache and diagnostics
-just run -- cache info              # show cache dir and disk usage
-just run -- cache prune             # clean stale temp files
-just run -- doctor                  # dependency checks + security posture
+just check::run -- cache info              # show cache dir and disk usage
+just check::run -- cache prune             # clean stale temp files
+just check::run -- doctor                  # dependency checks + security posture
 # There is no `security` verb — plan 40 folded it into `doctor`.
 ```
 

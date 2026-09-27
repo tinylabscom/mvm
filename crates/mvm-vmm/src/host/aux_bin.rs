@@ -414,7 +414,7 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
     bail!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
          a source checkout run `cargo build --bins` (or `just \
-         build-supervisors`), or set {env}=<path>.{hint}",
+         payload::supervisors`), or set {env}=<path>.{hint}",
         bin = spec.bin,
         pkg = spec.rebuild_package,
         env = spec.env_var,
@@ -465,7 +465,7 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
 }
 
 /// `target/{release,debug}` under each workspace target dir (default plus a
-/// `CARGO_TARGET_DIR` override), the fallback for `just build-supervisors`.
+/// `CARGO_TARGET_DIR` override), the fallback for `just payload::supervisors`.
 fn workspace_target_dirs() -> Vec<PathBuf> {
     workspace_root_from_manifest_dir()
         .map_or_else(Vec::new, |root| workspace_target_dirs_for(&root))
@@ -1108,7 +1108,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("cargo build --bins"), "{err}");
-        assert!(err.contains("just build-supervisors"), "{err}");
+        assert!(err.contains("just payload::supervisors"), "{err}");
     }
 
     #[test]

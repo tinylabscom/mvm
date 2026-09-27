@@ -59,11 +59,11 @@ echo "    home:  $HOME_DIR"
 echo "    flake: $FLAKE"
 
 e2e_phase build
-just embed-refresh
+just payload::refresh
 cargo build --bin mvmctl --features "$FEATURES"
 cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
 cargo build --bin mvmctl --features "$FEATURES,embed-host-bins"
-just build-supervisors
+just payload::supervisors
 
 # Against a cold home, the unembedded command owns no payload, so it must hand
 # Stage 0, the builder image and both sidecar variants to its embedded helper.

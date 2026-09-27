@@ -332,7 +332,7 @@ fn the_release_asset_list_cannot_upload_one_file_twice() {
 
 /// The release prep must test the tree it pushes, not the tree before it.
 ///
-/// `just release` runs the workspace suite and *then* calls `_release-prep`,
+/// `just release::pr` runs the workspace suite and *then* calls `_release-prep`,
 /// which is where the version actually changes. So the suite green-lights the
 /// pre-bump tree while the bumped tree — the one that becomes the release — was
 /// never run.
@@ -2318,7 +2318,7 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
     );
 }
 
-/// `just smoke-fresh-install` runs the same script the release gate runs, so a
+/// `just e2e::smoke-fresh-install` runs the same script the release gate runs, so a
 /// maintainer can reproduce a red first-run lane locally.
 #[test]
 fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {

@@ -212,7 +212,7 @@ fn build_local_workload_kernel() -> Result<String> {
     );
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
         .context(
-            "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
+            "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel::workload`",
         )?;
     let path = path.display().to_string();
     ui::success(&format!(
@@ -289,7 +289,7 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
          `machine run --image` needs a dm-verity-capable workload kernel before the guest can boot. \
          In a source checkout it is built automatically on first use; set \
          `MVM_KERNEL_SOURCE=download` to use the published kernel instead, or create it manually \
-         with `mvmctl kernel build --which workload` or `just kernel-workload`."
+         with `mvmctl kernel build --which workload` or `just kernel::workload`."
     )
 }
 

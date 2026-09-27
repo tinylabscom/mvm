@@ -1,6 +1,6 @@
 # cargo-nextest configuration.
 #
-# `just test-ci` has always passed `--profile ci`; without this file that
+# `just tests::ci` has always passed `--profile ci`; without this file that
 # recipe fails before running a single test with
 # `error: profile 'ci' not found`.
 

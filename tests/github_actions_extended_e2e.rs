@@ -54,7 +54,7 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
         "the privileged recipe must restore the provisioned runner PATH for cargo and rustc"
     );
     assert!(
-        job.contains("\"$HOME/.cargo/bin/just\" bdd-live-warm-claim"),
+        job.contains("\"$HOME/.cargo/bin/just\" bdd::live-warm-claim"),
         "the privileged step must use the runner's absolute just path because sudo replaces PATH"
     );
 }
@@ -419,10 +419,6 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
     );
 }
 
-fn justfile() -> String {
-    fs::read_to_string("Justfile").expect("read Justfile")
-}
-
 fn root_manifest() -> String {
     fs::read_to_string("Cargo.toml").expect("read root Cargo manifest")
 }
@@ -483,11 +479,11 @@ fn local_launch_gate_uses_the_published_workload_kernel() {
 
     assert!(
         script.contains("cargo build --bin mvmctl --features user,embed-host-bins"),
-        "`just e2e-launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
+        "`just e2e::launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
     );
     assert!(
         script.contains("export MVM_KERNEL_SOURCE=download"),
-        "`just e2e-launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
+        "`just e2e::launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
     );
 }
 
@@ -500,7 +496,7 @@ fn local_launch_gate_runs_only_launch_features() {
         script.contains(
             "s31_launch_e2e/{cli_launch_modes,launch_budget,sdk_and_library_modes}.feature"
         ),
-        "`just e2e-launch` must name its three launch feature files explicitly"
+        "`just e2e::launch` must name its three launch feature files explicitly"
     );
     assert!(
         !script.contains("s31_launch_e2e/*.feature"),
@@ -598,7 +594,7 @@ fn extended_ci_runs_the_cold_source_bootstrap_witness() {
     let job = job_block(&workflow, "source-bootstrap-linux");
 
     assert!(
-        job.contains("run: just e2e-source-bootstrap"),
+        job.contains("run: just e2e::source-bootstrap"),
         "the nightly source bootstrap job must run the dedicated witness"
     );
     assert!(
@@ -609,8 +605,9 @@ fn extended_ci_runs_the_cold_source_bootstrap_witness() {
         field_after(job, "MVM_BOOT_IMAGE:").is_none(),
         "the source witness must not be pointed at the published image"
     );
+    let e2e_mod = fs::read_to_string("just/e2e/mod.just").expect("read e2e module");
     assert!(
-        justfile().contains("e2e-source-bootstrap:\n    ./scripts/e2e-source-bootstrap.sh"),
+        e2e_mod.contains("source-bootstrap:\n    ./scripts/e2e-source-bootstrap.sh"),
         "the recipe must run the source bootstrap witness"
     );
 }
@@ -943,7 +940,7 @@ fn macos_documented_surface_uploads_its_log() {
     let macos = job_block(&workflow, "e2e-docs-macos");
 
     let run = macos
-        .find("just e2e-docs 2>&1 | tee")
+        .find("just e2e::docs 2>&1 | tee")
         .expect("the macOS lane must tee the suite output to a file it keeps");
     let pipefail = macos
         .find("set -o pipefail")
@@ -1219,10 +1216,10 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
 
 #[test]
 fn standard_supervisor_build_never_enables_libkrun() {
-    let just = justfile();
+    let just = fs::read_to_string("just/payload/mod.just").expect("read embed module");
     let recipe = just
-        .split_once("\nbuild-supervisors")
-        .expect("build-supervisors recipe")
+        .split_once("\nsupervisors")
+        .expect("supervisors recipe")
         .1
         .split_once("\n# ")
         .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
@@ -1237,7 +1234,7 @@ fn standard_supervisor_build_never_enables_libkrun() {
     );
 
     let optional = just
-        .split_once("\nbuild-libkrun-supervisor")
+        .split_once("\nlibkrun-supervisor")
         .expect("explicit libkrun integration recipe")
         .1
         .split_once("\n# ")

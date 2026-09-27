@@ -37,7 +37,7 @@ Until then nothing moves a user onto the tag: `install.sh` installs the newest
 full release, `mvmctl env update` follows GitHub's latest marker, and the
 served installer's fallback still names the previous release. A red smoke
 leaves the tag staged; the fix ships as a new tag. The same check runs locally
-with `just smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
+with `just e2e::smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
 alone.
 
 ## How each install path consumes a release

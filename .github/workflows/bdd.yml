@@ -38,7 +38,7 @@ jobs:
         with:
           packages: libcap-ng-dev lld
 
-      # No zig here: `just bdd` builds mvmctl without `embed-host-bins`, and the
+      # No zig here: `just bdd::run` builds mvmctl without `embed-host-bins`, and the
       # scenarios that would need the payload are `@live`-tagged, which this
       # hermetic lane skips. The live job below does need it.
       - name: Install just
@@ -65,14 +65,14 @@ jobs:
       - uses: ./.github/actions/rust-cache
 
       - name: Run BDD conformance suite
-        run: just bdd
+        run: just bdd::run
 
       # The Python and TypeScript SDKs each carry a unit suite that no cargo
       # target reaches, so until now nothing in CI ran either. They belong on
       # this lane: it is the one already scoped to `crates/mvm-sdk/`, and it
       # already installs uv, Node and the TypeScript dependencies.
       - name: Run the language SDK unit suites
-        run: just sdk-test
+        run: just sdk::test
 
   # The hermetic suite is intentionally cheap enough for every PR update. This
   # companion proves the smallest useful documented lifecycle against a real
@@ -107,7 +107,7 @@ jobs:
         with:
           packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
 
-      # Kept: `just bdd-live-ci` builds with `embed-host-bins`, because the
+      # Kept: `just bdd::live-ci` builds with `embed-host-bins`, because the
       # `@live` scenarios boot real microVMs and reach the builder VM. That is
       # the cross-compile, and it needs the pinned zig.
       - uses: ./.github/actions/install-zigbuild
@@ -143,7 +143,7 @@ jobs:
           ls -la /dev/kvm
 
       - name: Run the fast live BDD witness
-        run: just bdd-live-ci
+        run: just bdd::live-ci
 
       - name: Dump VMM diagnostics on failure
         if: failure()

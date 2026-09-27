@@ -21,7 +21,7 @@
 #   --check    change nothing; exit 1 unless the installer already carries
 #              exactly this pin
 #
-# The only writer of those lines: the release PR (`just release`) and the
+# The only writer of those lines: the release PR (`just release::pr`) and the
 # site deployment both call this. Needs an authenticated `gh` and `cosign`.
 set -eu
 

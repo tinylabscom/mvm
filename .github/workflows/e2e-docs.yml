@@ -147,7 +147,7 @@ jobs:
           sudo chmod 666 /dev/kvm
 
       - name: Run the documented surface end to end
-        run: just e2e-docs
+        run: just e2e::docs
 
       - name: Dump VMM diagnostics on failure
         if: failure()
@@ -328,7 +328,7 @@ jobs:
           MVM_BDD_WALL_CLOCK: "1"
         run: |
           set -o pipefail
-          just e2e-docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
+          just e2e::docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
 
       # Nobody logs in to the runner to read a log. Upload on success too: a
       # green run's "did NOT run" tally is how a skipped scenario gets noticed.
