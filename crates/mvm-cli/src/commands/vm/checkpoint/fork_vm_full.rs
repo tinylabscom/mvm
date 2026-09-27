@@ -691,6 +691,7 @@ mod tests {
                         allowed_hosts: vec!["api.example.com".into()],
                         sigv4: None,
                         provider: None,
+                        approve: Default::default(),
                     },
                 )
                 .unwrap();

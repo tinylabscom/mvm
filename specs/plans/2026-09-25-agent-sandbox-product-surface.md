@@ -132,8 +132,8 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
-      host is terminated only on an explicit `intercept` grant; `ask` goes to the
-      `EgressApprover` seam, which refuses (`approval_unavailable`) until PS-07;
+      host is terminated only on an explicit `intercept` grant; `ask` is held and
+      answered through PS-07's approval supervisor;
       `--allow-endpoint` and `[[network.routes]]` (transient runs; persistent
       machines refuse routes for now)
 - [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
@@ -188,10 +188,33 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] agent packs: claude, codex, pi, opencode, goose; runtime packs: python, node, rust, go
 
 ### PS-07 — Runtime approval supervisor (#3717)
-- [ ] `ask` outcomes from PS-02/PS-13/secret use pause at the host and consult a backend
-- [ ] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
-- [ ] webhook and chain backends; SDK callback through hostlib
-- [ ] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
+- [x] `ask` outcomes from PS-02 routes and secret use pause at the host and consult a backend
+      — `mvm_hostd::supervisor::runtime_approval::ApprovalSupervisor` in the
+      per-VM endpoint holds the flow, records the request in the contract's
+      `ApprovalLedger`, and asks the broker the launching `mvmctl` binds on
+      the VM's `approval.sock`; a binding with `approve = ask`
+      (`mvmctl secret set --approve ask`) asks before its placeholder is
+      substituted; timeout, no broker or any error denies
+- [ ] PS-13 tool calls consult the same supervisor — the `tool_call`
+      subject exists; `tool_gate.rs` has no live caller to ask it
+- [x] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
+      — `/dev/tty`, never workload stdin; an `-it` run denies (`tty_busy`)
+      rather than race the workload; `PromptRenderer` is the seam PS-04's
+      live denials share
+- [x] webhook and chain backends — HTTPS or loopback only, no redirects,
+      4 KiB reply cap, timeout; `--approval-mode all|any`
+- [ ] SDK callback through hostlib — `CallbackBackend` is the callback type.
+      Remaining: a hostlib ABI entry that registers a callback, a broker bound
+      per machine hostlib launches, and the Python and TypeScript facades
+- [x] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
+      — session approvals live in the endpoint for 15 minutes; 10 prompts a
+      minute, the rest denied `rate_limited`; `approval.requested / granted /
+      denied / timed_out` chain-signed with the request id
+- [x] surface: `--approval tty|deny|webhook=URL` on `run` and `machine run`,
+      `[approval]` in `mvm.toml`; default tty for an operator at a terminal,
+      deny otherwise
+- [ ] a broker for detached and persistent machines — nobody answers today,
+      so their asks deny
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
 - [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints

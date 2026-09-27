@@ -577,6 +577,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         deregister_invoke_session(session_id.as_ref());
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    // Answer the endpoint's `ask` decisions while the call runs. A machine
+    // kept alive past the call has no one to ask, and its asks deny. A
+    // terminal being streamed to the workload is the workload's, not ours.
+    let terminal_streamed = stream_stdin && std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let approvals = crate::approval::serve_for(&vm.vm_name, terminal_streamed);
 
     // Run the call. Pass the session id so a transport drop coincident
     // with `mvmctl session kill` is attributed as `SessionKilled`
@@ -604,6 +609,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         session_id: session_id.as_ref(),
     });
     drop(admitted);
+    drop(approvals);
 
     // Tear down lifecycle:
     //   - default: kill the VM and drop the session record (matches

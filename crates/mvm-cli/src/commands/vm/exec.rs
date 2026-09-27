@@ -9,7 +9,7 @@ use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::Signer;
 
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
@@ -21,7 +21,7 @@ use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
 };
 use super::Cli;
-use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
+use super::host_signer::{host_signer_id, load_or_init};
 use crate::ui;
 
 pub(in crate::commands) mod detect;
@@ -295,6 +295,12 @@ pub(in crate::commands) struct RunArgs {
     /// Allow one HTTP endpoint only, e.g. GET https://h/p/**.
     #[arg(long = "allow-endpoint", value_name = "[METHOD ]URL")]
     pub allow_endpoint: Vec<String>,
+    /// Answer `ask` rules with tty, deny, or webhook=URL (repeatable).
+    #[arg(long = "approval", value_name = "BACKEND")]
+    pub approval: Vec<crate::approval::ApprovalSpec>,
+    /// Combine several --approval backends: all (default) or any.
+    #[arg(long = "approval-mode", value_name = "MODE", value_parser = crate::approval::parse_mode)]
+    pub approval_mode: Option<mvm_core::manifest::ApprovalChainMode>,
     /// Cap total AI tokens for this run.
     #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
     pub ai_token_budget: Option<u64>,
@@ -508,6 +514,8 @@ impl Default for RunArgs {
             network_preset: None,
             allow_host: Vec::new(),
             allow_endpoint: Vec::new(),
+            approval: Vec::new(),
+            approval_mode: None,
             ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
@@ -698,6 +706,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let host_config = mvm_core::user_config::load(None);
     let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
     let routes = super::run_routes::launch_routes(&args)?;
+    crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
@@ -1406,10 +1415,12 @@ struct RunReceiptSignature {
 
 pub(in crate::commands) mod env_args;
 mod preflight;
+mod receipt_verify;
 use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;
 use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
+use receipt_verify::verify_run_receipt;
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
@@ -1584,61 +1595,6 @@ fn write_run_receipt(
     let bytes = serde_json::to_vec_pretty(&receipt).context("serializing run receipt")?;
     std::fs::write(path, bytes).with_context(|| format!("writing receipt {}", path.display()))?;
     Ok(())
-}
-
-fn verify_run_receipt(path: &Path, pubkey_path: Option<&Path>) -> Result<SignedRunReceipt> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading receipt {}", path.display()))?;
-    let receipt: SignedRunReceipt = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing receipt {}", path.display()))?;
-    if receipt.payload.schema_version != 1 {
-        anyhow::bail!(
-            "unsupported receipt schema_version {}; this build supports 1",
-            receipt.payload.schema_version
-        );
-    }
-    if !receipt.signature.algorithm.eq_ignore_ascii_case("ed25519") {
-        anyhow::bail!(
-            "unsupported receipt signature algorithm '{}'",
-            receipt.signature.algorithm
-        );
-    }
-    let verifying = load_receipt_pubkey(pubkey_path)?;
-    let public_key = verifying.to_bytes();
-    let actual_key_hash = sha256_hex(&public_key);
-    if actual_key_hash != receipt.signature.public_key_sha256 {
-        anyhow::bail!(
-            "receipt was signed by public key {}; trusted key is {}",
-            receipt.signature.public_key_sha256,
-            actual_key_hash
-        );
-    }
-
-    let sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&receipt.signature.signature_base64)
-        .context("decoding receipt signature")?;
-    let signature = Signature::from_slice(&sig_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid receipt signature bytes: {e}"))?;
-    let payload_bytes =
-        serde_json::to_vec(&receipt.payload).context("serializing receipt payload")?;
-    verifying
-        .verify(&payload_bytes, &signature)
-        .map_err(|e| anyhow::anyhow!("receipt signature verification failed: {e}"))?;
-    Ok(receipt)
-}
-
-fn load_receipt_pubkey(path: Option<&Path>) -> Result<VerifyingKey> {
-    let path = match path {
-        Some(path) => path.to_path_buf(),
-        None => super::host_signer::default_keys_dir()?.join(PUBLIC_FILENAME),
-    };
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading trusted receipt public key {}", path.display()))?;
-    let key: [u8; super::host_signer::KEY_BYTES] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("{} must contain exactly 32 bytes", path.display()))?;
-    VerifyingKey::from_bytes(&key).with_context(|| format!("parsing {}", path.display()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

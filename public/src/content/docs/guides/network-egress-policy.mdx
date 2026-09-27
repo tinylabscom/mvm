@@ -118,8 +118,11 @@ A path the host cannot read unambiguously is refused, not matched: a `.` or
 `.`. Encoded letters and digits are decoded first, so `/%61dmin` cannot pass a
 rule written for `/admin`.
 
-`ask` is refused for now, recorded with the reason `approval_unavailable`,
-until an approval backend can answer it.
+`ask` holds the request on the host and asks the `mvmctl` that launched the
+run — on your terminal, through a webhook, or not at all — and refuses it
+unless the answer is yes. [Runtime approvals](/guides/runtime-approvals/)
+covers the backends, the timeout, session approvals and the audit entries. A
+run nobody can answer for, such as a detached machine, refuses every `ask`.
 
 Every decision — allow, deny or ask — is a `host.route.decided` entry in the
 chain-signed audit log, carrying the route id, the rule that decided (its `id`,

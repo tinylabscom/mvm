@@ -102,6 +102,10 @@ pub enum EventCategory {
     /// compute workload-asserted
     /// vs system-asserted entry rates separately.
     WorkloadAudit,
+    /// Runtime approvals: a held flow's question and how it was answered.
+    /// `approval.<requested|granted|denied|timed_out>`. Unbound, like `dns`:
+    /// the per-VM endpoint that asks holds no `ExecutionPlan`.
+    Approval,
 }
 
 impl EventCategory {
@@ -123,6 +127,7 @@ impl EventCategory {
             Self::Dns => "dns",
             Self::Icmp => "icmp",
             Self::WorkloadAudit => "workload_audit",
+            Self::Approval => "approval",
         }
     }
 
@@ -314,6 +319,8 @@ impl Recorder {
             EventCategory::Dns => &m.audit_dns_total,
             EventCategory::Icmp => &m.audit_icmp_total,
             EventCategory::WorkloadAudit => &m.audit_workload_audit_total,
+            // Counted with policy decisions: an approval is one.
+            EventCategory::Approval => &m.audit_policy_total,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }

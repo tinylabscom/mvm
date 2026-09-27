@@ -12,6 +12,9 @@ license.workspace = true
 # never gains an `mvm-runtime` edge — that is what lets `mvm-sdk` enable
 # `mvm-core/client` for the trait without dragging the backend into a cycle.
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM approval endpoint broker (host-local Unix socket)"
+
 [features]
 default = []
 # Build as the release channel: the runtime overlay defaults to the published
@@ -105,6 +108,9 @@ ext4-view = { workspace = true }
 # its tags are also in this crate's re-exported public surface.
 mvm-contract = { workspace = true }
 thiserror = { workspace = true }
+# The approval broker's webhook backend. Already in this crate's closure
+# through mvm-hostd, so the direct edge adds no crates.
+mvm-http = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
