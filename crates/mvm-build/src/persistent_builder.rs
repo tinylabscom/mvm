@@ -1071,13 +1071,13 @@ pub fn stage_flake_dispatch_job(
     let out_dir = guest_artifact_dir(transport, &job_id);
     // The boot payload's copy when the session booted with one, else the copy
     // a legacy image baked.
-    let payload_host_vm_init = crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR;
+    let host_vm_init_sh =
+        crate::builder_boot::guest_host_binary_sh("HOST_VM_INIT", "mvm-host-vm-init");
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
          OUT_DIR='{out_dir}'\n\
-         HOST_VM_INIT='{payload_host_vm_init}/mvm-host-vm-init'\n\
-         [ -x \"$HOST_VM_INIT\" ] || HOST_VM_INIT=/sbin/mvm-host-vm-init\n\
+         {host_vm_init_sh}\
          mkdir -p \"$OUT_DIR\"\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
@@ -1824,8 +1824,10 @@ mod tests {
             "missing before_build hook runner invocation in:\n{body}"
         );
         assert!(
-            body.contains("HOST_VM_INIT='/run/mvm/host-bins/mvm-host-vm-init'\n")
-                && body.contains("|| HOST_VM_INIT=/sbin/mvm-host-vm-init\n"),
+            body.contains(&crate::builder_boot::guest_host_binary_sh(
+                "HOST_VM_INIT",
+                "mvm-host-vm-init"
+            )) && body.contains("HOST_VM_INIT=\"/run/mvm/host-bins/mvm-host-vm-init\"\n"),
             "the hook runner must prefer the boot payload's copy in:\n{body}"
         );
         assert!(

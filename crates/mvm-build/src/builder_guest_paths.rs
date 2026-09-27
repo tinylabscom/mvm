@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 pub const RUNTIME_HOST_BIN_DIR: &str = "/run/mvm/host-bins";
 
 /// Where a legacy builder image bakes its own copies of the builder binaries.
-const LEGACY_HOST_BIN_DIR: &str = "/sbin";
+pub const LEGACY_HOST_BIN_DIR: &str = "/sbin";
 
 /// The path of builder binary `name` inside a running builder guest: the
 /// payload's copy when the guest booted with one, the image's baked copy

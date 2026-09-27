@@ -67,3 +67,57 @@ pub const STAGE_ENV: &str = "MVM_BUILDER_BOOT_STAGE";
 
 /// The value of [`STAGE_ENV`] in stage 2.
 pub const STAGE2: &str = "2";
+
+/// The same resolution for a shell script the guest runs: assign `var` the
+/// payload's copy of `name` when it is there, the image's baked copy
+/// otherwise. A job script must not name `/sbin` itself, or it runs a stale
+/// baked binary on a legacy image and finds none on one that carries no
+/// builder binaries.
+pub fn guest_host_binary_sh(var: &str, name: &str) -> String {
+    let (runtime, legacy) = (
+        crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR,
+        crate::builder_guest_paths::LEGACY_HOST_BIN_DIR,
+    );
+    format!(
+        "{var}=\"{runtime}/{name}\"\n\
+         [ -f \"${var}\" ] || {var}=\"{legacy}/{name}\"\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shell form resolves exactly as the Rust one does.
+    #[test]
+    fn the_shell_form_prefers_the_payload_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let script = guest_host_binary_sh("BIN", "mvm-host-vm-init")
+            .replace(
+                crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR,
+                &root.path().join("run").to_string_lossy(),
+            )
+            .replace(
+                crate::builder_guest_paths::LEGACY_HOST_BIN_DIR,
+                &root.path().join("sbin").to_string_lossy(),
+            )
+            + "printf %s \"$BIN\"\n";
+        let resolve = || {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            resolve(),
+            root.path().join("sbin/mvm-host-vm-init").to_string_lossy()
+        );
+        std::fs::create_dir_all(root.path().join("run")).unwrap();
+        std::fs::write(root.path().join("run/mvm-host-vm-init"), b"payload").unwrap();
+        assert_eq!(
+            resolve(),
+            root.path().join("run/mvm-host-vm-init").to_string_lossy()
+        );
+    }
+}

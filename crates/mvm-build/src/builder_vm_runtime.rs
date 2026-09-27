@@ -644,8 +644,8 @@ fi
 BUILD_HOOK_ROOTFS="/tmp/mvm-rootfs-before-build.ext4"
 cp -L "$ROOTFS_SRC" "$BUILD_HOOK_ROOTFS"
 echo "mvm-builder-vm: running before_build hook" >&2
-set +e
-/sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"
+{host_vm_init_sh}set +e
+"$HOST_VM_INIT" run-before-build-hook "$BUILD_HOOK_ROOTFS"
 hook_rc=$?
 set -e
 if [ "$hook_rc" -ne 0 ]; then
@@ -735,6 +735,8 @@ fi
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
         seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
+        host_vm_init_sh =
+            crate::builder_boot::guest_host_binary_sh("HOST_VM_INIT", "mvm-host-vm-init"),
     )
 }
 
@@ -2135,8 +2137,16 @@ mod tests {
         // The hook runner is invoked on a writable temp copy so the Nix
         // store output is never modified in place.
         assert!(
-            body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),
+            body.contains("\"$HOST_VM_INIT\" run-before-build-hook"),
             "missing before_build hook runner invocation in:\n{body}"
+        );
+        // The hook runs the payload's `mvm-host-vm-init` when the guest booted
+        // with one: an image that carries no builder binaries has no `/sbin`
+        // copy, and a legacy image's is stale.
+        assert!(
+            body.contains("HOST_VM_INIT=\"/run/mvm/host-bins/mvm-host-vm-init\"")
+                && !body.contains("\n/sbin/mvm-host-vm-init "),
+            "the hook must resolve the payload copy first in:\n{body}"
         );
         assert!(
             body.contains("/tmp/mvm-rootfs-before-build.ext4"),
@@ -2145,7 +2155,7 @@ mod tests {
         // The hook must run before the final rootfs is copied to /out, and the
         // source-rendered script must seal that exact artifact itself.
         let hook_idx = body
-            .find("/sbin/mvm-host-vm-init run-before-build-hook")
+            .find("\"$HOST_VM_INIT\" run-before-build-hook")
             .expect("hook runner present");
         let journal_idx = body
             .find(r#"/sbin/e2fsck -p -f "/out/rootfs.ext4""#)
@@ -2182,12 +2192,12 @@ mod tests {
         );
         assert!(
             body.contains(
-                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+                "set +e\n\"$HOST_VM_INIT\" run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
             ),
             "the hook's real exit status must be captured before testing it in:\n{body}"
         );
         assert!(
-            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            !body.contains("if ! \"$HOST_VM_INIT\" run-before-build-hook"),
             "negating the hook command makes `$?` report the `!` result instead of the hook failure"
         );
         assert!(
