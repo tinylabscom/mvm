@@ -434,6 +434,17 @@ fi
 echo "==> building the source-matched SDK sidecar through unembedded mvmctl"
 MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
+# The dev default image (`mvmctl run` with no image) is built from an image
+# checkout too; without one, and with nothing cached, `run` refuses. The one
+# scenario that boots it is Firecracker-only (the cached dev rootfs must stay
+# byte-identical across launches), so only the Linux lane builds it, once, into
+# the warm home every scenario shares, through the same single-step hand-off.
+if [[ "$(uname -s)" == Linux ]]; then
+  e2e_phase dev-image
+  echo "==> building the dev default image through the mvm-images checkout"
+  MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$MVMCTL" run --no-detect -- /bin/true
+fi
+
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.
 #

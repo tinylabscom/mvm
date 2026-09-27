@@ -1010,6 +1010,33 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     );
 }
 
+/// `mvmctl run` with no image boots the dev default image, which is built only
+/// from an image checkout; the Firecracker lane's rootfs byte-identity scenario
+/// boots it, so the suite warms it through the same one-step hand-off.
+#[test]
+fn documented_surface_warms_the_dev_default_image_through_the_image_checkout() {
+    let script = documented_surface_script();
+
+    let warm = "MVM_HOME=\"$E2E_HOME\" MVM_IMAGES_DIR=\"$E2E_IMAGES_DIR\" \"$MVMCTL\" run --no-detect -- /bin/true";
+    let at = script
+        .find(warm)
+        .expect("the dev default image must be warmed through the image checkout");
+    let sidecar = script
+        .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
+        .expect("the sidecar step");
+    assert!(
+        sidecar < at,
+        "the checkout is resolved before the dev image warm"
+    );
+    let guard = script[..at]
+        .rfind("if [[ \"$(uname -s)\" == Linux ]]; then")
+        .expect("only the Firecracker lane boots the dev default image");
+    assert!(
+        guard > sidecar,
+        "the Linux guard must wrap the dev image warm"
+    );
+}
+
 /// The sidecar step needs an mvm-images checkout, and it must not sit where an
 /// image checkout is discovered, or every scenario would build images from it.
 #[test]
