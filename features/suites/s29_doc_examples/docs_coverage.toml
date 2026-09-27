@@ -220,6 +220,8 @@ uncovered = [
     'mvmctl capture verify environment.json --manifest-dir ./my-app --run "cargo test" --out-dir ./mvm-verify --exec-in-builder-vm',
     "mvmctl run --manifest ./mvm.toml -- ./triage.sh",
     "mvmctl secret set deploy-token --host api.example.com --type bearer --approve ask",
+    "mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw -- sh -c 'echo kept > /data/state/note'",
+    "mvmctl machine run --manifest my-app --name app -d --mount app-data.img:/data/state:4G:rw",
     "mvmctl catalog list",
     "mvmctl deps audit",
     "mvmctl deps audit --all",
