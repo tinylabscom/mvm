@@ -143,7 +143,18 @@ pub(super) fn install_revision_artifacts(
 /// `cp -a <src> <dst>` minus the VM shell hop: both paths are already
 /// host paths. `std::fs::copy` preserves the source's permission
 /// bits, matching `cp -a`'s mode-preserving behavior.
+///
+/// Re-installing a revision copies a sealed (0444) Nix store output
+/// onto a destination a previous install left sealed at 0444, and
+/// truncating a read-only file fails with EACCES. `cp -f` unlinks the
+/// destination first; here the destination is made owner-writable
+/// instead, which keeps the inode stable for any reader that already
+/// has it open.
 fn copy_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    if dst.is_file() {
+        make_owner_writable(dst)
+            .with_context(|| format!("making {} writable for overwrite", dst.display()))?;
+    }
     std::fs::copy(src, dst)
         .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
     Ok(())
@@ -705,6 +716,101 @@ mod tests {
             "installed rootfs must be owner-writable"
         );
 
+        let target = std::fs::read_link(&current_link).unwrap();
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("artifacts/revisions/rev-1")
+        );
+    }
+
+    #[test]
+    fn copy_artifact_overwrites_a_read_only_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("mvm-meta.json");
+        let dst = tmp
+            .path()
+            .join("revisions")
+            .join("rev-1")
+            .join("mvm-meta.json");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        // Both the Nix store source and a previously installed copy are
+        // sealed read-only; re-installing must not fail on the destination.
+        std::fs::write(&src, b"new-meta").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::write(&dst, b"old-meta").unwrap();
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        copy_artifact(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-meta");
+        let mode = std::fs::metadata(&dst).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o444,
+            0o444,
+            "overwrite keeps the sealed destination mode"
+        );
+    }
+
+    #[test]
+    fn install_revision_artifacts_reinstalls_over_sealed_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("vmlinux"), b"K").unwrap();
+        std::fs::write(build.join("initrd"), b"I").unwrap();
+        std::fs::write(build.join("rootfs.ext4"), b"R").unwrap();
+        std::fs::write(build.join(mvm_build::builder_vm::SIDECAR_FILENAME), b"{}").unwrap();
+        // Nix store outputs are read-only, so a first install seals
+        // every copied artifact at 0444.
+        for name in ["vmlinux", "initrd", mvm_build::builder_vm::SIDECAR_FILENAME] {
+            std::fs::set_permissions(build.join(name), std::fs::Permissions::from_mode(0o444))
+                .unwrap();
+        }
+
+        let rev_dst = tmp.path().join("slot/artifacts/revisions/rev-1");
+        let current_link = tmp.path().join("slot/current");
+        let sources = fake_sources(&build);
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+
+        // Re-run the install over the sealed results of the first one,
+        // with new sidecar content, as a rebuild of the same revision.
+        let sidecar = build.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&sidecar, b"{\"libc\":\"musl\"}").unwrap();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+
+        assert_eq!(std::fs::read(rev_dst.join("vmlinux")).unwrap(), b"K");
+        assert_eq!(std::fs::read(rev_dst.join("initrd")).unwrap(), b"I");
+        assert_eq!(std::fs::read(rev_dst.join("rootfs.ext4")).unwrap(), b"R");
+        assert_eq!(
+            std::fs::read(rev_dst.join(mvm_build::builder_vm::SIDECAR_FILENAME)).unwrap(),
+            b"{\"libc\":\"musl\"}"
+        );
+        // Sealed artifacts keep their read-only mode across the overwrite.
+        for name in ["vmlinux", "initrd", mvm_build::builder_vm::SIDECAR_FILENAME] {
+            let mode = std::fs::metadata(rev_dst.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o200, 0, "{name} keeps the sealed read-only mode");
+        }
+        // The rootfs keeps the owner-write bit the installer adds.
+        let rootfs_mode = std::fs::metadata(rev_dst.join("rootfs.ext4"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            rootfs_mode & 0o200,
+            0o200,
+            "installed rootfs must be owner-writable"
+        );
         let target = std::fs::read_link(&current_link).unwrap();
         assert_eq!(
             target,
