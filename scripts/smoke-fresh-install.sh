@@ -12,6 +12,18 @@
 # with stdin redirected from /dev/null, and must print the token on stdout
 # within its time budget.
 #
+# Two more boots follow from the same HOME, each with its own token and
+# budget, because a release binary's downloads are not checked by its first
+# boot. That boot runs the runtime overlay and initramfs it has just fetched.
+# The second is the first to resolve them from the cache, which fetches again,
+# or refuses, an artifact whose VERSION is not the binary's own. So the second
+# boot must print its token and must not have replaced any file the first left
+# under ~/.mvm/cache/runtime-overlay or ~/.mvm/cache/initramfs. The third binds
+# an SDK host service (`--host-service host.time.v1`), which downloads the
+# published SDK sidecar, and the guest must find the SDK library under
+# /mvm/sdk. A source checkout builds all three locally, so CI's e2e lanes
+# cannot see this class of bug.
+#
 # The environment is rebuilt from nothing (`env -i`): no MVM_* knob, cache
 # directory or tool the developer's shell happens to carry can make a broken
 # release look working. Nothing outside the throwaway root is written.
@@ -23,11 +35,14 @@
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
 #   MVM_SMOKE_RUN_BUDGET_SECS      first-command budget; default 600
+#   MVM_SMOKE_SECOND_RUN_BUDGET_SECS
+#                                  second-boot budget; default 300
+#   MVM_SMOKE_SDK_RUN_BUDGET_SECS  SDK-boot budget; default 300
 #   MVM_SMOKE_KEEP                 set to 1 to keep the throwaway HOME
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
 #
-# Exit status: 0 when the first command printed the token in budget, 1 when
-# it did not, 2 on a usage error.
+# Exit status: 0 when all three boots printed their tokens in budget and the
+# second fetched nothing again, 1 when any of that failed, 2 on a usage error.
 set -eu
 
 usage() {
@@ -48,9 +63,11 @@ BOUNDED="$REPO_ROOT/scripts/run-bounded-command.py"
 INSTALLER="${MVM_SMOKE_INSTALLER:-$REPO_ROOT/install.sh}"
 INSTALL_BUDGET="${MVM_SMOKE_INSTALL_BUDGET_SECS:-1200}"
 RUN_BUDGET="${MVM_SMOKE_RUN_BUDGET_SECS:-600}"
+SECOND_RUN_BUDGET="${MVM_SMOKE_SECOND_RUN_BUDGET_SECS:-300}"
+SDK_RUN_BUDGET="${MVM_SMOKE_SDK_RUN_BUDGET_SECS:-300}"
 IMAGE="alpine"
 
-for budget in "$INSTALL_BUDGET" "$RUN_BUDGET"; do
+for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET"; do
   case "$budget" in
     ''|*[!0-9]*|0) echo "time budgets must be positive whole seconds, got: $budget" >&2; exit 2 ;;
   esac
@@ -182,7 +199,7 @@ log "host:       $(uname -s) $(uname -r) $(uname -m)"
 log "installer:  $INSTALLER"
 log "release:    ${VERSION:-(unpinned: what the one-liner installs today)}"
 log "HOME:       $SMOKE_HOME"
-log "budgets:    install ${INSTALL_BUDGET}s, first command ${RUN_BUDGET}s"
+log "budgets:    install ${INSTALL_BUDGET}s, first command ${RUN_BUDGET}s, second boot ${SECOND_RUN_BUDGET}s, SDK boot ${SDK_RUN_BUDGET}s"
 log "PATH:       $PATH_FOR_USER"
 
 case "$INSTALLER" in
@@ -222,32 +239,120 @@ if grep -q 'bootstrap failed' "$ROOT/install.err"; then
   log "note: the installer's bootstrap failed; the first command must recover on its own"
 fi
 
+# Keep what the guests and their supervisors said before the throwaway HOME
+# goes. Every boot is its own machine directory, so this runs after each one.
+keep_vm_logs() {
+  for vm_log in "$SMOKE_HOME"/.mvm/vms/*/console.log "$SMOKE_HOME"/.mvm/vms/*/supervisor.log; do
+    [ -f "$vm_log" ] || continue
+    vm_name="$(basename "$(dirname "$vm_log")")"
+    mkdir -p "$OUT/vms/$vm_name"
+    cp "$vm_log" "$OUT/vms/$vm_name/"
+  done
+}
+
+# Boot a microVM and require it to print a token on stdout: $1 names the step
+# in the transcript and in its failure, $2 is its budget, $3 the token, $4 the
+# stem of its output files under the throwaway root, and the rest is the
+# command. Sets STEP_ELAPSED, and fails the smoke on a timeout, a nonzero exit,
+# or a missing token.
+boot_and_expect() {
+  step="$1"
+  step_budget="$2"
+  step_token="$3"
+  step_stem="$4"
+  shift 4
+  if bounded "$step_budget" "$ROOT/$step_stem.out" "$ROOT/$step_stem.err" "$@"; then
+    step_status=0
+  else
+    step_status=$?
+  fi
+  append "$ROOT/$step_stem.out"
+  log "--- stderr ---"
+  append "$ROOT/$step_stem.err"
+  log "--- $step exited $step_status after ${BOUNDED_ELAPSED}s ---"
+  STEP_ELAPSED="$BOUNDED_ELAPSED"
+  keep_vm_logs
+  [ "$step_status" -ne 124 ] || fail "the $step did not finish within ${step_budget}s"
+  [ "$step_status" -eq 0 ] || fail "the $step exited $step_status"
+  tr -d '\r' < "$ROOT/$step_stem.out" | grep -qxF "$step_token" \
+    || fail "the $step exited 0 without printing $step_token on stdout"
+}
+
+# The artifacts a release binary downloads on its first boot and must find in
+# the cache on every later one, one line per file: inode, size, and path under
+# ~/.mvm/cache. Both installers stage a new directory and rename it over the
+# old one, so a re-fetch gives every file a new inode even when the bytes are
+# identical; booting from an artifact changes none of the three. The inode is
+# the signal because it holds whatever mvmctl chooses to log. Dotfiles are left
+# out: they are the resolver's own validation stamps and staging files, which
+# it may rewrite on any boot without fetching anything.
+snapshot_download_caches() {
+  python3 - "$SMOKE_HOME/.mvm/cache" runtime-overlay initramfs <<'SNAPSHOT' | LC_ALL=C sort
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+for cache in sys.argv[2:]:
+    for directory, _, files in os.walk(os.path.join(root, cache)):
+        for name in files:
+            if name.startswith("."):
+                continue
+            path = os.path.join(directory, name)
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode):
+                print(info.st_ino, info.st_size, os.path.relpath(path, root))
+SNAPSHOT
+}
+
 TOKEN="mvm-fresh-install-$(date +%s)-$$"
 section "first command (mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/null)"
-if bounded "$RUN_BUDGET" "$ROOT/run.out" "$ROOT/run.err" \
-  mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"; then
-  run_status=0
-else
-  run_status=$?
-fi
-append "$ROOT/run.out"
-log "--- stderr ---"
-append "$ROOT/run.err"
-log "--- first command exited $run_status after ${BOUNDED_ELAPSED}s ---"
-RUN_ELAPSED="$BOUNDED_ELAPSED"
+boot_and_expect "first command" "$RUN_BUDGET" "$TOKEN" run \
+  mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
+RUN_ELAPSED="$STEP_ELAPSED"
 
-# Keep what the guest and its supervisor said before the throwaway HOME goes.
-for vm_log in "$SMOKE_HOME"/.mvm/vms/*/console.log "$SMOKE_HOME"/.mvm/vms/*/supervisor.log; do
-  [ -f "$vm_log" ] || continue
-  vm_name="$(basename "$(dirname "$vm_log")")"
-  mkdir -p "$OUT/vms/$vm_name"
-  cp "$vm_log" "$OUT/vms/$vm_name/"
-done
+CACHES_FIRST="$OUT/download-caches-after-first.txt"
+CACHES_SECOND="$OUT/download-caches-after-second.txt"
+section "download caches after the first command (inode size path, under ~/.mvm/cache)"
+snapshot_download_caches > "$CACHES_FIRST"
+append "$CACHES_FIRST"
+[ -s "$CACHES_FIRST" ] \
+  || fail "the first command cached no runtime overlay or initramfs under $SMOKE_HOME/.mvm/cache, so a second boot has nothing to reuse"
 
-[ "$run_status" -ne 124 ] || fail "the first command did not finish within ${RUN_BUDGET}s"
-[ "$run_status" -eq 0 ] || fail "the first command exited $run_status"
-tr -d '\r' < "$ROOT/run.out" | grep -qxF "$TOKEN" \
-  || fail "the first command exited 0 without printing $TOKEN on stdout"
+# A release binary accepts a cached artifact only when its VERSION is the
+# binary's own. The first boot runs whatever it has just downloaded; only a
+# later one resolves the cache, and that is where a mismatched artifact is
+# fetched again on every boot, or refused outright.
+TOKEN2="$TOKEN-second"
+section "second boot from the same HOME (mvmctl machine run --image $IMAGE -- echo $TOKEN2 </dev/null)"
+boot_and_expect "second boot" "$SECOND_RUN_BUDGET" "$TOKEN2" run-second \
+  mvmctl machine run --image "$IMAGE" -- echo "$TOKEN2"
+SECOND_RUN_ELAPSED="$STEP_ELAPSED"
 
-verdict "PASS: $INSTALLED installed in ${INSTALL_ELAPSED}s; its first microVM printed the token in ${RUN_ELAPSED}s"
+section "download caches after the second boot"
+snapshot_download_caches > "$CACHES_SECOND"
+append "$CACHES_SECOND"
+REFETCHED="$(LC_ALL=C comm -23 "$CACHES_FIRST" "$CACHES_SECOND" | cut -d' ' -f3- | tr '\n' ' ')"
+[ -z "$REFETCHED" ] \
+  || fail "the second boot replaced or removed what the first cached, so it fetched it again: $REFETCHED"
+
+# The documented way to give a workload the SDK: binding an SDK-served host
+# service attaches the sidecar read-only at /mvm/sdk, downloading the published
+# one on a cold cache. The guest proves the library is there.
+TOKEN3="$TOKEN-sdk"
+SDK_SERVICE="host.time.v1"
+SDK_LIB="/mvm/sdk/lib/libmvm_host_services.so"
+SDK_SCRIPT="if test -r $SDK_LIB; then echo $TOKEN3; else echo 'no SDK sidecar library at $SDK_LIB' >&2; exit 3; fi"
+section "SDK boot (mvmctl machine run --image $IMAGE --host-service $SDK_SERVICE -- sh -c \"$SDK_SCRIPT\" </dev/null)"
+boot_and_expect "SDK boot" "$SDK_RUN_BUDGET" "$TOKEN3" run-sdk \
+  mvmctl machine run --image "$IMAGE" --host-service "$SDK_SERVICE" -- sh -c "$SDK_SCRIPT"
+SDK_RUN_ELAPSED="$STEP_ELAPSED"
+
+section "timings"
+log "install:        ${INSTALL_ELAPSED}s of ${INSTALL_BUDGET}s"
+log "first command:  ${RUN_ELAPSED}s of ${RUN_BUDGET}s"
+log "second boot:    ${SECOND_RUN_ELAPSED}s of ${SECOND_RUN_BUDGET}s"
+log "SDK boot:       ${SDK_RUN_ELAPSED}s of ${SDK_RUN_BUDGET}s"
+
+verdict "PASS: $INSTALLED installed in ${INSTALL_ELAPSED}s; its first microVM printed the token in ${RUN_ELAPSED}s, a second boot from the same HOME in ${SECOND_RUN_ELAPSED}s without fetching anything again, and a boot binding $SDK_SERVICE saw the SDK sidecar in ${SDK_RUN_ELAPSED}s"
 printf '[smoke] transcript: %s\n' "$TRANSCRIPT" >&2

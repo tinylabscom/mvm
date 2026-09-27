@@ -384,9 +384,11 @@ e2e-source-bootstrap:
 # What a new user gets: install a release into a throwaway HOME under /tmp with
 # this checkout's install.sh — builder bootstrap included — then run the
 # README's `machine run --image alpine` with stdin closed and require its output
-# within a time budget. The release workflow runs the same script before it
-# promotes a tag. Omit VERSION to test whatever the one-liner installs today.
-# Boots a real microVM; never touches your own ~/.mvm or ~/.local.
+# within a time budget. It boots again from the same HOME, which must reuse
+# what the first boot downloaded, and once more binding an SDK host service,
+# which must attach the SDK sidecar. The release workflow runs the same script
+# before it promotes a tag. Omit VERSION to test whatever the one-liner installs
+# today. Boots real microVMs; never touches your own ~/.mvm or ~/.local.
 #
 
 # Install a release as a new user would and run the first command
