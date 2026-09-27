@@ -68,7 +68,9 @@ pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
 use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
-use volume_profile::enforce_volume_profile;
+use volume_profile::{
+    enforce_persisted_volume_profile, enforce_volume_profile, persistent_dir_share_refusal,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -537,7 +539,7 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 /// through the shared `vm_volume_from_spec_validated` choke point
 /// (protected-dir deny-list + guest-mount validation, claim 1), and its host
 /// path is canonicalised to an **absolute** path so a later reconnect from a
-/// different working directory still resolves the same share. The boot path
+/// different working directory still resolves the same disk. The boot path
 /// re-validates via `build_machine_volume_cfg`, so this is the early,
 /// user-facing gate, not the only one.
 fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
@@ -1511,18 +1513,15 @@ fn build_machine_volume_cfg(
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
+        // The spec-time gate refuses this too; a spec saved before it existed
+        // must still not reach boot with a directory it cannot attach.
         if let super::shared::VolumeSpec::DirShare {
             host_dir,
             guest_mount,
             ..
         } = &spec
         {
-            bail!(
-                "persistent machine volume '{host_dir}' -> '{guest_mount}' cannot be attached: \
-                 a live host-directory share can't be expressed. Snapshot and register it with \
-                 `mvmctl machine volume mount <machine> --volume <name> --host {host_dir} \
-                 --guest {guest_mount}` before starting the machine."
-            );
+            bail!(persistent_dir_share_refusal(host_dir, guest_mount));
         }
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {volume:?}"))?;

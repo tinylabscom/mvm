@@ -1244,7 +1244,7 @@ fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
 #[test]
 fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
     let dir = tempfile::tempdir().expect("tmpdir");
-    let host = dir.path().to_string_lossy().into_owned();
+    let host = dir.path().join("state.img").to_string_lossy().into_owned();
     let args = parse_run(&[
         "run",
         "--image",
@@ -1252,7 +1252,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         "--name",
         "web",
         "--volume",
-        &format!("{host}:/work:ro"),
+        &format!("{host}:/data:1G:ro"),
     ])
     .expect("parse");
     let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
@@ -1265,71 +1265,29 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         std::path::Path::new(host_part).is_absolute(),
         "host not absolute: {stored}"
     );
-    assert!(stored.ends_with(":/work:ro"), "stored: {stored}");
+    assert!(stored.ends_with(":/data:1G:ro"), "stored: {stored}");
 }
 
+/// A persistent machine has no live host-directory share, so `machine run -d`
+/// refuses a directory volume at spec time under every profile, read-only and
+/// writable alike, rather than saving a spec that is guaranteed to fail at
+/// boot. `dev` and `permissive` used to accept a writable one here.
 #[test]
-fn run_rw_directory_volume_requires_dev_profile() {
+fn run_directory_volume_is_refused_under_every_profile() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
-    // The default is `standard`, so a writable share is refused unless the user
-    // asks for `dev` explicitly. It refuses at spec time with the flag to pass,
-    // rather than quietly handing the guest a read-only mount it will fail to
-    // write to later.
-    let default_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let default_err = machine_run_spec(&default_args, "web".to_string(), None)
-        .expect_err(":rw is not in the default profile");
-    assert!(
-        default_err.to_string().contains("profile dev"),
-        "the refusal must name the flag that grants it: {default_err}"
-    );
-
-    // An explicitly stricter profile still refuses the writable share.
-    let std_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--profile",
-        "standard",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let err = machine_run_spec(&std_args, "web".to_string(), None)
-        .expect_err(":rw needs a dev-capable profile");
-    assert!(err.to_string().contains("profile dev"), "msg: {err}");
-
-    // With --profile dev the writable share is accepted.
-    let dev_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--profile",
-        "dev",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let spec =
-        machine_run_spec(&dev_args, "web".to_string(), None).expect("dev profile allows :rw");
-    assert!(
-        spec.volumes[0].ends_with(":/work:rw"),
-        "stored: {}",
-        spec.volumes[0]
-    );
+    for profile in [None, Some("standard"), Some("dev"), Some("permissive")] {
+        for mode in ["", ":ro", ":rw"] {
+            let volume = format!("{host}:/work{mode}");
+            let message = machine_run_spec_with_volume(profile, &volume)
+                .expect_err("a persistent machine takes no host directory")
+                .to_string();
+            assert!(
+                message.contains("cannot attach a live host directory"),
+                "{profile:?} {volume}: {message}"
+            );
+        }
+    }
 }
 
 /// A persistent `machine run` spec for `--volume <volume>` under `profile`.
@@ -1364,17 +1322,24 @@ fn run_rw_disk_image_is_accepted_without_the_dev_profile() {
     }
 }
 
-/// The refusal of a writable directory names the directory as the problem
-/// and points at the disk image that works in any profile.
+/// The refusal names the directory as the problem and both ways to get the
+/// data in: a disk image, or a snapshot registered with `machine volume mount`.
 #[test]
-fn run_rw_directory_refusal_points_at_a_disk_image() {
+fn run_directory_refusal_points_at_a_disk_image_and_a_snapshot() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let volume = format!("{}:/work:rw", dir.path().display());
-    let message = machine_run_spec_with_volume(Some("standard"), &volume)
-        .expect_err("standard must refuse a writable directory")
+    let message = machine_run_spec_with_volume(Some("dev"), &volume)
+        .expect_err("dev must refuse a directory on a persistent machine")
         .to_string();
-    assert!(message.contains("host directory"), "{message}");
-    assert!(message.contains("HOST.img:/GUEST:SIZE:rw"), "{message}");
+    assert!(message.contains("live host directory"), "{message}");
+    assert!(message.contains("HOST.img:/GUEST:SIZE[:rw]"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "mvmctl machine volume mount <machine> --volume <name> --host {} --guest /work",
+            dir.path().display()
+        )),
+        "{message}"
+    );
 }
 
 /// Restrictive accepts no volume at all: not a read-only one, and not a
@@ -1473,22 +1438,35 @@ fn create_accepts_a_rw_disk_image_under_standard() {
     );
 }
 
-/// ...and refuses a writable directory under `standard`, with the same
-/// message, while `dev` still accepts it.
+/// ...and refuses a host directory at create time under every profile,
+/// including the `dev` default a CLI-created machine gets, instead of saving a
+/// spec that `machine start` would refuse.
 #[test]
-fn create_refuses_a_rw_directory_under_standard_and_accepts_it_under_dev() {
+fn create_refuses_a_directory_volume_under_every_profile() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
-    let manifest = manifest_with_volume(dir.path(), "./src:/work:rw");
-    let message = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
-        .into_spec()
-        .expect_err("standard must refuse a writable directory")
-        .to_string();
-    assert!(message.contains("host directory"), "{message}");
-    assert!(message.contains("--profile dev"), "{message}");
-    create_args_from_manifest(&manifest, Some(RunProfile::Dev))
-        .into_spec()
-        .expect("dev accepts a writable directory");
+    for volume in ["./src:/work:ro", "./src:/work:rw"] {
+        let manifest = manifest_with_volume(dir.path(), volume);
+        for profile in [
+            None,
+            Some(RunProfile::Standard),
+            Some(RunProfile::Dev),
+            Some(RunProfile::Permissive),
+        ] {
+            let message = create_args_from_manifest(&manifest, profile)
+                .into_spec()
+                .expect_err("a persistent machine takes no host directory")
+                .to_string();
+            assert!(
+                message.contains("cannot attach a live host directory"),
+                "{profile:?} {volume}: {message}"
+            );
+            assert!(
+                message.contains(&format!("--host {}", dir.path().join("src").display())),
+                "{profile:?} {volume}: {message}"
+            );
+        }
+    }
 }
 
 /// ...and refuses any volume under `restrictive`.
@@ -1503,21 +1481,28 @@ fn create_restrictive_refuses_a_disk_image() {
     assert!(message.contains("does not allow volumes"), "{message}");
 }
 
+/// The boot-time check stays as defense in depth for a spec that reached
+/// `machine start` without passing the spec-time gate, and it says exactly
+/// what the gate says.
 #[test]
 fn persistent_directory_volume_refuses_with_the_snapshot_registration_path() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let volume = format!("{}:/work:ro", dir.path().display());
-    let err = build_machine_volume_cfg(&[volume])
-        .expect_err("a persistent machine cannot carry a live directory share");
-    let message = err.to_string();
+    let at_boot = build_machine_volume_cfg(std::slice::from_ref(&volume))
+        .expect_err("a persistent machine cannot carry a live directory share")
+        .to_string();
     assert!(
-        message.contains("live host-directory share can't be expressed"),
-        "message: {message}"
+        at_boot.contains("cannot attach a live host directory"),
+        "message: {at_boot}"
     );
     assert!(
-        message.contains("machine volume mount"),
-        "message: {message}"
+        at_boot.contains("machine volume mount"),
+        "message: {at_boot}"
     );
+    let at_spec_time = enforce_volume_profile(RunProfile::Dev, &[volume])
+        .expect_err("the spec-time gate refuses it too")
+        .to_string();
+    assert_eq!(at_boot, at_spec_time);
 }
 
 #[test]
@@ -2185,7 +2170,6 @@ fn create_auto_generates_a_name_when_omitted() {
 #[test]
 fn create_sources_machine_defaults_from_manifest() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
     std::fs::write(
         dir.path().join("mvm.toml"),
         r#"
@@ -2201,7 +2185,7 @@ allow_hosts = ["api.example.com"]
 
 [dev]
 init = ["pip install -r requirements.txt"]
-volumes = ["./src:/work:rw"]
+volumes = ["./state.img:/data:1G:rw"]
 "#,
     )
     .expect("manifest");
@@ -2240,7 +2224,10 @@ volumes = ["./src:/work:rw"]
     assert_eq!(spec.init, vec!["pip install -r requirements.txt"]);
     assert_eq!(
         spec.volumes,
-        vec![format!("{}:/work:rw", dir.path().join("src").display())]
+        vec![format!(
+            "{}:/data:1G:rw",
+            dir.path().join("state.img").display()
+        )]
     );
 }
 

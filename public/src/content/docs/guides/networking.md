@@ -210,7 +210,7 @@ tier and there is no per-launch selector:
 ```bash
 mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares
 mvmctl machine run --flake . --profile standard      # explicit env; read-only host dirs, writable disk images (default)
-mvmctl machine run --flake . --profile dev           # dev ergonomics: as standard + writable host dirs, dev guest
+mvmctl machine run --flake . --profile dev           # dev ergonomics: as standard + the dev guest
 ```
 
 The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.
@@ -218,11 +218,12 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 | Profile              | Env injection           | Host shares                                      |
 | -------------------- | ----------------------- | ------------------------------------------------ |
 | `restrictive`        | none                    | none                                                          |
-| `standard` (default) | explicit `-e KEY=VALUE` | read-only                                                     |
-| `dev`                | explicit `-e KEY=VALUE` | read-write **on a persistent machine only**                   |
+| `standard` (default) | explicit `-e KEY=VALUE` | read-only directories; writable disk images                   |
+| `dev`                | explicit `-e KEY=VALUE` | as `standard`                                                 |
 | `permissive`         | explicit                | as `dev`, and requires `MVM_ACK_PERMISSIVE_RUN=1`             |
 
-A transient run's host shares are read-only under every profile.
+No profile makes a host directory writable: a transient run's directory share
+is read-only, and a persistent machine takes no host directory at all.
 
 ## DNS
 

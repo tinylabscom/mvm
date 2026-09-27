@@ -17,13 +17,17 @@ For generated code, third-party code, model tool calls, and CI jobs, start with
 | Profile | Default use | Host directories | Disk images | Environment injection |
 | --- | --- | --- | --- | --- |
 | `restrictive` | Generated or untrusted code. | Not allowed. | Not allowed. | Not allowed. |
-| `standard` | Normal local one-shot runs. | Read-only. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
-| `dev` | Local iteration against a project tree. | Read-only here; writable only on a *persistent* machine. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
+| `standard` | Normal local one-shot runs. | Read-only, transient runs only. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
+| `dev` | Local iteration against a project tree. | Read-only, transient runs only. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
 | `permissive` | Last-resort local debugging. | Same as `dev`, plus `MVM_ACK_PERMISSIVE_RUN=1`. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
 
-A one-shot run's host **directory** shares are **read-only under every
-profile** — the writable directory grant applies only when the machine is
-persistent, and only under `dev` or `permissive`. A **disk image**
+No profile makes a host **directory** writable. A one-shot run's directory
+share is a read-only snapshot under every profile, and a persistent machine
+(`-d`, or `machine create`) cannot attach a live host directory at all, so
+`machine run` and `machine create` refuse a directory volume there under every
+profile. A persistent machine gets a directory's contents by registering a
+snapshot with `mvmctl machine volume mount <machine> --volume <name> --host
+<absolute-dir> --guest <path>`. A **disk image**
 (`HOST.img:/GUEST:SIZE:rw`) is different: the guest writes into its own ext4
 image file, never into the host filesystem, so every profile that accepts
 `--mount` accepts it writable, `standard` and `--prod` included. Keeping state
@@ -77,8 +81,10 @@ Rules:
   `/mnt/*` is refused specifically so a share cannot shadow the runtime's own
   config and secrets drives;
 - `restrictive` rejects host directory shares;
-- `standard` accepts read-only host directories and read-only or writable
-  disk images.
+- `standard` accepts read-only host directories on a transient run and
+  read-only or writable disk images;
+- a persistent machine accepts no host directory under any profile; use a
+  disk image or a snapshot registered with `mvmctl machine volume mount`.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
 context. Use a writable disk image, `mvmctl machine cp`, or a managed volume
@@ -125,8 +131,7 @@ caught before a workload starts.
 
 There is **no per-launch seccomp selector**. Every plan `mvmctl` synthesises
 hardcodes the `standard` tier, and `--profile` carries no seccomp field — a
-profile governs `--env`, host shares, writable-directory and writable-disk
-eligibility, the dev
+profile governs `--env`, host shares, writable-disk eligibility, the dev
 guest profile, and whether an acknowledgement is required, and nothing else.
 
 The tier is still recorded in the signed admission profile, so an audit can
@@ -146,11 +151,12 @@ and installs no filter — it only reports on a syscall set.
 | Model-generated code | `mvmctl run --profile restrictive` | Read-only fixtures after review. |
 | Code interpreter | `mvmctl run --profile restrictive` | A bounded work directory or receipt output. |
 | CI validation | `mvmctl run --profile standard` | Read-only source share and explicit non-secret env. |
-| Local development | `mvmctl run --profile dev` | Writable project share. |
+| Local development | `mvmctl run --profile dev` | A writable disk image for state; a read-only project share. |
 | Long-running local service | `mvmctl machine run --profile standard` | Explicit ports, volumes, and readiness checks. |
 
 Security-first defaults should feel slightly strict. A denied `--env` or
-writable share is a useful signal that the run is crossing a boundary.
+refused writable directory is a useful signal that the run is crossing a
+boundary.
 
 ## Audit and receipts
 

@@ -41,8 +41,8 @@ Use this path when the VM has state, files, services, or snapshots that should s
 | Profile | Use it when | Notes |
 | --- | --- | --- |
 | `restrictive` | Running generated or untrusted code. | No env injection, no host directory shares, and no disk images. |
-| `standard` | Normal local runs. | Explicit env is allowed; host directory shares must be read-only; a sized disk image (`HOST.img:/GUEST:SIZE:rw`) may be writable. |
-| `dev` | Iterating on a local project. | Host directory shares may be writable on a persistent machine; a transient run's directory share stays read-only. Also selects the dev guest profile. |
+| `standard` | Normal local runs. | Explicit env is allowed; host directory shares must be read-only, on transient runs only; a sized disk image (`HOST.img:/GUEST:SIZE:rw`) may be writable. |
+| `dev` | Iterating on a local project. | Same grants as `standard`, plus the dev guest profile. No profile makes a host directory writable, and a persistent machine takes none. |
 | `permissive` | Last-resort debugging. | Same grants as `dev`, and refuses unless `MVM_ACK_PERMISSIVE_RUN=1` is set. |
 
 ## Security notes
@@ -50,7 +50,7 @@ Use this path when the VM has state, files, services, or snapshots that should s
 - Prefer argv arrays and explicit command arguments.
 - Avoid passing secrets through command-line args.
 - Use receipts for automation and audit correlation.
-- Keep writable host shares out of untrusted runs.
+- Keep host shares narrow in untrusted runs.
 - Treat stdout and stderr as sensitive because guest code controls them.
 
 ## Related pages

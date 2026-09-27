@@ -217,8 +217,8 @@ pub(in crate::commands) struct RunArgs {
     // attaches it as a block device — every backend serves it, and the image is
     // a snapshot taken at boot, so host edits mid-run are not visible.
     // `HOST:/GUEST:SIZE[:ro][:enc]` attaches a disk instead, which is what the
-    // `--volume` spelling reads naturally as. A transient run is read-only
-    // either way.
+    // `--volume` spelling reads naturally as. Only a disk may be writable,
+    // and a persistent machine takes disks only.
     //
     // Deliberately a plain comment, not a doc comment: clap derives `long_help`
     // from doc comments and `machine_run_option_summaries_stay_short` caps that

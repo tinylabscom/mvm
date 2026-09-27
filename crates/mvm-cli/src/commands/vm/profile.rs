@@ -6,10 +6,11 @@ use clap::ValueEnum;
 pub(crate) enum RunProfile {
     /// No environment variables or host shares.
     Restrictive,
-    /// Environment variables, read-only host shares, and writable disk images.
+    /// Environment variables, read-only host directories on transient runs,
+    /// and writable disk images.
     Standard,
-    /// As standard, plus a writable host-directory share on a persistent
-    /// machine and the dev guest profile for a sealed-image entrypoint run.
+    /// As standard, plus the dev guest profile for a sealed-image entrypoint
+    /// run.
     Dev,
     /// Local escape hatch; requires MVM_ACK_PERMISSIVE_RUN=1.
     Permissive,
@@ -27,14 +28,12 @@ pub(crate) struct ProfileGrants {
     /// `--env` is accepted.
     pub env: bool,
     /// `--mount` is accepted at all.
+    ///
+    /// No profile makes a host directory writable. A transient run's
+    /// directory share is a read-only snapshot under every profile, and a
+    /// persistent machine cannot attach a live host directory at all; both
+    /// refusals are structural, so neither is a row in this table.
     pub host_shares: bool,
-    /// A `:rw` **host-directory** share is accepted on a persistent machine.
-    /// The guest would write into a host directory, and a directory share's
-    /// content digest is pinned at admission, so this stays with the profiles
-    /// that also unseal the guest. A transient run's directory snapshot is
-    /// read-only under every profile, which is why this is not simply
-    /// "writable directories".
-    pub writable_host_dirs_when_persistent: bool,
     /// A `:rw` **disk image** (`HOST.img:/GUEST:SIZE:rw`) is accepted. The
     /// guest writes into its own ext4 image file, never into the host
     /// filesystem, so persisting data does not have to unseal the guest. The
@@ -82,7 +81,6 @@ impl RunProfile {
             Self::Restrictive => ProfileGrants {
                 env: false,
                 host_shares: false,
-                writable_host_dirs_when_persistent: false,
                 writable_disk_images: false,
                 dev_guest: false,
                 needs_acknowledgement: false,
@@ -90,7 +88,6 @@ impl RunProfile {
             Self::Standard => ProfileGrants {
                 env: true,
                 host_shares: true,
-                writable_host_dirs_when_persistent: false,
                 writable_disk_images: true,
                 dev_guest: false,
                 needs_acknowledgement: false,
@@ -98,7 +95,6 @@ impl RunProfile {
             Self::Dev => ProfileGrants {
                 env: true,
                 host_shares: true,
-                writable_host_dirs_when_persistent: true,
                 writable_disk_images: true,
                 dev_guest: true,
                 needs_acknowledgement: false,
@@ -106,7 +102,6 @@ impl RunProfile {
             Self::Permissive => ProfileGrants {
                 env: true,
                 host_shares: true,
-                writable_host_dirs_when_persistent: true,
                 writable_disk_images: true,
                 dev_guest: true,
                 needs_acknowledgement: true,
@@ -119,13 +114,11 @@ impl RunProfile {
         let g = self.grants();
         let mut parts = Vec::new();
         parts.push(if g.env { "env allowed" } else { "no env" });
-        parts.push(
-            match (g.host_shares, g.writable_host_dirs_when_persistent) {
-                (false, _) => "no host shares",
-                (true, false) => "read-only host directories",
-                (true, true) => "host directories, writable on a persistent machine",
-            },
-        );
+        parts.push(if g.host_shares {
+            "read-only host directories on transient runs"
+        } else {
+            "no host shares"
+        });
         if g.writable_disk_images {
             parts.push("writable disk images");
         }
@@ -149,36 +142,23 @@ mod tests {
     /// a row here rather than something that slips through four call sites.
     #[test]
     fn each_preset_grants_exactly_what_the_contract_says() {
-        // (profile, env, host_shares, writable_dirs_when_persistent,
-        //  writable_disk_images, dev_guest, ack)
+        // (profile, env, host_shares, writable_disk_images, dev_guest, ack)
         let expected = [
-            (
-                RunProfile::Restrictive,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-            ),
-            (RunProfile::Standard, true, true, false, true, false, false),
-            (RunProfile::Dev, true, true, true, true, true, false),
-            (RunProfile::Permissive, true, true, true, true, true, true),
+            (RunProfile::Restrictive, false, false, false, false, false),
+            (RunProfile::Standard, true, true, true, false, false),
+            (RunProfile::Dev, true, true, true, true, false),
+            (RunProfile::Permissive, true, true, true, true, true),
         ];
         assert_eq!(
             expected.len(),
             RunProfile::ALL.len(),
             "a profile was added without a row here"
         );
-        for (profile, env, shares, writable_dirs, writable_disks, dev_guest, ack) in expected {
+        for (profile, env, shares, writable_disks, dev_guest, ack) in expected {
             let g = profile.grants();
             let name = profile.as_str();
             assert_eq!(g.env, env, "{name}: --env");
             assert_eq!(g.host_shares, shares, "{name}: --mount");
-            assert_eq!(
-                g.writable_host_dirs_when_persistent, writable_dirs,
-                "{name}: :rw directory share on a persistent machine"
-            );
             assert_eq!(
                 g.writable_disk_images, writable_disks,
                 "{name}: :rw disk image"
@@ -188,9 +168,11 @@ mod tests {
         }
     }
 
-    /// Permissions must only widen as the presets loosen. A preset that
-    /// permitted something a looser one refuses would make "stricter" a
-    /// meaningless word in the docs and the help.
+    /// Permissions must only widen as the presets loosen, and each step must
+    /// change something. A preset that permitted something a looser one
+    /// refuses would make "stricter" a meaningless word in the docs and the
+    /// help; two presets with identical grants would be one preset under two
+    /// names.
     #[test]
     fn the_presets_are_ordered_from_strictest_to_loosest() {
         let mut prev = RunProfile::Restrictive.grants();
@@ -199,11 +181,6 @@ mod tests {
             for (label, was, now) in [
                 ("env", prev.env, g.env),
                 ("host_shares", prev.host_shares, g.host_shares),
-                (
-                    "writable_host_dirs",
-                    prev.writable_host_dirs_when_persistent,
-                    g.writable_host_dirs_when_persistent,
-                ),
                 (
                     "writable_disk_images",
                     prev.writable_disk_images,
@@ -217,6 +194,12 @@ mod tests {
                     profile.as_str()
                 );
             }
+            assert_ne!(
+                g,
+                prev,
+                "{} grants exactly what the preset before it grants",
+                profile.as_str()
+            );
             prev = g;
         }
     }
@@ -231,38 +214,45 @@ mod tests {
     }
 
     /// Persisting data must not require unsealing the guest: the profile that
-    /// grants a writable disk image without a directory share also withholds
-    /// the dev guest. If this ever fails, `--profile dev` is back to being the
-    /// only way to keep state, and it drags the dev shell along with it.
+    /// grants a writable disk image also withholds the dev guest. If this
+    /// ever fails, `--profile dev` is back to being the only way to keep
+    /// state, and it drags the dev shell along with it.
     #[test]
     fn a_writable_disk_image_does_not_need_the_dev_guest() {
         let g = RunProfile::Standard.grants();
         assert!(g.writable_disk_images, "standard grants writable disks");
         assert!(!g.dev_guest, "standard keeps the guest sealed");
-        assert!(
-            !g.writable_host_dirs_when_persistent,
-            "standard still withholds writable host directories"
-        );
     }
 
     /// The one-line description `doctor` prints must say that disk images are
-    /// writable and directories are not, and restrictive must mention neither.
+    /// writable and host directories are read-only, and restrictive must
+    /// mention neither. No profile may describe a writable host directory:
+    /// none grants one, on a transient run or a persistent machine.
     #[test]
     fn the_summary_separates_writable_disks_from_host_directories() {
         let standard = RunProfile::Standard.summary();
-        assert!(
-            standard.contains("read-only host directories"),
-            "{standard}"
+        assert_eq!(
+            standard,
+            "env allowed; read-only host directories on transient runs; writable disk images"
         );
-        assert!(standard.contains("writable disk images"), "{standard}");
         let dev = RunProfile::Dev.summary();
         assert!(
-            dev.contains("host directories, writable on a persistent machine"),
+            dev.contains("read-only host directories on transient runs"),
             "{dev}"
         );
-        assert!(dev.contains("writable disk images"), "{dev}");
+        assert!(dev.contains("dev guest profile"), "{dev}");
         let restrictive = RunProfile::Restrictive.summary();
         assert!(restrictive.contains("no host shares"), "{restrictive}");
         assert!(!restrictive.contains("writable"), "{restrictive}");
+        for profile in RunProfile::ALL {
+            let summary = profile.summary();
+            assert!(
+                !summary
+                    .replace("writable disk images", "")
+                    .contains("writable"),
+                "{}: only a disk image may be described as writable: {summary}",
+                profile.as_str()
+            );
+        }
     }
 }
