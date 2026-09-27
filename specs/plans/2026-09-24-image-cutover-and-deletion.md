@@ -346,7 +346,7 @@ need an owner in `mvm-images` first.
       with per-architecture `initramfs` members. `images.lock` pins it and
       `current_train()` now requires the role on both architectures, so a set
       without it is refused as incomplete.
-- [ ] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
+- [x] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
       sidecar and initramfs are acquired as members of the locked set —
       digest- and size-checked against the verified root, through the one
       acquisition boundary moved from `mvm-cli` into `mvm-build` so
@@ -362,6 +362,10 @@ need an owner in `mvm-images` first.
       keep reading the assets attached to their own releases, which are
       never deleted. The first CLI release after Wave 3 — the re-measure
       release — is therefore the first to ship without a mirror.
+      *Done 2026-09-26:* all three are fetched as members of the pinned
+      `image-set/v0.2.1`, whose members carry `VERSION` `0.18.0-rc.2`, the
+      version `main` builds; `PublishedImageSet` moved to `mvm-build`, and
+      mvm-build's `test-support` tests joined the targeted CI lane.
 - [ ] **Waves 1+2 — `mvm-build` and `mvm-cli` together.** Remove
       `ImageSource::InTree`, `in_tree_overlay_checkout_root` and every in-tree
       build arm; keep pair builds from the sibling checkout. Re-point the
