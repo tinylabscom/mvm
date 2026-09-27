@@ -28,6 +28,54 @@ pub fn staged_contract_files(
     Ok(tmp)
 }
 
+/// Install one libc variant of the SDK sidecar from a pair entry into the
+/// version-matched cache under `cache_root`, stamped with `fingerprint` (the
+/// pair identity) so launches under this pair trust it.
+///
+/// The entry's files carry the producer's manifest names; the installer reads
+/// the canonical `sdk.ext4` / `VERSION` / `checksums-sha256.txt` layout, so the
+/// contract files are staged under those names first. Both the launch path and
+/// `mvmctl build sdk-sidecar build` install through here.
+pub fn install_pair_sidecar(
+    entry: &CachedImageSet,
+    fingerprint: &str,
+    cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+) -> Result<mvm_fs::sdk_sidecar::SdkSidecarArtifact> {
+    let role = mvm_core::image_set::ImageSetRole::SdkSidecar(libc).to_string();
+    let staged = staged_contract_files(
+        entry,
+        &[
+            (role.as_str(), mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE),
+            (role.as_str(), mvm_fs::sdk_sidecar::SDK_SIDECAR_VERSION_FILE),
+            (role.as_str(), mvm_fs::overlay::CHECKSUM_MANIFEST_FILE),
+        ],
+    )
+    .with_context(|| {
+        format!(
+            "staging the {libc} SDK sidecar from the pair entry at {}",
+            entry.dir.display()
+        )
+    })?;
+    mvm_build::sdk_sidecar::install_source_built_sidecar(
+        staged.path(),
+        cache_root,
+        version,
+        arch,
+        libc,
+        fingerprint,
+    )
+    .with_context(|| {
+        format!(
+            "installing the {libc} SDK sidecar staged from {} into {}",
+            entry.dir.display(),
+            cache_root.display()
+        )
+    })
+}
+
 /// The overlay artifact from a pair entry: contract files staged under
 /// their canonical names in a temp directory that lives as long as the
 /// returned value, read through the fixed-layout reader.

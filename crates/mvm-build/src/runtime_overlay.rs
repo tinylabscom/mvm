@@ -71,6 +71,15 @@ pub enum RuntimeOverlayError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// An io failure that knows the operation and the path it failed on.
+    #[error("{op} {}: {source}", .path.display())]
+    IoAt {
+        op: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// `curl` exited non-zero (or couldn't be spawned) while fetching one of
     /// the release artifacts. Carries the URL and the upstream stderr so a
     /// failed download is debuggable without re-running with `--verbose`.
@@ -655,8 +664,13 @@ fn write_checksum_manifest(dir: &Path) -> Result<(), RuntimeOverlayError> {
 #[cfg(unix)]
 pub(crate) fn set_cache_perms(p: &Path) -> Result<(), RuntimeOverlayError> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644))?;
-    Ok(())
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).map_err(|source| {
+        RuntimeOverlayError::IoAt {
+            op: "setting cache permissions on",
+            path: p.to_path_buf(),
+            source,
+        }
+    })
 }
 
 #[cfg(not(unix))]

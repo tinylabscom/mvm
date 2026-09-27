@@ -649,25 +649,13 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
     {
         ui::info("SDK sidecar: building from the selected image checkout...");
         let entry = (pair.build)(pair.checkout, target)?;
-        // The sidecar installer reads a fixed layout; the entry files carry
-        // the producer's manifest names, so stage the contract files under
-        // their canonical names first.
-        let role = mvm_core::image_set::ImageSetRole::SdkSidecar(libc).to_string();
-        let staged = crate::launch::pair_stage::staged_contract_files(
+        crate::launch::pair_stage::install_pair_sidecar(
             &entry,
-            &[
-                (role.as_str(), "sdk.ext4"),
-                (role.as_str(), "VERSION"),
-                (role.as_str(), "checksums-sha256.txt"),
-            ],
-        )?;
-        mvm_build::sdk_sidecar::install_source_built_sidecar(
-            staged.path(),
+            &fingerprint,
             &cache_root,
             version,
             arch,
             libc,
-            &fingerprint,
         )?;
     }
 
