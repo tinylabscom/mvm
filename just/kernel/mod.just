@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
 

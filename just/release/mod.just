@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # ── Release ──────────────────────────────────────────────────────────────
 # Cut a release with automatic version bump (based on conventional commits)
 # Cut the next release (auto-detected version) via a PR. `main` is protected

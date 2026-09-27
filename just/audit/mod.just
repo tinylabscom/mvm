@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # Security audit (cargo-audit — RUSTSEC advisories against Cargo.lock)
 audit:
     cargo audit

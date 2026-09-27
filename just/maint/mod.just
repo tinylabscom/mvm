@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # ── Development ──────────────────────────────────────────────────────────
 
 # Wire core.hooksPath at .githooks/ (one-time per clone)

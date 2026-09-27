@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # ── Documentation ────────────────────────────────────────────────────────
 
 # Install docs site dependencies

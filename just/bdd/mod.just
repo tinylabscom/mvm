@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
 # features/suites/ against it. Scenarios tagged `@wip` describe

@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # Provision the pinned cross-compile toolchain the Linux host binaries are built
 # with — by a release `cargo build`, or by an `mvmctl` built without them: the
 # exact zig from the `ziglang` PyPI package, the musl rust targets, and the

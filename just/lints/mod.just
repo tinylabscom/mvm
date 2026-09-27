@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # ── Model / Conformance gates ────────────────────────────────────────────
 # R1: the model is the single source. Verify model/*.toml, the generated
 

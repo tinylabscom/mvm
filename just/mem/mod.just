@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # ── Agent memory (.agent-memory/notes) ───────────────────────────────────
 
 # Recall local findings. Lexical, because at a few hundred terse,

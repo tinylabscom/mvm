@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # Build the publishable SDK artifacts without building the full Rust workspace.
 # Usage: just sdk::build [lang]
 #   lang: sdk name (python, typescript) or "all" (default)

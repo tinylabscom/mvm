@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # Run tests with sccache caching the workspace crates.
 # Usage: just tests::cached [FILTER]
 #   FILTER: optional test filter expression

@@ -1,3 +1,5 @@
+set working-directory := "../.."
+
 # End-to-end launch gate: boot a real guest through every README-documented
 # entry point (CLI verbs, runtime SDK, decorator SDK, Rust library facade) on
 # whatever backend this host has. Unlike `live-ci` this is deliberately NOT
