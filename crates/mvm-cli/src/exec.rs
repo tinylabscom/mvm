@@ -41,11 +41,9 @@ use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
+pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrate};
 use session::wait_for_agent_timed;
-pub use session::{
-    AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, SessionVmName, boot_session_vm,
-    dispatch_in_session, tear_down_session_vm, wait_for_agent,
-};
+pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
     BootAttempt, boot_transient_vm, combine_run_and_flush, flush_writable_disks_before_teardown,
     install_ctrlc_teardown, teardown_transient_vm,

@@ -146,10 +146,13 @@ export { Machine, MachineError } from "./_machine.js";
 export type {
   MachineCreateOptions,
   MachineExecOptions,
+  MachineFollowLogsOptions,
   MachineInventoryRecord,
+  MachineLaunchOptions,
   MachineLogsOptions,
   MachineResult,
   MachineRunOptions,
+  MachineSource,
   MachineState,
 } from "./_machine.js";
 

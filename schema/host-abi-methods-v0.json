@@ -1,12 +1,18 @@
 {
   "abi_major": 1,
-  "abi_minor": 2,
+  "abi_minor": 3,
   "methods": [
     {
       "classification": "prod_safe",
       "key": "backend_capabilities",
       "name": "backend.capabilities",
       "summary": "Reports what the backend can do."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "entrypoint_call",
+      "name": "entrypoint.call",
+      "summary": "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."
     },
     {
       "classification": "prod_safe",
@@ -52,6 +58,24 @@
     },
     {
       "classification": "prod_safe",
+      "key": "machine_logs_stream_close",
+      "name": "machine.logs.stream.close",
+      "summary": "Closes a captured-output stream. Idempotent."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_logs_stream_next",
+      "name": "machine.logs.stream.next",
+      "summary": "Returns the captured output that has arrived."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_logs_stream_open",
+      "name": "machine.logs.stream.open",
+      "summary": "Opens a stream over a machine's captured output, replayed then followed."
+    },
+    {
+      "classification": "prod_safe",
       "key": "machine_run",
       "name": "machine.run",
       "summary": "Boots a machine through the admitted local launch."
@@ -67,6 +91,30 @@
       "key": "machine_stop",
       "name": "machine.stop",
       "summary": "Stops a machine. Idempotent."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_call",
+      "name": "session.call",
+      "summary": "Calls the entrypoint in a running session's microVM."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_info",
+      "name": "session.info",
+      "summary": "Reports a session's record."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_start",
+      "name": "session.start",
+      "summary": "Boots a warm session for a workload, admitted under a signed plan."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_stop",
+      "name": "session.stop",
+      "summary": "Stops a session and tears down its microVM."
     },
     {
       "classification": "dev_only",
