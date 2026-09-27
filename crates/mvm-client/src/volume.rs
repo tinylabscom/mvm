@@ -13,8 +13,10 @@
 //!   before decryption is attempted.
 //! - **Typed attachments.** Guest mount paths are restricted to the mount
 //!   allow-roots (`/mnt`, `/data`, `/work`); attachments default to
-//!   read-only, and read-write is refused unless the admitted profile is
-//!   dev-tier.
+//!   read-only, and read-write is refused unless the admitted profile grants
+//!   writable disk images (`standard`, `dev`, `permissive`; see
+//!   [`crate::profile::ProfileGrants`]). Every managed volume is an ext4
+//!   image the guest writes into, never a live host directory.
 //! - **Exclusive leases.** A block volume attaches to at most one VM at a
 //!   time; leases persist across restarts and roll back leak-free (RAII) on
 //!   a failed launch. With [`dto::UnlockPolicy::JustInTime`] the service
@@ -34,7 +36,7 @@ mod lifecycle;
 mod service;
 mod snapshot;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use dto::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, AttachmentRequestBuilder,
@@ -62,6 +64,7 @@ mod tests {
     use super::lease::AttachmentLeaseCatalog;
     use super::service::{LocalVolumeService, VolumeService};
     use super::test_support::TestVolumeHome;
+    use crate::profile::RunProfile;
 
     fn service() -> LocalVolumeService {
         LocalVolumeService::new()
@@ -72,7 +75,7 @@ mod tests {
             .unwrap()
             .guest_path(guest)
             .access(access)
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
             .unwrap()
     }
@@ -80,7 +83,7 @@ mod tests {
     fn dev_launch(owner: &str) -> LaunchLeaseRequest {
         LaunchLeaseRequest::builder(owner)
             .unwrap()
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
     }
 
@@ -298,6 +301,65 @@ mod tests {
         assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
     }
 
+    /// A writable managed block volume is a disk image the guest writes
+    /// into, so every profile that grants a writable `--mount` disk image
+    /// leases it read-write — the default `standard` included.
+    #[test]
+    fn a_writable_managed_volume_leases_under_every_granting_profile() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        service()
+            .prepare_attachment(
+                &AttachmentRequest::builder("vm-1", "work")
+                    .unwrap()
+                    .guest_path("/data/work")
+                    .access(AccessMode::ReadWrite)
+                    .profile(RunProfile::Standard)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        for profile in [
+            RunProfile::Standard,
+            RunProfile::Dev,
+            RunProfile::Permissive,
+        ] {
+            let request = LaunchLeaseRequest::builder("vm-1")
+                .unwrap()
+                .profile(profile)
+                .build();
+            let prepared = service()
+                .acquire_launch_lease(&request)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", profile.as_str()));
+            assert_eq!(prepared.volumes.len(), 1);
+            assert!(!prepared.volumes[0].read_only, "{}", profile.as_str());
+            // Dropped uncommitted: the lease rolls back for the next profile.
+        }
+        assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
+    }
+
+    /// `restrictive` grants no writable disk image, so it refuses the same
+    /// registration and takes no lease.
+    #[test]
+    fn restrictive_profile_refuses_read_write_launch() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
+            .unwrap();
+        let request = LaunchLeaseRequest::builder("vm-1")
+            .unwrap()
+            .profile(RunProfile::Restrictive)
+            .build();
+        let err = service().acquire_launch_lease(&request).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("does not permit writable"), "{message}");
+        assert!(message.contains("profile \"restrictive\""), "{message}");
+        assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
+    }
+
     #[test]
     fn duplicate_guest_path_between_explicit_and_registered_is_refused() {
         let home = TestVolumeHome::new();
@@ -318,7 +380,7 @@ mod tests {
         let request = LaunchLeaseRequest::builder("vm-1")
             .unwrap()
             .explicit_volumes(vec![explicit])
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build();
         let err = service().acquire_launch_lease(&request).unwrap_err();
         assert!(
@@ -342,7 +404,7 @@ mod tests {
         let request = LaunchLeaseRequest::builder("vm-1")
             .unwrap()
             .explicit_volumes(vec![materialized])
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build();
 
         let prepared = service().acquire_launch_lease(&request).unwrap();
@@ -481,7 +543,7 @@ mod tests {
 
         let request = LaunchLeaseRequest::builder("vm-1")
             .unwrap()
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .unlock(UnlockPolicy::JustInTime)
             .build();
         let mut prepared = service().acquire_launch_lease(&request).unwrap();
@@ -513,7 +575,7 @@ mod tests {
 
         let request = LaunchLeaseRequest::builder("vm-1")
             .unwrap()
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .unlock(UnlockPolicy::JustInTime)
             .build();
         let prepared = service().acquire_launch_lease(&request).unwrap();
@@ -688,7 +750,7 @@ mod tests {
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
             .unwrap();
 
@@ -716,7 +778,7 @@ mod tests {
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
             .unwrap();
         let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
@@ -754,7 +816,7 @@ mod tests {
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
             .unwrap();
         let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
@@ -789,7 +851,7 @@ mod tests {
             let request = AttachmentRequest::builder("vm-1", name)
                 .unwrap()
                 .guest_path("/work/input")
-                .profile(AdmittedProfile::Dev)
+                .profile(RunProfile::Dev)
                 .build()
                 .unwrap();
             let err = svc
@@ -818,7 +880,7 @@ mod tests {
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
-            .profile(AdmittedProfile::Dev)
+            .profile(RunProfile::Dev)
             .build()
             .unwrap();
         service()

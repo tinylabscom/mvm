@@ -113,7 +113,7 @@ pub(in crate::commands) struct Args {
     pub host_service: Vec<String>,
 }
 
-pub(crate) use super::profile::RunProfile;
+pub(crate) use mvm_client::profile::RunProfile;
 
 /// A run boots from exactly one source. Spelling the other four at each flag is
 /// what let `run` and `machine run` disagree about which sources exist at all.

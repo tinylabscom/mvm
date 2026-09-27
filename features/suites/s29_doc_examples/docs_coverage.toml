@@ -164,7 +164,6 @@ covered = [
     "mvmctl machine volume create coding-agent-work",
     "mvmctl machine volume lock agent-cache",
     "mvmctl machine volume lock coding-agent-work",
-    "mvmctl machine volume mount agent-sandbox --volume agent-cache --guest /cache --rw",
     "mvmctl machine volume mount agent-sandbox --volume agent-cache --guest /data/cache --rw",
     "mvmctl machine volume mount agent-sandbox --volume project-data --host /absolute/path/to/data --guest /data",
     "mvmctl machine volume mount app --volume config --host /tmp/my-config --guest /data/config",

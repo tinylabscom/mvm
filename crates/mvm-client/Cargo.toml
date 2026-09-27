@@ -36,6 +36,10 @@ tracing-bridge = ["dep:base64"]
 # canned-snapshot test path. Off by default so the mock never reaches a
 # production build; the crate's own pause/resume test suite turns it on.
 test-support = ["mvm-runtime/test-support"]
+# Derive `clap::ValueEnum` on `profile::RunProfile`, so `mvmctl`'s `--profile`
+# flag parses straight into the one profile table instead of a CLI-side copy.
+# Off by default: an embedder names a profile by value and links no parser.
+clap = ["dep:clap"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client"] }
@@ -111,6 +115,9 @@ thiserror = { workspace = true }
 # The approval broker's webhook backend. Already in this crate's closure
 # through mvm-hostd, so the direct edge adds no crates.
 mvm-http = { workspace = true }
+# `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
+# the one crate that turns the feature on.
+clap = { workspace = true, optional = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }

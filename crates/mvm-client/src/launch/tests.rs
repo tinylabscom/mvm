@@ -940,6 +940,69 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
     assert_eq!(record.attached_to, None, "lease released on stop");
 }
 
+/// The library launch path attaches a managed volume read-write under the
+/// default `standard` profile, and refuses it under `restrictive`.
+#[tokio::test]
+async fn launch_attaches_a_writable_managed_volume_under_standard_only_when_granted() {
+    use crate::volume::{CreateBlockVolumeRequest, VolumeService as _};
+
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+    let volumes = crate::volume::LocalVolumeService::new();
+    volumes
+        .create_block_volume(
+            &CreateBlockVolumeRequest::builder("state")
+                .unwrap()
+                .capacity_mib(16)
+                .build()
+                .unwrap(),
+        )
+        .expect("create volume");
+    volumes.unlock_volume("state").expect("unlock");
+    let writable = LaunchVolumeSpec {
+        volume: "state".into(),
+        guest_path: "/data/state".into(),
+        access: AccessMode::ReadWrite,
+    };
+
+    let refused = persistent_request(&rootfs, "p-restrictive")
+        .profile("restrictive")
+        .volume(writable.clone())
+        .build()
+        .unwrap();
+    let err = client.launch(refused).await.unwrap_err();
+    assert!(
+        err.to_string().contains("does not permit writable"),
+        "got: {err}"
+    );
+
+    let request = persistent_request(&rootfs, "p-standard")
+        .volume(writable)
+        .build()
+        .unwrap();
+    let outcome = client.launch(request).await.expect("standard launch");
+    assert_eq!(
+        outcome.machine.status,
+        mvm_core::client::dto::MachineStatus::Running
+    );
+    let attachments = volumes.list_attachments("p-standard").expect("list");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].access, AccessMode::ReadWrite);
+    assert_eq!(
+        volumes
+            .describe_volume("state")
+            .expect("describe")
+            .attached_to
+            .as_deref(),
+        Some("p-standard")
+    );
+    client
+        .stop_machine(&mvm_core::client::dto::MachineId("p-standard".into()))
+        .await
+        .expect("stop");
+}
+
 // ── Audit hygiene ───────────────────────────────────────────────────
 
 #[tokio::test]

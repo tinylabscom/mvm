@@ -59,7 +59,8 @@ pub struct LaunchVolumeSpec {
     pub volume: String,
     /// Absolute guest mount point (validated against the mount allow-roots).
     pub guest_path: String,
-    /// Requested access mode; read-write requires a dev-tier profile.
+    /// Requested access mode; read-write requires a profile that grants
+    /// writable disk images (`standard`, `dev`, `permissive`).
     pub access: AccessMode,
 }
 
@@ -219,8 +220,10 @@ impl LaunchRequestBuilder {
         self
     }
 
-    /// Machine profile (default `standard`). Only `dev` / `permissive`
-    /// profiles may take writable volume attachments.
+    /// Machine profile (default `standard`). Writable volume attachments
+    /// follow [`crate::profile::ProfileGrants::writable_disk_images`]:
+    /// `standard`, `dev` and `permissive` take them, `restrictive` and any
+    /// name that is not a profile do not.
     #[must_use]
     pub fn profile(mut self, profile: impl Into<String>) -> Self {
         self.profile = profile.into();

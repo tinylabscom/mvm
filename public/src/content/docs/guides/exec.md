@@ -123,10 +123,11 @@ mvmctl machine exec build -- cargo build --manifest-path /work/src/Cargo.toml
 
 The directory is copied into an ext4 image each time the machine starts, so
 host edits appear after the next stop and start. `--host` must be absolute and
-on encrypted storage. With `--rw`, which only a `dev` or `permissive` machine
-accepts, the guest writes into the machine's private copy; those writes never
-reach the host directory, and a changed host directory replaces the copy at the
-next start. See the [machine volume docs](/guides/machine-use-cases/).
+on encrypted storage. With `--rw` the guest writes into the machine's private
+copy of the image; those writes never reach the host directory, and a changed
+host directory replaces the copy at the next start. Because it is a disk image,
+a read-write registration follows the writable-disk-image grant: `standard`,
+`dev`, and `permissive` take it, `restrictive` does not. See the [machine volume docs](/guides/machine-use-cases/).
 
 ## Injecting environment variables: `--env`
 

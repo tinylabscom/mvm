@@ -35,6 +35,20 @@ therefore does not require `--profile dev`, which would also give the guest the
 dev shell agent and the DevOnly verbs. Guest mount paths must be under `/data`
 or `/work`, whatever the profile.
 
+A **managed volume** attached read-write follows the same grant. Every managed
+volume reaches the guest as its own ext4 image: a managed block volume is one,
+and a directory registered with `mvmctl machine volume mount --host` is
+snapshotted into an image, of which a read-write attachment gets a private
+copy. The guest writes into that image, never into the host directory. So
+every start — `mvmctl machine start`, the Rust `LocalBackend`, and the host
+library the language SDKs load — checks a read-write managed volume against
+the profile the machine's spec names: `standard`, `dev`, and `permissive`
+admit it, and `restrictive`, or a profile name that is not one of the four,
+refuses it. `mvmctl machine volume mount --rw` against a machine that already
+exists applies the same check at registration, so a `restrictive` machine
+refuses the registration rather than the next start. A read-only managed
+volume is accepted under every profile.
+
 The default is `standard`. Use `restrictive` when the workload does not need
 host files or host-provided environment values:
 
@@ -84,7 +98,10 @@ Rules:
 - `standard` accepts read-only host directories on a transient run and
   read-only or writable disk images;
 - a persistent machine accepts no host directory under any profile; use a
-  disk image or a snapshot registered with `mvmctl machine volume mount`.
+  disk image or a snapshot registered with `mvmctl machine volume mount`;
+- a managed volume attached read-write is a disk image too, so it follows the
+  writable-disk-image grant: `standard`, `dev`, and `permissive` accept it and
+  `restrictive` refuses it.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
 context. Use a writable disk image, `mvmctl machine cp`, or a managed volume
