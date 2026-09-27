@@ -299,10 +299,18 @@ fi
 echo "==> building the per-VM host helpers"
 just build-supervisors
 
+# The language SDKs drive machines in-process through the host library and find
+# it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
+# --bin mvmctl` never builds it, so without this the runtime-SDK scenarios fail
+# with "the host library ... was not found" before a machine is asked for.
+echo "==> building the SDK host library beside mvmctl"
+cargo build -p mvm-hostlib
+
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
   find "$root" -type f -name mvm-gpu-endpoint 2>/dev/null | grep -q . || return 1
+  find "$root" -type f \( -name libmvm_hostlib.so -o -name libmvm_hostlib.dylib \) 2>/dev/null | grep -q . || return 1
   if [[ "$(uname -s)" == "Darwin" ]]; then
     find "$root" -type f -name mvm-hvf-supervisor 2>/dev/null | grep -q . || return 1
   fi
