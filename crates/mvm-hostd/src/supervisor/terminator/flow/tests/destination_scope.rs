@@ -181,7 +181,7 @@ fn a_placeholder_in_the_body_of_a_terminated_request_is_refused_before_forwardin
 
 /// A real TLS server behind [`BOUND_HOST`]: it presents a leaf chained to
 /// `issuer`, records the plaintext of whatever request it is sent, and answers
-/// one request.
+/// one request once it has read all of it.
 struct Upstream {
     addr: SocketAddr,
     received: Arc<Mutex<Vec<u8>>>,
@@ -215,7 +215,10 @@ fn upstream(issuer: &VmEgressCa) -> Upstream {
                 Ok(n) => {
                     let mut seen = sink.lock().expect("upstream record lock");
                     seen.extend_from_slice(&chunk[..n]);
-                    if request_complete(&seen) {
+                    // Only a whole request is answered, as a real server
+                    // answers one: answering and closing on less leaves the
+                    // rest of the body to hit a closed socket.
+                    if message_complete(&seen) {
                         break;
                     }
                 }
@@ -255,24 +258,6 @@ fn accept_within(listener: &TcpListener, limit: Duration) -> Option<std::net::Tc
             Err(_) => return None,
         }
     }
-}
-
-/// Whether `seen` holds one whole HTTP/1.1 request, by its own framing.
-fn request_complete(seen: &[u8]) -> bool {
-    let Some(end) = super::super::super::find_subslice(seen, b"\r\n\r\n") else {
-        return false;
-    };
-    let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
-    if head.contains("transfer-encoding: chunked") {
-        return seen.ends_with(b"0\r\n\r\n");
-    }
-    let declared = head
-        .split("\r\n")
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim() == "content-length")
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    seen.len() >= end + 4 + declared
 }
 
 /// A forward leg over the production client, resolving [`BOUND_HOST`] to
@@ -332,6 +317,14 @@ fn the_forward_leg_verifies_the_destination_and_carries_the_real_credential() {
         "the verified destination received the real credential: {received}"
     );
     assert!(!received.contains(&vm.placeholders[0]), "{received}");
+    // The forward leg sends the body chunked. The destination answered only
+    // after reading all of it, so the answer the guest got is to the whole
+    // request, not to its head.
+    assert_eq!(
+        dechunk(received.as_bytes()),
+        b"{\"a\":\"b\"}",
+        "the destination read the body too: {received}"
+    );
     assert!(
         !String::from_utf8_lossy(&response).contains(REAL_SECRET),
         "and the guest never sees it"
