@@ -14,8 +14,8 @@
 //! and outbound fetches go through the same vsock egress proxy as every other
 //! backend. Proven E2E on x86_64 (kernel built + copied to `/out`).
 //!
-//! Either way: `nix build` the in-repo builder-VM flake, copy the artifacts to
-//! `/out`, and power off. The host side (`stage0::materialize_root_dir` /
+//! Either way: `nix build` the flake the host staged at `/work` and named in the
+//! build config, copy the artifacts to `/out`, and power off. The host side (`stage0::materialize_root_dir` /
 //! `qemu_builder`) lays down the seed and writes this binary as `/init`.
 
 use std::process::ExitCode;
@@ -1063,9 +1063,7 @@ mod linux {
         let conf = crate::build_config::read(&conf_path);
         if conf.is_empty() {
             eprintln!(
-                "stage0-init: no build config at {}; \
-                 building the default image, which is the wrong artifact for \
-                 any host that asked for something else",
+                "stage0-init: no build config at {}; nothing names what to build",
                 conf_path.display()
             );
         }
@@ -1078,13 +1076,17 @@ mod linux {
             .cloned()
             .unwrap_or_else(|| "image".into());
         let arch = machine_arch()?;
-        // The attr namespace defaults to the in-tree builder-vm flake; a conf
-        // key overrides it (one mechanism for every layout that stages a
-        // different tree at /work).
-        let flake_base = conf
-            .get("MVM_STAGE0_FLAKE")
-            .cloned()
-            .unwrap_or_else(|| "path:/work/nix/images/builder-vm#packages".into());
+        // The host names the flake it staged at /work. There is no default:
+        // mvm carries no image flake of its own for the guest to fall back
+        // on, and building some other tree than the one staged would only
+        // surface later as a missing artifact.
+        let flake_base = conf.get("MVM_STAGE0_FLAKE").cloned().ok_or_else(|| {
+            format!(
+                "the build config at {} names no flake (MVM_STAGE0_FLAKE); \
+                 the host must name the flake it staged at /work",
+                conf_path.display()
+            )
+        })?;
         let flake_ref = format!("{flake_base}.{arch}-linux.{attr}");
 
         // Clear a `/homeless-shelter` left by a crashed prior build before nix's

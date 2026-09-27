@@ -1,8 +1,8 @@
 //! `mvmctl kernel` — build the custom microVM kernels.
 //!
 //! The builder-VM and workload microVM kernels are slim custom Linux
-//! builds (`nix/images/builder-vm/kernel/base.nix` + per-variant
-//! deltas). Because the
+//! builds (the `mvm-images` kernel canon: a shared base + per-variant
+//! deltas), compiled from the selected `mvm-images` checkout. Because the
 //! config is custom, `cache.nixos.org` has no substitute, so a fresh
 //! machine compiles from source — the slow, memory-heavy step a first
 //! build otherwise hits implicitly. This command makes that
@@ -70,13 +70,12 @@ struct BuildArgs {
 enum Which {
     Builder,
     Workload,
-    /// In-guest-orchestrator variant (rootless Kubernetes guests):
-    /// cgroup/namespace/netfilter/bridge plumbing on top of the workload
-    /// kernel's verified-boot delta.
+    /// In-guest-orchestrator variant (rootless Kubernetes guests). The
+    /// mvm-images kernel canon does not define it, so a compile is refused;
+    /// a cached one is still selectable at boot.
     WorkloadK8s,
     /// Generic rootless-container floor (no network namespace) — the
-    /// control kernel for datapath bisects. Defined only in the mvm-images
-    /// kernel canon; a build from the in-repo flake fails at evaluation.
+    /// control kernel for datapath bisects, from the mvm-images kernel canon.
     Rootless,
 }
 

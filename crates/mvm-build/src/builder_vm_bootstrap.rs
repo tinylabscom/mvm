@@ -1,12 +1,12 @@
 //! Acquiring and running the builder-VM bootstrap helper.
 //!
 //! On a source checkout with a cold `~/.mvm/cache/builder-vm/<arch>/`, the
-//! image has to be built before anything can boot it — and building it needs
-//! the Linux host binaries. The helper is the `mvmctl` that supplies them: an
-//! explicitly named one, else the running executable, which carries them
-//! compiled in or produces them from its own checkout. There is no third rung;
-//! a process that can do neither says so rather than compiling a second
-//! `mvmctl`.
+//! image has to be prepared before anything can boot it — and the bootstrap
+//! that prepares it needs the Linux host binaries the builder boots with. The
+//! helper is the `mvmctl` that supplies them: an explicitly named one, else the
+//! running executable, which carries them compiled in or produces them from its
+//! own checkout. There is no third rung; a process that can do neither says so
+//! rather than compiling a second `mvmctl`.
 //!
 //! None of that applies to a library embedding the runtime. It is not `mvmctl`
 //! and must never run one, so once [`declare_library_embedder`] has been called
@@ -101,12 +101,7 @@ fn auto_bootstrap_builder_vm_image_for(
     };
 
     let bootstrap_bin = resolve_builder_vm_bootstrap_bin_for(&workspace_root, host)?;
-    let mut cmd = builder_vm_helper_command(
-        host,
-        &bootstrap_bin,
-        &workspace_root,
-        BuilderVmHelperCommand::Bootstrap,
-    )?;
+    let mut cmd = builder_vm_helper_command(host, &bootstrap_bin, &workspace_root)?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn builder VM bootstrap helper {}: {e}",
@@ -125,43 +120,10 @@ fn auto_bootstrap_builder_vm_image_for(
 }
 
 pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError> {
-    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::Bootstrap)
-}
-
-pub fn maybe_reexec_builder_vm_sdk_sidecar_helper(force: bool) -> Result<bool, BuilderVmError> {
-    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::SdkSidecarBuild { force })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuilderVmHelperCommand {
-    Bootstrap,
-    SdkSidecarBuild { force: bool },
-}
-
-impl BuilderVmHelperCommand {
-    fn args(self) -> Vec<&'static str> {
-        match self {
-            Self::Bootstrap => vec!["__builder-vm-bootstrap"],
-            Self::SdkSidecarBuild { force: false } => {
-                vec!["build", "sdk-sidecar", "build"]
-            }
-            Self::SdkSidecarBuild { force: true } => {
-                vec!["build", "sdk-sidecar", "build", "--force"]
-            }
-        }
-    }
-}
-
-fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<bool, BuilderVmError> {
-    maybe_reexec_builder_vm_helper_for(
-        command,
-        &HostProcess::current(),
-        builder_vm_source_checkout_root(),
-    )
+    maybe_reexec_builder_vm_helper_for(&HostProcess::current(), builder_vm_source_checkout_root())
 }
 
 fn maybe_reexec_builder_vm_helper_for(
-    command: BuilderVmHelperCommand,
     host: &HostProcess,
     source_checkout_root: Option<PathBuf>,
 ) -> Result<bool, BuilderVmError> {
@@ -177,7 +139,7 @@ fn maybe_reexec_builder_vm_helper_for(
         return Ok(false);
     }
 
-    let mut cmd = builder_vm_helper_command(host, &bootstrap_bin, &workspace_root, command)?;
+    let mut cmd = builder_vm_helper_command(host, &bootstrap_bin, &workspace_root)?;
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn embedded builder VM helper {}: {e}",
@@ -194,7 +156,10 @@ fn maybe_reexec_builder_vm_helper_for(
     Ok(true)
 }
 
-/// The command that runs the `mvmctl` at `helper` for `command` from
+/// The hidden verb a bootstrap helper runs.
+const BUILDER_VM_BOOTSTRAP_VERB: &str = "__builder-vm-bootstrap";
+
+/// The command that runs the bootstrap in the `mvmctl` at `helper` from
 /// `workspace_root`, refused for a library embedder.
 ///
 /// The resolver has refused an embedder already; refusing here as well keeps
@@ -204,15 +169,13 @@ fn builder_vm_helper_command(
     host: &HostProcess,
     helper: &Path,
     workspace_root: &Path,
-    command: BuilderVmHelperCommand,
 ) -> Result<Command, BuilderVmError> {
     host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
     let mut cmd = mvm_core::env_hygiene::helper_command(helper);
-    cmd.current_dir(workspace_root).args(command.args());
-    if command == BuilderVmHelperCommand::Bootstrap {
+    cmd.current_dir(workspace_root)
+        .arg(BUILDER_VM_BOOTSTRAP_VERB)
         // Marks the child as a bootstrap so it never spawns one of its own.
-        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
-    }
+        .env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
     Ok(cmd)
 }
 
@@ -460,15 +423,10 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let (script, observed) = backend_observer_script(scratch.path());
 
-        let status = builder_vm_helper_command(
-            &HostProcess::undeclared(),
-            &script,
-            scratch.path(),
-            BuilderVmHelperCommand::Bootstrap,
-        )
-        .expect("mvmctl may run its helper")
-        .status()
-        .expect("run backend observer");
+        let status = builder_vm_helper_command(&HostProcess::undeclared(), &script, scratch.path())
+            .expect("mvmctl may run its helper")
+            .status()
+            .expect("run backend observer");
 
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(observed).unwrap(), "unset");
@@ -485,34 +443,26 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let (script, observed) = backend_observer_script(scratch.path());
 
-        let status = builder_vm_helper_command(
-            &HostProcess::undeclared(),
-            &script,
-            scratch.path(),
-            BuilderVmHelperCommand::Bootstrap,
-        )
-        .expect("mvmctl may run its helper")
-        .status()
-        .expect("run backend observer");
+        let status = builder_vm_helper_command(&HostProcess::undeclared(), &script, scratch.path())
+            .expect("mvmctl may run its helper")
+            .status()
+            .expect("run backend observer");
 
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(observed).unwrap(), "firecracker");
     }
 
     #[test]
-    fn builder_vm_helper_commands_are_closed_and_preserve_force() {
-        assert_eq!(
-            BuilderVmHelperCommand::Bootstrap.args(),
-            ["__builder-vm-bootstrap"]
-        );
-        assert_eq!(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: false }.args(),
-            ["build", "sdk-sidecar", "build"]
-        );
-        assert_eq!(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: true }.args(),
-            ["build", "sdk-sidecar", "build", "--force"]
-        );
+    fn the_helper_runs_only_the_hidden_bootstrap_verb() {
+        let cmd = builder_vm_helper_command(
+            &HostProcess::undeclared(),
+            Path::new("/opt/mvmctl"),
+            Path::new("/workspace"),
+        )
+        .expect("mvmctl may run its helper");
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["__builder-vm-bootstrap"]);
     }
 
     #[test]
@@ -648,24 +598,17 @@ mod tests {
         );
     }
 
-    /// The seam that constructs the `mvmctl` helper command refuses on its own,
-    /// for both helper verbs.
+    /// The seam that constructs the `mvmctl` helper command refuses on its own.
     #[test]
     fn a_library_embedder_constructs_no_helper_command() {
-        for command in [
-            BuilderVmHelperCommand::Bootstrap,
-            BuilderVmHelperCommand::SdkSidecarBuild { force: true },
-        ] {
-            let err = builder_vm_helper_command(
-                &embedder(),
-                Path::new("/opt/mvmctl"),
-                Path::new("/workspace"),
-                command,
-            )
-            .expect_err("an embedder never runs mvmctl");
+        let err = builder_vm_helper_command(
+            &embedder(),
+            Path::new("/opt/mvmctl"),
+            Path::new("/workspace"),
+        )
+        .expect_err("an embedder never runs mvmctl");
 
-            assert_refused(err, CliSpawn::BuilderBootstrapHelper);
-        }
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
     }
 
     /// The re-exec entry points refuse before the source-checkout test, so an
@@ -673,12 +616,8 @@ mod tests {
     /// in-process.
     #[test]
     fn a_library_embedder_outside_a_checkout_is_refused_the_helper_reexec() {
-        let err = maybe_reexec_builder_vm_helper_for(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: false },
-            &embedder(),
-            None,
-        )
-        .expect_err("an embedder is refused, not declined");
+        let err = maybe_reexec_builder_vm_helper_for(&embedder(), None)
+            .expect_err("an embedder is refused, not declined");
 
         assert_refused(err, CliSpawn::BuilderBootstrapHelper);
     }
@@ -697,37 +636,28 @@ mod tests {
         );
         env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
 
-        let err = maybe_reexec_builder_vm_helper_for(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: false },
-            &embedder(),
-            Some(scratch.path().to_path_buf()),
-        )
-        .expect_err("an embedder is refused, not declined");
+        let err =
+            maybe_reexec_builder_vm_helper_for(&embedder(), Some(scratch.path().to_path_buf()))
+                .expect_err("an embedder is refused, not declined");
 
         assert_refused(err, CliSpawn::BuilderBootstrapHelper);
         assert!(!ran.exists(), "the helper must not have run");
     }
 
     #[test]
-    fn helper_commands_carry_the_bootstrap_marker_only_for_a_bootstrap() {
-        let marker = |command| {
-            builder_vm_helper_command(
-                &HostProcess::undeclared(),
-                Path::new("/opt/mvmctl"),
-                Path::new("/workspace"),
-                command,
-            )
-            .expect("mvmctl may run its helper")
-            .get_envs()
-            .any(|(key, value)| {
-                key == BUILDER_VM_BOOTSTRAP_ACTIVE_ENV && value.is_some_and(|v| v == "1")
-            })
-        };
+    fn the_helper_command_carries_the_bootstrap_marker() {
+        let marked = builder_vm_helper_command(
+            &HostProcess::undeclared(),
+            Path::new("/opt/mvmctl"),
+            Path::new("/workspace"),
+        )
+        .expect("mvmctl may run its helper")
+        .get_envs()
+        .any(|(key, value)| {
+            key == BUILDER_VM_BOOTSTRAP_ACTIVE_ENV && value.is_some_and(|v| v == "1")
+        });
 
-        assert!(marker(BuilderVmHelperCommand::Bootstrap));
-        assert!(!marker(BuilderVmHelperCommand::SdkSidecarBuild {
-            force: false
-        }));
+        assert!(marked);
     }
 
     fn executable_script(dir: &Path, body: &str) -> PathBuf {

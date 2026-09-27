@@ -3,8 +3,8 @@
 //! this binary was compiled from, and publish it to the local image cache.
 //!
 //! It lives under `build` beside `kernel`, `runtime-overlay` and
-//! `sdk-sidecar`, which build members of the same image set from the in-tree
-//! flakes; `image` acquires and manages images and builds none.
+//! `sdk-sidecar`, which build members of the same image set; `image` acquires
+//! and manages images and builds none.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;

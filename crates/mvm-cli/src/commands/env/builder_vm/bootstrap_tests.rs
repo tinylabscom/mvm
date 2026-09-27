@@ -216,9 +216,8 @@ mod attested_builder_pack_tests {
 
     #[test]
     fn attested_builder_pack_selected_skips_on_source_checkout_and_flag_off() {
-        // The test binary is compiled from a source checkout, so
-        // `find_builder_vm_flake()` resolves — the pack path must be skipped even
-        // with the flag on, mirroring the release-artifact download gate.
+        // The test binary is a contributor build compiled from a source
+        // checkout, so the pack path must be skipped even with the flag on.
         let mut env = TestEnv::new();
         env.set(MVM_BUILDER_PACK_ENV, "1");
         assert!(

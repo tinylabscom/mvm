@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27
 
 ## In progress
 
@@ -3947,3 +3947,6 @@ resume` takes a `current_head` and refuses when it differs from the
                   member; `images.lock` pins `image-set/v0.2.1`.
             - [x] Wave 0.5b: runtime overlay, SDK sidecar and initramfs
                   come from the pinned set, not the CLI's own release.
+            - [x] Waves 1+2: no mvm code path builds an image in-tree; an
+                  in-tree build refuses with "image construction lives in
+                  mvm-images".

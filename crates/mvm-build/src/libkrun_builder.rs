@@ -4905,17 +4905,8 @@ mod tests {
         );
         assert_eq!(
             root,
-            builder_vm_source_checkout_root().expect("the image flakes are still in-tree today"),
-            "both probes agree while the flakes exist; the supervisor probe must not depend on them"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_checkout_root_detects_workspace() {
-        let root = builder_vm_source_checkout_root().expect("source checkout root");
-        assert!(
-            root.join("nix/images/builder-vm/flake.nix").is_file(),
-            "workspace root must contain the builder-vm flake"
+            builder_vm_source_checkout_root().expect("tests run from a source checkout"),
+            "the bootstrap helper and the supervisor build key on the same checkout"
         );
     }
 

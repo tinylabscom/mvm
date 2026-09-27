@@ -28,66 +28,6 @@ pub(in crate::commands) fn stage0_active_in_process() -> bool {
     false
 }
 
-/// Which phase of Stage 0 failed. Each variant maps to a
-/// `stage=...` value in the `Stage0Failed` audit detail so a dashboard
-/// can break down "Stage 0 reliability" by failure phase. String
-/// representations are stable wire format.
-#[cfg(feature = "builder-vm")]
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Stage0FailureStage {
-    Build,
-    Validate,
-}
-
-#[cfg(feature = "builder-vm")]
-impl Stage0FailureStage {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Build => "build",
-            Self::Validate => "validate",
-        }
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-impl std::fmt::Display for Stage0FailureStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Short prefix of the source fingerprint for audit
-/// `fingerprint_prefix=` field. 8 hex chars are enough to disambiguate
-/// against unrelated build runs without exposing the full digest.
-#[cfg(feature = "builder-vm")]
-pub(super) fn stage0_fingerprint_prefix(source_fingerprint: &str) -> String {
-    source_fingerprint.chars().take(8).collect::<String>()
-}
-
-/// Condense an `anyhow::Error` into the short single-line
-/// `reason=` field for `Stage0Failed`. The full chain is on stderr
-/// already; the audit field is for "what broke at a glance". Capped
-/// at 160 chars and stripped of newlines / commas / spaces around
-/// `=`-signs so the space-separated `key=value` detail format stays
-/// parseable.
-#[cfg(feature = "builder-vm")]
-pub(super) fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
-    let raw = err.to_string();
-    let cleaned: String = raw
-        .chars()
-        .map(|c| match c {
-            '\n' | '\r' | '\t' => ' ',
-            // Audit detail is space-separated `key=value` pairs; any
-            // bare `=` in the reason text would confuse a downstream
-            // parser, so map them to `~` (visibly distinct from `=`).
-            '=' => '~',
-            _ => c,
-        })
-        .collect();
-    let truncated: String = cleaned.chars().take(160).collect();
-    truncated
-}
-
 /// RAII advisory lock at `<cache parent>/stage0.lock` (for the builder image,
 /// `~/.mvm/cache/builder-vm/stage0.lock`), naming what it guards as `what`.
 ///
@@ -119,13 +59,11 @@ pub(super) fn acquire_stage0_lock_within(
 }
 
 /// What the per-arch builder VM cache lock guards, as a waiting line names it.
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 pub(super) const BUILDER_VM_CACHE_LOCK_SUBJECT: &str = "the builder VM image";
 
 /// How long a Stage 0 caller queues. `mvm-build`'s own test build flips its
 /// default to fail-fast, but that flip does not reach this crate's tests, so
 /// the same choice is made here: a test never waits out the production hour.
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 fn stage0_lock_wait() -> mvm_build::builder_vm_runtime::LockWait {
     if cfg!(test) {
         mvm_build::builder_vm_runtime::LockWait::none()
@@ -137,7 +75,6 @@ fn stage0_lock_wait() -> mvm_build::builder_vm_runtime::LockWait {
 /// The advisory lock every writer of a per-arch builder VM cache holds. A
 /// published-image fetch takes it without [`acquire_stage0_lock`]'s in-process
 /// count, so an interrupted download is not reported as an interrupted build.
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 fn lock_builder_vm_cache(
     out_dir: &std::path::Path,
     what: &str,
@@ -160,7 +97,6 @@ fn lock_builder_vm_cache(
 /// Remove incomplete Stage 0 directories belonging to one final cache
 /// directory. The caller holds the shared Stage 0 lock, so every matching
 /// sibling is from an earlier interrupted process rather than a live writer.
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 pub(super) fn sweep_stage0_staging_siblings(final_dir: &std::path::Path) -> Result<u64> {
     let parent = final_dir.parent().ok_or_else(|| {
         anyhow::anyhow!("Stage 0 cache path has no parent: {}", final_dir.display())
@@ -189,7 +125,6 @@ pub(super) fn sweep_stage0_staging_siblings(final_dir: &std::path::Path) -> Resu
     Ok(removed)
 }
 
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 pub(super) fn unique_builder_vm_stage0_staging_dir(
     final_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
@@ -408,248 +343,7 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
     mvm_core::disk_usage::tree_bytes(path)
 }
 
-/// Fingerprint the full set of source inputs that determine the
-/// builder-VM rootfs.
-///
-/// The builder-VM rootfs is built by `nix/images/builder-vm/flake.nix`
-/// from these categories of source input:
-///
-/// 1. The flake itself (`flake.nix` + `flake.lock`) — controls
-///    which `nixpkgs` rev, which `mkGuest` shape, which `microvm.nix`,
-///    which packages get installed.
-/// 2. The bytes of the embedded host binaries the rootfs bakes — `build.rs`
-///    cross-compiles the in-VM PID-1 and builder daemon (`cargo build -p
-///    mvm-build --bin <name>`) and embeds the bytes in mvmctl, and the flake
-///    installs them. The rest of the payload is not installed and not folded.
-///    The byte hash captures the bin source, the
-///    `mvm-build` lib, its deps, AND the cross-compile toolchain in one
-///    shot — strictly more than the per-crate `src/` hash this replaced
-///    (which also broke when the two former top-level `crates/<name>/`
-///    crates were folded into `crates/mvm-build/src/bin/`).
-/// 3. Every Nix source outside the flake's directory that it imports
-///    ([`BUILDER_FLAKE_NIX_INPUTS`]): the shared library, the guest recipes,
-///    the kernel configs, and the runtime-overlay flake.
-/// 4. The Rust source of `mvm-setpriv`, the one Rust binary the flake compiles
-///    itself (`cargo build --package mvm-setpriv --bin mvm-setpriv`) rather
-///    than taking from mvmctl's embedded payload: every workspace crate
-///    `mvm-setpriv` reaches (only itself; it is a leaf over `libc`), the
-///    `Cargo.lock` entries of their non-dev dependency closure, and the
-///    root-manifest tables that change how that closure compiles (see
-///    `mvm_build::source_closure`).
-///
-/// The workspace `Cargo.lock` as a whole is deliberately not hashed, so a
-/// dependency bump outside those two binaries' closures does not rebuild the
-/// builder. The embedded host binaries' byte hashes are folded into layer 2,
-/// and `build.rs` watches their crates so changes that affect them rebuild the
-/// bytes before this fingerprint is computed; layer 4 takes only the lock
-/// entries `mvm-setpriv` can reach.
-///
-/// Pre-2026-05 this function only hashed (1), so contributor edits to
-/// the in-VM binaries silently reused the cached `rootfs.ext4`,
-/// burning the dev loop. This version closes that hole — now via the
-/// embedded-byte hash rather than a per-crate source walk.
-///
-/// ## Scope and tradeoffs
-///
-/// We don't hash the entire workspace. A change to `mvm-cli` doesn't
-/// affect the rootfs and shouldn't invalidate the cache; only the
-/// embedded binaries' bytes and `mvm-setpriv`'s source closure carry the
-/// in-VM binary identity.
-///
-/// ## Hash discipline
-///
-/// File layers use the original flake-only shape:
-/// `{name}\0{u64-length-LE}\0{contents}\0`, repeated for each input.
-/// The `name` is the relative path keyed off the workspace, so
-/// renaming a file changes the fingerprint. Files within a directory
-/// are visited in lexicographic order regardless of filesystem read
-/// order so the hash is deterministic across HFS+, APFS, and ext4.
-/// The embedded-binary layer folds `(name, sha256_hex)` under a
-/// `host-bin\0` domain tag (see `fold_embedded_binary_identity`).
-pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
-    let payload = crate::host_binaries::source::host_payload_if_any()
-        .context("produce the Linux host binaries the builder image is fingerprinted by")?;
-    let identities: Vec<(&str, &str)> = payload
-        .iter()
-        .map(|bin| (bin.name.as_str(), bin.sha256_hex.as_str()))
-        .collect();
-    fingerprint_builder_vm_sources(builder_flake_dir, &identities)
-}
-
-/// [`builder_vm_source_fingerprint`] over a given payload, as
-/// `(name, sha256_hex)` pairs in table order.
-pub(super) fn fingerprint_builder_vm_sources(
-    builder_flake_dir: &str,
-    payload: &[(&str, &str)],
-) -> Result<String> {
-    let flake_dir = std::path::Path::new(builder_flake_dir);
-    let workspace_root = workspace_root_for_builder_flake(flake_dir)?;
-    let mut hasher = Sha256::new();
-
-    // Layer 1: flake-local inputs.
-    for name in ["flake.nix", "flake.lock"] {
-        let path = flake_dir.join(name);
-        if !path.exists() {
-            if name == "flake.nix" {
-                anyhow::bail!("builder VM source fingerprint missing {}", path.display());
-            }
-            continue;
-        }
-        hash_named_file(&mut hasher, name, &path)?;
-    }
-
-    // Layer 2: the baked host-binary identity (`mvm-host-vm-init`,
-    // `mvm-builderd`). `build.rs` cross-compiles them and embeds the bytes in
-    // mvmctl, or a binary built without them produces the same bytes from its
-    // checkout; Stage 0 installs those bytes into the rootfs. Hashing the
-    // bytes captures the bin source, the `mvm-build` lib, its dep closure, AND
-    // the cross-compile toolchain (a gnu→musl switch yields different bytes
-    // from identical source) in one shot. (`build.rs` reruns the cross-compile
-    // when its real inputs change, so a rebuilt binary's bytes shift this
-    // layer.)
-    fold_baked_binary_identities(&mut hasher, payload);
-
-    // Layer 3: every Nix source outside its own directory that the flake
-    // reaches. A change to any of them changes the built image, and a
-    // fingerprint that skips one silently reuses a stale image.
-    for input in BUILDER_FLAKE_NIX_INPUTS {
-        let path = workspace_root.join(input);
-        if path.is_dir() {
-            hash_dir_recursive(&mut hasher, input, &path)?;
-        } else if path.is_file() {
-            hash_named_file(&mut hasher, input, &path)?;
-        }
-    }
-
-    // Layer 4: the one Rust binary the flake compiles from workspace source
-    // itself, so it has no embedded bytes to fold into layer 2.
-    mvm_build::source_closure::fold_package_source_identity(
-        &mut hasher,
-        &workspace_root,
-        mvm_build::source_closure::SETPRIV_PACKAGE,
-    )?;
-
-    Ok(hex::encode(hasher.finalize()))
-}
-
-/// Shared with the local image cache key of a pair-built builder image, which
-/// reads the same sources.
-pub(super) use mvm_build::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
-
-/// Fold the identity of each payload binary the builder image bakes, in
-/// payload order. The seed and bootstrap-support binaries drive Stage 0 but
-/// are never installed in what it produces, so rebuilding one leaves the
-/// image, and this key, as it was.
-pub(super) fn fold_baked_binary_identities(hasher: &mut Sha256, payload: &[(&str, &str)]) {
-    for &(name, sha256_hex) in payload {
-        if crate::host_binaries::manifest::is_baked_into_rootfs(name) {
-            fold_embedded_binary_identity(hasher, name, sha256_hex);
-        }
-    }
-}
-
-/// Fold one embedded host-binary's identity into the fingerprint.
-/// Keyed on `(name, sha256_hex)` so a rebuilt binary's byte change —
-/// the authoritative signal that the baked binary's source or toolchain
-/// shifted — busts the Stage 0 cache key. The `host-bin\0`
-/// domain tag keeps these entries from colliding with the file-hash
-/// layers above.
-pub(super) fn fold_embedded_binary_identity(hasher: &mut Sha256, name: &str, sha256_hex: &str) {
-    hasher.update(b"host-bin\0");
-    hasher.update(name.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(sha256_hex.as_bytes());
-}
-
-/// Resolve the workspace root from the builder-VM flake dir.
-///
-/// `find_builder_vm_flake` computes the flake path as
-/// `<workspace>/nix/images/builder-vm`, so walking three parents up
-/// lands on the workspace. Splitting this out for the fingerprint
-/// tests to call without going through `find_builder_vm_flake`'s
-/// `CARGO_MANIFEST_DIR` lookup.
-fn workspace_root_for_builder_flake(flake_dir: &std::path::Path) -> Result<std::path::PathBuf> {
-    flake_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot resolve workspace root from builder-vm flake dir {} \
-                 (expected <workspace>/nix/images/builder-vm)",
-                flake_dir.display()
-            )
-        })
-}
-
-/// Feed a single named file into the hasher using the original
-/// flake-fingerprint discipline: `{name}\0{u64-length-LE}\0{contents}\0`.
-fn hash_named_file(hasher: &mut Sha256, name: &str, path: &std::path::Path) -> Result<()> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading builder VM source input {}", path.display()))?;
-    hasher.update(name.as_bytes());
-    hasher.update(b"\0");
-    hasher.update((bytes.len() as u64).to_le_bytes());
-    hasher.update(b"\0");
-    hasher.update(&bytes);
-    hasher.update(b"\0");
-    Ok(())
-}
-
-/// Hash every regular file under `dir` recursively, keyed by
-/// `<prefix>/<relative-path>` so the fingerprint reflects directory
-/// structure. Skips hidden entries and `target/`, which are local build/editor
-/// artifacts rather than builder-VM source inputs.
-fn hash_dir_recursive(hasher: &mut Sha256, prefix: &str, dir: &std::path::Path) -> Result<()> {
-    let files = walk_source_dir_sorted(dir)
-        .with_context(|| format!("walking builder VM source dir {}", dir.display()))?;
-    for path in &files {
-        let rel = path.strip_prefix(dir).map_err(|e| {
-            anyhow::anyhow!(
-                "strip_prefix {} from {}: {e}",
-                dir.display(),
-                path.display()
-            )
-        })?;
-        let key = format!("{prefix}/{}", rel.display());
-        hash_named_file(hasher, &key, path)?;
-    }
-    Ok(())
-}
-
-/// Walk every regular file under `dir`, skipping hidden entries
-/// (`.git/`, `.DS_Store`, …), editor swap files (`*.swp`), and
-/// `target/` (cargo build output). Paths are returned
-/// lexicographically sorted so the hash is deterministic regardless
-/// of filesystem read order.
-fn walk_source_dir_sorted(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let entries = std::fs::read_dir(&d).with_context(|| format!("read_dir {}", d.display()))?;
-        for e in entries {
-            let e = e.with_context(|| format!("read_dir entry in {}", d.display()))?;
-            let name = e.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with('.') || name_str == "target" || name_str.ends_with(".swp") {
-                continue;
-            }
-            let path = e.path();
-            let ft = e
-                .file_type()
-                .with_context(|| format!("file_type {}", path.display()))?;
-            if ft.is_dir() {
-                stack.push(path);
-            } else if ft.is_file() {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
+#[cfg(any(feature = "builder-vm", test))]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum BuilderVmSourceCacheStatus {
     Hit,
@@ -663,11 +357,13 @@ pub(super) enum BuilderVmSourceCacheStatus {
     ProvenanceMismatch,
 }
 
+#[cfg(any(feature = "builder-vm", test))]
 impl BuilderVmSourceCacheStatus {
     pub(super) fn is_ready(self) -> bool {
         self == Self::Hit
     }
 
+    #[cfg(test)]
     pub(super) fn reason_code(self) -> &'static str {
         match self {
             Self::Hit => "hit",
@@ -683,6 +379,7 @@ impl BuilderVmSourceCacheStatus {
     }
 }
 
+#[cfg(test)]
 pub(super) fn builder_vm_source_cache_status(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -690,6 +387,7 @@ pub(super) fn builder_vm_source_cache_status(
     cache_status(dir, expected_fingerprint, STAGE0_SOURCE_KIND)
 }
 
+#[cfg(any(feature = "builder-vm", test))]
 fn cache_status(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -824,13 +522,20 @@ struct BuilderVmSourceCacheProvenance {
     acquired_at: Option<String>,
 }
 
-/// Provenance `source_kind` for a cache built by the in-tree Stage 0 path.
+/// Provenance `source_kind` the attested builder-pack materializer records.
+/// The name predates the pack path, which reuses the Stage 0 sidecar format;
+/// it is on-disk state, so it keeps its name.
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
 pub(super) const STAGE0_SOURCE_KIND: &str = "source_checkout_stage0";
 /// Provenance `source_kind` for a cache installed from a local image pair's
 /// `builder-vm` target; the fingerprint names both checkout identities.
 #[cfg(any(feature = "builder-vm", test))]
 pub(super) const LOCAL_PAIR_SOURCE_KIND: &str = "local_pair";
 
+#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_source_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -846,7 +551,6 @@ fn builder_vm_source_cache_provenance(
     })
 }
 
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 fn write_builder_vm_provenance(
     dir: &std::path::Path,
     provenance: &BuilderVmSourceCacheProvenance,
@@ -869,6 +573,7 @@ fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String
     Ok(names)
 }
 
+#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_source_cache_provenance_matches(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -922,12 +627,13 @@ pub(super) fn write_local_pair_cache_sidecars(
 }
 
 /// Write the full cache-sidecar set — source fingerprint, artifact-digest
-/// manifest, and provenance — that [`builder_vm_source_cache_status`] reads
-/// back to decide a hit. Shared by Stage 0 promotion and the dev-image
-/// fast-path (Fix A) so both write the identical format; the order matters
-/// only in that the digest manifest must be written after the artifacts are
-/// final.
-#[cfg(any(feature = "builder-vm", test))]
+/// manifest, and provenance — that the readiness check reads back to decide a
+/// hit. The order matters only in that the digest manifest must be written
+/// after the artifacts are final.
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
 pub(super) fn write_builder_vm_cache_sidecars(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -937,7 +643,10 @@ pub(super) fn write_builder_vm_cache_sidecars(
     write_cache_provenance(dir, source_fingerprint, STAGE0_SOURCE_KIND)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
 pub(super) fn promote_builder_vm_stage0_cache(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,
@@ -1020,7 +729,6 @@ fn promote_source_cache(
 /// rename puts it back: the failure mode is "no update", not "no builder
 /// image". The aside path uses the Stage 0 staging name, so a crash between
 /// the two renames leaves a directory the orphan sweep already reclaims.
-#[cfg(any(feature = "builder-vm", feature = "release-artifact-bootstrap", test))]
 fn replace_builder_vm_cache_dir(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,
@@ -1095,15 +803,12 @@ pub(super) trait BuilderVmReleaseSource {
     fn fetch(&self, url: &str, dest: &str) -> Result<()>;
 }
 
-/// Download the per-arch Layer 1 builder VM image published on the boot image
-/// release train into the local cache.
+/// Download the per-arch builder VM image from the signed image set the image
+/// lock pins into the local cache.
 ///
-/// Gated behind `release-artifact-bootstrap`. Contributor builds (default)
-/// never compile this in, so the "no flake + cache miss" branch in
-/// [`bootstrap_builder_vm_image`] has no escape hatch and surfaces a hard
-/// error. End-user-binary release builds opt in at compile time via
-/// `--features release-artifact-bootstrap`.
-#[cfg(feature = "release-artifact-bootstrap")]
+/// Every build can reach this: image construction lives in `mvm-images`, so
+/// without a selected image checkout the signed set is the only source of a
+/// builder image, contributor build or not.
 pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
     refuse_foreign_builder_vm_arch(arch)?;
     let arch = arch.parse::<mvm_core::arch::GuestArch>()?;
@@ -1138,7 +843,6 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     Ok(())
 }
 
-#[cfg(feature = "release-artifact-bootstrap")]
 fn stage_locked_builder_vm_image(
     arch: mvm_core::arch::GuestArch,
     staging: &std::path::Path,
@@ -1242,7 +946,6 @@ pub(super) fn fetch_builder_vm_image(
 
 /// A builder VM runs on the host's own CPU, so an image for another
 /// architecture can only fail to boot. Refused before any request is made.
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
 fn refuse_foreign_builder_vm_arch(arch: &str) -> Result<()> {
     let host = super::builder_vm_host_arch();
     if arch != host {
@@ -1259,7 +962,6 @@ fn refuse_foreign_builder_vm_arch(arch: &str) -> Result<()> {
 /// Its wording is a contract with whoever greps for it, so it changes only
 /// when what it attests changes — and a waived check is never reported as a
 /// verified one.
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
 pub(super) fn fetched_builder_vm_image_line(tag: &str, waivers: &[&str]) -> String {
     let verification = if waivers.is_empty() {
         "signature and digests verified".to_string()
@@ -1269,7 +971,6 @@ pub(super) fn fetched_builder_vm_image_line(tag: &str, waivers: &[&str]) -> Stri
     format!("Builder VM image source: fetched ({tag}), {verification}")
 }
 
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
 fn active_verification_waivers() -> Vec<&'static str> {
     [
         mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV,
@@ -1340,7 +1041,6 @@ impl PublishedBuilderVmInstall<'_> {
     }
 }
 
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
 fn fetched_builder_vm_provenance(
     dir: &std::path::Path,
     acquired: &crate::commands::image::boot::cache::AcquiredProvenance,
@@ -1451,7 +1151,6 @@ fn check_manifest_pin(
 /// Promote a fully staged fetched image. The staged directory must already
 /// satisfy the readiness check the bootstrap applies, so a promoted cache is
 /// never re-fetched as not-ready.
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
 fn promote_fetched_builder_vm_cache(
     staging: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -1534,28 +1233,4 @@ impl BuilderVmArtifactNames {
             },
         ]
     }
-}
-
-/// Backend attempt order for the dev-image / default-microvm builds. Delegates
-/// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
-/// (one policy: automatic and explicit choices stay single-backend) so this
-/// CLI loop and the
-/// `mvm-build` build paths can't drift. The live platform supplies
-/// `is_linux_native`, and the per-host builder-health cache stays advisory only
-/// now that qemu is explicit dev/test-only rather than an automatic fallback.
-#[cfg(feature = "builder-vm")]
-pub(super) fn builder_backend_attempt_order(
-    selected: mvm_build::builder_backend_select::BuilderBackendChoice,
-    explicit_override: bool,
-) -> Vec<mvm_build::builder_backend_select::BuilderBackendChoice> {
-    let is_linux_native = matches!(
-        mvm_core::platform::current(),
-        mvm_core::platform::Platform::LinuxNative
-    );
-    mvm_build::builder_backend_select::builder_attempt_order(
-        selected,
-        explicit_override,
-        is_linux_native,
-        mvm_build::builder_health::libkrun_marked_unavailable(),
-    )
 }

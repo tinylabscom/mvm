@@ -72,9 +72,9 @@ fn run_build(args: BuildArgs) -> Result<()> {
     };
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     // A selected checkout is the overlay's source; fetching the published
-    // artifact under one is refused, with the way out named. `--force` is an
-    // in-tree concept: the pair answers from its content-addressed cache, so
-    // an unchanged pair has nothing to force.
+    // artifact under one is refused, with the way out named. `--force` is a
+    // source-build concept: the pair answers from its content-addressed
+    // cache, so an unchanged pair has nothing to force.
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         if args.source == Source::Download {
@@ -111,13 +111,16 @@ fn run_build(args: BuildArgs) -> Result<()> {
     }
 
     let source_checkout_root = match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Some(
-            runtime_overlay_source_checkout_root().ok_or_else(|| {
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+            Some(runtime_overlay_source_checkout_root().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--source build requires a source checkout with nix/images/runtime-overlay/flake.nix"
+                    "--source build assembles the overlay from guest binaries cargo builds in an \
+                     mvm source checkout, and this binary has none; run it from a contributor \
+                     build, set {} to an mvm checkout, or use --source download",
+                    mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
                 )
-            })?,
-        ),
+            })?)
+        }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
     };
 

@@ -4,8 +4,8 @@
 //! the `builder-vm` target of that checkout pair: built once by the shared
 //! local-image-set build, served from the local image cache, and installed
 //! into the builder-VM cache layout with a provenance record naming the pair.
-//! The build that produces it runs inside the in-tree or published tool
-//! builder — never inside the image it is building, which would recurse.
+//! The build that produces it runs inside the published tool builder — never
+//! inside the image it is building, which would recurse.
 
 use std::path::Path;
 
@@ -55,9 +55,9 @@ pub(crate) fn derive_pair_key(
 /// Build `target` for the pair (answering a cache hit without booting
 /// anything) and return the entry and the key it answers.
 ///
-/// The builder the job runs in is the tool builder — the in-tree or published
-/// one — via the exempt bootstrap, so building the `builder-vm` target from a
-/// pair never routes through the image being built.
+/// The builder the job runs in is the published tool builder, via the exempt
+/// bootstrap, so building the `builder-vm` target from a pair never routes
+/// through the image being built.
 pub(crate) fn ensure_pair_built(
     checkout: &LocalImageCheckout,
     target: ImageBuildTarget,

@@ -7,11 +7,11 @@
 //! [`mvm_fs::overlay`] (its main names are re-exported here); this module
 //! owns how an artifact *lands* in the cache in the first place:
 //!
-//! 1. **Build from the flake.** [`build_overlay_with_nix`] shells out to
-//!    `nix build` against `<workspace>/nix/images/runtime-overlay/` and
-//!    returns paths into the nix store. Linux-only — host Nix is never used
-//!    by mvmctl on macOS, so the function gates on `target_os = "linux"`;
-//!    macOS builds run through the direct in-process assembler instead.
+//! 1. **Build from a source checkout.** A contributor build cross-compiles
+//!    the guest binaries from the checkout it was compiled from and
+//!    [`build_runtime_overlay_from_guest_binaries`] assembles the ext4 and
+//!    its verity sidecar in-process. No image flake is involved; the
+//!    published overlay is built by `mvm-images`.
 //! 2. **Download from the image set.** [`download_runtime_overlay`] fetches
 //!    the per-arch tarball as a member of the signed image set this build
 //!    pins, holds it to the digest the verified root declares, and installs
@@ -434,197 +434,8 @@ fn local_source_cache_is_fresh(
     Ok(found.trim() == expected && epoch.trim() == LOCAL_BUILD_EPOCH)
 }
 
-// =================================================================
-// Build orchestrator
-// =================================================================
-
-/// Spec for `nix build` of the runtime-overlay flake at
-/// `<workspace>/nix/images/runtime-overlay/`. Pure data; the
-/// actual invocation lives in [`build_overlay_with_nix`].
-///
-/// The spec exposes its argv + env separately so callers that
-/// drive `nix build` *inside* the builder VM (rather than on the
-/// host) can plumb the same shape through without reaching for an
-/// external command.
-#[derive(Debug, Clone)]
-pub struct OverlayBuildSpec {
-    /// Workspace root — the dir containing `nix/`, `crates/`,
-    /// `Cargo.toml`. The flake reads
-    /// `<workspace_root>/nix/images/runtime-overlay/flake.nix`.
-    pub workspace_root: PathBuf,
-    /// Which target arch to build for. Maps to the Nix
-    /// `system` attribute on the flake's `packages` output.
-    pub arch: GuestArch,
-    /// Where the resulting result-symlink should live. Typically
-    /// a tempdir or a staging location under
-    /// `~/.mvm/cache/runtime-overlay/<version>/<arch>/.work/` —
-    /// the install-to-cache step is the caller's responsibility.
-    pub out_link: PathBuf,
-    /// Override the `nix` binary location. Default `None` ⇒
-    /// resolved via `$PATH`. Tests use this to substitute a stub.
-    pub nix_binary: Option<PathBuf>,
-}
-
-impl OverlayBuildSpec {
-    /// Construct a spec for the given (workspace, arch, out_link).
-    pub fn new(workspace_root: PathBuf, arch: GuestArch, out_link: PathBuf) -> Self {
-        Self {
-            workspace_root,
-            arch,
-            out_link,
-            nix_binary: None,
-        }
-    }
-
-    /// Nix `system` attribute string corresponding to `self.arch`.
-    /// The runtime-overlay flake exposes outputs at
-    /// `packages.<system>.default` for these two systems.
-    pub fn system(&self) -> &'static str {
-        self.arch.nix_system()
-    }
-
-    /// Absolute path to the flake directory (the dir containing
-    /// `flake.nix`). Nix's `path:` URI scheme consumes the dir,
-    /// not the `flake.nix` file.
-    pub fn flake_path(&self) -> PathBuf {
-        self.workspace_root
-            .join("nix")
-            .join("images")
-            .join("runtime-overlay")
-    }
-
-    /// The Nix flake reference used by `nix build`. Pinned to
-    /// the workspace-local path so we don't accidentally fetch
-    /// a published flake when building from source.
-    pub fn flake_reference(&self) -> String {
-        format!(
-            "path:{}#packages.{}.default",
-            self.flake_path().display(),
-            self.system()
-        )
-    }
-
-    /// `nix build` argv, ready to hand to `Command::new` plus
-    /// `.args(argv[1..])`. The orchestrator manages its own
-    /// symlink position via `--out-link <path>`. The build always
-    /// includes `--impure` because the flake's workspace-root
-    /// contract relies on `MVM_WORKSPACE_PATH`.
-    pub fn argv(&self) -> Vec<String> {
-        let nix = self
-            .nix_binary
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "nix".to_string());
-        vec![
-            nix,
-            "build".to_string(),
-            "--extra-experimental-features".to_string(),
-            "nix-command flakes".to_string(),
-            "--impure".to_string(),
-            "--out-link".to_string(),
-            self.out_link.display().to_string(),
-            self.flake_reference(),
-        ]
-    }
-
-    /// Environment variables to thread through to `nix build`.
-    /// `MVM_WORKSPACE_PATH` is the override the flake reads when
-    /// running inside the builder VM's sandbox where `..`
-    /// resolution against the store copy doesn't reach the
-    /// workspace — same mechanism the builder-vm flake uses.
-    ///
-    /// The path is handed over resolved. The workspace filter keeps a file by
-    /// stripping the root from its path as text, and Nix hands the filter
-    /// symlink-resolved paths, so a root reached through a symlink matches
-    /// nothing and the build sees an empty tree.
-    pub fn env(&self) -> Vec<(String, String)> {
-        vec![(
-            "MVM_WORKSPACE_PATH".to_string(),
-            canonical_workspace_root(&self.workspace_root)
-                .display()
-                .to_string(),
-        )]
-    }
-}
-
-/// `root` with every symlink resolved, or `root` itself when it cannot be
-/// resolved (it does not exist yet). An unresolvable root is left for the
-/// flake's filter to refuse, which names the root and the likely cause.
-fn canonical_workspace_root(root: &Path) -> PathBuf {
-    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
-}
-
-/// Drive `nix build` from a spec. Linux-only at runtime — host
-/// Nix is never used by mvmctl on macOS, and even if the binary
-/// is installed it can't cross-compile to `aarch64-linux` /
-/// `x86_64-linux` without a remote builder. Non-Linux callers
-/// get `HostUnsupported`; those calls route through the builder
-/// VM.
-///
-/// On success the function:
-///
-/// 1. Verifies the four required files exist at
-///    `<out_link>/{overlay.ext4, overlay.verity, overlay.roothash,
-///    VERSION}`. The runtime-overlay flake's `runCommand`
-///    produces exactly these names.
-/// 2. Reads `VERSION` + `overlay.roothash` and validates them.
-/// 3. Returns a [`RuntimeOverlayArtifact`] pointing at the
-///    nix-store paths the result-symlink resolves to.
-pub fn build_overlay_with_nix(
-    spec: &OverlayBuildSpec,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    #[cfg(target_os = "linux")]
-    {
-        run_nix_build(spec)?;
-        validate_built_artifact(spec)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Suppress "unused" on non-Linux while keeping a single
-        // public signature across hosts.
-        let _ = spec;
-        Err(RuntimeOverlayError::HostUnsupported {
-            operation: "runtime-overlay nix build",
-            reason: "nix build runs Linux-only; non-Linux callers route through the libkrun builder VM (W1.4b.3b)",
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn run_nix_build(spec: &OverlayBuildSpec) -> Result<(), RuntimeOverlayError> {
-    let argv = spec.argv();
-    let binary = argv.first().cloned().unwrap_or_else(|| "nix".to_string());
-    let mut cmd = std::process::Command::new(&binary);
-    cmd.args(&argv[1..]);
-    for (k, v) in spec.env() {
-        cmd.env(k, v);
-    }
-    let exec = cmd
-        .output()
-        .map_err(|e| RuntimeOverlayError::NixBuildFailed {
-            reason: format!("spawn `{binary}`: {e}"),
-        })?;
-    if !exec.status.success() {
-        let stderr = String::from_utf8_lossy(&exec.stderr).into_owned();
-        return Err(RuntimeOverlayError::NixBuildFailed {
-            reason: format!("exit {:?}; stderr={stderr}", exec.status.code()),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn validate_built_artifact(
-    spec: &OverlayBuildSpec,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    Ok(read_overlay_artifact_from_dir(
-        &spec.out_link,
-        &spec.arch.to_string(),
-    )?)
-}
-
 fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
-    crate::image_source::in_tree_overlay_checkout_root()
+    crate::image_source::guest_runtime_source_checkout()
 }
 
 fn build_runtime_overlay_from_source_checkout(
@@ -1231,20 +1042,18 @@ mod tests {
 
     #[cfg(feature = "release-channel")]
     #[test]
-    fn official_build_does_not_detect_the_compiled_in_runtime_overlay_flake() {
+    fn official_build_does_not_detect_the_compiled_in_source_checkout() {
         assert_eq!(runtime_overlay_source_checkout_root(), None);
     }
 
     #[cfg(not(feature = "release-channel"))]
     #[test]
-    fn contributor_build_detects_the_compiled_in_runtime_overlay_flake() {
+    fn contributor_build_detects_its_source_checkout_by_the_workspace_manifest() {
         let workspace_root = runtime_overlay_source_checkout_root()
             .expect("a contributor build must detect its source checkout");
         assert!(
-            workspace_root
-                .join("nix/images/runtime-overlay/flake.nix")
-                .is_file(),
-            "detected workspace root must contain the runtime-overlay flake"
+            workspace_root.join("Cargo.toml").is_file(),
+            "detected workspace root must be the mvm workspace"
         );
     }
 
@@ -1298,164 +1107,6 @@ mod tests {
     // =================================================================
     // Build-spec tests
     // =================================================================
-
-    #[test]
-    fn build_spec_system_maps_arch_to_nix_system_string() {
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::Aarch64,
-            PathBuf::from("/tmp/result"),
-        );
-        assert_eq!(spec.system(), "aarch64-linux");
-
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::X86_64,
-            PathBuf::from("/tmp/result"),
-        );
-        assert_eq!(spec.system(), "x86_64-linux");
-    }
-
-    #[test]
-    fn build_spec_flake_path_points_at_runtime_overlay_dir() {
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::Aarch64,
-            PathBuf::from("/tmp/result"),
-        );
-        assert_eq!(
-            spec.flake_path(),
-            PathBuf::from("/workspace/nix/images/runtime-overlay")
-        );
-    }
-
-    #[test]
-    fn build_spec_flake_reference_pins_path_uri_and_system_default() {
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::X86_64,
-            PathBuf::from("/tmp/result"),
-        );
-        // Pinned to the workspace-local path so we don't fetch
-        // a published flake on the rare host where nix is happy
-        // to resolve a bare attribute against `nixpkgs`.
-        assert_eq!(
-            spec.flake_reference(),
-            "path:/workspace/nix/images/runtime-overlay#packages.x86_64-linux.default"
-        );
-    }
-
-    #[test]
-    fn build_spec_argv_defaults_to_path_lookup_nix_and_includes_required_flags() {
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::Aarch64,
-            PathBuf::from("/tmp/result"),
-        );
-        let argv = spec.argv();
-        // Default nix binary is `nix` (resolved via $PATH).
-        assert_eq!(argv[0], "nix");
-        assert_eq!(argv[1], "build");
-        // Experimental features enable nix-command + flakes
-        // without requiring a contributor's `~/.config/nix/nix.conf`.
-        let pair = argv
-            .windows(2)
-            .find(|w| w[0] == "--extra-experimental-features");
-        assert!(
-            pair.is_some(),
-            "argv must enable nix-command + flakes: {argv:?}"
-        );
-        assert_eq!(pair.unwrap()[1], "nix-command flakes");
-        assert!(
-            argv.iter().any(|arg| arg == "--impure"),
-            "argv must opt into the MVM_WORKSPACE_PATH override: {argv:?}"
-        );
-        // --out-link <path>
-        let out = argv.windows(2).find(|w| w[0] == "--out-link");
-        assert!(out.is_some(), "argv must specify --out-link: {argv:?}");
-        assert_eq!(out.unwrap()[1], "/tmp/result");
-        assert!(
-            argv.iter().any(|arg| arg == "--impure"),
-            "argv must opt into impure evaluation so MVM_WORKSPACE_PATH is visible: {argv:?}"
-        );
-        // Final positional is the flake reference.
-        assert_eq!(
-            argv.last().unwrap(),
-            "path:/workspace/nix/images/runtime-overlay#packages.aarch64-linux.default"
-        );
-    }
-
-    #[test]
-    fn build_spec_argv_respects_nix_binary_override() {
-        let spec = OverlayBuildSpec {
-            workspace_root: PathBuf::from("/workspace"),
-            arch: GuestArch::Aarch64,
-            out_link: PathBuf::from("/tmp/result"),
-            nix_binary: Some(PathBuf::from("/custom/nix-stub")),
-        };
-        let argv = spec.argv();
-        assert_eq!(argv[0], "/custom/nix-stub");
-    }
-
-    #[test]
-    fn build_spec_env_sets_workspace_path_for_sandbox_resolution() {
-        // `MVM_WORKSPACE_PATH` is the env override the
-        // runtime-overlay flake reads so the `..` resolution
-        // against a store copy lands at the right tree when nix
-        // runs inside the builder VM sandbox.
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::Aarch64,
-            PathBuf::from("/tmp/result"),
-        );
-        let env = spec.env();
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].0, "MVM_WORKSPACE_PATH");
-        assert_eq!(env[0].1, "/workspace");
-    }
-
-    /// A root reached through a symlink is handed to the flake resolved: the
-    /// filter compares resolved paths against the root as text, so an
-    /// unresolved root would admit nothing.
-    #[test]
-    fn build_spec_env_resolves_a_symlinked_workspace_root() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let real = tmp.path().join("real");
-        std::fs::create_dir_all(&real).expect("mkdir real");
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-
-        let spec = OverlayBuildSpec::new(link, GuestArch::Aarch64, PathBuf::from("/tmp/result"));
-        let env = spec.env();
-
-        assert_eq!(
-            env[0].1,
-            real.canonicalize()
-                .expect("canonical real")
-                .display()
-                .to_string()
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn build_overlay_with_nix_returns_host_unsupported_on_non_linux() {
-        let spec = OverlayBuildSpec::new(
-            PathBuf::from("/workspace"),
-            GuestArch::Aarch64,
-            PathBuf::from("/tmp/result"),
-        );
-        let err = build_overlay_with_nix(&spec).unwrap_err();
-        match err {
-            RuntimeOverlayError::HostUnsupported { operation, .. } => {
-                assert!(
-                    operation.contains("runtime-overlay") || operation.contains("nix"),
-                    "expected runtime-overlay or nix in operation; got {operation:?}"
-                );
-            }
-            other => panic!("expected HostUnsupported, got {other:?}"),
-        }
-    }
 
     // =================================================================
     // install_overlay_into_cache tests

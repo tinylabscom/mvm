@@ -1193,6 +1193,44 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
         script.contains("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"),
         "the live SDK scenarios must use a sidecar built from the checkout under test"
     );
+    assert!(
+        script.contains(
+            "MVM_IMAGES_DIR=\"$E2E_IMAGES_DIR\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"
+        ),
+        "the sidecar recipe lives in mvm-images, so the build must be handed a checkout of it"
+    );
+    assert!(
+        !script.contains("export MVM_IMAGES_DIR"),
+        "the image checkout is for the sidecar step alone; exporting it would move every image \
+         off the pinned set"
+    );
+}
+
+/// The sidecar step needs an mvm-images checkout, and it must not sit where an
+/// image checkout is discovered, or every scenario would build images from it.
+#[test]
+fn documented_surface_jobs_check_out_mvm_images_for_the_sidecar_only() {
+    let workflow = extended_ci();
+
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains("repository: tinylabscom/mvm-images"),
+            "{job} must check out the sidecar recipe"
+        );
+        assert!(
+            block.contains("path: .e2e-mvm-images"),
+            "{job} must keep the checkout inside the workspace, away from the sibling path"
+        );
+        assert!(
+            block.contains("MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images"),
+            "{job} must hand the checkout to the sidecar step"
+        );
+        assert!(
+            !block.contains("MVM_IMAGES_DIR:"),
+            "{job} must not select the checkout for the whole suite"
+        );
+    }
 }
 
 #[test]

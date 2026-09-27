@@ -34,7 +34,7 @@ pub const MVM_BOOT_IMAGE_ENV: &str = "MVM_BOOT_IMAGE";
 /// Which arm produces the boot image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootImageAcquisition {
-    /// Build the image locally from the in-repo flake.
+    /// Build the image locally from the selected image checkout.
     Build,
     /// Fetch a published prebuilt.
     Fetch,
