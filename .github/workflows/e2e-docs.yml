@@ -83,8 +83,7 @@ jobs:
       # Fetch the pinned, signed builder image, as the macOS lane does. Building
       # it from source here put 37 minutes of Stage 0 ahead of every scenario on
       # a good run, and a two-hour hang ahead of none on a bad one; no scenario
-      # examines the image itself. The cold source path has its own nightly
-      # witness in Extended CI (`source-bootstrap-linux`).
+      # examines the image itself, and building images is mvm-images' job.
       #
       # There are deliberately no Stage 0 grants below: no readable /boot
       # kernel, no vhost-vsock, no QEMU. A regression that drifts this lane back

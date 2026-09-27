@@ -887,12 +887,17 @@ signed bytes during the transition.
 
 Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
 
-- [ ] Remove image construction and canonical image hosting from `mvm` only
+- [x] Remove image construction and canonical image hosting from `mvm` only
       after the compatibility window and telemetry/monitoring show the new path
-      healthy.
-- [ ] Retire duplicated signing and dual-publish steps without deleting
-      historical releases.
-- [ ] Keep contract, resolver, compatibility, and live-boot tests in `mvm`.
+      healthy. (Waves 1–4, after the W7 window closed 2026-09-25: no code path
+      builds an image in-tree and `nix/images/` is deleted.)
+- [x] Retire duplicated signing and dual-publish steps without deleting
+      historical releases. (Wave 3: `release-boot-image.yml`,
+      `kernel-build.yml` and the release mirror are gone; every release stays
+      published.)
+- [x] Keep contract, resolver, compatibility, and live-boot tests in `mvm`.
+      (The image-set contract, `images.lock`, the acquisition boundary and
+      the merge-queue boot lanes all stay.)
 - [ ] Re-measure release duration, storage, download volume, and failure rate.
 - [ ] Separately shard the 313-scenario documented-surface suite if its live
       phase remains the critical path.

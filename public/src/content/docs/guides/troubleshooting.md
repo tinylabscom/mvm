@@ -511,11 +511,12 @@ RUST_LOG=debug mvmctl <command>
 RUST_LOG=mvm=trace mvmctl <command>
 ```
 
-## Builder Pack Signature Verification
+## Builder Image Signature Verification
 
-The builder VM image ships as a release artifact (the "builder pack") under
-the same cosign-signed-manifest + SHA-256 + revocation model that used to
-also cover the now-removed dev-image fetch path.
+The builder VM image is a member of the signed image set `images.lock` pins
+(see [Verifying boot images](verify-release#verifying-boot-images-the-image-set)).
+The sections below also cover the builder manifests CLI releases up to v0.18
+attached, which an older `mvmctl` still fetches.
 
 ### "Cosign verification failed for builder-vm-{arch}.manifest.json"
 
@@ -549,7 +550,7 @@ The manifest pins `manifest.version` to `mvmctl --version` exactly. Either:
 
 SHA-256 of the downloaded artifact doesn't match the manifest's recorded digest. Possible causes, in order:
 
-1. Mid-flight corruption — retry with `mvmctl bootstrap` (or `mvmctl pack download builder`) to re-download.
+1. Mid-flight corruption — retry with `mvmctl bootstrap` to re-download.
 2. Mirror/CDN cache poisoning — rare but real; open a security issue with the SHA-256 you got vs what the manifest says.
 3. The release was re-uploaded after the manifest was signed (publishing process bug) — wait for the next tag.
 

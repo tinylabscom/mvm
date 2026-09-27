@@ -32,9 +32,9 @@ pub(in crate::commands) use run_mode::resolve_run_mode;
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
-    /// legacy slot name). If omitted, the bundled
-    /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.mvm/cache/default-microvm/`). Each invocation boots a
+    /// legacy slot name). If omitted, the default microVM image is used (from
+    /// the selected mvm-images checkout, or else the pinned image set; cached
+    /// at `~/.mvm/cache/default-microvm/`). Each invocation boots a
     /// fresh transient microVM — never the long-running builder VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,

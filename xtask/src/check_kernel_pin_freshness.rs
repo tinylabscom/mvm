@@ -3,7 +3,12 @@
 //! The I/O shell around [`mvm_core::kernel_advisory`]: read mvm's local kernel
 //! pins, fetch the latest upstream point releases, assess, emit the
 //! `KernelAdvisory` as JSON on stdout, and exit nonzero when a bump is
-//! recommended. The comparison logic is pure + unit-tested in mvm-core; this
+//! recommended.
+//!
+//! The one kernel pin this repository still carries is libkrunfw's, the kernel
+//! the libkrun builder boots. The workload and builder-image kernels are built
+//! and pinned in mvm-images, which watches their freshness itself; this gate
+//! says so in its output rather than reporting a pin it no longer reads. The comparison logic is pure + unit-tested in mvm-core; this
 //! file does the reading/fetching and is offline-tolerant (a fetch failure
 //! yields no upstream data → `Unknown`, never a false "up to date").
 
@@ -30,7 +35,7 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
 
     if !quiet {
         eprintln!(
-            "check-kernel-pin-freshness: {} pin(s); worst = {:?}; action_recommended = {}",
+            "check-kernel-pin-freshness: {} pin(s) (libkrunfw; image kernels are pinned in mvm-images); worst = {:?}; action_recommended = {}",
             advisory.pins.len(),
             advisory.worst,
             advisory.action_recommended
@@ -43,9 +48,8 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Read every kernel pin mvm carries. The libkrunfw pin is a deterministic
-/// file read; the nix-built kernel's pinned version needs a Nix eval and is
-/// best-effort (skipped, not failed, when Nix is unavailable).
+/// Read every kernel pin mvm carries: the libkrunfw tarball pin, a
+/// deterministic file read.
 fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
     let mut pins = Vec::new();
     let libkrunfw = workspace.join("nix/packages/libkrunfw.nix");
@@ -57,12 +61,6 @@ fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
             version,
         });
     }
-    if let Some(version) = eval_nix_kernel_version(workspace) {
-        pins.push(KernelPin {
-            name: "nix-kernel".into(),
-            version,
-        });
-    }
     pins
 }
 
@@ -71,50 +69,6 @@ fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
 fn parse_libkrunfw_pin(content: &str) -> Option<String> {
     let re = Regex::new(r"linux-(\d+\.\d+\.\d+)\.tar").ok()?;
     re.captures(content).map(|c| c[1].to_string())
-}
-
-/// Best-effort: the nix-built kernel pins an exact point release (decoupled
-/// from nixpkgs' channel-gated `linux_6_12`), exposed as the kernel flake's
-/// `workload-vmlinux.version`. Eval it from the standalone kernel flake.
-/// Returns `None` (skip the pin) on any Nix/eval failure rather than erroring.
-fn eval_nix_kernel_version(workspace: &Path) -> Option<String> {
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    };
-    let flake = format!("{}/nix/images/kernel", workspace.display());
-    let attr = format!("packages.{arch}-linux.workload-vmlinux.version");
-    let out = Command::new(nix_bin())
-        .args([
-            "eval",
-            "--raw",
-            "--extra-experimental-features",
-            "nix-command flakes",
-            &format!("{flake}#{attr}"),
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!v.is_empty() && split_version(&v).is_some()).then_some(v)
-}
-
-/// Locate the `nix` binary: prefer one on `PATH` (CI with Nix installed),
-/// else the default install profile (a dev shell often doesn't export it).
-fn nix_bin() -> &'static str {
-    let on_path = Command::new("nix")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if on_path {
-        "nix"
-    } else {
-        "/nix/var/nix/profiles/default/bin/nix"
-    }
 }
 
 /// Fetch kernel.org's release list. Offline-tolerant: any failure yields an

@@ -510,8 +510,7 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
 /// On-disk summary of what `stage_flake_cmd_sh`'s cmd.sh
 /// produced. Both `vmlinux` and `rootfs.ext4` are required;
 /// `manifest.json` is an optional sidecar (some flakes emit it,
-/// some don't — see `nix/images/builder/flake.nix` for the
-/// shape).
+/// some don't).
 #[derive(Debug)]
 struct ArtifactSummary {
     vmlinux: std::path::PathBuf,

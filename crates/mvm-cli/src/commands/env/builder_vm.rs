@@ -1,14 +1,7 @@
 //! Builder-VM image bootstrap, Stage 0, workload-kernel build, and
 //! bundled-image fetching helpers.
 
-// `pub(in crate::commands)`: the `attested_builder_pack` release-fetch +
-// verification-context helpers are reused by `commands::pack` (a sibling of
-// `env`, not a descendant of `builder_vm`) to implement `mvmctl pack
-// download/update builder` over the same trust construction, rather than
-// forking a second copy.
-pub(in crate::commands) mod bootstrap;
-#[cfg(test)]
-mod bootstrap_tests;
+mod bootstrap;
 #[cfg(test)]
 mod builder_vm_bootstrap_tests;
 pub(in crate::commands) mod default_microvm;
@@ -99,20 +92,6 @@ pub(crate) fn images_built_from_source() -> bool {
     )
 }
 
-/// Whether this `mvmctl` is a contributor build running from the mvm source
-/// checkout it was compiled from. That decides where helper binaries come
-/// from and which shortcuts a published artifact may take; it says nothing
-/// about where images come from, which is [`images_built_from_source`].
-#[cfg(any(
-    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-    test
-))]
-pub(crate) fn is_mvm_source_checkout() -> bool {
-    mvm_build::image_source::mvm_source_checkout(
-        mvm_build::artifact_acquisition::compiled_channel(),
-    )
-    .is_some()
-}
 #[cfg(all(test, feature = "builder-vm"))]
 use default_microvm::DefaultMicrovmVariant;
 #[cfg(any(feature = "builder-vm", test))]
@@ -142,14 +121,6 @@ pub(crate) use local_pair::seed_pair_workload_kernel_cache;
 pub(crate) use local_pair::staged_contract_files;
 #[cfg(test)]
 use stage0_cache::builder_vm_artifact_names;
-#[cfg(all(
-    feature = "manifest-verify",
-    any(
-        all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-        test
-    )
-))]
-use stage0_cache::builder_vm_boot_assets;
 use stage0_cache::download_builder_vm_image;
 pub(in crate::commands) use stage0_cache::{
     Stage0SweepOutcome, stage0_active_in_process, stage0_bootstrap_in_flight,
@@ -204,14 +175,3 @@ use mvm_build::cache_install::BUILDER_VM_PROVENANCE_FILE;
 use mvm_build::cache_install::{
     BUILDER_VM_ARTIFACT_DIGEST_FILE, BUILDER_VM_SOURCE_FINGERPRINT_FILE,
 };
-
-/// Env var opting an installed binary into the attested-pack acceleration path:
-/// place a verified builder-image pack into the cache in lieu of the plain
-/// checksum download. Truthy: `1`, `true`, `yes`, `on`. Off/unset ⇒ the download
-/// path is byte-identical to today. Ignored in a contributor build running from
-/// its source checkout, which takes no published-artifact shortcut.
-#[cfg(any(
-    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
-    test
-))]
-const MVM_BUILDER_PACK_ENV: &str = "MVM_BUILDER_PACK";

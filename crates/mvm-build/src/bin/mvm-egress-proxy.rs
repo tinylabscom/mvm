@@ -19,8 +19,8 @@
 //!
 //! On non-Linux hosts the binary still compiles (for workspace
 //! ergonomics) but prints a hint + exits 1. The production caller
-//! cross-compiles for `<arch>-unknown-linux-musl` from the
-//! builder VM flake (`nix/images/builder-vm/flake.nix`).
+//! cross-compiles for `<arch>-unknown-linux-musl` and the builder
+//! image (mvm-images' builder flake) installs it.
 
 use std::process::ExitCode;
 
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
             "mvm-egress-proxy is Linux-only (in-VM egress allowlist proxy \
              for the libkrun builder VM). On a developer host this binary \
              is a no-op; the production binary is cross-compiled to \
-             <arch>-unknown-linux-musl via nix/images/builder-vm/flake.nix. \
+             <arch>-unknown-linux-musl and installed by the builder image. \
              See specs/plans/73-sdk-port-followups.md §B.2.x."
         );
         ExitCode::FAILURE

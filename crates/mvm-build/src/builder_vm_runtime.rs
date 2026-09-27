@@ -599,7 +599,7 @@ printf '%s\n' "$NIX_OUT" > /job/store-path
 # bounded fixed names keep the store bounded — the cap GC still frees a
 # superseded closure within a kind, and an unchanged derivation is a store hit
 # next build. The builder-vm image derivation name (mvm-builder-vm-image-* /
-# mvm-builder-vm-dev-*) is set in nix/images/builder-vm/flake.nix; everything
+# mvm-builder-vm-dev-*) is set by mvm-images' builder flake; everything
 # else (workload rootfs/images) is the workload kind. Best-effort; never fails
 # the build.
 case "$(basename "$NIX_OUT")" in

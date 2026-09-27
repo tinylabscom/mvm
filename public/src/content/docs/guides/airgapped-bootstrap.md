@@ -78,25 +78,24 @@ store — is self-contained and carries no revocation list of its own.
 
 ## Provisioning the builder VM
 
-A `--flake` source still needs the builder VM's Nix toolchain, which
-ships as its own release artifact (the "builder pack") under a
-separate cosign/OIDC-based keyless trust model. That model does
-consult a [revocation list](verify-release#recall-revocation-list) —
-mvmctl caches it under `~/.mvm/cache/revocations/`, valid for 24 hours
-before refresh and tolerated up to 7 days stale when the network is
-unavailable; a 404 on the upstream URL is treated as "no recalls
-today," not an error.
+A `--flake` source still needs the builder VM's Nix toolchain. The
+builder image is a member of the signed image set this `mvmctl` pins
+(see [Verifying boot images](verify-release#verifying-boot-images-the-image-set)),
+under a keyless trust model that also consults a
+[revocation list](verify-release#recall-revocation-list) — mvmctl caches it
+under `~/.mvm/cache/revocations/`, valid for 24 hours before refresh and
+tolerated up to 7 days stale when the network is unavailable; a 404 on the
+upstream URL is treated as "no recalls today," not an error.
 
-On a connected host, fetch and verify the builder pack:
+On a connected host, fetch and verify the builder image:
 
 ```bash
-mvmctl pack download builder    # fetch + verify, don't activate
-mvmctl pack update builder      # fetch + verify + activate
+mvmctl bootstrap
 ```
 
 Carrying the resulting cache into a fully air-gapped host isn't a wired
 CLI flow today. If your source is `--flake`, that means the builder
-pack currently has to be fetched from a host that can reach the
+image currently has to be fetched from a host that can reach the
 network. Sources that don't need the builder VM at all — an OCI
 `--image`, or a sealed `.mvmpkg` bundle as above — remain fully
 air-gap-friendly once transferred.

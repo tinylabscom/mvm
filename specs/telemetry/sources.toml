@@ -236,12 +236,6 @@ reason = "Output pattern appears only inside a docstring example; the module its
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-agent"
-launcher = "nix/images/initramfs/flake.nix"
-anchor = "mvm-guest-agent"
-activation = "always"
-
-[[launch_edge]]
-producer = "mvm-agentd/mvm-guest-agent"
 launcher = "nix/lib/mk-guest.nix"
 anchor = "MVM_AGENT_BIN"
 activation = "always"
@@ -310,7 +304,7 @@ activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-display-bridge"
-launcher = "nix/images/runtime-overlay/flake.nix"
+launcher = "crates/mvm-build/src/runtime_overlay.rs"
 anchor = "display-bridge"
 activation = "on-demand"
 
@@ -328,8 +322,8 @@ activation = "legacy"
 
 [[launch_edge]]
 producer = "mvm-build/mvm-host-vm-init"
-launcher = "nix/images/builder-vm/flake.nix"
-anchor = "chain_init"
+launcher = "crates/mvm-cli/src/commands/env/builder_vm.rs"
+anchor = "mvm.chain_init=/sbin/mvm-host-vm-init"
 activation = "always"
 
 [[launch_edge]]
