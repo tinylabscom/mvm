@@ -970,6 +970,11 @@ mod tests {
             guest.contains("tinylabscom/mvm-images"),
             "the guest-image witness must consume the external image source"
         );
+        assert!(
+            guest.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
+            "the guest-image witness gates the merge queue, so it must build the image \
+             sources images.lock pins rather than mvm-images main"
+        );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
             guest.contains("nix build --rebuild"),

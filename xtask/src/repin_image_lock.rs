@@ -83,7 +83,7 @@ fn stage0_artifact(manifest: &ImageSetManifest, arch: GuestArch) -> Result<Membe
 
 /// Rewrite `lock` to pin the root in `bytes`, refusing a result the lock
 /// parser would not read back as exactly that pin.
-fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
+pub(crate) fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
     let pin = Pin::from_root(bytes)?;
     let tag = quoted(&pin.release_tag);
     let mut text = lock.to_string();
@@ -183,15 +183,18 @@ fn check_reads_back(text: &str, pin: &Pin) -> Result<()> {
     Ok(())
 }
 
+/// Published-shape image-set roots for tests that need a lock pinning one.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fixtures {
+    use std::fs;
+    use std::path::Path;
+
     use serde_json::json;
 
-    fn checked_in_lock() -> String {
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(LOCK))
-            .expect("read the checked-in lock")
-    }
+    use super::LOCK;
+
+    /// The producer commit every fixture root records.
+    pub(crate) const SOURCE_COMMIT: &str = "1b08fbc104d0a3e0ac9dd9d74ec5db3c38ff3f38";
 
     fn stage0_member(arch: &str, name: &str, sha: &str) -> serde_json::Value {
         json!({
@@ -224,7 +227,7 @@ mod tests {
                 "repository": "tinylabscom/mvm-images",
                 "workflow": ".github/workflows/release.yml",
                 "release_tag": tag,
-                "source_commit": "1b08fbc104d0a3e0ac9dd9d74ec5db3c38ff3f38"
+                "source_commit": SOURCE_COMMIT
             },
             "mvm_source_commit": "fa6d5c1b271382684f9387eed61850c299e1ade5",
             "compatibility": {"guest_agent_protocol": {"min": 2, "max": 3}, "builder_cache_contract": 5},
@@ -234,7 +237,14 @@ mod tests {
         .expect("serialize root")
     }
 
-    fn next_root() -> Vec<u8> {
+    /// The lock as checked in.
+    pub(crate) fn checked_in_lock() -> String {
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(LOCK))
+            .expect("read the checked-in lock")
+    }
+
+    /// A complete root one release ahead of anything the tests assume.
+    pub(crate) fn next_root() -> Vec<u8> {
         root(
             "image-set/v0.2.0",
             [
@@ -243,6 +253,12 @@ mod tests {
             ],
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{checked_in_lock, next_root};
+    use super::*;
 
     #[test]
     fn a_new_root_advances_every_route_consistently() {

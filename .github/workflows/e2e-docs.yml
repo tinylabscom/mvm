@@ -97,16 +97,6 @@ jobs:
       MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
-      # The SDK sidecar the service-plane scenarios load is built from this
-      # tree through the mvm-images recipe. It is checked out inside the
-      # workspace, not beside it, so no other step discovers it as an image
-      # checkout and every other image still comes from the pinned set.
-      - name: Check out mvm-images for the source-matched SDK sidecar
-        uses: actions/checkout@v6
-        with:
-          repository: tinylabscom/mvm-images
-          ref: main
-          path: .e2e-mvm-images
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
@@ -126,6 +116,29 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           key: e2e-docs-linux
+
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      #
+      # At the commit that produced the image set images.lock pins, never at
+      # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
+      # it was tagged because `main` had gained a manifest field this tree did
+      # not parse yet. The pair's `main`s are compared by the non-blocking
+      # `image-pair.yml` canary instead.
+      - name: Resolve the mvm-images commit images.lock pins
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: .e2e-mvm-images
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -295,16 +308,6 @@ jobs:
       MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
-      # The SDK sidecar the service-plane scenarios load is built from this
-      # tree through the mvm-images recipe. It is checked out inside the
-      # workspace, not beside it, so no other step discovers it as an image
-      # checkout and every other image still comes from the pinned set.
-      - name: Check out mvm-images for the source-matched SDK sidecar
-        uses: actions/checkout@v6
-        with:
-          repository: tinylabscom/mvm-images
-          ref: main
-          path: .e2e-mvm-images
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -319,6 +322,29 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           key: e2e-docs-macos
+
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      #
+      # At the commit that produced the image set images.lock pins, never at
+      # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
+      # it was tagged because `main` had gained a manifest field this tree did
+      # not parse yet. The pair's `main`s are compared by the non-blocking
+      # `image-pair.yml` canary instead.
+      - name: Resolve the mvm-images commit images.lock pins
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: .e2e-mvm-images
 
       - name: Set up Node
         uses: actions/setup-node@v6
