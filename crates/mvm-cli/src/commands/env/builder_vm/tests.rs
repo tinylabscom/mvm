@@ -778,20 +778,7 @@ mod reap_orphans_tests {
 
 #[cfg(all(test, feature = "builder-vm"))]
 mod heartbeat_tests {
-    use super::{format_compile_elapsed, format_compile_start};
-    use std::time::Duration;
-
-    #[test]
-    fn format_compile_elapsed_renders_minutes_and_seconds() {
-        assert_eq!(
-            format_compile_elapsed(Duration::from_secs(5)),
-            "still compiling… (0m05s elapsed)"
-        );
-        assert_eq!(
-            format_compile_elapsed(Duration::from_secs(130)),
-            "still compiling… (2m10s elapsed)"
-        );
-    }
+    use super::format_compile_start;
 
     #[test]
     fn compile_start_message_avoids_a_false_fixed_duration_promise() {

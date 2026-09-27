@@ -619,6 +619,10 @@ fn build_runtime_overlay_from_source_checkout(
             .map_err(|e| RuntimeOverlayError::NixBuildFailed {
                 reason: format!("compute runtime-overlay source fingerprint: {e}"),
             })?;
+    let phase = mvm_vmm::host::ui::activity::start(format!(
+        "Compiling the {arch} runtime overlay from local sources (cached for this checkout \
+         afterward)"
+    ));
     let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
         cache_root,
         version,
@@ -631,6 +635,7 @@ fn build_runtime_overlay_from_source_checkout(
     let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
     write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
     write_local_build_epoch(cache_root, version, arch)?;
+    phase.finish();
     Ok(artifact)
 }
 

@@ -256,6 +256,9 @@ fn build_initramfs_with_cargo(
             reason: format!("fingerprint guest sources: {e}"),
         }
     })?;
+    let phase = mvm_vmm::host::ui::activity::start(format!(
+        "Building the {arch} universal initramfs from local sources"
+    ));
     let binaries = crate::guest_agent_build::resolve_or_build_guest_binaries(
         cache_root, &cache_key, arch, &workspace,
     )
@@ -266,7 +269,9 @@ fn build_initramfs_with_cargo(
 
     let staging = tempfile::tempdir()?;
     assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
-    install_initramfs_into_cache(staging.path(), cache_root, version, arch)
+    let installed = install_initramfs_into_cache(staging.path(), cache_root, version, arch)?;
+    phase.finish();
+    Ok(installed)
 }
 
 /// Write the four artifact files (image + sidecars) for `agent_bytes` into

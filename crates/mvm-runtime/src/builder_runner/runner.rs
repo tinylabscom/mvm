@@ -17,6 +17,7 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
 
+use super::console_progress::{BuildConsoleProgress, TerminalSink};
 use super::halt_watch::ConsoleHaltWatch;
 use super::spec::{BuilderSpecInputs, Stage0SpecInputs, builder_spec, stage0_spec};
 use crate::driver::{VmmDriver, VmmSpec};
@@ -88,15 +89,21 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
     /// Pack the inputs onto the input disk, boot the builder VM, wait for it to
     /// finish, and extract the artifact tar off the output disk.
     pub fn build(&self, b: &BuilderBuild<'_>) -> Result<BuilderOutcome> {
+        let mut progress = BuildConsoleProgress::start(
+            "Builder VM: running the in-guest nix build",
+            crate::ui::is_verbose(),
+        );
         let transport = BootTransport::stage(b.name)?;
 
         // A source checkout's work tree may contain tens of GiB of local build
         // state. Keep it out of the raw transport disk using the same filtering
         // contract as the other disk-backed builder path.
+        progress.host_step("staging the source tree");
         let work_staging = stage_filtered_work_input(b.work_src)?;
 
         // Pack {job, filtered work, mvm-bins} onto the input disk; the guest
         // extracts it.
+        progress.host_step("packing the input disk");
         pack_input_disk(
             &[
                 InputTree {
@@ -137,7 +144,9 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             memory_mib: b.memory_mib,
         });
 
-        self.run_to_completion(&spec, &transport)
+        let outcome = self.run_to_completion(&spec, &transport, &mut progress)?;
+        progress.finish();
+        Ok(outcome)
     }
 
     /// Bootstrap a builder VM from the Nix seed — Stage 0.
@@ -152,13 +161,19 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
     /// Stage 0 through here: the previous shape had a separate hand-written
     /// body per VMM, and a backend without one simply could not bootstrap.
     pub fn stage0(&self, s: &Stage0Run<'_>) -> Result<BuilderOutcome> {
+        let mut progress = BuildConsoleProgress::start(
+            "Stage 0 VM: running the in-guest nix build",
+            crate::ui::is_verbose(),
+        );
         let transport = BootTransport::stage(s.name)?;
 
+        progress.host_step("staging the source tree");
         let work_staging = stage_filtered_work_input(s.workspace_src)?;
 
         // `conf` rather than `job`: Stage 0 is not handed a rendered `cmd.sh`,
         // it is handed `stage0-build.conf` naming the flake attr and output
         // mode. The guest reads it off the input disk.
+        progress.host_step("packing the input disk");
         pack_input_disk(
             &[
                 InputTree {
@@ -198,7 +213,9 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             memory_mib: s.memory_mib,
         });
 
-        self.run_to_completion(&spec, &transport)
+        let outcome = self.run_to_completion(&spec, &transport, &mut progress)?;
+        progress.finish();
+        Ok(outcome)
     }
 
     /// Spawn the egress endpoint, boot, wait for power-off, and read the output
@@ -212,6 +229,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         &self,
         spec: &VmmSpec,
         transport: &BootTransport,
+        progress: &mut BuildConsoleProgress<TerminalSink>,
     ) -> Result<BuilderOutcome> {
         let builder_policy = NetworkPolicy::trusted_build_egress();
         spawn_network_endpoint(SubstitutionSpawnParams {
@@ -235,6 +253,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         })?;
         let mut endpoint_guard = EndpointGuard::new(&transport.name);
 
+        progress.host_step("booting the VM");
         let vm = self.driver.boot(spec)?;
         // A builder is run-to-completion: the guest powers off after the job, and
         // `status()` flips to Stopped/Failed when the supervisor drops its PID
@@ -250,7 +269,9 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                 stopped = true;
                 break;
             }
-            if halt_watch.guest_halted() {
+            let polled = halt_watch.poll();
+            progress.observe(&polled.lines);
+            if polled.halted {
                 tracing::info!(vm = %transport.name, "builder guest halted; stopping its VMM");
                 vm.kill().context("stopping a halted builder VM")?;
                 stopped = true;
@@ -259,7 +280,11 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             std::thread::sleep(Duration::from_millis(500));
         }
 
+        // Lines written between the last poll and power-off.
+        progress.observe(&halt_watch.poll().lines);
+
         // The guest wrote a tar onto the output disk; extract it host-side.
+        progress.host_step("extracting the build output");
         let output_dir = transport.state_dir.join("out");
         read_output_disk(&transport.output_disk, &output_dir)?;
         endpoint_guard.defuse();

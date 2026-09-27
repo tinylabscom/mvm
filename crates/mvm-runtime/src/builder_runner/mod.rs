@@ -4,6 +4,7 @@
 //! egress endpoint, no virtio-fs. `spec` is pure (unit-testable without a VM);
 //! `runner` owns the disk prep + VM lifecycle.
 
+mod console_progress;
 pub mod driver_builder;
 mod halt_watch;
 pub mod hvf_persistent;

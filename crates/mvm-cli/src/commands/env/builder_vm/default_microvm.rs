@@ -207,9 +207,7 @@ pub(super) fn default_workload_kernel_source_for(
 
 #[cfg(feature = "builder-vm")]
 fn build_local_workload_kernel() -> Result<String> {
-    ui::notice(
-        "Preparing the workload kernel using the Stage 0 builder. The first source build can take several minutes; the persistent Nix store and finished kernel are reused afterward.",
-    );
+    // `build_kernel_via_stage0` announces itself with a live status line.
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
         .context(
             "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
@@ -294,7 +292,12 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
 }
 
 fn download_workload_kernel(arch: &str, dest: &std::path::Path) -> Result<()> {
-    crate::update::download_kernel(arch, "workload", dest)
+    let phase = mvm_runtime::ui::activity::start(format!(
+        "Downloading the published workload kernel ({arch})"
+    ));
+    crate::update::download_kernel(arch, "workload", dest)?;
+    phase.finish();
+    Ok(())
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {
