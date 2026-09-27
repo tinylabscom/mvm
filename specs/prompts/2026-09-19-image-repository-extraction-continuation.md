@@ -132,6 +132,25 @@ mvmctl's own payload. Three agreed interfaces, as of 2026-09-25:
 
 ## Traps this session hit
 
+- **An unqueued PR is not held.** mvm-images#31 was opened deliberately without
+  auto-merge, because it could not land before mvm learned to parse the field it
+  emits. Something on this host added it straight to the merge queue anyway, 40
+  minutes later, under the same GitHub account. It merged, every manifest
+  mvm-images writes became unparseable to the mvm under test, and the v0.18.0
+  release gate failed on the macOS and Linux documented-surface lanes. If a
+  change must not land yet, push the branch and open no PR at all. Reverting
+  took a second PR through a queue that was starved of runners: the merge-group
+  jobs sat queued for 40 minutes behind the PR's own duplicate build jobs, and
+  cancelling those was what let the revert through.
+- **Nothing distinguishes the sessions working here.** Same GitHub account, same
+  commit author on every commit in both repositories, and a merge queue that
+  accepts anything green. One session credited another session's commit to this
+  one; ownership of an active branch could only be established by messaging four
+  sessions and asking. Before assigning or rebasing work on a branch you did not
+  create, ask who owns it.
+- **Two sessions independently planned to cut the same release tag.** Neither
+  knew about the other until a third asked both. A tag push fires the release
+  workflow immediately, so that race is expensive and invisible until it runs.
 - **Do not stack a PR on another open PR in this repo.** The merge queue put
   the child ahead of the parent, and the child carried a stale copy of the
   parent's commit. W5d then merged its whole stack, and the parent PR had to
