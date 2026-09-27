@@ -870,11 +870,14 @@ Taken on 2026-09-24.
 2. **Schema field.** The boot ABI gets its own `builder_boot_abi` field in the
    signed image-set `[compatibility]` section, so a Nix-only change can bump
    `builder_cache_contract` without claiming an ABI change.
-   - Landed on the `mvm` side: `ImageSetCompatibility::builder_boot_abi`
-     (`Option<BuilderBootAbi>`), `HostProtocolSupport::builder_boot_abi` (the
-     range this host boots: `0..=1` with a registered payload source,
-     `0..=0` without), refusal of an ABI outside that range at acquisition,
-     and `xtask repin-image-lock` copying the field into `images.lock`. A
+   - Landed on the `mvm` side in #3776, ahead of the payload because
+     mvm-images#31 landed early and broke every pair build with
+     `unknown field builder_boot_abi`: `ImageSetCompatibility::builder_boot_abi`
+     (`Option<BuilderBootAbi>`), `HostProtocolSupport::builder_boot_abi`,
+     refusal of an ABI outside the host's range at acquisition, and
+     `xtask repin-image-lock` copying the field into `images.lock`. #3776's
+     host range is `0..=0`; the payload branch makes it `0..=1` when a payload
+     source is registered and leaves `0..=0` without one. A
      **release** set without the field means ABI 0 (published before it
      existed). A **local** set without it also reads as ABI 0 for
      now. `ImageSetCompatibility` denies unknown fields, so `mvm` has to know

@@ -43,9 +43,11 @@ side of the `builder_boot_abi` image-set field.
   #3774, which would have failed every flake build on an ABI 1 image.
 - **The payload manifest moved** to `crates/mvm-build/src/host_payload_manifest.rs`,
   so `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone.
-- **Image sets** carry `builder_boot_abi`. A set without it means ABI 0, local
-  or release, until mvm-images#31 makes the emitter write it; W8a then refuses
-  a local set that omits it.
+- **Image sets** carry `builder_boot_abi` (the schema landed on its own in
+  #3776). A set without it means ABI 0, local or release, until mvm-images#31
+  makes the emitter write it; W8a then refuses a local set that omits it.
+  With a payload source registered, `mvmctl` boots sets declaring 0 or 1;
+  without one, only 0.
 - **ADR-004** records the builder boot contract; ADR-030 and ADR-018 point at it.
 
 ## What did not change, and why
