@@ -65,13 +65,22 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     if let Some(checkout) = selected_local_checkout()? {
         return bootstrap_builder_vm_image_from_local_pair(&checkout);
     }
-    use mvm_build::boot_image_select::{BootImageAcquisition, resolve_env_override};
-    if resolve_env_override() == Some(BootImageAcquisition::Build) {
+    refuse_a_local_builder_build(mvm_build::boot_image_select::resolve_env_override())?;
+    bootstrap_tool_builder_vm_image()
+}
+
+/// Without a checkout there is nothing to build the builder image from, so a
+/// caller that forces a local build is refused rather than handed the fetched
+/// image it asked not to have.
+fn refuse_a_local_builder_build(
+    acquisition: Option<mvm_build::boot_image_select::BootImageAcquisition>,
+) -> Result<()> {
+    if acquisition == Some(mvm_build::boot_image_select::BootImageAcquisition::Build) {
         return Err(
             mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into(),
         );
     }
-    bootstrap_tool_builder_vm_image()
+    Ok(())
 }
 
 /// The local image checkout the selector names, if that is the selected
@@ -701,5 +710,32 @@ pub(in crate::commands) mod attested_builder_pack {
         )
         .context("writing synthesized builder pack manifest.json")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod forced_build_tests {
+    use super::refuse_a_local_builder_build;
+    use mvm_build::boot_image_select::BootImageAcquisition;
+
+    #[test]
+    fn a_forced_builder_build_without_a_checkout_is_refused() {
+        let rendered = format!(
+            "{:#}",
+            refuse_a_local_builder_build(Some(BootImageAcquisition::Build))
+                .expect_err("there is no source to build the builder image from")
+        );
+
+        assert!(rendered.contains("the builder VM image"), "{rendered}");
+        assert!(
+            rendered.contains("image construction lives in mvm-images"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn fetching_or_an_unset_override_goes_on_to_the_published_builder() {
+        refuse_a_local_builder_build(Some(BootImageAcquisition::Fetch)).unwrap();
+        refuse_a_local_builder_build(None).unwrap();
     }
 }
