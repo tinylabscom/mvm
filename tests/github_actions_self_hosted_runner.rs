@@ -106,10 +106,17 @@ fn push_section(text: &str) -> Option<Vec<String>> {
     )
 }
 
-/// Whether a workflow places a job on the runner by label.
+/// Whether a workflow places a job on the runner by label: in `runs-on:`
+/// itself, or in the matrix `runner:` value a `runs-on: ${{ matrix.runner }}`
+/// job expands.
 fn targets_runner(text: &str) -> bool {
     text.lines().any(|line| {
-        let Some(value) = line.trim_start().strip_prefix("runs-on:") else {
+        let line = line.trim_start();
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        let Some(value) = line
+            .strip_prefix("runs-on:")
+            .or_else(|| line.strip_prefix("runner:"))
+        else {
             return false;
         };
         value
@@ -188,6 +195,11 @@ fn no_untrusted_event_can_place_a_job_on_the_self_hosted_runner() {
         "the macOS documented-surface lane must target the `{RUNNER_LABEL}` runner; \
          if it moved, this test is no longer guarding it"
     );
+    assert!(
+        reaching.contains("first-run-smoke.yml") && reaching.contains("release.yml"),
+        "the macOS first-run lane must target the `{RUNNER_LABEL}` runner through its \
+         matrix, and the release that calls it must be seen to reach it"
+    );
 
     let violations: Vec<String> = all
         .iter()
@@ -227,6 +239,16 @@ fn a_push_to_any_branch_is_refused_and_tags_or_main_are_not() {
 fn schedules_dispatch_and_reusable_calls_are_trusted() {
     let text = "on:\n  schedule:\n    - cron: \"0 0 * * *\"\n  workflow_dispatch:\n  workflow_call:\njobs:\n";
     assert_eq!(untrusted_reach(text), None);
+}
+
+#[test]
+fn a_matrix_runner_value_is_a_runner_target() {
+    assert!(targets_runner(
+        "jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - runner: [self-hosted, m1]\n    runs-on: ${{ matrix.runner }}\n"
+    ));
+    assert!(!targets_runner(
+        "jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - runner: ubuntu-latest\n    runs-on: ${{ matrix.runner }}\n"
+    ));
 }
 
 #[test]

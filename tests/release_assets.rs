@@ -30,6 +30,14 @@ fn release_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+/// The first-run lanes `release.yml` calls after publishing a tag, and a
+/// maintainer dispatches against a candidate before tagging.
+fn first_run_smoke_workflow() -> String {
+    let path = Path::new(".github/workflows/first-run-smoke.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 /// The boot image train's workflow. The four image jobs live here, not in
 /// `release.yml`: images ship on their own `boot-image/vN` counter so a rootfs
 /// fix does not need a CLI release.
@@ -1716,20 +1724,41 @@ fn every_tag_is_published_as_a_prerelease_until_it_is_promoted() {
 fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
     let workflow = release_workflow();
 
-    let smoke = job_block(&workflow, "first-run-smoke");
+    let gate = job_block(&workflow, "first-run-smoke");
     assert!(
-        smoke.contains("    needs: [verify-release]\n"),
+        gate.contains("    needs: [verify-release]\n"),
         "the smoke must wait for verify-release, which waits for the kernels a \
          first run downloads"
     );
     assert!(
-        smoke.contains("github.event_name == 'push' && needs.verify-release.result == 'success'"),
+        gate.contains("github.event_name == 'push' && needs.verify-release.result == 'success'"),
         "the smoke runs for a pushed tag whose asset set verified"
     );
     assert!(
+        gate.contains("    uses: ./.github/workflows/first-run-smoke.yml\n")
+            && gate.contains("      tag: ${{ github.ref_name }}\n"),
+        "the release must run the shared first-run lanes against exactly the \
+         tag being released"
+    );
+
+    let lanes = first_run_smoke_workflow();
+    let lanes_on = lanes
+        .split("\npermissions:")
+        .next()
+        .expect("first-run-smoke.yml has an `on:` block");
+    assert!(
+        lanes_on.contains("  workflow_call:\n")
+            && lanes_on.contains("  workflow_dispatch:\n")
+            && lanes_on.matches("      tag:\n").count() == 2
+            && lanes_on.matches("        required: true\n").count() == 2,
+        "the lanes must be callable by the release and dispatchable against a \
+         published candidate, each with a required tag"
+    );
+    let smoke = job_block(&lanes, "first-run-smoke");
+    assert!(
         smoke.contains(r#"run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}""#)
-            && smoke.contains("TAG_NAME: ${{ github.ref_name }}"),
-        "the smoke must install exactly the tag being released"
+            && smoke.contains("TAG_NAME: ${{ inputs.tag }}"),
+        "the smoke must install exactly the tag it was given"
     );
     let e2e = fs::read_to_string(".github/workflows/e2e-docs.yml").expect("e2e-docs workflow");
     let macos_runner = "runs-on: [self-hosted, macOS, ARM64, m1]";

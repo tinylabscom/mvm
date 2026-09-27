@@ -968,51 +968,15 @@ jobs:
   #
   # Both backends a new user boots: HVF on the self-hosted Apple Silicon
   # runner `e2e-docs` uses (no hosted macOS runner can boot a guest), and
-  # Firecracker on a hosted Linux runner with KVM.
+  # Firecracker on a hosted Linux runner with KVM. The lanes live in
+  # first-run-smoke.yml so they can be dispatched against a release candidate
+  # before a tag depends on them.
   first-run-smoke:
-    name: First run after a fresh install (${{ matrix.lane }})
     needs: [verify-release]
     if: ${{ github.event_name == 'push' && needs.verify-release.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: macOS, HVF
-            runner: [self-hosted, macOS, ARM64, m1]
-            artifact: first-run-macos-hvf
-          - lane: Linux, Firecracker
-            runner: ubuntu-latest
-            artifact: first-run-linux-firecracker
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-
-      # What `install/linux.md` asks of a user: write access to /dev/kvm.
-      - name: Grant /dev/kvm access for the job
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          if [ ! -e /dev/kvm ]; then
-            echo "::error::/dev/kvm missing on this runner — a first run cannot boot here." >&2
-            exit 1
-          fi
-          sudo chmod 666 /dev/kvm
-
-      - name: Install the tag as a new user and run the first command
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-          MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
-        run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
-
-      - name: Upload the transcript
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/first-run
-          if-no-files-found: warn
-          retention-days: 30
+    uses: ./.github/workflows/first-run-smoke.yml
+    with:
+      tag: ${{ github.ref_name }}
 
   # The only step that makes a release reach users who did not ask for it:
   # GitHub's latest marker (`mvmctl update`), install.sh's default (the newest
