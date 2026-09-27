@@ -40,6 +40,16 @@ leaves the tag staged; the fix ships as a new tag. The same check runs locally
 with `just smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
 alone.
 
+The lanes live in `.github/workflows/first-run-smoke.yml`, which `release.yml`
+calls. To prove them on the real runners before a tag depends on them,
+dispatch that workflow against a published tag:
+`gh workflow run first-run-smoke.yml --ref main -f tag=v0.18.0-rc.1`. The
+installer and the smoke script come from the dispatched ref; the binaries and
+artifacts come from the tag. That exercises the runners, the installer, and
+that tag's first run. It does not exercise code that has not been released yet:
+for that, tag a release candidate, which runs the same lanes and stays a
+prerelease.
+
 ## How each install path consumes a release
 
 | Path | What it pulls |
