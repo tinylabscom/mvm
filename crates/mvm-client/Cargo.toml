@@ -12,6 +12,9 @@ license.workspace = true
 # never gains an `mvm-runtime` edge — that is what lets `mvm-sdk` enable
 # `mvm-core/client` for the trait without dragging the backend into a cycle.
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM approval endpoint broker (host-local Unix socket)"
+
 [features]
 default = []
 # Build as the release channel: the runtime overlay defaults to the published
