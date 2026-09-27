@@ -1339,3 +1339,25 @@ fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
         "the boot log dump must be armed before the installed-bundle run"
     );
 }
+
+/// The runtime-SDK scenarios load the host library the SDK finds beside
+/// `mvmctl`, and nothing else in the suite builds it.
+#[test]
+fn documented_surface_builds_the_sdk_host_library_beside_mvmctl() {
+    let script = documented_surface_script();
+
+    let hostlib = script
+        .find("cargo build -p mvm-hostlib")
+        .expect("the suite must build the SDK host library");
+    let embedded = script
+        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"")
+        .expect("the embedded mvmctl build");
+    assert!(
+        embedded < hostlib,
+        "the library is built into the same target directory after mvmctl"
+    );
+    assert!(
+        script.contains("-name libmvm_hostlib.so -o -name libmvm_hostlib.dylib"),
+        "a missing host library must fail the run before the suite starts"
+    );
+}
