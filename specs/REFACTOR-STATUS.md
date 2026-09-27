@@ -51,7 +51,7 @@ Last updated: 2026-09-26
   - [ ] PS-18 docs per capability and per agent — #3727
   - [ ] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
-  - [ ] PS-21 CLI thin over `mvm-client` — #3730
+  - [x] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by

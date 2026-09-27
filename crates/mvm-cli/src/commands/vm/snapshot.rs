@@ -1,14 +1,13 @@
 //! `mvmctl snapshot ls / rm` — inspect and remove sealed instance snapshots.
 //!
-//! Sits beside `pause`/`resume`, which produce the sealed snapshots this browses.
-//! These are a read/delete surface over `~/.mvm/instances/*/snapshot/`, not the
-//! pause/resume lifecycle op, so they reach the snapshot store directly rather
-//! than through the machine-lifecycle facade.
+//! Sits beside `pause`/`resume`, which produce the sealed snapshots this
+//! browses. The store access itself lives in `mvm_client::snapshot` so the
+//! CLI and the host library share one implementation (and one audit
+//! entry); this file is clap args plus table/JSON rendering.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
 
-use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -51,7 +50,7 @@ pub(in crate::commands) fn run_snapshot(
 }
 
 fn snap_ls(json: bool) -> Result<()> {
-    let entries = mvm_runtime::vm::instance_snapshot::list_instance_snapshots()?;
+    let entries = mvm_client::snapshot::list_instance_snapshots()?;
     if json {
         #[derive(serde::Serialize)]
         struct Row<'a> {
@@ -104,15 +103,9 @@ struct SnapshotRemoveJson<'a> {
 }
 
 fn snap_rm(name: &str, json: bool) -> Result<()> {
-    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let removed = mvm_runtime::vm::instance_snapshot::delete_instance_snapshot(name)?;
+    let removed = mvm_client::snapshot::remove_instance_snapshot(name)?;
     if !removed {
         bail!("no snapshot found for VM {:?}", name);
-    }
-    let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
-        let _ = registry.set_paused(name, false);
-        let _ = registry.save(&registry_path);
     }
     if json {
         crate::json_out::emit_json(&SnapshotRemoveJson {
@@ -124,6 +117,5 @@ fn snap_rm(name: &str, json: bool) -> Result<()> {
     } else {
         println!("{}: snapshot removed", name);
     }
-    mvm_core::audit_emit!(SnapshotDelete, vm: name);
     Ok(())
 }
