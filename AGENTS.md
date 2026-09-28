@@ -251,6 +251,27 @@ round-trips where a single event-driven wait would do.
 If you catch yourself typing `sleep` before a check, stop: name the condition
 you are waiting for and pick the matching primitive from the Waiting Model.
 
+## Test Failure Loop: Scoped by Default
+
+The debugging loop is **scoped**: `just test-scoped <crate> <filter>` → read
+the failure → fix → `just test-scoped <crate> <filter>` again. The
+full-workspace sweep (`just test`, `cargo test --workspace`) runs **once**
+before declaring a task done — it is a pre-merge/CI gate, not a debugging
+tool.
+
+Running the whole workspace after every edit to see whether it still fails
+is the expensive anti-pattern: sampled transcripts show 673
+`cargo test --workspace` mentions across 22 Claude sessions, many
+immediately after a failure where a single filtered test would have
+answered the question in seconds. Even a *filtered* workspace run
+(`just test <filter>`) still builds and links every crate in the tree;
+`test-scoped` limits compilation to the crate under edit, which is what
+keeps the edit→test loop fast.
+
+Pair this with Retry Discipline: a scoped test that fails gets one change
+and one scoped re-run — never an unscoped sweep used as a substitute for
+reading the error.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:
