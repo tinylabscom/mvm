@@ -7,7 +7,9 @@ Last updated: 2026-09-27
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
       microVM / vsock / signed-plan security core and close every
-      product-surface gap on top of it. One issue per workstream:
+      product-surface gap on top of it. Resume from the plan's "Execution
+      log and handoff" section (landed PRs, open PRs, decisions, known
+      defects). One issue per workstream:
   - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
     - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
     - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
