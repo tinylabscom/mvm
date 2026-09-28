@@ -1364,6 +1364,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signing_smoke_keeps_pack_inputs_outside_output_directory() {
+        let smoke = workflow("pack-signing-smoke.yml").replace("\\\n", " ");
+        let mut producers = 0;
+        for invocation in smoke.split("cargo run").skip(1) {
+            let command = invocation.lines().next().unwrap();
+            if !command.contains("mvm-builder-pack-tool") {
+                continue;
+            }
+            producers += 1;
+            let args: Vec<_> = command.split_whitespace().collect();
+            let output = args.windows(2).find(|pair| pair[0] == "--out-dir").unwrap()[1];
+            for flag in ["--vmlinux", "--rootfs", "--verity", "--roothash"] {
+                if let Some(pair) = args.windows(2).find(|pair| pair[0] == flag) {
+                    assert_ne!(
+                        std::path::Path::new(pair[1]).parent(),
+                        Some(std::path::Path::new(output)),
+                        "{flag} must not copy a pack input onto itself"
+                    );
+                }
+            }
+        }
+        assert_eq!(producers, 2, "both pack producers must be checked");
+    }
+
     /// Claim 3's `ci:` witness and its no-SSH companion assert properties of
     /// the image every installed mvmctl boots, which is built in mvm-images.
     /// So each must fetch the runtime overlay the lock pins and verify it the

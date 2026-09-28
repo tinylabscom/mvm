@@ -4795,3 +4795,11 @@ writes the plan:
       path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
       collection gate).
 
+
+## 2026-09-28 Pack signing smoke — #3794
+
+- [x] Reproduce and remove the pack input/output collision; focused Cargo test,
+      actionlint and host workspace Clippy pass.
+- [ ] Complete workspace and Linux builder validation, live signing, merge and closure.
+
+See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
