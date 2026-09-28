@@ -3,7 +3,13 @@
 Backing: shipped-source
 Validation: transcript-reanalysis
 
-**Status:** IN PROGRESS — Phase 1 complete; Phases 2–10 not started.
+**Status:** AGREEMENTS LANDED — Phases 1–10 implemented on
+`chore/agent-efficiency-overhaul`. All AGENTS.md working agreements, the
+`mvm_run` guard + failure journal, the `test-scoped` recipe, the
+reproducible analysis script, and the Codex reasoning-effort change are in.
+Remaining: scheduled re-measurements (2.4, 3.3, 4.4, 5.3, 6.3, 7.3, 8.3,
+9.3, 10.3) — re-run `scripts/agent-transcript-analysis.py 60` on fresh
+transcripts ~2 weeks after merge and compare against recorded baselines.
 
 ## Problem
 
