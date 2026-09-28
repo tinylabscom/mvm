@@ -1278,6 +1278,7 @@ impl LaunchResolveMarks {
     }
 }
 
+#[cfg(test)]
 fn prepare_then_admit<T>(
     prepare: impl FnOnce() -> Result<()>,
     admit: impl FnOnce() -> Result<T>,
