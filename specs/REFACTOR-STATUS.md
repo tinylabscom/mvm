@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
 
@@ -3959,3 +3959,13 @@ resume` takes a `current_head` and refuses when it differs from the
                   image; `nix/images/` is deleted.
             - [x] Release decoupling: image-set members are cached by the
                   pinned root, so a CLI version bump needs no image rebuild.
+            - [x] Re-measure on v0.18.3 recorded honestly (delivery note
+                  3366-w8-remeasure): no image bytes in the release (10
+                  assets, ~55 MiB vs rc.2's 78/~1.66 GiB), the
+                  ≥25-minute gate is missed because the lane still
+                  pair-builds the SDK sidecar and dev image, and the plan
+                  stays open with
+                  specs/plans/2026-09-27-release-e2e-under-image-target.md
+                  carrying the work. Parent W6's boot box ticked: the
+                  v0.2.1 pack boots on HVF, libkrun, Firecracker and QEMU
+                  across aarch64 and x86_64.
