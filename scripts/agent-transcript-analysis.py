@@ -33,10 +33,10 @@ def pct(a, b):
 
 def sample_files(root, n):
     files = []
-    for dp, _, fns in os.walk(os.path.expanduser(root)):
         for fn in fns:
             if fn.endswith(".jsonl"):
                 files.append(os.path.join(dp, fn))
+    files.sort()
     random.shuffle(files)
     return files[:n]
 
