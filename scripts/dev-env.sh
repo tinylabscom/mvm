@@ -113,6 +113,17 @@ mvm_run() {
     if [ "${_mvm_run_rc}" -ne 0 ]; then
         mkdir -p "${dev_state_root}"
         printf '%s' "${_mvm_run_key}" > "${_mvm_run_state}"
+        # Failure journal: append every failure. At 3+ failures the reminder
+        # enforces the recovery discipline — a session that has failed three
+        # times on one task is guessing, and must write down what failed,
+        # why, and the next single change before attempting again.
+        _mvm_run_journal="${dev_state_root}/failure-journal.log"
+        printf '%s rc=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u)" "${_mvm_run_rc}" "${_mvm_run_key}" >> "${_mvm_run_journal}"
+        _mvm_run_fails=$(wc -l < "${_mvm_run_journal}" | tr -d ' ')
+        if [ "${_mvm_run_fails}" -ge 3 ]; then
+            printf 'mvm_run: %s recorded failures — stop and write the failure journal before the next attempt:\n' "${_mvm_run_fails}" >&2
+            printf 'mvm_run:   what failed / why / next single change → %s\n' "${_mvm_run_journal}" >&2
+        fi
     else
         rm -f "${_mvm_run_state}"
     fi

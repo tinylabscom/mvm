@@ -103,6 +103,29 @@ esac
 check "secret-bearing retry is refused without echoing the secret" 1 1 \
     "${secret_retry}"
 
+# Failure journal: distinct failing commands accumulate; at 3+ failures the
+# guard reminds the caller to write the journal before the next attempt.
+s4="${TMP}/journal"; mkdir -p "${s4}"
+got="$(run_mvm "${s4}" sh -c 'exit 11')"
+got_rc="${got%%$'\t'*}"; got_err="${got##*$'\t'}"
+[ "${got_rc}" = "11" ] && [ "${got_err}" = "" ] || { echo "FAIL: journal case 1 rc=${got_rc} err=${got_err}"; failures=$((failures + 1)); }
+run_mvm "${s4}" sh -c 'exit 12' >/dev/null || true
+got="$(run_mvm "${s4}" sh -c 'exit 13')"
+if printf '%s' "${got}" | grep -q "failure journal" && [ "$(wc -l < "${s4}/failure-journal.log" | tr -d ' ')" = "3" ]; then
+    printf 'ok   third failure triggers the journal reminder and logs all three\n'
+else
+    printf 'FAIL journal: got %s, log lines: %s\n' "${got}" "$(wc -l < "${s4}/failure-journal.log" 2>/dev/null)"
+    failures=$((failures + 1))
+fi
+# A success does not append to the journal.
+run_mvm "${s4}" true >/dev/null
+if [ "$(wc -l < "${s4}/failure-journal.log" | tr -d ' ')" = "3" ]; then
+    printf 'ok   success does not append to the failure journal\n'
+else
+    echo "FAIL: success appended to the journal"
+    failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
     printf '%d gate test(s) failed\n' "${failures}" >&2
     exit 1

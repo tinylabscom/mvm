@@ -717,3 +717,14 @@ For `mvmctl`/cargo one-offs, use `mvm_run <cmd>` (defined by
 `.mvm-test/last-failed-cmd` and refuses an immediate identical re-run. After
 genuinely diagnosing, clear the marker (`rm .mvm-test/last-failed-cmd`) or
 run the changed command, which clears it automatically on success.
+
+**Failure journal.** Error clustering is the second-largest observed waste:
+33 of 40 sampled Kimi sessions accumulated 5+ tool errors, meaning retries
+without diagnosis are the norm, not the exception. `mvm_run` appends every
+failure to `.mvm-test/failure-journal.log` and, at 3+ recorded failures,
+reminds you to stop and write the journal before the next attempt — three
+lines: what failed / why / next single change. At that point you are
+guessing; the journal forces the guess to become a hypothesis. Even outside
+`mvm_run`, adopt the same rule manually: 3 failures on one task ⇒ write the
+three lines before attempt 4. If the "why" is the same twice in a row, the
+hypothesis is wrong — change strategy, not just the command.

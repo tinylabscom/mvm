@@ -4843,3 +4843,7 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
       from `high` to `medium` (N=60 baseline was 380 reasoning items/session);
       AGENTS.md "Reasoning Budget: Think, Then Act" agreement — one reasoning
       turn per decision point, action after 2 consecutive reasoning turns.
+- [x] Phase 7 recovery discipline: `mvm_run` failure journal
+      (`.mvm-test/failure-journal.log`) with 3-failure reminder; AGENTS.md
+      rule extended with the manual equivalent and the "same why twice ⇒
+      change strategy" tripwire. Guard tests: 9 checks green.

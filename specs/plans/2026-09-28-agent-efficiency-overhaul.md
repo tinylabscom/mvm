@@ -166,15 +166,21 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 7 — Recovery discipline (diagnose → change one thing → scoped re-run)
 
-- [ ] **7.1 Codify the recovery sequence** in `AGENTS.md` (extends 1.1 to
+- [x] **7.1 Recovery sequence codified** in `AGENTS.md` (extends 1.1 to
   non-identical retries): full error read, root-cause hypothesis, single
   change, scoped verification. Error clustering (33/40 Kimi sessions with
   ≥5 errors) shows retries without diagnosis are the norm.
-- [ ] **7.2 Failure journal per long session:** when a session accumulates
-  3+ failures on one task, the agent must write a 3-line failure journal
-  (what failed / why / next single change) before the next attempt.
+- [x] **7.2 Failure journal shipped.** `mvm_run` appends every failure to
+  `.mvm-test/failure-journal.log`; at 3+ failures it prints a reminder with
+  the journal path before the next attempt. AGENTS.md adopts the same rule
+  manually for non-`mvm_run` work: 3 failures on one task ⇒ write the three
+  lines before attempt 4, and if the "why" repeats twice, change strategy
+  rather than the command. Gate tests cover reminder trigger, log
+  accumulation, and that success does not append.
 - [ ] **7.3 Measure.** Tool failure rate <5% in new transcripts; error
-  clustering (≥5 errors/session) <10% of sessions.
+  clustering (≥5 errors/session) <10% of sessions. Baseline (N=60): Claude
+  21%, Codex 24%, Kimi 12% failure rates; Kimi 33/40 sessions with ≥5
+  errors.
 
 ## Phase 8 — Background tasks for long operations
 
