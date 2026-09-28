@@ -99,16 +99,17 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 3 — Scoped test runs by default
 
-- [ ] **3.1 `AGENTS.md` test-loop agreement.** Failure loop must be:
+- [x] **3.1 `AGENTS.md` test-loop agreement.** Failure loop must be:
   run scoped test → read failure → fix → re-run *same scoped test* →
   workspace sweep once before declaring done. `cargo test --workspace` is a
   pre-merge/CI gate, not a debugging tool. (`AGENTS.md` already says host
   default for cargo; this adds the scoping rule.)
-- [ ] **3.2 Add a `just test-scoped <pkg> <filter>` recipe** (or document the
+- [x] **3.2 Added `just test-scoped <crate> [filter]` recipe** (nextest `-p` + `-E`, (or document the
   exact `cargo nextest run -p …` one-liner) so the cheap path is also the
   easy path.
 - [ ] **3.3 Measure.** Count `cargo test --workspace` occurrences per session
-  in new transcripts; target: ≤1 per session (the final sweep).
+  in new transcripts; target: ≤1 per session (the final sweep). Baseline:
+  673 mentions in 22/60 Claude sessions (N=60, seed 42).
 
 ## Phase 4 — Route exploration through graft, not raw Shell/Grep
 
