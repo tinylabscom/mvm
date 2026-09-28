@@ -29,6 +29,7 @@ mod either;
 mod guest_run;
 mod launch_plan;
 mod mounts;
+mod oci_boot;
 use either::Either;
 use mounts::refuse_unloadable_sidecar;
 mod session;
@@ -42,6 +43,7 @@ pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
 pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrate};
+pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_env};
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
@@ -293,14 +295,11 @@ impl ExecRequest {
     }
 }
 
-fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> bool {
-    matches!(
-        shape.image,
-        ImageSource::Prebuilt {
-            unpacked_oci_root: Some(_),
-            ..
-        }
-    ) && shape.network_policy.allows_egress()
+fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> Result<bool> {
+    Ok(
+        boots_oci_image(ImageNaming::Resolved(shape.image))?
+            && shape.network_policy.allows_egress(),
+    )
 }
 
 /// Build the IR healthcheck from the CLI flags. A shell command string becomes
@@ -1327,7 +1326,7 @@ pub fn resolve_launch(
     use crate::commands::vm::phase_timing::SubPhase;
 
     let backend = select_exec_backend(
-        shape_uses_vsock_proxy_backend(shape),
+        shape_uses_vsock_proxy_backend(shape)?,
         shape.network_policy,
         shape.hypervisor,
     )?;

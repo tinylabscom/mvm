@@ -32,10 +32,8 @@ pub(super) use parse::{
     parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
-pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref,
-    resolve_manifest_arg,
-};
+pub(crate) use resolve::{ManifestArgRef, resolve_manifest_arg};
+pub(super) use resolve::{egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref};
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};
