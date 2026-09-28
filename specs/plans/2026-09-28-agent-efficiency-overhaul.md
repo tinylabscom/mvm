@@ -184,14 +184,19 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 8 — Background tasks for long operations
 
-- [ ] **8.1 Agreement:** anything expected to run >60 s (builds, CI watches,
-  test sweeps) goes to a background task with notification, not a foreground
-  blocking call. Kimi already has the capability (used only 142× vs 17.6k
-  Shell calls).
-- [ ] **8.2 CI-watch recipe:** `gh pr checks <n> --watch` or background +
-  notification; never `sleep`-then-check (closes the loop with Phase 2).
+- [x] **8.1 Agreement landed.** `AGENTS.md` "Long Operations Go to
+  Background": >60 s expected runtime ⇒ background task; foreground Shell
+  timeouts must not be re-run with bigger timeouts (Retry Discipline
+  violation) but diagnosed and moved to background. Kimi's TaskOutput was
+  used only 142× vs 17.6k Shell calls — the capability exists, the
+  agreement redirects usage.
+- [x] **8.2 CI-watch recipe:** referenced in 8.1 (`gh pr checks <n>
+  --watch` / background task); the no-sleep half landed in Phase 2.
 - [ ] **8.3 Measure.** Long-command foreground Shell calls with
-  timeout >120 s: near zero in new transcripts.
+  timeout >120 s: near zero in new transcripts. Baseline (Kimi, 60 wires):
+  4,875 of 24,235 Shell calls (20%) had timeout >120 s, spanning 48/60
+  sessions; 2,043 more had timeout 61–120 s. Worst pattern on record: the
+  same `cargo check` re-issued with timeout=300 five times in one session.
 
 ## Phase 9 — Context hygiene in long sessions
 

@@ -4847,3 +4847,7 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
       (`.mvm-test/failure-journal.log`) with 3-failure reminder; AGENTS.md
       rule extended with the manual equivalent and the "same why twice ⇒
       change strategy" tripwire. Guard tests: 9 checks green.
+- [x] Phase 8 background tasks: AGENTS.md "Long Operations Go to Background"
+      (>60 s ⇒ background task; no timeout-bump re-runs). Baseline: 20% of
+      Kimi Shell calls had timeout >120 s across 48/60 sessions; same cargo
+      check re-run at timeout=300 five times in one session.

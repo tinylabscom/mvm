@@ -320,6 +320,30 @@ least.
   running the scoped test, and running the test is cheaper than thinking
   about what it might say.
 
+## Long Operations Go to Background
+
+Any command expected to run **longer than 60 seconds** — full builds,
+workspace test sweeps, image builds, CI watches — goes to a **background
+task**, not a foreground blocking call. The foreground stays free, the
+harness notifies you on completion, and you keep working or explicitly wait
+on the task rather than holding a Shell call open.
+
+Blocking foreground calls teach bad habits: they serialize your attention
+on one thing, they inflate the Shell-call timeout until huge values feel
+normal, and when they time out at 300 s the natural (wrong) response is to
+re-run them. Background tasks invert that: launch, note the task id, check
+the log tail when the current step is done.
+
+- Builds and sweeps: background task; check the log tail when it finishes.
+- CI: `gh pr checks <n> --watch` blocks efficiently in ONE call, or run
+  `gh pr checks` as a background task — never sleep-then-poll (see No
+  Sleep-Polling).
+- Quick commands stay foreground: a scoped `just test-scoped` run under
+  60 s is faster to await inline than to round-trip through a task.
+- If a foreground command times out, do not just re-run it with a bigger
+  timeout — that is a Retry Discipline violation. Ask why it is slow
+  (cold cache? wrong scope? hung process?) and move it to background.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:
