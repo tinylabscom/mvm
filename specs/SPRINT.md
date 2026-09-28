@@ -4806,8 +4806,8 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 
 - [x] Quantified baseline from ~120 sampled transcripts across the three
       agent stores (Claude 21% error-keyword rate and 5% retry-loop sessions
-      at N=60; Codex 18% failure rate and 18% retry-loop sessions; Kimi 11%
-      error rate, 30% retry-loop sessions, 83% Shell share).
+      at N=60; Codex 24% failure rate and 23% retry-loop sessions; Kimi 12%
+      error rate, 27% retry-loop sessions, 84% Shell share).
 - [x] `scripts/agent-transcript-analysis.py` — reproducible cross-agent
       transcript baseline/re-measurement script (was throwaway in /tmp).
 - [x] `AGENTS.md` "Retry Discipline" working agreement: never re-issue an

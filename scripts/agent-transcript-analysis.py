@@ -33,6 +33,7 @@ def pct(a, b):
 
 def sample_files(root, n):
     files = []
+    for dp, _, fns in os.walk(os.path.expanduser(root)):
         for fn in fns:
             if fn.endswith(".jsonl"):
                 files.append(os.path.join(dp, fn))
@@ -56,6 +57,7 @@ def analyze_claude():
             continue
         st["sessions"] += 1
         tools, results = [], []
+        saw_compaction = False
         for line in lines:
             try:
                 d = json.loads(line)
@@ -73,7 +75,9 @@ def analyze_claude():
                         if c.get("type") == "tool_result":
                             results.append(json.dumps(c.get("content", "")))
             if t == "system" and isinstance(d.get("content"), str) and "compact" in d["content"].lower():
-                compact_sessions += 1
+                saw_compaction = True
+        if saw_compaction:
+            compact_sessions += 1
         st["tool_calls"] += len(tools)
         tool_names.update(tools)
         st["errors"] += sum(1 for r in results if ERR_RE.search(r))
@@ -86,11 +90,15 @@ def analyze_claude():
                 continue
             if d.get("type") == "assistant":
                 for c in d.get("message", {}).get("content", []):
-                    if c.get("type") == "tool_use" and c.get("name") == "Bash":
+                    if c.get("type") != "tool_use":
+                        continue
+                    if c.get("name") == "Bash":
                         cmd = c.get("input", {}).get("command", "")
                         if cmd and cmd == prev:
                             dups += 1
                         prev = cmd
+                    else:
+                        prev = None
         if dups >= 2:
             retry_sessions += 1
         st["dups"] += dups
@@ -125,7 +133,7 @@ def analyze_codex():
         st["sessions"] += 1
         sizes.append(sz)
         calls = errs = 0
-        last_args = None
+        last_call = None
         dups = 0
         for line in fh:
             try:
@@ -138,11 +146,13 @@ def analyze_codex():
             t = p.get("type")
             if t in ("function_call", "custom_tool_call", "web_search_call"):
                 calls += 1
-                tool_names[p.get("name", t)] += 1
+                tool_name = p.get("name", t)
+                tool_names[tool_name] += 1
                 args = p.get("arguments", "")
-                if args == last_args and len(args) > 10:
+                call_key = (tool_name, args)
+                if call_key == last_call and len(args) > 10:
                     dups += 1
-                last_args = args
+                last_call = call_key
             elif t in ("function_call_output", "custom_tool_call_output"):
                 out = str(p.get("output", ""))
                 if EXIT_RE.search(out) or ERR_RE.search(out):
@@ -177,6 +187,7 @@ def analyze_kimi():
         for fn in fns:
             if fn == "wire.jsonl":
                 wires.append(os.path.join(dp, fn))
+    wires.sort()
     random.shuffle(wires)
     sample = wires[:N]
     st = collections.Counter()
@@ -189,7 +200,7 @@ def analyze_kimi():
             continue
         st["sessions"] += 1
         calls = errs = 0
-        last_args = None
+        last_call = None
         dups = 0
         for line in fh:
             try:
@@ -204,11 +215,13 @@ def analyze_kimi():
             if t == "ToolCall":
                 calls += 1
                 fn = p.get("function", {})
-                tool_names[fn.get("name", "?")] += 1
+                tool_name = fn.get("name", "?")
+                tool_names[tool_name] += 1
                 args = fn.get("arguments", "")
-                if args == last_args and len(args) > 10:
+                call_key = (tool_name, args)
+                if call_key == last_call and len(args) > 10:
                     dups += 1
-                last_args = args
+                last_call = call_key
             elif t == "ToolResult":
                 rv = p.get("return_value", {})
                 if isinstance(rv, dict) and rv.get("is_error"):

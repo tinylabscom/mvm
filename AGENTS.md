@@ -625,8 +625,8 @@ The recovery sequence after any tool failure is:
 4. **Re-run a scoped version of the command**, not the original blast radius
    (see "Scoped test runs" in the plan of the day if one is active).
 
-For `mvmctl`/cargo one-offs, use `mvm-run <cmd>` (defined by
-`scripts/dev-env.sh`): it records the failing command in
+For `mvmctl`/cargo one-offs, use `mvm_run <cmd>` (defined by
+`scripts/dev-env.sh`): it records the failing command fingerprint in
 `.mvm-test/last-failed-cmd` and refuses an immediate identical re-run. After
 genuinely diagnosing, clear the marker (`rm .mvm-test/last-failed-cmd`) or
 run the changed command, which clears it automatically on success.

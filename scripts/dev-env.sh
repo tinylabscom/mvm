@@ -68,21 +68,42 @@ export MVM_NO_LEGACY_BANNER="${MVM_NO_LEGACY_BANNER:-1}"
 unset -f _mvm_dev_env_claim
 unset _mvm_name _mvm_want _mvm_have
 
-# Blind-retry guard. mvm-run <cmd...> runs the command; on failure it records
-# the exact command line in .mvm-test/last-failed-cmd, and the next mvm-run of
-# the identical command is refused until the marker is cleared (by a
+# Blind-retry guard. mvm_run <cmd...> runs the command; on failure it records a
+# non-reversible argv fingerprint in .mvm-test/last-failed-cmd, and the next
+# mvm_run of the identical argv is refused until the marker is cleared (by a
 # successful different command, `rm .mvm-test/last-failed-cmd`, or editing the
 # command). Re-running a failed command verbatim is the single largest
 # observed agent inefficiency; this makes the failure visible and forces a
 # diagnose-first step. Variables are _mvm_run_*-prefixed; no `local` so the
 # file stays POSIX-sh sourceable.
-mvm-run() {
-    _mvm_run_state="${dev_state_root}/last-failed-cmd"
-    _mvm_run_cmd="$*"
+_mvm_run_hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r | awk '{print $1}'
+    else
+        cksum | awk '{print $1 "-" $2}'
+    fi
+}
 
-    if [ -f "${_mvm_run_state}" ] && [ "$(cat "${_mvm_run_state}")" = "${_mvm_run_cmd}" ]; then
-        printf 'mvm-run: refusing blind re-run of a command that just failed: %s\n' "${_mvm_run_cmd}" >&2
-        printf 'mvm-run: diagnose the failure, change one thing, or clear the marker: rm %s\n' "${_mvm_run_state}" >&2
+_mvm_run_fingerprint() {
+    (
+        for _mvm_run_arg do
+            _mvm_run_len=${#_mvm_run_arg}
+            printf '%s\n%s\n' "${_mvm_run_len}" "${_mvm_run_arg}"
+        done
+    ) | _mvm_run_hash_stream
+}
+
+mvm_run() {
+    _mvm_run_state="${dev_state_root}/last-failed-cmd"
+    _mvm_run_key="$(_mvm_run_fingerprint "$@")"
+
+    if [ -f "${_mvm_run_state}" ] && [ "$(cat "${_mvm_run_state}")" = "${_mvm_run_key}" ]; then
+        printf 'mvm_run: refusing blind re-run of a command that just failed (fingerprint %s)\n' "${_mvm_run_key}" >&2
+        printf 'mvm_run: diagnose the failure, change one thing, or clear the marker: rm %s\n' "${_mvm_run_state}" >&2
         return 1
     fi
 
@@ -91,7 +112,7 @@ mvm-run() {
 
     if [ "${_mvm_run_rc}" -ne 0 ]; then
         mkdir -p "${dev_state_root}"
-        printf '%s' "${_mvm_run_cmd}" > "${_mvm_run_state}"
+        printf '%s' "${_mvm_run_key}" > "${_mvm_run_state}"
     else
         rm -f "${_mvm_run_state}"
     fi

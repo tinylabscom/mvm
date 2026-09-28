@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Gate tests for the mvm-run blind-retry guard in scripts/dev-env.sh.
+# Gate tests for the mvm_run blind-retry guard in scripts/dev-env.sh.
 #
 # The guard exists to stop one specific failure: re-issuing an identical
 # command right after it failed, which transcript analysis showed in 30% of
@@ -14,21 +14,20 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-ROOT="$PWD"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 failures=0
 
 # run_mvm <state-dir> <cmd...> — sources dev-env.sh in a subshell, points
-# dev_state_root at the given dir, then runs mvm-run. Prints "<rc>\t<stderr>".
+# dev_state_root at the given dir, then runs mvm_run. Prints "<rc>\t<stderr>".
 run_mvm() {
     local state_dir="$1"
     shift
     MVM_STATE_DIR="${state_dir}" bash -c '
         source scripts/dev-env.sh
         dev_state_root="${MVM_STATE_DIR}"
-        mvm-run "$@" 2>"${MVM_STATE_DIR}/stderr.tmp"
+        mvm_run "$@" 2>"${MVM_STATE_DIR}/stderr.tmp"
         printf "%s" "$?" > "${MVM_STATE_DIR}/rc.tmp"
     ' _ "$@"
     printf "%s\t" "$(cat "${state_dir}/rc.tmp")"
@@ -42,7 +41,7 @@ check() {
     local got_rc="${got%%$'\t'*}" got_err="${got##*$'\t'}"
     if [ "${got_rc}" = "${want_rc}" ]; then
         case "${got_err}" in
-            *mvm-run:*) has_guard=1 ;;
+            *mvm_run:*) has_guard=1 ;;
             *) has_guard=0 ;;
         esac
         if [ "${has_guard}" = "${want_guard}" ]; then
@@ -67,7 +66,9 @@ s2="${TMP}/fail-once"; mkdir -p "${s2}"
 check "failing command runs (rc passthrough) and records marker" 3 0 \
     "$(run_mvm "${s2}" sh -c 'exit 3')"
 marker="$(cat "${s2}/last-failed-cmd")"
-[ "${marker}" = "sh -c exit 3" ] || { echo "FAIL: marker content '${marker}'"; failures=$((failures + 1)); }
+case "${marker}" in
+    ""|*"exit 3"*) echo "FAIL: marker content '${marker}'"; failures=$((failures + 1)) ;;
+esac
 
 # The identical command is refused: rc 1, guard message, original not re-run.
 check "identical re-run is refused with guard message" 1 1 \
@@ -85,8 +86,22 @@ check "after a success the same command may run again" 4 0 \
 # Arguments are compared verbatim: same binary, different args, is allowed.
 s3="${TMP}/args"; mkdir -p "${s3}"
 run_mvm "${s3}" sh -c 'exit 5' >/dev/null || true
-check "same command with different arguments is allowed" 0 0 \
-    "$(run_mvm "${s3}" true)"
+check "distinct argv with the same joined string is allowed" 0 0 \
+    "$(run_mvm "${s3}" sh -c exit 5)"
+
+# Secret-bearing invocations are fingerprinted and redacted.
+s4="${TMP}/secret"; mkdir -p "${s4}"
+secret_value="top-secret-token"
+run_mvm "${s4}" sh -c 'exit 9' -- "${secret_value}" >/dev/null || true
+secret_retry="$(run_mvm "${s4}" sh -c 'exit 9' -- "${secret_value}")"
+case "$(cat "${s4}/last-failed-cmd")" in
+    *"${secret_value}"*) echo "FAIL: secret leaked into marker"; failures=$((failures + 1)) ;;
+esac
+case "${secret_retry}" in
+    *"${secret_value}"*) echo "FAIL: secret leaked into guard output"; failures=$((failures + 1)) ;;
+esac
+check "secret-bearing retry is refused without echoing the secret" 1 1 \
+    "${secret_retry}"
 
 if [ "${failures}" -gt 0 ]; then
     printf '%d gate test(s) failed\n' "${failures}" >&2

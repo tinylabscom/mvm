@@ -45,6 +45,7 @@ product code changes.
 
 The analysis script lives at `scripts/agent-transcript-analysis.py` and is checked in for reproducible re-measurement:
 
+```sh
 python3 scripts/agent-transcript-analysis.py 60
 ```
 
@@ -63,7 +64,7 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 - [x] **1.2 Kimi: harness retry dedup.** Kimi has no visible retry guard;
   file/track with Kimi CLI maintainers or wrap long-running commands via
   `bin/dev` (which already centralizes env). Practical step: extend
-  `scripts/dev-env.sh` with a `mvm-run` helper that logs the last failed
+  `scripts/dev-env.sh` with a `mvm_run` helper that logs the last failed
   command per worktree and refuses blind re-runs.
 - [x] **1.3 Measure (baseline recorded).** N=60 re-measurement with the
   checked-in script, seed 42, recorded 2026-09-28 — the "before" snapshot:
@@ -213,14 +214,13 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 2. Config changes (Kimi graft MCP, Codex reasoning effort) land locally in
    `~/.kimi/config.toml` / `~/.codex/config.toml` — not repo files; record
    them in this plan's validation notes.
-3. Re-run `/tmp/analyze_transcripts.py 60` on a fresh sample after two weeks
+3. Re-run `python3 scripts/agent-transcript-analysis.py 60` on a fresh sample after two weeks
    of normal use; append before/after numbers to this plan.
 
 ## Appendix: analysis script
 
 The quantified baseline was produced by sampling 40 transcripts per tool
 (seed 42) and counting tool calls, error-keyword results, back-to-back
-duplicate calls, and per-session command repetition. Store the script at
-`scripts/agent-transcript-analysis.py` (copied from `/tmp/analyze_transcripts.py`
-plus `/tmp/analyze2.py`) when this plan starts so the re-measurement is
-reproducible.
+duplicate calls, and per-session command repetition with the checked-in
+`scripts/agent-transcript-analysis.py`, so the re-measurement stays
+reproducible from a checkout.
