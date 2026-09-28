@@ -4839,3 +4839,7 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
       `scripts/dev-env.sh` once; no inline env re-exports or absolute-`cd`
       prefixes as the default pattern; `bin/dev` for one-off unconfigured
       shells.
+- [x] Phase 6 reasoning budget: Codex `~/.codex/config.toml` default lowered
+      from `high` to `medium` (N=60 baseline was 380 reasoning items/session);
+      AGENTS.md "Reasoning Budget: Think, Then Act" agreement — one reasoning
+      turn per decision point, action after 2 consecutive reasoning turns.

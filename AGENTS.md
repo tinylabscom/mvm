@@ -297,6 +297,29 @@ that follows looks intermittent but is self-inflicted.
 If you find yourself typing the same env prefix twice, stop and source
 `scripts/dev-env.sh` instead.
 
+## Reasoning Budget: Think, Then Act
+
+Deliberation is for deciding the next action, not for re-deriving what the
+last tool output already told you. A reasoning chain that does not end in a
+tool call, a question to the user, or a committed hypothesis is pure
+context burn — sampled Codex transcripts average 380 reasoning items per
+session, and the longest chains correlate with the sessions that finish
+least.
+
+- **One reasoning turn per decision point.** Read the tool output, think
+  once, act. If the action's result disagrees with the hypothesis, that is
+  data — reason once more with it, act again.
+- **After 2 consecutive reasoning turns with no action, stop and do
+  something**: make the tool call, ask the user, or write the hypothesis
+  down and test it. Momentum beats perfection.
+- **Reserve deep deliberation for genuinely ambiguous design decisions.**
+  Mechanical phases (edits the plan already specifies, boilerplate, test
+  fixes with obvious error messages) get minimal deliberation — the
+  reasoning budget is the scarcest resource in a long session.
+- This complements Retry Discipline: reasoning is not a substitute for
+  running the scoped test, and running the test is cheaper than thinking
+  about what it might say.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:

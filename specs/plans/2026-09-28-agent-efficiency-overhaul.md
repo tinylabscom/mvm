@@ -151,13 +151,18 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 6 — Cap reasoning bloat (Codex)
 
-- [ ] **6.1 Codex config:** investigate `model_reasoning_effort` /
-  reasoning-effort settings to reduce 192-item reasoning chains; prefer
-  act-after-at-most-one-reasoning-item for mechanical phases.
-- [ ] **6.2 Working agreement:** reasoning without a tool call is capped —
+- [x] **6.1 Codex config changed.** Was `model_reasoning_effort = "high"`
+  for `gpt-5.6-sol`; now `"medium"` with an explanatory comment and the
+  `codex -c model_reasoning_effort="high"` escape hatch for ambiguous
+  design work. Config validated as TOML; backup at
+  `/tmp/codex-config-backup.toml`. Baseline was 380 reasoning
+  items/session at N=60 (worse than the N=40 estimate of 192).
+- [x] **6.2 Working agreement:** reasoning without a tool call is capped —
   after 2 consecutive reasoning turns, take an action (tool call, question to
   user, or commit to a hypothesis and test it).
 - [ ] **6.3 Measure.** Avg reasoning items/session <100; no session >10 MB.
+  Baseline (N=60): 380 reasoning items/session avg, max transcript 203 MB,
+  14 sessions >5 MB.
 
 ## Phase 7 — Recovery discipline (diagnose → change one thing → scoped re-run)
 
