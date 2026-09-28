@@ -1,8 +1,10 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
+
+- [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
