@@ -200,28 +200,31 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 9 — Context hygiene in long sessions
 
-- [ ] **9.1 Mid-session state snapshot.** Working agreement: at each phase
-  boundary, emit a 10-line snapshot (decisions made, files touched, next
-  step, blockers) so compaction doesn't destroy intent. Compaction events
-  already observed in Claude transcripts; >5 MB Codex transcripts risk
-  truncation.
-- [ ] **9.2 Session budget awareness:** when a session crosses ~50 tool
-  calls without reaching its goal, stop and re-plan (write the plan to a
-  todo list) rather than continuing to burn context.
+- [x] **9.1 Mid-session state snapshot.** `AGENTS.md` "Context Hygiene"
+  section: ~10-line snapshot (decisions + why, files touched, blocker, next
+  step) at every phase boundary.
+- [x] **9.2 Session budget awareness:** ~50 tool calls without the goal ⇒
+  stop and re-plan as a fresh todo list; long sessions close or split at
+  phase boundaries.
 - [ ] **9.3 Measure.** Sessions >5 MB fraction reduced; user "where were we"
-  corrections zero (currently 0 observed, keep it that way).
+  corrections zero (currently 0 observed, keep it that way). Baseline
+  (N=60): 14/60 Codex sessions >5 MB (max 203 MB), 3 Claude sessions hit
+  compaction, avg 380 reasoning items/session feeding transcript growth.
 
 ## Phase 10 — Subagent pre-flight discipline
 
-- [ ] **10.1 Pre-flight checklist in every subagent prompt:** target paths
-  inside workspace boundary, required env vars present, read-only vs
-  write scope declared. All three transcript-analysis subagents in the
-  2026-09-28 session blocked immediately on workspace-boundary denials —
-  wasted launches.
-- [ ] **10.2 Capability declaration:** subagent prompt must state which
-  tools it will use and why; operator approves with full information.
+- [x] **10.1 Pre-flight checklist in AGENTS.md** — four required items per
+  subagent prompt: path pre-flight (exact paths, inside the workspace
+  boundary), environment pre-flight (env vars + setup), scope declaration
+  (read-only vs write, tools and why), and a fallback instruction (report
+  precisely and stop on denial — no boundary workarounds). The
+  2026-09-28 transcript-analysis subagents are the recorded anti-example.
+- [x] **10.2 Capability declaration:** folded into 10.1's scope
+  declaration; the plan-doc rule is "if you cannot fill in all four items,
+  you are not ready to launch the subagent".
 - [ ] **10.3 Measure.** Zero "blocked — access denied" subagent summaries in
-  new transcripts.
+  new transcripts. Baseline: 3/3 analysis subagents in the 2026-09-28
+  session blocked on their first call (0% launch success).
 
 ---
 

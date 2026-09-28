@@ -4851,3 +4851,9 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
       (>60 s ⇒ background task; no timeout-bump re-runs). Baseline: 20% of
       Kimi Shell calls had timeout >120 s across 48/60 sessions; same cargo
       check re-run at timeout=300 five times in one session.
+- [x] Phase 9 context hygiene: AGENTS.md "Context Hygiene: Snapshots and
+      Budgets" — 10-line snapshot at phase boundaries, ~50-call re-plan
+      tripwire, close/split long sessions.
+- [x] Phase 10 subagent pre-flight: AGENTS.md four-item checklist (paths,
+      env, scope + tools, denial fallback). Anti-example recorded: 3/3
+      analysis subagents blocked on first call, 2026-09-28.

@@ -344,6 +344,52 @@ the log tail when the current step is done.
   timeout — that is a Retry Discipline violation. Ask why it is slow
   (cold cache? wrong scope? hung process?) and move it to background.
 
+## Context Hygiene: Snapshots and Budgets
+
+Long sessions are the norm here, and compaction is not lossless — sampled
+Claude transcripts hit compaction mid-task, and sampled Codex transcripts
+reach 200 MB. What survives compaction is structure, not intent; intent has
+to be written down before the window shrinks.
+
+- **Snapshot at every phase boundary.** When a plan phase or sub-task
+  completes, emit a ~10-line snapshot into the todo list or the plan doc:
+  decisions made (with the why), files touched, current blocker if any, and
+  the exact next step. After compaction, the snapshot is the difference
+  between resuming and re-deriving.
+- **Budget awareness.** Past ~50 tool calls without reaching the session's
+  goal, stop and re-plan: write the remaining work as a fresh todo list
+  before continuing. Grinding past 50 calls on one goal without a plan
+  update is how sessions end up 200 MB with nothing landed.
+- **Close or split long sessions.** A session that has served its purpose
+  (PR opened, task done) should end; a genuinely multi-part effort should be
+  split at phase boundaries so each session carries only the context it
+  needs. Resuming a three-day-old session costs more re-orientation than a
+  fresh one with a good snapshot.
+
+## Subagent Pre-Flight
+
+A subagent that launches into an environment it cannot use is pure waste:
+the launch, the first tool call, the denial, and the "blocked" summary all
+burn context and time (observed directly: three analysis subagents each
+died on the first call with workspace-boundary denials).
+
+Every subagent prompt must carry:
+
+1. **Path pre-flight.** Declare the exact paths it will touch and confirm
+   they are inside the workspace boundary. If it needs anything outside,
+   say so in the prompt and let the operator decide before launch — not
+   after the denial.
+2. **Environment pre-flight.** Declare the env vars it depends on
+   (sourced `scripts/dev-env.sh`? specific exports?) and any setup steps it
+   must run first.
+3. **Scope declaration.** Read-only research or write-capable? Which tools
+   it will use and why. The operator approves with full information.
+4. **Fallback instruction.** What to do when a tool call is denied or a
+   path is missing: report precisely what was needed and stop — no
+   workarounds, no retries against the boundary.
+
+If you cannot fill in all four, you are not ready to launch the subagent.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:
