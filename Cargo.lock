@@ -2702,7 +2702,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-agentd",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-capture"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-client"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-conformance"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3135,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "am-fs-ext4",
  "async-trait",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-cuda-shim"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3233,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-cudart-shim"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3242,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-nvml-shim"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-shim-core"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3326,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostlib"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3378,7 +3378,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -3387,7 +3387,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-observability"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "mvm-core",
  "mvm-http",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3471,14 +3471,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3505,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
