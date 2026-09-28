@@ -2,6 +2,29 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.1] — 2026-09-28
+
+### Added
+- **build**: Identify image-set members by the pinned root, not the CLI version
+
+### Changed
+- **features**: Delete never-enabled feature flags and record the full inventory (PS-19)
+
+### Documentation
+- **prompts**: Record what the builder-boot-ABI break taught
+- **plans**: Execution log and handoff for the agent-sandbox product surface
+
+### Fixed
+- **build**: Install a pair-built SDK sidecar from its canonical names, and name the path in every io error
+- **e2e**: Build the SDK host library beside mvmctl
+- **CI**: Address all CI lane failures
+
+### Refactored
+- **client**: Move snapshot, live-readiness, and backend selection behind mvm-client (PS-21)
+
+### Testing
+- **release**: The first-run smoke boots twice
+
 ## [0.18.0] — 2026-09-27
 
 ### Added
