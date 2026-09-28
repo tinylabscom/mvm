@@ -34,6 +34,10 @@ pub(super) fn mint_verb_grant_sidecar(
         return Ok(None);
     };
 
+    // The grant expires with the plan's validity window. Minting one that is
+    // already dead guarantees the guest refuses activation, and the guest can
+    // only say `VerbNotAuthorized`; refusing here says what actually expired.
+    refuse_expired_plan(&plan, chrono::Utc::now())?;
     let verbs = plan.agent_verbs.unwrap_or_default();
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
     if verbs.is_empty() && drive.is_none() {
@@ -69,4 +73,49 @@ pub(super) fn mint_verb_grant_sidecar(
     let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
     write_secret_file(&sidecar_path, &envelope_json)?;
     Ok(Some(envelope))
+}
+
+/// Refuse to mint a grant from a plan whose validity window has closed.
+fn refuse_expired_plan(plan: &ExecutionPlan, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    if now < plan.valid_until {
+        return Ok(());
+    }
+    let window = (plan.valid_until - plan.valid_from).num_seconds();
+    let since_admission = (now - plan.valid_from).num_seconds();
+    anyhow::bail!(
+        "the admitted plan's validity window closed at {} ({window}s after admission at {}), \
+         {since_admission}s ago counting from admission; a verb grant minted from it would \
+         already be expired, so the guest would refuse to activate. Something between admission \
+         and boot took longer than the window. Start again: prepared artifacts are cached.",
+        plan.valid_until,
+        plan.valid_from
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan_valid(from_secs_ago: i64, window_secs: i64) -> ExecutionPlan {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.valid_from = chrono::Utc::now() - chrono::Duration::seconds(from_secs_ago);
+        plan.valid_until = plan.valid_from + chrono::Duration::seconds(window_secs);
+        plan
+    }
+
+    #[test]
+    fn a_plan_whose_window_closed_is_refused_with_both_times() {
+        let plan = plan_valid(700, 600);
+        let err = refuse_expired_plan(&plan, chrono::Utc::now())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("validity window closed"), "{err}");
+        assert!(err.contains("600s after admission"), "{err}");
+        assert!(err.contains(&plan.valid_until.to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_plan_still_in_its_window_mints() {
+        assert!(refuse_expired_plan(&plan_valid(5, 600), chrono::Utc::now()).is_ok());
+    }
 }

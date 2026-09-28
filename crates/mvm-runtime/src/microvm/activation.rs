@@ -164,8 +164,44 @@ where
         GuestResponse::ActivateEnvironmentError { message } => {
             bail!("guest activation failed: {message}")
         }
+        GuestResponse::VerbNotAuthorized { verb } => Err(anyhow::anyhow!(
+            verb_refusal_explanation(&verb, env.verb_grant_envelope.as_ref(), chrono::Utc::now())
+        )),
         other => bail!("unexpected response to ActivateEnvironment: {other:?}"),
     }
+}
+
+/// Say why the guest refused `verb` at activation, from the grant the host
+/// sent. A bare `VerbNotAuthorized` names the verb and nothing else, which
+/// sent the first person to hit an expired grant looking for a policy bug.
+fn verb_refusal_explanation(
+    verb: &str,
+    envelope: Option<&mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let Some(envelope) = envelope else {
+        return format!(
+            "the guest refused `{verb}`: its policy requires a signed verb grant and the host \
+             sent none"
+        );
+    };
+    let not_after = envelope.grant.not_after;
+    if now >= not_after {
+        let late = (now - not_after).num_seconds();
+        return format!(
+            "the guest refused `{verb}` because the verb grant for session {} expired at \
+             {not_after}, {late}s before activation. A grant lasts only as long as the admitted \
+             plan's validity window, so something between admission and boot outlasted that \
+             window. Start again: prepared artifacts are cached, and admission now happens after \
+             preparation.",
+            envelope.grant.session_id
+        );
+    }
+    format!(
+        "the guest refused `{verb}`: the verb grant for session {} (valid until {not_after}) was \
+         not accepted. The guest console log records why it rejected the grant.",
+        envelope.grant.session_id
+    )
 }
 
 /// Build an [`ActivateEnvironment`] from the admitted launch config.
@@ -360,6 +396,52 @@ pub fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrantEnvelop
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grant_until(not_after: chrono::DateTime<chrono::Utc>) -> VerbGrantEnvelope {
+        VerbGrantEnvelope {
+            pubkey_hex: "ab".repeat(32),
+            plan_nonce_hex: "00".repeat(16),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: "vm-late".into(),
+                plan_nonce: mvm_core::plan::Nonce::from_bytes([0u8; 16]),
+                not_after,
+                verbs: Vec::new(),
+                drive: None,
+                sig: vec![0u8; 64],
+            },
+        }
+    }
+
+    /// The reported failure: a grant that expired before the guest checked it
+    /// must say so, and say what to do, rather than surface as a bare
+    /// `VerbNotAuthorized`.
+    #[test]
+    fn an_expired_grant_is_named_as_expired_with_its_deadline() {
+        let now = chrono::Utc::now();
+        let expired = grant_until(now - chrono::Duration::seconds(90));
+        let message = verb_refusal_explanation("activate-environment", Some(&expired), now);
+        assert!(message.contains("expired at"), "{message}");
+        assert!(message.contains("90s before activation"), "{message}");
+        assert!(message.contains("validity window"), "{message}");
+        assert!(message.contains("vm-late"), "{message}");
+    }
+
+    #[test]
+    fn a_live_grant_refusal_points_at_the_guest_log_not_at_expiry() {
+        let now = chrono::Utc::now();
+        let live = grant_until(now + chrono::Duration::minutes(5));
+        let message = verb_refusal_explanation("activate-environment", Some(&live), now);
+        assert!(!message.contains("expired"), "{message}");
+        assert!(message.contains("console log"), "{message}");
+    }
+
+    #[test]
+    fn a_missing_grant_says_none_was_sent() {
+        let message = verb_refusal_explanation("activate-environment", None, chrono::Utc::now());
+        assert!(message.contains("sent none"), "{message}");
+    }
     use mvm_core::net::session::SessionError;
     use mvm_core::protocol::vm_backend::VmVolumeKind;
     use mvm_core::util::test_env::TestEnv;

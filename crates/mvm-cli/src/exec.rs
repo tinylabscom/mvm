@@ -1383,6 +1383,38 @@ pub fn resolve_launch(
     );
     let mut use_snapshot = boot.use_snapshot;
 
+    // Attach everything the boot waits on before admitting. Admission starts
+    // the plan's validity window and the verb grant minted from it expires
+    // with it, so a cold overlay build after admission would spend the window
+    // the boot needs (see `mvm_client::launch::boot_order`).
+    let t_overlay = std::time::Instant::now();
+    sub.start(SubPhase::AttachOverlay);
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            backend.name(),
+            None,
+            pair,
+        )
+    })?;
+    sub.finish(SubPhase::AttachOverlay);
+    tracing::debug!(
+        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach runtime overlay"
+    );
+
+    let t_initramfs = std::time::Instant::now();
+    sub.start(SubPhase::AttachInitramfs);
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(
+        &mut start_config,
+        backend.name(),
+    )?;
+    sub.finish(SubPhase::AttachInitramfs);
+    tracing::debug!(
+        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach universal initramfs"
+    );
+
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
     // `network_policy` and chain-audit the run. Force cold boot when admitted —
@@ -1446,34 +1478,6 @@ pub fn resolve_launch(
         );
         start_config.cpus = granted;
     }
-
-    let t_overlay = std::time::Instant::now();
-    sub.start(SubPhase::AttachOverlay);
-    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
-            &mut start_config,
-            backend.name(),
-            None,
-            pair,
-        )
-    })?;
-    sub.finish(SubPhase::AttachOverlay);
-    tracing::debug!(
-        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach runtime overlay"
-    );
-
-    let t_initramfs = std::time::Instant::now();
-    sub.start(SubPhase::AttachInitramfs);
-    crate::commands::vm::up::attach_universal_initramfs_if_cached(
-        &mut start_config,
-        backend.name(),
-    )?;
-    sub.finish(SubPhase::AttachInitramfs);
-    tracing::debug!(
-        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach universal initramfs"
-    );
 
     let t_status = std::time::Instant::now();
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
