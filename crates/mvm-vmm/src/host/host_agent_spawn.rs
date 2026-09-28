@@ -26,9 +26,10 @@ use mvm_core::protocol::broker_control::{
     self, ControlRequest, ControlResponse, DeregisterVm, RegisterVm,
 };
 
+use crate::host::aux_bin::AuxBin;
 use crate::host::broker_services_spawn::{
     AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid,
-    resolve_subprocess_bin, spawn_detached_with_config,
+    resolve_subprocess_bin_to_spawn, spawn_detached_with_config,
 };
 
 /// PID file for the per-tenant host-agent daemon, under `host_agent_dir`.
@@ -180,7 +181,12 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     // Stale socket from a dead daemon would block the rebind.
     let _ = std::fs::remove_file(&control_socket);
     warm_claim_debug("resolve_daemon_binary");
-    let bin = resolve_subprocess_bin(HOST_AGENT_BIN, "MVM_HOST_AGENT_PATH")?;
+    // The daemon starts its key-holding signer from beside its own
+    // executable, so the two are built together.
+    let bin = resolve_subprocess_bin_to_spawn(
+        &AuxBin::new(HOST_AGENT_BIN, "MVM_HOST_AGENT_PATH", "mvm-hostd")
+            .with_companions(&["mvm-signer-helper"]),
+    )?;
     let cfg = serde_json::json!({
         "tenant_id": tenant,
         "control_socket": control_socket,

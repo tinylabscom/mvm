@@ -33,9 +33,26 @@ curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 
 ### From source
 
+To run from the checkout, one build is enough:
+
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
+cargo build --release
+./target/release/mvmctl machine run --image alpine -- echo ok
+```
+
+A root `cargo build` produces only `mvmctl`. The per-VM helpers it spawns —
+`mvm-hvf-supervisor`, `mvm-network-endpoint` — are separate executables, and a
+contributor `mvmctl` builds each one into its own `target/<profile>/` the first
+time it needs it, signs the supervisor with the hypervisor entitlement, and
+announces the build. It rebuilds a helper the same way whenever one of the
+helper's sources is newer than it, so a helper never lags the checkout. An
+official release binary never does this; it ships its helpers.
+
+To install the binaries somewhere else, build the helpers explicitly:
+
+```bash
 cargo build --release --bin mvmctl
 cargo build --release -p mvm-hostd \
   --bin mvm-hvf-supervisor
@@ -57,7 +74,7 @@ is useful for CLI-only inspection or development.
 cargo install mvmctl
 ```
 
-`mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries, so sign them yourself after building.
+`mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries. A contributor `mvmctl` run from its checkout signs the supervisor it builds; sign copies you install elsewhere yourself.
 
 ## Linux Builds On macOS
 
