@@ -172,6 +172,49 @@ pub(crate) fn attach_runtime_overlay_from_cache(
     }
 }
 
+/// Attach the universal initramfs (what mounts the overlay at `/mvm/runtime`
+/// and supplies `/init`) on every in-process boot that attaches the overlay.
+///
+/// The CLI's start paths attach this through `mvm-client`, which cannot be
+/// reached from here; the resolution itself lives in `mvm-build`, a crate
+/// this one already depends on, so both layers run the same ladder (cached
+/// entry, then the deterministic cargo build, then the pinned image set's
+/// member). Without the initramfs a runtime-lean OCI rootfs has no
+/// `/init` at all and the guest panics before the agent can answer, which
+/// the host only sees as a session-handshake short read. Fail closed for a
+/// kernel-and-rootfs boot, exactly like the CLI: nothing else mounts the
+/// overlay. Kernel-less shapes (the wasm tier) never reach this helper's
+/// callers with a rootfs.
+pub(crate) fn attach_universal_initramfs_from_cache(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<()> {
+    if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
+        return Ok(());
+    }
+    if config.kernel_path.is_none() || config.rootfs_path.is_empty() {
+        return Ok(());
+    }
+    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    // `RuntimeBuildEnv` is the shell environment this crate's other
+    // build-dispatch paths carry; the initramfs ladder resolves from the
+    // cache or its own cargo/set arms without shelling out, and if that
+    // ever changes, VM-dispatched builds are the host-appropriate behavior.
+    let artifact = mvm_build::initramfs::resolve_or_build_local_initramfs(
+        &mvm_runtime::build_env::RuntimeBuildEnv,
+        &cache_root,
+        version,
+        arch,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!("universal initramfs required for {backend_name} boot but unavailable: {e}")
+    })?;
+    config.initrd_path = Some(artifact.image_path.display().to_string());
+    Ok(())
+}
+
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
 ///
 /// On success the plan was either synthesized here and signed under the host
@@ -273,6 +316,7 @@ pub fn admit_and_boot_local(
         ..Default::default()
     };
     attach_runtime_overlay_from_cache(&mut config, &req.backend_name)?;
+    attach_universal_initramfs_from_cache(&mut config, &req.backend_name)?;
 
     admit_and_start(
         backend,
@@ -360,6 +404,7 @@ fn admit_signed_and_boot_local(
         ..Default::default()
     };
     attach_runtime_overlay_from_cache(&mut config, &req.backend_name)?;
+    attach_universal_initramfs_from_cache(&mut config, &req.backend_name)?;
 
     crate::audit::durability::record_admission(
         ctx.emitter,
@@ -664,6 +709,109 @@ mod tests {
             err.to_string().contains("runtime overlay required"),
             "got: {err:#}"
         );
+    }
+
+    /// A kernel-and-rootfs boot on a real backend carries the universal
+    /// initramfs; a backend that boots no kernel, and a kernel-less config,
+    /// are left alone. Regression test for the transient in-process launch
+    /// booting a runtime-lean OCI image with no `/init` and panicking.
+    #[test]
+    fn attach_universal_initramfs_from_cache_sets_initrd_for_kernel_boots() {
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(data.path());
+
+        // Seed a complete version-keyed entry so the resolve is a pure cache
+        // read: the ladder's build/download arms are deliberately not what
+        // this test exercises.
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let dir = data
+            .path()
+            .join("cache")
+            .join("initramfs")
+            .join(version)
+            .join(&arch);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = b"cpio-payload";
+        std::fs::write(dir.join("initramfs.cpio.gz"), image).unwrap();
+        std::fs::write(dir.join("initramfs.hash"), "ab".repeat(32)).unwrap();
+        std::fs::write(dir.join("initramfs.size"), format!("{}\n", image.len())).unwrap();
+        std::fs::write(dir.join("VERSION"), format!("{version}\n")).unwrap();
+
+        let mut config = VmStartConfig {
+            kernel_path: Some("/img/vmlinux".into()),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        attach_universal_initramfs_from_cache(&mut config, "firecracker")
+            .expect("a warm cache attaches the initramfs");
+        let initrd = config
+            .initrd_path
+            .expect("a kernel-and-rootfs boot must carry the initramfs");
+        assert!(
+            initrd.ends_with("initramfs.cpio.gz"),
+            "the attached initrd is the cached image: {initrd}"
+        );
+
+        let mut config = VmStartConfig {
+            kernel_path: Some("/img/vmlinux".into()),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        attach_universal_initramfs_from_cache(&mut config, "mock").expect("mock skips the attach");
+        assert!(
+            config.initrd_path.is_none(),
+            "a backend that boots no kernel gets no initramfs"
+        );
+
+        let mut config = VmStartConfig::default();
+        attach_universal_initramfs_from_cache(&mut config, "firecracker")
+            .expect("a kernel-less config skips the attach");
+        assert!(
+            config.initrd_path.is_none(),
+            "a kernel-less shape has no initramfs leg"
+        );
+    }
+
+    /// An unusable cache entry fails closed with the artifact named: a
+    /// kernel-and-rootfs boot whose initramfs cannot be vouched for would
+    /// reach PID 1 with an empty `/mvm/runtime` and panic. The wrong-version
+    /// entry keeps the resolve off the build/download arms (a genuinely cold
+    /// cache in this workspace would cold-build from sources instead, which
+    // is the ladder's own tested behavior).
+    #[test]
+    fn attach_universal_initramfs_from_cache_unusable_entry_refuses() {
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(data.path());
+
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let dir = data
+            .path()
+            .join("cache")
+            .join("initramfs")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join(&arch);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = b"not-this-version's bytes";
+        std::fs::write(dir.join("initramfs.cpio.gz"), image).unwrap();
+        std::fs::write(dir.join("initramfs.hash"), "cd".repeat(32)).unwrap();
+        std::fs::write(dir.join("initramfs.size"), format!("{}\n", image.len())).unwrap();
+        std::fs::write(dir.join("VERSION"), "0.0.1-not-this-build\n").unwrap();
+
+        let mut config = VmStartConfig {
+            kernel_path: Some("/img/vmlinux".into()),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let err = attach_universal_initramfs_from_cache(&mut config, "firecracker")
+            .expect_err("an unvouched-for entry must refuse a kernel-and-rootfs boot");
+        assert!(
+            err.to_string().contains("universal initramfs required"),
+            "got: {err:#}"
+        );
+        assert!(config.initrd_path.is_none());
     }
 
     /// A missing rootfs fails at the hash step, before any admission or boot.
