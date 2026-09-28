@@ -340,3 +340,102 @@ build domain (`mvm_build`/`mvm_sdk` calls), which is a library in its own
 right. Pattern for future slices: `mvm_client::guest` (guest RPC verbs) and
 `mvm_client::volume::LocalVolumeService` — a service module + DTOs in the
 client, CLI left with args + rendering.
+
+## Execution log and handoff
+
+Snapshot as of 2026-09-27. This section is the pick-up point: it records what
+landed, what is in flight, the decisions taken while executing, and the known
+defects found along the way. The workstream checkboxes above remain the
+per-item source of truth; `specs/REFACTOR-STATUS.md` is the rollup; tracking
+issue #3731 carries the same status as a comment.
+
+### Landed
+
+| PR | Workstream | What it delivered |
+|---|---|---|
+| #3733 | plan | this plan and its rollup entry |
+| #3739 | PS-12 (#3722, closed) | one env denylist for guest passthrough and 26 host helper spawn sites; `check-helper-env-hygiene` gate; launch-plan env keys validated as shell names |
+| #3742 | PS-03 | `--secret` on `run` / `machine run`; destinations signed into the plan; per-binding placeholders; host TLS termination only for plan-bound destinations |
+| #3745 | PS-03 (#3713, closed) | reflected-credential scrub on every terminated response path; `secret set --from env:// file:// keychain:// op:// bw://`; gitlab/gemini providers and declared headers; `[secrets]` in `mvm.toml` |
+| #3748 | PS-02 | one restricted-address classifier; private-range default deny; NAT64/6to4/Teredo embedded-address closure; DNS pinned for the forward leg; five claim-10 witnesses |
+| #3749 | PS-02 | endpoint routes (method + path rules) decided at the gate; explicit interception grant; `ask` seam; `--allow-endpoint`, `[[network.routes]]`; `fuzz_egress_routes` |
+| #3754 | PS-01 | SDKs call `libmvm_hostlib` in-process (ABI 1.2); subprocess transport deleted; `check-no-cli-shellout` gate; `mvm-client` re-exports the embedder surface |
+| #3755 | PS-04 | egress refusals shown on the host live and at exit with per-reason remedies; `explain` gains denials; shared audit follow reader (fixes a tail-after-rotation skip) |
+| #3756 | PS-07 | `ask` held at the endpoint, answered by a tty / webhook / chain broker from the launching `mvmctl`; fail-closed; chain-signed `approval.*` entries |
+| #3759 | PS-01 | homepage SDK samples follow the in-process READMEs |
+| #3770 | PS-21 (#3730, closed) | snapshot, live-readiness and backend selection moved behind `mvm-client`; bypass inventory above |
+| #3771 | PS-19 (#3728, closed) | never-enabled feature flags deleted; full inventory recorded |
+
+### Open or queued (at snapshot time)
+
+| PR | Workstream | State / next step |
+|---|---|---|
+| #3784 | PS-01 (closes #3711) | command/env/template sources, BrowserSandbox presets, in-VM dispatch via `mvm_client::entrypoint`, `machine.logs.stream.*` (ABI 1.3); armed for the merge queue |
+| #3751 | PS-09 | console reattach with 1 MiB scrollback, `~d` detach, `--list`, `--force` take-over, `machine detach`; CI red, being rebased and fixed |
+| #3753 | PS-11 | instruction-file trust policy, sidecar signatures, pre-boot admission scan, `trust instructions *`, signing workflow; conflicts with main, being rebased |
+| #3758 | PS-10 | `session.sealed` entries, derived session ledger, `trust audit sessions` / `show` / `verify <session>`; two claim-8 witnesses; CI being fixed |
+| #3767 | PS-20 | unreachable `up::Args` and stale references removed (opened by another session) |
+| #3768 | PS-17 | task-runner surface reduced (opened by another session) |
+| mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
+
+In progress without a PR yet: PS-05 policy profiles (`feat/policy-profiles`);
+#3757 fix, then PS-02 leftovers, then approval parity; #3752 fix, then the
+PS-09 remainder; the no-network hint, then PS-08 undo/diff; the transient
+`LocalBackend::launch` initramfs fix.
+
+### Not started
+
+PS-06 packs (needs PS-05), PS-13 tool privileges (needs PS-05), PS-15
+packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
+`mvm-templates` and define their own images with their own `mvm.toml` /
+`flake.nix`; `mvm-images` builds only the images `mvmctl` itself requires.
+
+### Decisions taken during execution
+
+- **Reflected credentials are scrubbed**, not merely documented: every
+  terminated response replaces a substituted value with its placeholder
+  (headers and body, across chunk boundaries); upstreams are asked for
+  identity encoding and a compressed response is refused
+  (`response_encoded_unscannable`). Values under 8 bytes and transformed
+  reflections (base64, split markup) are stated limits.
+- **Builder VM loses private-range reach** under its open egress policy
+  (#3748). Only a flake fetching from a literal private IP is affected; it now
+  needs an explicit grant.
+- **L7 rules never intercept silently**: an unbound host is terminated only
+  when its route grants `intercept`; otherwise `endpoint_rules_unenforceable`.
+- **No-network hint**: a run with no network grants that exits nonzero prints
+  one line naming `--allow-host`; nothing on exit 0; `"network": "none"` in
+  JSON.
+- **SDK machines are named and persistent**, stopped and removed by `kill()`,
+  because transient `LocalBackend::launch` boots without an initramfs (see
+  defects). Revisit once that is fixed.
+- **Audit durability**: fsync on authorizing and boundary entries (admission,
+  failure, exit, seal, segment events), not every entry. Measured cost per
+  fsync: 4-5 ms on macOS, 44-49 ms on the rotational KVM host.
+- **Approvals on detached machines deny** until a per-machine broker exists;
+  never approve silently.
+
+### Known defects found along the way
+
+- #3752: the run verb grant is minted before a cold guest-runtime build and
+  can expire before boot (`VerbNotAuthorized`).
+- #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
+- Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
+  attaches no universal initramfs and panics at `/init` for Rust callers.
+- #3753 open box: host-directory volumes attached as block devices
+  (`machine volume mount --host DIR`) are never scanned for instruction files.
+- For review: a boot command override on a `prod` build slot is accepted, the
+  same as `machine run -d -- cmd`.
+- CLAUDE.md claim-8 prose still says tail truncation is undetectable; after
+  #3758, truncation through a session seal is detectable (the ADR-001 table
+  carries the precise statement).
+
+### How to resume
+
+1. Read this section, then `gh issue view 3731` for the latest status comment.
+2. For each open PR above: `gh pr checks N`; rebase onto main keeping both
+   sides of any conflict; fix root causes; enqueue through the merge queue.
+3. Branches are named in the tables; their worktrees live under
+   `.worktrees/` beside the repository and may be removed once merged.
+4. Next workstreams in priority order: PS-05 → PS-06 and PS-13 → PS-08 →
+   PS-15 → PS-16 → PS-18.
