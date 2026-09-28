@@ -4830,3 +4830,8 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 - [x] `just test-scoped CRATE [FILTER]` recipe (nextest `-p` + `-E`) so the
       scoped path is the easy path; `AGENTS.md` "Test Failure Loop: Scoped by
       Default" agreement pairing it with Retry Discipline.
+- [x] Phase 4 graft audit correction: graft was already wired for Kimi via
+      the tracked `.mcp.json` (this session's graft MCP tools prove it); the
+      real gap was usage. Added MCP-native routing rules to the AGENTS.md
+      Graft section (find_code/find_all/trace_calls/file_api/repo_map before
+      raw Grep/Glob/ReadFile).

@@ -627,6 +627,24 @@ re-read whole files.
 
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
+
+### MCP-native usage (agent harnesses)
+
+When your harness exposes graft as MCP tools (`graft_find_code`,
+`graft_find_all`, `graft_trace_calls`, `graft_file_api`, `graft_repo_map`),
+use those *before* the generic Grep/Glob/ReadFile tools — they return ranked
+answers with code spans inlined instead of raw hit lists you have to read
+your way out of. The routing rule:
+
+- **Understanding / "where does X live / how does Y work"** →
+  `graft_find_code` (or `graft_repo_map` when new to an area).
+- **Exhaustive literal search** ("every occurrence", "every caller") →
+  `graft_find_all` / `graft_trace_calls`, not the Grep tool.
+- **API surface of one file** → `graft_file_api`, not reading the file.
+- **Raw Grep/Glob** → only for unindexed files or when graft returns nothing
+  useful. Transcript baselines show thousands of raw Grep/Glob/Shell calls
+  per week where graft would have answered in one round-trip — that is the
+  waste this routing rule exists to stop.
 <!-- graft:end -->
 
 ## Retry Discipline

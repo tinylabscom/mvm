@@ -119,14 +119,20 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
   skill (`.claude/skills/graft/SKILL.md`). **Kimi has no graft configured at
   all**, yet Kimi is the heaviest raw-tool user (1,190 Grep + 1,135 ReadFile
   calls in the sample). No sampled transcript showed meaningful graft usage.
-- [ ] **4.2 Wire graft into Kimi.** Add the graft MCP server to
-  `~/.kimi/config.toml` (same `graft mcp` command as Cursor/Codex).
-- [ ] **4.3 Make graft the first move in `AGENTS.md`.** All three tools read
+- [x] **4.2 Wire graft into Kimi — resolved: already wired.** The tracked
+  `.mcp.json` (`npx -y @nanonets/graft mcp`) serves Kimi project-wide; this
+  session's graft MCP tools come from it. Gap was usage (4.3), not wiring.
+  Note: `~/.kimi/config.toml` has no server section, so `.mcp.json` is the
+  right home; no global change needed.
+- [x] **4.3 Made graft routing explicit in `AGENTS.md`.** All three tools read
   this file; add: "For any codebase question — where code lives, who calls
   it, what breaks — query graft *before* Grep/Glob." The project graft skill
   already says this for Claude; promote it to the shared file.
 - [ ] **4.4 Measure.** Kimi Shell share of tool calls <60%; Grep+Glob calls
-  per session down 50% in new transcripts.
+  per session down 50% in new transcripts. Baseline (N=60): Kimi 84% Shell
+  share (20,847/24,803), 1,194 Grep + 171 Glob calls; Claude 61 Grep in 60
+  sessions. Graft was wired but unused in all sampled transcripts, so the
+  after-sample must show graft MCP tool calls present.
 
 ## Phase 5 — Persistent shell state
 
