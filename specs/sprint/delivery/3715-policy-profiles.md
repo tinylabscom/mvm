@@ -31,7 +31,7 @@ then among embedded built-ins: groups `registries`, `github`, `llm-apis`,
 and are refused. The flag is `--policy`, not `--profile`: `--profile` already
 selects the run's security tier (restrictive/standard/dev/permissive).
 
-**Resolved manifest = the signed plan.** A resolved policy is folded into the
+**Resolved manifest feeds the signed plan.** A resolved policy is folded into the
 launch's own flags (`--allow-host`, routes, `--secret`, `--mount`,
 `--allow-env`, `--cpu-limit`, `--timeout`), with the flags as the last layer —
 they add to allows and cannot reach denies, blocks or ceilings — and from there
@@ -40,6 +40,15 @@ admission. A test admits a profile and the equivalent flags through the real
 admission path and compares the plans. `mvmctl policy resolve` writes the
 manifest; `run --plan FILE` reads it back, re-validates it, refuses a plan or
 signature inside it, and is exclusive with every policy flag.
+
+The final security audit also closes alternate-input bypasses: policy network
+denies narrow egress supplied by a grants file, project manifest, or host
+default; Workload IR secret names and launch-plan/workload environment names
+are checked before launch; share denies compare canonical host paths; SDK
+transport modes refuse policy they cannot apply; and backend-conditioned
+policy fails closed if launch selection drifts. Persistent machines refuse
+every section their spec cannot record rather than silently dropping deny-only
+or allow-only rules.
 
 **One resolution for every verb.** The project's `[network] allow_hosts`
 used to reach only `machine create --manifest`; `run` and `machine run` never

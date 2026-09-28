@@ -623,21 +623,24 @@ fn machine_run_spec(
     }
     let config = mvm_core::user_config::load(None);
     let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
-    let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: args.run.cpu_limit,
-        timeout_secs: args.run.timeout,
-        allow_host: &args.run.allow_host,
-        peer: &args.run.peer,
-        net: args.run.net,
-        network_preset: args.run.network_preset,
-        grants_file: args.run.grants_file.as_deref(),
-        // A persistent `machine run` names its source on the command line and
-        // reads no project manifest; `machine create` is the verb that sources
-        // a `[grants]` table.
-        manifest: None,
-        config: &config,
-        ai: ai.as_ref(),
-    })?;
+    let resolved = super::shared::resolve_run_grants_with_policy(
+        super::shared::GrantInputs {
+            cpu_limit_millicores: args.run.cpu_limit,
+            timeout_secs: args.run.timeout,
+            allow_host: &args.run.allow_host,
+            peer: &args.run.peer,
+            net: args.run.net,
+            network_preset: args.run.network_preset,
+            grants_file: args.run.grants_file.as_deref(),
+            // A persistent `machine run` names its source on the command line and
+            // reads no project manifest; `machine create` is the verb that sources
+            // a `[grants]` table.
+            manifest: None,
+            config: &config,
+            ai: ai.as_ref(),
+        },
+        args.run.applied_policy.as_ref(),
+    )?;
     let (net, allow_host) = super::shared::persisted_run_network(
         args.run.net,
         args.run.network_preset,
@@ -1134,18 +1137,21 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // Resolving grants also settles the egress policy, so validating it
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
-    let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: policy.cpu_limit,
-        timeout_secs: policy.timeout,
-        allow_host: &allow_host,
-        peer: inputs.peer,
-        net,
-        network_preset: None,
-        grants_file: inputs.grants_file,
-        manifest: workflow.map(|workflow| &workflow.grants),
-        config: &config,
-        ai,
-    })?;
+    let resolved = super::shared::resolve_run_grants_with_policy(
+        super::shared::GrantInputs {
+            cpu_limit_millicores: policy.cpu_limit,
+            timeout_secs: policy.timeout,
+            allow_host: &allow_host,
+            peer: inputs.peer,
+            net,
+            network_preset: None,
+            grants_file: inputs.grants_file,
+            manifest: workflow.map(|workflow| &workflow.grants),
+            config: &config,
+            ai,
+        },
+        policy.policy.as_ref(),
+    )?;
     if cpus == 0 {
         bail!("machine CPUs must be >= 1");
     }

@@ -330,6 +330,13 @@ pub(in crate::commands) struct RunArgs {
     /// contributes, merged with `--allow-endpoint` where routes resolve.
     #[arg(skip)]
     pub policy_routes: Vec<mvm_contract::policy::routes::EgressRoute>,
+    /// Internal: the resolved authored policy, retained so lower grant
+    /// surfaces cannot reopen something it denied.
+    #[arg(skip)]
+    pub applied_policy: Option<mvm_client::policy_profiles::PolicyBody>,
+    /// Internal: backend used to resolve a backend-conditioned policy.
+    #[arg(skip)]
+    pub policy_backend: Option<mvm_core::protocol::vm_backend::BackendKind>,
 }
 
 /// Every flag that authors policy. A resolved manifest is the whole policy,
@@ -550,18 +557,21 @@ pub(in crate::commands) fn run_secure_with_source(
     let routes = super::run_routes::launch_routes(&args)?;
     crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);
-    let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: args.cpu_limit,
-        timeout_secs: args.timeout,
-        allow_host: &allow_host,
-        peer: &args.peer,
-        net: args.net,
-        network_preset: args.network_preset,
-        grants_file: args.grants_file.as_deref(),
-        manifest: None,
-        config: &host_config,
-        ai: ai_policy.as_ref(),
-    })?;
+    let resolved_grants = super::shared::resolve_run_grants_with_policy(
+        super::shared::GrantInputs {
+            cpu_limit_millicores: args.cpu_limit,
+            timeout_secs: args.timeout,
+            allow_host: &allow_host,
+            peer: &args.peer,
+            net: args.net,
+            network_preset: args.network_preset,
+            grants_file: args.grants_file.as_deref(),
+            manifest: None,
+            config: &host_config,
+            ai: ai_policy.as_ref(),
+        },
+        args.applied_policy.as_ref(),
+    )?;
     let network_policy = resolved_grants
         .network_policy
         .clone()
@@ -582,6 +592,16 @@ pub(in crate::commands) fn run_secure_with_source(
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
+    if let Some(policy_backend) = args.policy_backend
+        && selected_backend.kind() != policy_backend
+    {
+        anyhow::bail!(
+            "the authored policy was resolved for backend {}, but launch selected {}; pass \
+             --hypervisor explicitly so backend-conditioned policy cannot drift",
+            policy_backend.as_str(),
+            selected_backend.kind().as_str()
+        );
+    }
     // The typed kind, taken off the backend object itself: admission measures a
     // declared grant against the mechanisms this tier really has, and a name
     // parsed back into a tier would be measuring against whatever was typed.
@@ -2178,6 +2198,16 @@ mod tests {
             .expect("plan resolves")
             .unwrap();
         assert_eq!(mode, RunMode::Plan);
+    }
+
+    #[test]
+    fn sdk_modes_refuse_an_authored_policy_they_cannot_apply() {
+        let _env = sdk_mode_free_env();
+        let mut args = run_args(RunProfile::Standard);
+        args.policy = Some("offline".to_string());
+        let error = resolve_run_mode(&sdk(Some(RunMode::Plan), false), &args)
+            .expect_err("SDK mode must not skip policy");
+        assert!(error.to_string().contains("--policy"));
     }
 
     /// An SDK mode chosen by the environment never swallows `--prod`.

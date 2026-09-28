@@ -522,6 +522,14 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {
+        if let Some(policy) = &args.run.applied_policy
+            && (!policy.shares.is_empty() || policy.resources.cpu_millicores.is_some())
+        {
+            anyhow::bail!(
+                "machine run --entrypoint cannot yet carry policy shares or a CPU-share \
+                 ceiling through entrypoint admission; use machine run with an argv"
+            );
+        }
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 

@@ -296,7 +296,7 @@ impl<T: Clone> OneOrMany<T> {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         matches!(self, OneOrMany::Many(values) if values.is_empty())
     }
 }

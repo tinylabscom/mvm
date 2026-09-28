@@ -312,6 +312,49 @@ fn a_predicate_on_an_unknown_backend_does_not_match() {
     assert_eq!(hosts, ["linux.test:443"]);
 }
 
+#[test]
+fn profile_overrides_apply_after_matching_when_overrides() {
+    let dir = Dir::new();
+    dir.profile(
+        "ordered",
+        "[[when]]\nos = \"linux\"\n[[when.overrides.secrets.bind]]\nname = \"token\"\n\
+         hosts = [\"a.test\", \"b.test\"]\n\
+         [[overrides.secrets.bind]]\nname = \"token\"\nhosts = [\"a.test\"]\n",
+    );
+    let resolved = dir
+        .resolve_on(
+            "ordered",
+            Platform {
+                os: Some(HostOs::Linux),
+                arch: None,
+                backend: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(resolved.policy.secrets.bind[0].hosts, ["a.test"]);
+}
+
+#[test]
+fn profile_override_cannot_unblock_a_matching_when_override() {
+    let dir = Dir::new();
+    dir.profile(
+        "ordered",
+        "[[when]]\nos = \"linux\"\n[when.overrides.network]\nblock = true\n\
+         [overrides.network]\nblock = false\n",
+    );
+    let error = dir
+        .resolve_on(
+            "ordered",
+            Platform {
+                os: Some(HostOs::Linux),
+                arch: None,
+                backend: None,
+            },
+        )
+        .unwrap_err();
+    assert!(error.message.contains("cannot turn the network back on"));
+}
+
 // ---- discovery precedence -------------------------------------------------
 
 fn project(profile: Option<&str>, include: &[&str], allow_hosts: &[&str]) -> ProjectPolicy {

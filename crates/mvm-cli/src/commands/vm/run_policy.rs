@@ -25,6 +25,7 @@ struct Selected {
     label: String,
     policy: mvm_client::policy_profiles::PolicyBody,
     notes: Vec<String>,
+    backend_conditioned: bool,
 }
 
 fn select(args: &RunArgs) -> Result<Option<Selected>> {
@@ -34,6 +35,7 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
             label: format!("resolved manifest {}", path.display()),
             policy: manifest.policy,
             notes: Vec::new(),
+            backend_conditioned: false,
         }));
     }
     let project = super::run_routes::project_manifest(args)?
@@ -51,20 +53,28 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
         label,
         policy: resolved.policy,
         notes: resolved.notes,
+        backend_conditioned: resolved.backend_conditioned,
     }))
 }
 
 /// This host, and the backend the run asks for or the host would pick.
 fn run_platform(args: &RunArgs) -> Platform {
-    let backend = match args.hypervisor.as_deref() {
-        Some(name) => mvm_client::backend_kind_for(name),
-        None => mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name()),
-    };
+    let requested = args.hypervisor.clone().or_else(|| {
+        ["MVM_HYPERVISOR", "MVM_BACKEND"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|value| value.to_string_lossy().trim().to_ascii_lowercase())
+            .find(|value| !value.is_empty())
+    });
+    let backend = requested.as_deref().map_or_else(
+        || mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name()),
+        mvm_client::backend_kind_for,
+    );
     Platform::current(Some(backend))
 }
 
 fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
-    let env_names = args
+    let mut env_names = args
         .env
         .iter()
         .map(|pair| {
@@ -73,6 +83,47 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
                 .with_context(|| format!("--env '{pair}': expected KEY=VALUE"))
         })
         .collect::<Result<Vec<_>>>()?;
+    if let Some(path) = &args.launch_plan {
+        for name in crate::exec::load_launch_plan(std::path::Path::new(path))?
+            .env
+            .into_keys()
+        {
+            if !env_names.contains(&name) {
+                env_names.push(name);
+            }
+        }
+    }
+    let mut declared_secrets = super::run_secrets::project_secret_specs(args)?
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    if let Some(workload) =
+        mvm_client::admission::secrets::load_workload_ir(args.from_workload_ir.as_deref())?
+    {
+        for app in &workload.apps {
+            for name in app.env.keys() {
+                if !env_names.contains(name) {
+                    env_names.push(name.clone());
+                }
+            }
+            for entrypoint in &app.entrypoints {
+                let env = match entrypoint {
+                    mvm_contract::ir::Entrypoint::Command { env, .. }
+                    | mvm_contract::ir::Entrypoint::Function { env, .. } => env,
+                };
+                for name in env.keys() {
+                    if !env_names.contains(name) {
+                        env_names.push(name.clone());
+                    }
+                }
+            }
+        }
+        for reference in mvm_client::admission::secrets::workload_machine_refs(&workload, "local") {
+            if !declared_secrets.contains(&reference.name) {
+                declared_secrets.push(reference.name);
+            }
+        }
+    }
     Ok(LaunchFlags {
         allow_host: args.allow_host.clone(),
         net: args.net,
@@ -81,10 +132,7 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
         cpu_limit: args.cpu_limit,
         timeout: args.timeout,
         secret: args.secret.clone(),
-        declared_secrets: super::run_secrets::project_secret_specs(args)?
-            .into_iter()
-            .map(|spec| spec.name)
-            .collect(),
+        declared_secrets,
         mounts: args.mounts.clone(),
         env_names,
         allow_env: args.allow_env.clone(),
@@ -117,6 +165,11 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     args.secret = folded.secret;
     args.mounts = folded.mounts;
     args.allow_env = folded.allow_env;
+    args.policy_backend = selected
+        .backend_conditioned
+        .then_some(run_platform(args).backend)
+        .flatten();
+    args.applied_policy = Some(selected.policy);
     tracing::info!(policy = %selected.label, "running under an authored policy");
     Ok(())
 }
@@ -263,5 +316,41 @@ mod tests {
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("never trusted"), "{err:#}");
+    }
+
+    #[test]
+    fn a_policy_reaches_workload_ir_secrets() {
+        let (_env, home) = isolated();
+        let profile = home.path().join("deny-secret.toml");
+        std::fs::write(&profile, "[overrides.secrets]\ndeny = [\"anthropic\"]\n").unwrap();
+        let workload = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/agent-workload/workload.json");
+        let mut args = RunArgs {
+            policy: Some(profile.display().to_string()),
+            from_workload_ir: Some(workload),
+            ..RunArgs::default()
+        };
+        let error = apply_run_policy(&mut args).expect_err("denied IR secret must be refused");
+        assert!(format!("{error:#}").contains("anthropic"));
+    }
+
+    #[test]
+    fn a_policy_reaches_launch_plan_environment() {
+        let (_env, home) = isolated();
+        let profile = home.path().join("deny-env.toml");
+        std::fs::write(&profile, "[overrides.env]\ndeny = [\"DEBUG\"]\n").unwrap();
+        let launch = home.path().join("launch.json");
+        std::fs::write(
+            &launch,
+            r#"{"entrypoint":{"command":["echo"],"env":{"DEBUG":"1"}}}"#,
+        )
+        .unwrap();
+        let mut args = RunArgs {
+            policy: Some(profile.display().to_string()),
+            launch_plan: Some(launch.display().to_string()),
+            ..RunArgs::default()
+        };
+        let error = apply_run_policy(&mut args).expect_err("denied launch env must be refused");
+        assert!(format!("{error:#}").contains("DEBUG"));
     }
 }

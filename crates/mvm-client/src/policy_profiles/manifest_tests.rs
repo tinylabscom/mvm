@@ -236,6 +236,31 @@ fn a_policy_deny_reaches_a_secret_the_project_declares() {
     assert_eq!(err.key.as_deref(), Some("[secrets]"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_share_deny_follows_symlinks_before_the_mount_is_admitted() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let denied = root.path().join("denied");
+    let safe = root.path().join("safe");
+    std::fs::create_dir(&denied).unwrap();
+    std::fs::create_dir(&safe).unwrap();
+    let link = safe.join("link");
+    symlink(&denied, &link).unwrap();
+    let policy: PolicyBody = toml::from_str(&format!(
+        "[shares]\ndeny = [{}]\n",
+        toml::Value::String(denied.display().to_string())
+    ))
+    .unwrap();
+    let flags = LaunchFlags {
+        mounts: vec![format!("{}:/work:ro", link.display())],
+        ..flags()
+    };
+    let error = fold(&policy, &flags).expect_err("symlink into denied tree must be refused");
+    assert!(error.message.contains("denies as a share source"));
+}
+
 // ---- shares -------------------------------------------------------------------
 
 #[test]

@@ -147,6 +147,7 @@ pub fn resolve(
         visited: Vec::new(),
         groups: Vec::new(),
         overrides: Vec::new(),
+        backend_conditioned: false,
     };
     if let Some(reference) = &selection.profile {
         let root = store.load_profile(reference, None, LayerOrigin::User, "--policy")?;
@@ -190,9 +191,12 @@ pub fn resolve(
             0,
         )?;
     }
+    let backend_conditioned = walker.backend_conditioned;
     let mut layers: Vec<Layer> = walker.groups.into_iter().map(|g| g.layer).collect();
     layers.extend(walker.overrides);
-    merge_layers(&layers)
+    let mut resolved = merge_layers(&layers)?;
+    resolved.backend_conditioned = backend_conditioned;
+    Ok(resolved)
 }
 
 /// Resolve a single file that is a profile or, failing that, a group, as a
@@ -241,6 +245,7 @@ struct Walker<'a> {
     visited: Vec<String>,
     groups: Vec<SelectedGroup>,
     overrides: Vec<Layer>,
+    backend_conditioned: bool,
 }
 
 fn group_layer(group: &Loaded<GroupFile>) -> Layer {
@@ -312,6 +317,9 @@ impl Walker<'_> {
         )?;
         let mut conditional = Vec::new();
         for (index, when) in profile.doc.when.iter().enumerate() {
+            if !when.backend.is_empty() {
+                self.backend_conditioned = true;
+            }
             if !self.platform.matches(when) {
                 continue;
             }
@@ -330,6 +338,7 @@ impl Walker<'_> {
                 });
             }
         }
+        self.overrides.extend(conditional);
         if !profile.doc.overrides.is_empty() {
             self.overrides.push(Layer {
                 label: format!("{} overrides", profile.label),
@@ -338,7 +347,6 @@ impl Walker<'_> {
                 body: profile.doc.overrides.clone(),
             });
         }
-        self.overrides.extend(conditional);
         Ok(())
     }
 

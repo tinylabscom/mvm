@@ -346,12 +346,39 @@ fn mount_guest(spec: &str) -> Option<&str> {
         .map(|(_, rest)| rest.split(':').next().unwrap_or(rest))
 }
 
+fn resolved_host_path(path: &str) -> std::path::PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| Path::new(path).to_path_buf());
+    canonicalize_with_missing_tail(absolute)
+}
+
+fn canonicalize_with_missing_tail(mut path: std::path::PathBuf) -> std::path::PathBuf {
+    let mut tail = Vec::new();
+    while !path.exists() {
+        let Some(name) = path.file_name().map(ToOwned::to_owned) else {
+            return path;
+        };
+        tail.push(name);
+        if !path.pop() {
+            return path;
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&path).unwrap_or(path);
+    for name in tail.into_iter().rev() {
+        resolved.push(name);
+    }
+    resolved
+}
+
 fn fold_mounts(policy: &PolicyBody, flags: &LaunchFlags) -> Result<Vec<String>, PolicyError> {
     let shares = &policy.shares;
     for spec in &flags.mounts {
         let host = mount_host(spec);
-        let absolute = std::path::absolute(host).unwrap_or_else(|_| Path::new(host).to_path_buf());
-        if let Some(deny) = shares.deny.iter().find(|d| absolute.starts_with(d)) {
+        let absolute = resolved_host_path(host);
+        if let Some(deny) = shares
+            .deny
+            .iter()
+            .find(|deny| absolute.starts_with(resolved_host_path(deny)))
+        {
             return Err(refuse(
                 "--mount",
                 format!("{host} is under {deny}, which the policy denies as a share source"),

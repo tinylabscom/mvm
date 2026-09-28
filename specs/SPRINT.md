@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Composable policy files and authored profiles — issue #3715.**
+      Rust-derived policy/profile schema, user and project discovery,
+      `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
+      into the signed execution path. Security regressions cover deny
+      precedence across lower grant surfaces, Workload IR secrets,
+      launch-plan environment, canonical share paths, conditional override
+      order, backend drift, and persistent-machine refusal for policy a spec
+      cannot record. See `specs/sprint/delivery/3715-policy-profiles.md`.
+
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
       an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
@@ -4794,8 +4803,6 @@ writes the plan:
       reusing the standing whole-collection refusal + chain-signed audit
       path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
       collection gate).
-
-
 ## 2026-09-28 Security evidence freshness — #3750
 
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.

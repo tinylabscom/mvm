@@ -36,14 +36,16 @@ pub(super) struct MachinePolicy {
     pub allow_host: Vec<String>,
     pub cpu_limit: Option<u32>,
     pub timeout: Option<u64>,
+    pub policy: Option<PolicyBody>,
 }
 
 /// Refuse a policy section a machine spec cannot record.
 fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
     for (section, present) in [
-        ("secrets", !policy.secrets.bind.is_empty()),
-        ("shares", !policy.shares.mount.is_empty()),
-        ("env", !policy.env.readmit.is_empty()),
+        ("secrets", !policy.secrets.is_empty()),
+        ("shares", !policy.shares.is_empty()),
+        ("env", !policy.env.is_empty()),
+        ("tools", !policy.tools.is_empty()),
         ("network.routes", !policy.network.routes.is_empty()),
     ] {
         if present {
@@ -70,6 +72,7 @@ pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachineP
             allow_host: inputs.allow_host.to_vec(),
             cpu_limit: inputs.cpu_limit,
             timeout: inputs.timeout,
+            policy: None,
         });
     };
     let backend = mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name());
@@ -78,6 +81,12 @@ pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachineP
         &selection,
         Platform::current(Some(backend)),
     )?;
+    if resolved.backend_conditioned {
+        bail!(
+            "a persistent machine cannot use backend-conditioned policy because a later start \
+             may select a different hypervisor; use a backend-independent policy"
+        );
+    }
     for note in &resolved.notes {
         crate::ui::warn(&format!("policy: {note}"));
     }
@@ -99,6 +108,7 @@ pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachineP
         allow_host: folded.allow_host,
         cpu_limit: folded.cpu_limit,
         timeout: folded.timeout,
+        policy: Some(resolved.policy),
     })
 }
 
@@ -165,9 +175,45 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_with_sections_a_spec_cannot_hold_is_refused() {
-        let body: PolicyBody = toml::from_str("[[secrets.bind]]\nname = \"gh\"\n").expect("parses");
-        assert!(refuse_unrecordable(&body).is_err());
+    fn backend_conditioned_policy_is_refused_for_a_persistent_spec() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let profile = home.path().join("backend.toml");
+        std::fs::write(
+            &profile,
+            "[[when]]\nbackend = \"firecracker\"\n[when.overrides.network]\nblock = true\n",
+        )
+        .unwrap();
+        let error = machine_policy(inputs(Some(profile.to_str().unwrap()), None, &[]))
+            .expect_err("a later start could pick another backend");
+        assert!(format!("{error:#}").contains("backend-conditioned"));
+    }
+
+    #[test]
+    fn every_policy_section_a_spec_cannot_hold_is_refused() {
+        for (section, text) in [
+            ("secrets", "[[secrets.bind]]\nname = \"gh\"\n"),
+            ("secrets", "[secrets]\ndeny = [\"gh\"]\n"),
+            (
+                "shares",
+                "[[shares.mount]]\nhost = \"/src\"\nguest = \"/work\"\n",
+            ),
+            ("shares", "[shares]\ndeny = [\"/private\"]\n"),
+            ("env", "[env]\nallow = [\"MODE\"]\n"),
+            ("env", "[env]\ndeny = [\"DEBUG\"]\n"),
+            ("env", "[env]\nreadmit = [\"LD_PRELOAD\"]\n"),
+            ("tools", "[tools]\nallow = [\"curl\"]\n"),
+            ("tools", "[tools]\ndeny = [\"ssh\"]\n"),
+            (
+                "network.routes",
+                "[[network.routes]]\nid = \"api\"\nhost = \"api.test\"\n",
+            ),
+        ] {
+            let body: PolicyBody = toml::from_str(text).expect("policy parses");
+            let error = refuse_unrecordable(&body).expect_err("section must be refused");
+            assert!(error.to_string().contains(section), "{error:#}");
+        }
         assert!(refuse_unrecordable(&PolicyBody::default()).is_ok());
     }
 }

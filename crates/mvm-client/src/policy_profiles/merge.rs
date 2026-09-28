@@ -62,6 +62,9 @@ pub struct ResolvedPolicy {
     pub provenance: BTreeMap<String, String>,
     /// What the merge dropped or narrowed, for the operator.
     pub notes: Vec<String>,
+    /// Whether any contributing profile selects policy by backend.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub backend_conditioned: bool,
 }
 
 impl ResolvedPolicy {
@@ -73,6 +76,7 @@ impl ResolvedPolicy {
             layers: Vec::new(),
             provenance: BTreeMap::new(),
             notes: Vec::new(),
+            backend_conditioned: false,
         }
     }
 }
@@ -245,17 +249,26 @@ fn validate_env_name(layer: &Layer, key: &str, name: &str) -> Result<(), PolicyE
 /// declaring file's directory.
 fn absolute_share_host(layer: &Layer, host: &str) -> Result<String, PolicyError> {
     let path = Path::new(host);
-    if path.is_absolute() {
-        return Ok(host.to_string());
-    }
-    match layer.file.as_deref().and_then(Path::parent) {
-        Some(dir) => Ok(dir.join(path).display().to_string()),
-        None => Err(layer_error(
-            layer,
-            "shares.mount.host",
-            format!("{host:?} is relative, and this layer has no file to resolve it against"),
-        )),
-    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match layer.file.as_deref().and_then(Path::parent) {
+            Some(dir) => dir.join(path),
+            None => {
+                return Err(layer_error(
+                    layer,
+                    "shares.mount.host",
+                    format!(
+                        "{host:?} is relative, and this layer has no file to resolve it against"
+                    ),
+                ));
+            }
+        }
+    };
+    Ok(std::fs::canonicalize(&absolute)
+        .unwrap_or(absolute)
+        .display()
+        .to_string())
 }
 
 fn narrower(current: &mut Option<Sourced<u32>>, value: Option<u32>, from: &str) {
@@ -734,6 +747,7 @@ impl Accumulator {
             layers: Vec::new(),
             provenance,
             notes,
+            backend_conditioned: false,
         })
     }
 }
