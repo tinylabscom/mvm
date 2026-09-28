@@ -144,7 +144,9 @@ independent_verifiers = 2
 # refuses a front-truncated file; a segment cannot be moved behind a
 # predecessor it never continued; a deleted segment is named rather than
 # silently skipped; and a crash mid-rotation continues the chain instead of
-# starting a fresh one that orphans everything behind it.
+# starting a fresh one that orphans everything behind it. The two session
+# witnesses hold a `session.sealed` record to the chain it sits in, field by
+# field, and pin that truncating through a seal is visible as UNSEALED.
 witnesses = [
     "fn:synthesize_plan",
     "fn:admit_for_run",
@@ -158,6 +160,8 @@ witnesses = [
     "fn:a_spliced_segment_is_refused",
     "fn:a_missing_segment_is_named_not_silently_skipped",
     "fn:an_interrupted_rotation_continues_history_instead_of_restarting_it",
+    "fn:a_correctly_signed_seal_that_lies_is_refused_field_by_field",
+    "fn:truncating_through_the_seal_leaves_the_session_unsealed",
 ]
 
 [[claim]]
