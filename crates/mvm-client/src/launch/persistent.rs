@@ -91,6 +91,9 @@ pub struct PersistentImageStartParams<'a> {
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
     pub gpu_device: Option<u32>,
+    /// Local workload source directory to scan for project instruction files and
+    /// policies on each start, when the persistent machine came from one.
+    pub workload_dir: Option<&'a std::path::Path>,
 }
 
 /// The network mode every newly admitted networked workload uses: the
@@ -191,6 +194,7 @@ pub fn start_persistent_oci_machine(
         grants,
         gpu,
         gpu_device,
+        workload_dir,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
@@ -214,9 +218,19 @@ pub fn start_persistent_oci_machine(
     let admission_ledger = InMemoryNonceLedger::new();
     let ingress = machine_port_ingress(ports)?;
     let resolved_secrets = crate::admission::secrets::resolve_machine_secrets(name)?;
+    let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
+        .iter()
+        .filter_map(|volume| {
+            volume
+                .materialized_image
+                .as_deref()
+                .map(std::path::PathBuf::from)
+        })
+        .collect();
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
-            instructions: Default::default(),
+            instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                .with_mount_roots(&instruction_mount_roots),
             outputs: Vec::new(),
             network_mode: preflight_network(),
             tenant: "local",

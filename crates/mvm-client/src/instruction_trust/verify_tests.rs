@@ -235,6 +235,30 @@ fn an_oversized_file_is_refused_unread() {
     assert!(report.sha256.is_none());
 }
 
+#[test]
+fn an_oversized_sidecar_is_refused_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_claude(dir.path(), b"be helpful\n");
+    let sidecar = crate::instruction_trust::sidecar_path(
+        &file,
+        crate::instruction_trust::KEYED_SIDECAR_SUFFIX,
+    );
+    std::fs::write(&sidecar, b"").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sidecar)
+        .unwrap()
+        .set_len(MAX_INSTRUCTION_SIDECAR_BYTES + 1)
+        .unwrap();
+    let report = verdict_under(dir.path(), &policy_trusting(&key(1), ""));
+    match &report.verdict {
+        Verdict::Failed(Failure::Unreadable { detail }) => {
+            assert!(detail.contains("sidecar limit"), "{detail}");
+        }
+        other => panic!("expected an unreadable sidecar, got {other:?}"),
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_is_verified_by_its_target_only_inside_the_root() {

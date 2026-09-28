@@ -25,6 +25,10 @@ pub struct InstructionSources<'a> {
     /// The workload's source directory on this host, when it has one. It is
     /// scanned like a mount, and a project policy is looked for inside it.
     pub workload_dir: Option<&'a Path>,
+    /// The exact roots copied into the guest for directory mounts, when the
+    /// caller has already materialized them. When absent, the scan falls back
+    /// to the admitted directory-share host paths.
+    pub mount_roots: Option<&'a [PathBuf]>,
     /// Override for the user policy path. `None` reads
     /// `mvm_core::config::instruction_trust_policy_path()`; tests inject a
     /// tempdir so they never read the real user's policy.
@@ -37,8 +41,17 @@ impl<'a> InstructionSources<'a> {
     pub fn for_workload(workload_dir: Option<&'a Path>) -> Self {
         Self {
             workload_dir,
+            mount_roots: None,
             user_policy: None,
         }
+    }
+
+    /// Use the exact roots the boot will copy into the guest for directory
+    /// mounts, rather than re-reading the admitted source paths.
+    #[must_use]
+    pub fn with_mount_roots(mut self, mount_roots: &'a [PathBuf]) -> Self {
+        self.mount_roots = Some(mount_roots);
+        self
     }
 }
 
@@ -52,11 +65,16 @@ fn boot_inputs(
     sources: InstructionSources<'_>,
 ) -> BootInputs {
     BootInputs {
-        mounts: shares
-            .iter()
-            .filter(|grant| grant.kind == ShareKind::DirShare)
-            .map(|grant| PathBuf::from(&grant.host_path))
-            .collect(),
+        mounts: sources.mount_roots.map_or_else(
+            || {
+                shares
+                    .iter()
+                    .filter(|grant| grant.kind == ShareKind::DirShare)
+                    .map(|grant| PathBuf::from(&grant.host_path))
+                    .collect()
+            },
+            <[PathBuf]>::to_vec,
+        ),
         assets: assets
             .iter()
             .map(|asset| PathBuf::from(&asset.host_path))
@@ -112,9 +130,14 @@ pub(super) fn record_and_enforce(
             Ok(())
         }
         Decision::Refuse(message) => {
-            if let Err(error) = emitter.emit_refused(plan, "instruction_provenance", &message) {
-                tracing::warn!(error = %error, "audit emit_refused failed");
-            }
+            emitter
+                .emit_refused(plan, "instruction_provenance", &message)
+                .with_context(|| {
+                    format!(
+                        "recording the instruction-provenance refusal in the audit chain \
+                         for: {message}"
+                    )
+                })?;
             anyhow::bail!(message)
         }
     }
@@ -162,5 +185,21 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn explicit_mount_roots_override_admitted_share_paths() {
+        let assets = vec![AssetSpec {
+            kind: mvm_contract::plan::AssetKind::Prompt,
+            host_path: "/assets/prompt".to_string(),
+        }];
+        let materialized = vec![PathBuf::from("/state/mount-0.ext4")];
+        let inputs = boot_inputs(
+            &[share("/src/tree", ShareKind::DirShare)],
+            &assets,
+            InstructionSources::for_workload(None).with_mount_roots(&materialized),
+        );
+        assert_eq!(inputs.mounts, materialized);
+        assert_eq!(inputs.assets, vec![PathBuf::from("/assets/prompt")]);
     }
 }

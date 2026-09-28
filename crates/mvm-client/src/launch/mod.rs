@@ -534,6 +534,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         gpu: false,
         gpu_device: None,
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,

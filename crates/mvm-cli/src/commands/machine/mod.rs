@@ -584,6 +584,27 @@ fn machine_run_spec(
     name: String,
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
+    fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {
+        mvm_client::instruction_trust::gate::local_workload_dir(
+            args.run.flake.as_deref(),
+            args.run.manifest.as_deref(),
+        )
+        .map(|path| {
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .context("resolving the current directory for the persistent workload source")?
+                    .join(path)
+            };
+            Ok(std::fs::canonicalize(&absolute)
+                .unwrap_or(absolute)
+                .display()
+                .to_string())
+        })
+        .transpose()
+    }
+
     validate_machine_name(&name)?;
     let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;
@@ -610,6 +631,7 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
+    let workload_dir = persistent_workload_dir_for_run(args)?;
     if !args.run.allow_endpoint.is_empty() {
         bail!(
             "--allow-endpoint is not yet supported on a persistent machine: its routes \
@@ -662,6 +684,7 @@ fn machine_run_spec(
         init: Vec::new(),
         agent_verb: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
+        workload_dir,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: crate::exec::build_healthcheck(
@@ -1171,6 +1194,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         init: inputs.init.to_vec(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,

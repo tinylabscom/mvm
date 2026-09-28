@@ -85,6 +85,22 @@ pub fn find_instruction_files(
     let mut found = Vec::new();
     if meta.is_dir() {
         walk(root, &root.path, "", policy, &mut found)?;
+    } else if meta.file_type().is_symlink() {
+        let target = std::fs::canonicalize(&root.path)?;
+        let target_meta = std::fs::metadata(&target)?;
+        if target_meta.is_dir() {
+            walk(root, &target, "", policy, &mut found)?;
+        } else if let Some(name) = root.path.file_name().and_then(|n| n.to_str())
+            && !is_sidecar_name(name)
+            && policy.includes(Path::new(name))
+        {
+            found.push(InstructionFile {
+                root: root.path.clone(),
+                root_kind: root.kind,
+                relative: name.to_string(),
+                path: root.path.clone(),
+            });
+        }
     } else if let Some(name) = root.path.file_name().and_then(|n| n.to_str())
         && !is_sidecar_name(name)
         && policy.includes(Path::new(name))
@@ -250,7 +266,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_directory_is_not_followed() {
+    fn an_explicit_root_symlink_to_a_directory_is_followed() {
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "CLAUDE.md");
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        assert_eq!(relatives(&dir.path().join("linked")), vec!["CLAUDE.md"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_symlinked_directories_are_still_not_followed() {
         let outside = tempfile::tempdir().unwrap();
         write(outside.path(), "CLAUDE.md");
         let dir = tempfile::tempdir().unwrap();

@@ -71,6 +71,7 @@ fn admit(f: &Fixture) -> Result<AdmissionContext> {
         shares: vec![share(&f.mount)],
         instructions: InstructionSources {
             workload_dir: None,
+            mount_roots: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -196,5 +197,42 @@ fn a_broken_user_policy_fails_admission_before_signing() {
     assert!(
         chain(&f).is_empty(),
         "nothing is recorded for a boot never signed"
+    );
+}
+
+#[test]
+fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
+    let f = fixture(Some("deny"));
+    let live = f.mount.join("CLAUDE.md");
+    crate::instruction_trust::sign::sign_file(&live, &publisher_key()).unwrap();
+
+    let materialized = f._dir.path().join("materialized");
+    std::fs::create_dir_all(&materialized).unwrap();
+    std::fs::write(materialized.join("CLAUDE.md"), b"unsigned snapshot bytes\n").unwrap();
+    let mount_roots = vec![materialized.clone()];
+
+    let ledger = InMemoryNonceLedger::new();
+    let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&mount_roots),
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("the unsigned snapshot must be what deny evaluates");
+
+    let message = format!("{err:#}");
+    assert!(message.contains("unsigned"), "{message}");
+    assert!(
+        message.contains(&materialized.display().to_string()),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&live.display().to_string()),
+        "the live source tree must not be what admission reports: {message}"
     );
 }

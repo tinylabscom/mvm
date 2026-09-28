@@ -670,8 +670,18 @@ pub(in crate::commands) fn run_secure_with_source(
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
+            .iter()
+            .filter_map(|volume| {
+                volume
+                    .materialized_image
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+            })
+            .collect();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-            instructions: InstructionSources::for_workload(admit_workload_dir.as_deref()),
+            instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
+                .with_mount_roots(&instruction_mount_roots),
             outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",

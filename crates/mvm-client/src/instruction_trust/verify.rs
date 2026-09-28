@@ -19,6 +19,8 @@ use super::{KEYED_SIDECAR_SUFFIX, KEYLESS_SIDECAR_SUFFIX, sidecar_path};
 /// refused unread rather than pulled into memory: no agent instruction file
 /// is legitimately this big.
 pub const MAX_INSTRUCTION_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// The largest signature sidecar read during verification.
+pub const MAX_INSTRUCTION_SIDECAR_BYTES: u64 = MAX_INSTRUCTION_FILE_BYTES;
 
 /// Why a file was refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -188,12 +190,23 @@ fn verdict_for(path: &Path, content: &[u8], sha256: &str, policy: &EffectivePoli
 
 /// Read a sidecar: `None` when absent, `Some(Err)` when present but unreadable.
 fn read_sidecar(path: &Path) -> Option<Result<Vec<u8>, Failure>> {
+    let read_error = |detail: String| Failure::Unreadable {
+        detail: format!("reading {}: {detail}", path.display()),
+    };
+    let size = match std::fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return Some(Err(read_error(error.to_string()))),
+    };
+    if size > MAX_INSTRUCTION_SIDECAR_BYTES {
+        return Some(Err(read_error(format!(
+            "{size} bytes exceeds the {MAX_INSTRUCTION_SIDECAR_BYTES}-byte sidecar limit"
+        ))));
+    }
     match std::fs::read(path) {
         Ok(bytes) => Some(Ok(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => Some(Err(Failure::Unreadable {
-            detail: format!("reading {}: {error}", path.display()),
-        })),
+        Err(error) => Some(Err(read_error(error.to_string()))),
     }
 }
 
