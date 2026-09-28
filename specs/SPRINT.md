@@ -4795,3 +4795,12 @@ writes the plan:
       path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
       collection gate).
 
+
+## 2026-09-28 Security witnesses — #3679
+
+- [ ] Validate remaining regressions and pass the full Security workflow.
+- [ ] Complete required workspace/Linux checks, merge and confirm closure.
+
+See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #3750 depends on this recovery.
+
+- [x] Security witness focused validation: mvm-contract 1,103 tests and mvm-fs 421 tests pass. Host workspace Clippy also passes; remaining package, workspace and mutation checks are pending.

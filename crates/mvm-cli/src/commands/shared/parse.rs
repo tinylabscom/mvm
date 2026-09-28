@@ -1066,3 +1066,19 @@ mod output_spec_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod host_path_kind_tests {
+    use super::validate_host_path;
+
+    #[test]
+    fn disk_images_and_directory_shares_keep_distinct_host_types() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("disk.ext4");
+        std::fs::write(&file, b"image").unwrap();
+        assert!(validate_host_path(file.to_str().unwrap(), false).is_ok());
+        assert!(validate_host_path(temp.path().to_str().unwrap(), true).is_ok());
+        assert!(validate_host_path(file.to_str().unwrap(), true).is_err());
+        assert!(validate_host_path(temp.path().to_str().unwrap(), false).is_err());
+    }
+}

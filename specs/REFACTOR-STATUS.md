@@ -1,8 +1,10 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
+
+- [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests) and host workspace Clippy pass; remaining tests, Linux and mutation validation are pending. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the

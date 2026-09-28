@@ -1154,6 +1154,10 @@ mod tests {
         let workspace_root = runtime_overlay_source_checkout_root()
             .expect("a contributor build must detect its source checkout");
         assert!(
+            workspace_root.is_absolute(),
+            "source root must not depend on the working directory"
+        );
+        assert!(
             workspace_root.join("Cargo.toml").is_file(),
             "detected workspace root must be the mvm workspace"
         );
