@@ -9,6 +9,18 @@ The fuller AI-assisted issue-to-PR playbook lives in
 setup in `public/src/content/docs/contributing/development.md`. If you change
 anything this file describes, update this file in the same change.
 
+## Documentation and editing hygiene
+
+- **No placeholders in shipped docs or guidance.** Do not land `TODO`,
+  `TBD`, `placeholder`, `<...>`, or similar stand-ins where contributors need
+  concrete instructions.
+- **Docs update with behavior changes.** If commands, flags, or behavior move,
+  update the matching docs in the same change, including
+  `public/src/content/docs/reference/cli-commands.md` when CLI surface changes.
+- **No scratch files in the repo tree.** Never write temporary/intermediate
+  files under the working tree; use `/tmp` instead (except local
+  `.agent-memory/notes/` findings).
+
 ## Execution boundaries
 
 **Builder VM requirement.** All Nix builds/evals, Firecracker operations,
@@ -70,6 +82,7 @@ developed in a git worktree. No docs-only or trivial-change exception.
 
 ```bash
 cd /Users/auser/work/tinylabs/mvmco/mvm   # main checkout
+mkdir -p ../.worktrees
 git worktree add ../.worktrees/mvm-<slug> -b feat/<slug>
 cd ../.worktrees/mvm-<slug>               # code + cargo live here
 ```

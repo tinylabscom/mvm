@@ -37,6 +37,7 @@ in a git worktree. Full detail is in `AGENTS.md`; the short version:
 ```bash
 cd mvm    # the main checkout — stays on main, always clean
 git fetch origin && git pull --ff-only origin main
+mkdir -p ../.worktrees
 git worktree add ../.worktrees/mvm-<slug> -b feat/<slug>
 cd ../.worktrees/mvm-<slug>
 ```
@@ -69,8 +70,8 @@ question in both.
   retrieval (`graft ask`), exhaustive search (`graft grep`), per-file API
   skeletons (`graft skeleton`), and call-graph edges (`graft callers`). It is
   cheap (no API key, sub-second) and always describes the code as it is right
-  now, including uncommitted edits. See the graft skill
-  (`.claude/skills/graft/SKILL.md`) for the tool-by-tool usage contract.
+  now, including uncommitted edits. See the graft contract
+  (`.cursor/rules/graft.mdc`) for the tool-by-tool usage contract.
 - **Serena** is a symbol-level semantic toolset over language servers (installed
   separately; see below). Use it inside the editor/agent for precise symbol
   operations: find symbol, find referencing symbols, rename, replace symbol
@@ -149,8 +150,8 @@ until the whole ladder is green.
 
 | Rung | Command | What it proves | Cost |
 |------|---------|----------------|------|
-| 1 | `cargo fmt` (or `just fmt`) | Formatting matches rustfmt | seconds |
-| 2 | `just check-fast-cargo` / `cargo check -p <crate>` | The touched crate compiles | seconds–a minute |
+| 1 | `cargo fmt --all` (or `just fmt`) | Formatting matches rustfmt across the workspace | seconds |
+| 2 | `cargo check -p <crate>` (optional first: `just check-fast-cargo`) | The touched crate compiles (`check-fast-cargo` only validates pinned toolchain/config wiring) | seconds–a minute |
 | 3 | `just test-crate <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
 | 4 | `just clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
 | 5 | `cargo test --workspace` | Nothing else regressed | longer |
@@ -169,11 +170,11 @@ Two notes from experience:
 
 ## What CI covers, and what it doesn't
 
-- `ci.yml` runs on every push to `main`/`feat/*` and every PR: check, fmt,
-  clippy, nextest on macOS and Linux, and dependency audit. The full
-  clippy + nextest + supply-chain matrix only runs on PRs — a direct push to
-  main ships untested, which is another reason the no-direct-commits rule exists.
-- `security.yml` and the supply-chain lane run as additional PR checks.
+- `ci.yml` runs on pull requests, merge-queue (`merge_group` with
+  `checks_requested`), and manual dispatch — not on ordinary branch pushes.
+  It covers check/fmt/clippy/nextest and related gates used for merge readiness.
+- `security.yml` runs on release tags, nightly schedule, and manual dispatch —
+  it does not run on pull requests.
 - Website/docs changes under `public/` are built and validated on PRs by
   `website.yml` and deploy to Cloudflare Workers Static Assets only after merge.
 - The merge queue is maintained by `merge-queue-requeue.yml`; once a PR is
