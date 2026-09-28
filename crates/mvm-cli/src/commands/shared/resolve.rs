@@ -4,6 +4,48 @@ use anyhow::{Context, Result};
 
 pub use mvm_client::launch::manifest_ref::{ManifestArgRef, resolve_manifest_arg};
 
+/// True when the launch source selectors resolve to an OCI image boot, whether
+/// the image was named directly (`--image`) or indirectly through `--manifest`.
+pub(in crate::commands) fn launch_uses_oci_image(
+    image_ref: Option<&str>,
+    manifest_arg: Option<&str>,
+) -> Result<bool> {
+    if image_ref.is_some() {
+        return Ok(true);
+    }
+    manifest_arg
+        .map(manifest_arg_uses_oci_image)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// True when a `--manifest` argument selects an OCI image source rather than a
+/// flake or wasm module.
+pub(in crate::commands) fn manifest_arg_uses_oci_image(arg: &str) -> Result<bool> {
+    use mvm_core::manifest::{Manifest, is_slot_hash_dirname, resolve_manifest_config_path};
+
+    let path = std::path::Path::new(arg);
+    if path.exists() {
+        let manifest_path = resolve_manifest_config_path(path)
+            .with_context(|| format!("Resolving --manifest {arg:?}"))?;
+        let manifest = Manifest::read_file(&manifest_path)
+            .with_context(|| format!("Reading manifest {}", manifest_path.display()))?;
+        return Ok(manifest.is_image_source());
+    }
+    if !is_slot_hash_dirname(arg) {
+        return Ok(false);
+    }
+    let persisted = match mvm_runtime::vm::template::lifecycle::template_load_slot(arg) {
+        Ok(persisted) => persisted,
+        Err(_) => return Ok(false),
+    };
+    let manifest = match Manifest::read_file(std::path::Path::new(&persisted.manifest_path)) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
+    Ok(manifest.is_image_source())
+}
+
 /// Resolve a flake reference: relative/absolute paths are canonicalized,
 /// remote refs (containing `:`) pass through unchanged.
 pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {

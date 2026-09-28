@@ -174,10 +174,14 @@ impl RunPreflightSummary {
         .with_ai(super::super::shared::resolve_ai_policy(
             args.ai_token_budget,
         ));
+        let uses_oci_image = super::super::shared::launch_uses_oci_image(
+            args.image.as_deref(),
+            args.manifest.as_deref(),
+        )?;
         let backend = match backend_override {
             Some(backend) => backend.to_string(),
             None => crate::exec::select_exec_backend(
-                args.image.is_some(),
+                uses_oci_image,
                 &policy,
                 args.hypervisor.as_deref(),
             )?

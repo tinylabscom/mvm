@@ -33,7 +33,8 @@ pub(super) use parse::{
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_flake_ref, resolve_manifest_arg,
+    ManifestArgRef, egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref,
+    resolve_manifest_arg,
 };
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
