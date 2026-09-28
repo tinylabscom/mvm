@@ -335,12 +335,10 @@ mod tests {
             .expect("spawn self");
         let pid = i32::try_from(child.id()).expect("pid fits in i32");
 
-        let outcome = signal_if_executable(pid, libc::SIGTERM, &|path| {
-            path == &current_exe
-        })
-        .unwrap();
+        let outcome =
+            signal_if_executable(pid, libc::SIGTERM, &|path| path == current_exe).unwrap();
 
-        let status = child.wait().unwrap();
+        let _status = child.wait().unwrap();
         assert_eq!(outcome, GuardedSignal::Sent);
         #[cfg(target_os = "linux")]
         {
