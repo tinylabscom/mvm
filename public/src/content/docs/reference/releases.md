@@ -62,7 +62,7 @@ prerelease.
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl env update` | the tarball for the latest release, in-place swap |
 | `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
-| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` |
+| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` |
 
 ## Image releases and the support window
 
@@ -111,13 +111,37 @@ changes over time is what is published next:
   to `boot-image/v*` is not possible: those releases publish no signed root for
   the lock to pin.
 
+## Member identity
+
+The runtime overlay, the SDK sidecars and the initramfs that `mvmctl` fetches
+from the image set are identified by the signed root its `images.lock` pins,
+not by the CLI's own version. Each member carries the `VERSION` of the `mvm`
+workspace that `mvm-images` built it from, which is usually not the version of
+the CLI that later pins the set.
+
+`mvmctl` files each member under the digest of that root —
+`~/.mvm/cache/image-set/<root-sha256>/` for the runtime overlay and SDK
+sidecars, `~/.mvm/cache/initramfs/image-set/<root-sha256>/` for the
+initramfs — and records the member's own `VERSION`, read from the verified
+bytes, beside it. A later boot expects that recorded version and makes every
+other check unchanged. A cached member from a root the binary no longer pins is
+not used; the pinned root's member is fetched instead.
+
+Whether a host can run a set is decided by the compatibility the signed root
+declares — the guest-agent protocol range and the builder cache contract —
+which is checked before any member is fetched. A CLI version bump therefore
+does not need a new image set. A change to the declared compatibility does.
+
+Artifacts built from a selected `mvm-images` checkout, or from this source tree,
+are still checked against the running CLI's version.
+
 ## Runtime overlay assets
 
 The shared guest-runtime overlay is a member of the image set:
 
 - `runtime-overlay-<arch>.tar.gz`
 
-It is the readonly, version-matched guest-runtime payload consumed by
+It is the readonly guest-runtime payload consumed by
 overlay-backed boots — part of the shipped surface for the backends that admit
 `RequiredOverlay`, not an optional side channel or a developer-only cache
 convenience.
@@ -126,7 +150,7 @@ The tarball is verified against the signed root before extraction. Inside it,
 the canonical payload is still per-file checked: `overlay.ext4`,
 `overlay.verity`, `overlay.roothash`, `VERSION`, and an inner
 `checksums-sha256.txt`. When `mvmctl` installs that payload into
-`~/.mvm/cache/runtime-overlay/<version>/<arch>/`, every required-overlay boot
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, every required-overlay boot
 re-hashes those cached files before attach and refuses to mount the overlay if
 the cache entry has drifted.
 
@@ -138,10 +162,10 @@ to `mvmctl`.
 
 Operationally, runtime-overlay updates are a **release + restart** story:
 
-- A fresh boot on an admitted backend resolves the runtime overlay for the
-  running `mvmctl` version, re-verifies the cached artifact checksums, and
-  mounts it read-only inside the guest.
-- A stopped VM picks up the newer version-matched overlay on its next
+- A fresh boot on an admitted backend resolves the runtime overlay of the image
+  set the running `mvmctl` pins, re-verifies the cached artifact checksums,
+  and mounts it read-only inside the guest.
+- A stopped VM picks up the overlay the host now resolves on its next
   `machine start` or `machine restart`.
 - A running VM keeps the overlay version it already booted with until restart.
 - mvm does **not** hot-remount or live-swap a different runtime overlay into an
@@ -149,14 +173,14 @@ Operationally, runtime-overlay updates are a **release + restart** story:
 
 That means the normal rollout path is:
 
-1. Publish the new `mvmctl` release, pinning an image set whose runtime
-   overlay matches it.
+1. Publish the new `mvmctl` release, pinning an image set whose declared
+   compatibility covers it.
 2. Update hosts to that release.
 3. Restart overlay-backed VMs when you want them to adopt the new runtime.
 
 ## Rollback / downgrade behavior
 
-Rollback follows the same version-matched rule:
+Rollback follows the same pinning rule:
 
 - If you downgrade `mvmctl` to an earlier release, the host resolves the
   runtime overlay that earlier release pins (or, for releases that predate the

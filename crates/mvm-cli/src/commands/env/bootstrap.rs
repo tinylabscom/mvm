@@ -86,8 +86,7 @@ fn prepare_launch_runtime_artifacts() -> Result<()> {
                 version.to_string(),
             );
             let overlay_ready =
-                mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(&resolver, arch)
-                    .is_ok();
+                mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_ok();
             if !overlay_ready {
                 acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
                     cache_root: &cache_root,

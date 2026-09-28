@@ -19,6 +19,11 @@ use thiserror::Error;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+mod member_cache;
+
+pub use member_cache::{
+    IMAGE_SET_MEMBER_CACHE_DIR, MemberVersion, SetMemberCache, SetMemberCacheError,
+};
 
 #[cfg(test)]
 mod tests;
@@ -131,6 +136,7 @@ pub enum ImageSetMemberError {
 /// [`Self::fetch_artifact`] checks them against their declaration.
 pub struct PublishedImageSet {
     manifest: ImageSetManifest,
+    root: Sha256Hex,
     release_tag: ReleaseTag,
     base_url: String,
     download: Download,
@@ -193,10 +199,17 @@ impl PublishedImageSet {
 
         Ok(Self {
             manifest,
+            root: actual,
             release_tag: lock.release_tag.clone(),
             base_url,
             download,
         })
+    }
+
+    /// The cache members of this set are installed into, keyed by the digest
+    /// of the root they were verified against.
+    pub fn member_cache(&self) -> SetMemberCache {
+        SetMemberCache::for_root(self.root.clone())
     }
 
     /// Materialize the curated default workload from members of the verified

@@ -69,8 +69,10 @@ overlay** that is mounted inside the guest at `/mvm/runtime`.
 - Before attach, mvm re-verifies the cached `overlay.ext4`, `overlay.verity`,
   `overlay.roothash`, and `VERSION` files against the recorded
   `checksums-sha256.txt` manifest and refuses the boot on any mismatch.
-- The artifact is shared across microVMs from the local cache under
-  `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
+- The artifact is shared across microVMs from the local cache: under
+  `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` when it came from the
+  pinned image set, or `~/.mvm/cache/runtime-overlay/<version>/<arch>/` when
+  it was built at this CLI's version.
 
 ### Runtime updates
 
@@ -200,8 +202,10 @@ Every backend shares this one per-VM directory with disjoint file names, so the
 marker file (`fc.pid`, `libkrun.pid`, `qemu.pid`, `hvf.pid`) is what identifies
 which VMM owns a running VM.
 
-The shared guest-runtime overlay cache lives separately under
-`~/.mvm/cache/runtime-overlay/<version>/<arch>/` and contains the sealed
+The shared guest-runtime overlay cache lives separately — under
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` for the pinned image
+set's member, `~/.mvm/cache/runtime-overlay/<version>/<arch>/` for a source
+build — and contains the sealed
 `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
 `checksums-sha256.txt` metadata reused by every VM that boots that runtime
 version.

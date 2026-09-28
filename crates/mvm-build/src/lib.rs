@@ -171,19 +171,20 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
-/// Host-side resolver for the mvm runtime overlay disk. Picks the right
-/// ext4 + verity sidecar + roothash for the running mvmctl version and
-/// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.
 pub mod release_signature;
+/// Host-side resolver for the mvm runtime overlay disk. Picks the right
+/// ext4 + verity sidecar + roothash for the host arch: the pinned image set's
+/// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
+/// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
 /// Fetches the per-arch, per-libc member of the signed image set, proves it
 /// against the verified root and its own manifest, and installs it under
-/// `~/.mvm/cache/sdk-sidecar/<version>/<arch>/` for
-/// [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
+/// `~/.mvm/cache/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`
+/// for [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
 pub mod sdk_sidecar;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
