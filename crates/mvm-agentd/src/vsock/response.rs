@@ -282,6 +282,8 @@ pub enum GuestResponse {
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
+    /// Every dirty page has been handed to the block layer.
+    FilesystemsSynced,
     /// Guest Unix socket forward started successfully.
     UnixSocketForwardStarted {
         guest_path: String,
@@ -377,7 +379,7 @@ name_enum! {
         CancelExtension,
         RunDetached,
         PostRestore,
-        FsDiff, StartUnixSocketForward, ConsoleOpen,
+        FsDiff, SyncFilesystems, StartUnixSocketForward, ConsoleOpen,
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
         ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
@@ -395,7 +397,7 @@ name_enum! {
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
-        PostRestoreAck, FsDiffResult,
+        PostRestoreAck, FsDiffResult, FilesystemsSynced,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
         ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
@@ -484,6 +486,7 @@ impl Verb {
             | Self::CancelExtension
             | Self::RunDetached
             | Self::PostRestore
+            | Self::SyncFilesystems
             | Self::StartUnixSocketForward
             | Self::ConsoleOpen
             | Self::ConsoleClose
@@ -548,6 +551,7 @@ impl Verb {
             | Self::CancelExtension
             | Self::PostRestore
             | Self::FsDiff
+            | Self::SyncFilesystems
             | Self::DriveFile
             | Self::StartUnixSocketForward
             | Self::ConsoleClose
@@ -617,6 +621,7 @@ impl Verb {
             Verb::RunDetached => unary(&[R::DetachedStarted]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
+            Verb::SyncFilesystems => unary(&[R::FilesystemsSynced]),
             Verb::StartUnixSocketForward => unary(&[R::UnixSocketForwardStarted]),
             Verb::ConsoleOpen => unary(&[R::ConsoleOpened]),
             Verb::ConsoleClose => unary(&[R::ConsoleExited]),
@@ -683,6 +688,7 @@ impl GuestResponse {
             GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
             GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
+            GuestResponse::FilesystemsSynced => ResponseVariant::FilesystemsSynced,
             GuestResponse::UnixSocketForwardStarted { .. } => {
                 ResponseVariant::UnixSocketForwardStarted
             }
@@ -1148,6 +1154,7 @@ mod tests {
                     },
                 ],
             },
+            GuestResponse::FilesystemsSynced,
             GuestResponse::ConsoleOpened {
                 session_id: 1,
                 data_port: 20001,

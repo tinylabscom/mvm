@@ -2066,6 +2066,13 @@
           ]
         },
         {
+          "description": "Flush every dirty page to disk. Carries nothing and returns nothing but an acknowledgement: the host asks for it before reading a running guest's writable volume image, so the read sees what the workload wrote.",
+          "type": "string",
+          "enum": [
+            "SyncFilesystems"
+          ]
+        },
+        {
           "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. The guest path must live under `/run/mvm/` (see `validate_unix_forward_guest_path`).",
           "type": "object",
           "required": [
@@ -3420,6 +3427,13 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "Every dirty page has been handed to the block layer.",
+          "type": "string",
+          "enum": [
+            "FilesystemsSynced"
+          ]
         },
         {
           "description": "Guest Unix socket forward started successfully.",

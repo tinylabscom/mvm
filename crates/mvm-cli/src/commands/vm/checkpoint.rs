@@ -376,6 +376,11 @@ fn capture_vm_full_for_running_vm(
         created_unix: args.created_unix,
         retain_paused: false,
         grants: admitted_grants_for(args.name)?,
+        // Frozen in the same pause window, so `vm diff --from/--to` can
+        // compare what the workspace held at each checkpoint.
+        workspace_volumes: super::workspace::capture_set(&super::workspace::workspaces_of(
+            args.name,
+        )?),
     };
     capture_vm_full(args.store, params, control.as_ref())
 }

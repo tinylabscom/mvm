@@ -994,6 +994,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // bounded for a warm child by the host ceiling its own plan was
             // admitted against, never by this record.
             grants: None,
+            // A factory parent has no workspace: it is booted before any
+            // workload, with no user volume attached.
+            workspace_volumes: Vec::new(),
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
             && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")

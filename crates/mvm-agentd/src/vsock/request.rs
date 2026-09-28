@@ -189,6 +189,10 @@ pub enum GuestRequest {
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
+    /// Flush every dirty page to disk. Carries nothing and returns nothing but
+    /// an acknowledgement: the host asks for it before reading a running
+    /// guest's writable volume image, so the read sees what the workload wrote.
+    SyncFilesystems,
     /// Bind a guest Unix socket and forward each accepted connection to a host
     /// vsock port. The guest path must live under `/run/mvm/` (see
     /// `validate_unix_forward_guest_path`).
@@ -528,6 +532,7 @@ impl GuestRequest {
             Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
+            Self::SyncFilesystems => "sync-filesystems",
             Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
             Self::ConsoleOpen { .. } => "console-open",
             Self::ConsoleClose { .. } => "console-close",
@@ -694,6 +699,7 @@ mod tests {
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
+            GuestRequest::SyncFilesystems,
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -1309,6 +1315,7 @@ mod tests {
                 "post-restore",
             ),
             (GuestRequest::FsDiff, "fs-diff"),
+            (GuestRequest::SyncFilesystems, "sync-filesystems"),
             (
                 GuestRequest::StartUnixSocketForward {
                     guest_path: "/run/mvm/forward.sock".to_string(),

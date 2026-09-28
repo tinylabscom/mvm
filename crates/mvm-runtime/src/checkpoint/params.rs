@@ -332,6 +332,47 @@ impl Default for ForkParamsBuilder {
     }
 }
 
+/// A writable volume image the machine works in, captured beside it so the
+/// workspace a checkpoint froze can be compared later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceVolume {
+    /// The volume's registered name: lowercase alphanumerics and hyphens.
+    pub name: String,
+    /// The image the guest writes.
+    pub image: PathBuf,
+}
+
+/// The content blob a checkpoint stores `volume`'s image under.
+#[must_use]
+pub fn workspace_blob_name(volume: &str) -> String {
+    format!("workspace-{volume}.ext4")
+}
+
+/// Whether `name` is safe to become part of a blob file name: the registered
+/// volume-name shape, which admits no separator or dot.
+fn workspace_name_is_safe(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+impl WorkspaceVolume {
+    /// The blob name, or an error for a name that could escape the content
+    /// directory.
+    pub(crate) fn blob_name(&self) -> anyhow::Result<String> {
+        if !workspace_name_is_safe(&self.name) {
+            anyhow::bail!(
+                "workspace volume name {:?} is not a registered volume name",
+                self.name
+            );
+        }
+        Ok(workspace_blob_name(&self.name))
+    }
+}
+
 pub struct CaptureVmFullParams {
     pub id: CheckpointId,
     pub vm_name: String,
@@ -355,6 +396,9 @@ pub struct CaptureVmFullParams {
     /// The permission set the captured VM was admitted under. See
     /// [`CaptureFsQuickParams::grants`].
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Writable volume images cloned in the same pause window as memory and
+    /// rootfs, so the checkpoint freezes the workspace with the machine.
+    pub workspace_volumes: Vec<WorkspaceVolume>,
 }
 
 impl CaptureVmFullParams {
@@ -379,6 +423,7 @@ pub struct CaptureVmFullParamsBuilder {
     created_unix: Option<u64>,
     retain_paused: Option<bool>,
     grants: Option<mvm_contract::grants::Grants>,
+    workspace_volumes: Vec<WorkspaceVolume>,
 }
 
 impl CaptureVmFullParamsBuilder {
@@ -395,7 +440,15 @@ impl CaptureVmFullParamsBuilder {
             created_unix: None,
             retain_paused: None,
             grants: None,
+            workspace_volumes: Vec::new(),
         }
+    }
+
+    /// Set the writable volume images to capture beside the machine.
+    #[must_use]
+    pub fn workspace_volumes(mut self, workspace_volumes: Vec<WorkspaceVolume>) -> Self {
+        self.workspace_volumes = workspace_volumes;
+        self
     }
 
     /// Set `id`.
@@ -490,6 +543,7 @@ impl CaptureVmFullParamsBuilder {
                 "retain_paused",
             ))?,
             grants: self.grants,
+            workspace_volumes: self.workspace_volumes,
         })
     }
 }

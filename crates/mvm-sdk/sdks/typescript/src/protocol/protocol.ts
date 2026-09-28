@@ -112,7 +112,7 @@ hostname?: (string | null)
  */
 token?: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
 }
-} | "FsDiff" | {
+} | "FsDiff" | "SyncFilesystems" | {
 StartUnixSocketForward: {
 guest_path: string
 host_vsock_port: number
@@ -468,7 +468,7 @@ success: boolean
 FsDiffResult: {
 changes: FsChange[]
 }
-} | {
+} | "FilesystemsSynced" | {
 UnixSocketForwardStarted: {
 guest_path: string
 host_vsock_port: number

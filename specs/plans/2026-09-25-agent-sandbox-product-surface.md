@@ -240,7 +240,11 @@ Security-bearing gaps first, then the foundations the UX needs:
       so their asks deny
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
-- [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+- [x] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+      — `mvm-fs` tree walk over the ext4 images the workspace keeps; a guest
+      diff verb on the existing request policy; `--from`/`--to`, `--stat`,
+      `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
+      seam for the remaining undo/redo/replay items
 - [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
 - [ ] session exclusions persisted so restore never deletes ignored files
 - [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input

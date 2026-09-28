@@ -39,7 +39,8 @@ pub use api::{
     query_primed_at, query_probe_status, query_probe_status_at, query_resource_usage,
     query_resource_usage_at, query_worker_status, query_worker_status_at, request_sleep_prep,
     request_sleep_prep_on, send_fs_request, send_fs_request_on, send_proc_request,
-    send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake, workload_is_primed_at,
+    send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake, sync_filesystems_on,
+    workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
