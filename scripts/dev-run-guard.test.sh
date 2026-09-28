@@ -108,7 +108,10 @@ check "secret-bearing retry is refused without echoing the secret" 1 1 \
 s4="${TMP}/journal"; mkdir -p "${s4}"
 got="$(run_mvm "${s4}" sh -c 'exit 11')"
 got_rc="${got%%$'\t'*}"; got_err="${got##*$'\t'}"
-[ "${got_rc}" = "11" ] && [ "${got_err}" = "" ] || { echo "FAIL: journal case 1 rc=${got_rc} err=${got_err}"; failures=$((failures + 1)); }
+if [ "${got_rc}" != "11" ] || [ -n "${got_err}" ]; then
+    echo "FAIL: journal case 1 rc=${got_rc} err=${got_err}"
+    failures=$((failures + 1))
+fi
 run_mvm "${s4}" sh -c 'exit 12' >/dev/null || true
 got="$(run_mvm "${s4}" sh -c 'exit 13')"
 if printf '%s' "${got}" | grep -q "failure journal" && [ "$(wc -l < "${s4}/failure-journal.log" | tr -d ' ')" = "3" ]; then

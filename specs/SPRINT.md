@@ -4802,7 +4802,7 @@ writes the plan:
 
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
-## 2026-09-28 Agent efficiency overhaul — Phase 1 (retry discipline)
+## 2026-09-28 Agent efficiency overhaul — Phases 1–10
 
 - [x] Quantified baseline from ~120 sampled transcripts across the three
       agent stores (Claude 21% error-keyword rate and 5% retry-loop sessions
@@ -4816,7 +4816,7 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 - [x] `scripts/dev-env.sh` `mvm_run` blind-retry guard: records the failing
       command in `.mvm-test/last-failed-cmd` and refuses an immediate
       identical re-run; cleared by a successful different command or `rm`.
-- [x] `scripts/dev-run-guard.test.sh` gate tests for the guard (6 checks).
+- [x] `scripts/dev-run-guard.test.sh` gate tests for the guard (7 checks).
 - [x] Plan: `specs/plans/2026-09-28-agent-efficiency-overhaul.md`, Phase 1
       checkboxes ticked with N=60 baseline numbers recorded.
 
