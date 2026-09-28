@@ -4803,3 +4803,8 @@ writes the plan:
 - [ ] Complete workspace and Linux builder checks, live SDK/release checks, merge and closure.
 
 See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
+
+Extended CI update (#3773): all 47 updated integration regressions and final host
+workspace Clippy pass. Full
+workspace validation is retrying with bounded concurrency after an unchanged
+agent deadline test failed; Linux builder initialization remains blocked.

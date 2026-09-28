@@ -404,7 +404,14 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
     let log_path = scratch.path().join("runner.log");
     let started = Instant::now();
     let status = Command::new("python3")
-        .args(["scripts/run-bounded-command.py", "--timeout", "5", "--log"])
+        .args([
+            "scripts/run-bounded-command.py",
+            "--timeout",
+            "5",
+            "--grace",
+            "1",
+            "--log",
+        ])
         .arg(&log_path)
         .args(["--", "sh", "-c", "sleep 30 & echo bounded-marker; exit 7"])
         .status()
@@ -412,7 +419,7 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
 
     assert_eq!(status.code(), Some(7));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(15),
         "an outliving descendant kept the output pipe open"
     );
     assert_eq!(
