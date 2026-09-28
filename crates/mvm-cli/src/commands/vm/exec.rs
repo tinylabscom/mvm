@@ -619,8 +619,11 @@ pub(in crate::commands) fn run_secure_with_source(
     // consumed by `into_exec_args()` below.
     let uses_oci_image =
         super::shared::launch_uses_oci_image(args.image.as_deref(), args.manifest.as_deref())?;
-    let selected_backend =
-        crate::exec::select_exec_backend(uses_oci_image, &network_policy, args.hypervisor.as_deref())?;
+    let selected_backend = crate::exec::select_exec_backend(
+        uses_oci_image,
+        &network_policy,
+        args.hypervisor.as_deref(),
+    )?;
     // The typed kind, taken off the backend object itself: admission measures a
     // declared grant against the mechanisms this tier really has, and a name
     // parsed back into a tier would be measuring against whatever was typed.
@@ -1105,7 +1108,7 @@ fn build_exec_request(
     } else {
         match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-            (Some(arg), None) => match super::shared::resolve_manifest_arg(&arg)? {
+            (Some(arg), None) => match super::shared::resolve_manifest_arg(arg)? {
                 super::shared::ManifestArgRef::Slot { slot_hash } => {
                     crate::exec::ImageSource::Template(slot_hash)
                 }
@@ -1123,7 +1126,9 @@ fn build_exec_request(
                     ),
                 },
             },
-            (None, image_ref) => resolve_launch_image_source(image_ref, prod, Some(oci_provenance))?,
+            (None, image_ref) => {
+                resolve_launch_image_source(image_ref, prod, Some(oci_provenance))?
+            }
         }
     };
     let uses_oci_image = match &image {
@@ -1139,8 +1144,11 @@ fn build_exec_request(
         }
         crate::exec::ImageSource::WasmModule { .. } => false,
     };
-    let selected_backend =
-        crate::exec::select_exec_backend(uses_oci_image, &network_policy, args.hypervisor.as_deref())?;
+    let selected_backend = crate::exec::select_exec_backend(
+        uses_oci_image,
+        &network_policy,
+        args.hypervisor.as_deref(),
+    )?;
     let mut effective_env =
         oci_vsock_proxy_env_for_backend(&selected_backend, uses_oci_image, &network_policy);
     effective_env.extend(env_pairs);
@@ -1800,7 +1808,8 @@ mod tests {
         let mut image_args = run_args(RunProfile::Standard);
         image_args.image = Some("docker.io/library/alpine:latest".to_string());
         image_args.allow_host = vec!["example.com".to_string()];
-        let image_receipt = ReceiptInput::from_run_args(&image_args, "libkrun").expect("image receipt");
+        let image_receipt =
+            ReceiptInput::from_run_args(&image_args, "libkrun").expect("image receipt");
         let manifest_receipt =
             ReceiptInput::from_run_args(&manifest_args, "libkrun").expect("manifest receipt");
         assert_eq!(image_receipt.env_keys, manifest_receipt.env_keys);
