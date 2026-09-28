@@ -452,6 +452,20 @@ path = "trust audit verify"
 tier = "exec"
 
 [[command]]
+path = "trust instructions init"
+tier = "exec"
+
+[[command]]
+path = "trust instructions sign"
+tier = "exec"
+fixture = "instruction-files"
+
+[[command]]
+path = "trust instructions verify"
+tier = "exec"
+fixture = "signed-instruction-files"
+
+[[command]]
 path = "trust list"
 tier = "exec"
 

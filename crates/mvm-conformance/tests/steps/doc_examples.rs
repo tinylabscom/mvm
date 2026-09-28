@@ -473,8 +473,36 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
             )
             .expect("stage release signature bundle");
         }
+        // `trust instructions sign|verify ./my-agent` name a directory of
+        // agent instruction files. Sign with this home's host key, which is
+        // the key `trust instructions init` writes a policy trusting, so the
+        // verify example passes whether or not that policy exists yet.
+        "instruction-files" => stage_instruction_files(dir),
+        "signed-instruction-files" => {
+            stage_instruction_files(dir);
+            let output = crate::steps::cli::mvmctl_command()
+                .isolated_home(home)
+                .env("MVM_SKIP_RECONCILE", "1")
+                .current_dir(dir)
+                .args(["trust", "instructions", "sign", "./my-agent"])
+                .output()
+                .expect("spawn mvmctl to sign the instruction-file fixture");
+            assert!(
+                output.status.success(),
+                "signing the instruction-file fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
+}
+
+/// The `./my-agent` directory the instruction-provenance guide signs.
+fn stage_instruction_files(dir: &Path) {
+    let agent = dir.join("my-agent");
+    std::fs::create_dir_all(&agent).expect("create instruction-file fixture");
+    std::fs::write(agent.join("CLAUDE.md"), "Answer in one sentence.\n")
+        .expect("write instruction-file fixture");
 }
 
 #[then(expr = "every side-effect-free documented example executes successfully")]
