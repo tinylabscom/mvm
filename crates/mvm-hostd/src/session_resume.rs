@@ -500,6 +500,7 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
     // A runtime-lean rootfs needs the guest agent from the overlay. The cache
     // resolver uses the current host package version, matching the fresh-run path.
     crate::run::attach_runtime_overlay_from_cache(&mut config, &params.material.backend_name)?;
+    crate::run::attach_universal_initramfs_from_cache(&mut config, &params.material.backend_name)?;
 
     Ok(config)
 }
