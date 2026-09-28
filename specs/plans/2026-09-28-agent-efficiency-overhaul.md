@@ -43,11 +43,9 @@ product code changes.
 
 ## Baseline & re-measurement
 
-The analysis script lives at `/tmp/analyze_transcripts.py` (regenerate from
-this plan's appendix if gone). Re-run it after each phase:
+The analysis script lives at `scripts/agent-transcript-analysis.py` and is checked in for reproducible re-measurement:
 
-```bash
-python3 /tmp/analyze_transcripts.py 60
+python3 scripts/agent-transcript-analysis.py 60
 ```
 
 Success = retry-loop session share <5% (all tools), scoped-test adoption,
