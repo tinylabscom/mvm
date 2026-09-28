@@ -81,17 +81,20 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 2 — Event-driven waits, never sleep-polling
 
-- [ ] **2.1 Ban `sleep N && <check>` in `AGENTS.md`** next to the existing
+- [x] **2.1 Ban `sleep N && <check>` in `AGENTS.md`** next to the existing
   "Waiting Model" section, which already prescribes events/timers/
   reconciliation — the agents aren't following it because nothing makes the
   cost visible.
-- [ ] **2.2 CI-watching recipe.** Add to `AGENTS.md`: use `gh pr checks
+- [x] **2.2 CI-watching recipe.** Added to `AGENTS.md`: use `gh pr checks
   --watch` (event-driven) or background tasks instead of sleep loops; cap any
   remaining bounded poll at 5 iterations with escalating backoff.
-- [ ] **2.3 Codex:** replace `wait`-tool polling sessions with explicit
-  background-exec + notification patterns; record the 957-`wait` session as
-  the anti-example in the plan's validation notes.
-- [ ] **2.4 Measure.** Grep new transcripts for `sleep \d+ &&`; target zero.
+- [x] **2.3 Codex anti-example recorded.** Full-store scan (1,411 Codex
+  sessions): 48,387 `wait` calls total, five sessions each issued >1,200
+  sequential waits (max 2,213, `rollout-2026-08-03T17-54-43-019fca44`);
+  869 `sleep >=5s` calls across 55 sessions. Kimi: 1,041 `sleep >=5s` calls
+  across 109 wires, 44 wires with sleep-polls (worst: 184 sleeps in session
+  `132ddba61eed4a5a`). These are the "before" numbers for 2.4.
+- [ ] **2.4 Measure.** Re-scan with the same full-store script; target: zero new sessions with `wait` counts >50 or `sleep >=5s` polls, and total wait calls trending to <5,000 (from 48,387).
 
 ## Phase 3 — Scoped test runs by default
 

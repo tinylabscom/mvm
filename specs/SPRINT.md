@@ -4819,3 +4819,11 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 - [x] `scripts/dev-run-guard.test.sh` gate tests for the guard (6 checks).
 - [x] Plan: `specs/plans/2026-09-28-agent-efficiency-overhaul.md`, Phase 1
       checkboxes ticked with N=60 baseline numbers recorded.
+
+- [x] `AGENTS.md` "No Sleep-Polling" agreement next to the Waiting Model:
+      `sleep N && <check>` banned; `gh pr checks --watch`/background-task
+      notifications for CI; bounded polls (≤5 iterations, escalating
+      backoff) only where no event source exists.
+- [x] Full-store Phase 2 baseline: Codex 48,387 `wait` calls (five sessions
+      >1,200 each, max 2,213), 869 `sleep>=5s` calls; Kimi 1,041 `sleep>=5s`
+      calls across 44/109 wires. Recorded in the plan as before-numbers.

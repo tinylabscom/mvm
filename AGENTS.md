@@ -230,6 +230,27 @@ poll loop merely because the surrounding API is synchronous.
 An event-driven change does not imply adopting a repository-wide async runtime.
 Use the smallest event primitive that matches the existing ownership boundary.
 
+## No Sleep-Polling
+
+`sleep N && <check>` is banned as a wait strategy. Transcript analysis
+(2026-09-28) found `sleep 240 && gh pr checks` loops across sessions and one
+Codex session that issued 957 sequential `wait` calls — hundreds of wasted
+round-trips where a single event-driven wait would do.
+
+- **CI and long checks:** use `gh pr checks <n> --watch` (blocks until the
+  checks settle), or launch the check as a background task and let its
+  completion notification wake you. Never sleep-then-poll a URL or CLI.
+- **Owned processes:** use the event primitive you already armed (child
+  handle, kqueue/pidfd, background-task notification) per the Waiting Model
+  above — a `sleep` loop around a pid you own is always the wrong answer.
+- **Externally owned state with no event source** (the only legitimate
+  poll): cap at 5 iterations with escalating backoff, state what event
+  would replace the poll, and prefer a single long blocking call over
+  repeated short ones.
+
+If you catch yourself typing `sleep` before a check, stop: name the condition
+you are waiting for and pick the matching primitive from the Waiting Model.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:
