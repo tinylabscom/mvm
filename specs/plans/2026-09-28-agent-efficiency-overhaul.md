@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: transcript-reanalysis
 
-**Status:** DRAFT — not started.
+**Status:** IN PROGRESS — Phase 1 complete; Phases 2–10 not started.
 
 ## Problem
 
