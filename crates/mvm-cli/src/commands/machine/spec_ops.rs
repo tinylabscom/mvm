@@ -1,3 +1,4 @@
+use super::remove::{remove_machine_spec, resolve_remove_targets, rm_running_refusal};
 use super::*;
 
 pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
