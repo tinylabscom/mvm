@@ -3,9 +3,9 @@
 //! They boot the builder image exactly as Stage 0 built it or the release
 //! fetched it, with nothing baked in: mvm's own builder binaries arrive in the
 //! boot payload each boot carries. Resolution goes through
-//! `ensure_builder_vm_image`, the same freshness decision the libkrun and QEMU
-//! builders take — cache contract, source fingerprint, shared-cache seeding and
-//! auto-bootstrap — so no builder backend boots an image the others would
+//! `ensure_builder_vm_image`, the same cache-contract, shared-cache seeding and
+//! auto-bootstrap decision the libkrun and QEMU builders take, so no builder
+//! backend boots an image the others would refuse.
 //! refuse.
 //!
 //! The kernel is passed through unconverted. `FcDriver` normalises it at boot
