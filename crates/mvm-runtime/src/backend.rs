@@ -528,6 +528,22 @@ impl AnyBackend {
         self.inner().name()
     }
 
+    /// A second handle on this backend, for a caller that has to hand one
+    /// over by value while keeping its own.
+    ///
+    /// Every real VMM keeps its VM state on disk, so a fresh instance of the
+    /// same hypervisor sees exactly what this one does. The mock keeps its
+    /// state in memory, so its handle shares that registry instead; a fresh
+    /// mock would report every VM this one started as stopped.
+    #[must_use]
+    pub fn handle(&self) -> Self {
+        match self {
+            #[cfg(feature = "test-support")]
+            Self::Mock(backend) => Self::Mock(backend.clone()),
+            other => Self::from_hypervisor(other.name()),
+        }
+    }
+
     pub fn capabilities(&self) -> VmCapabilities {
         self.inner().capabilities()
     }

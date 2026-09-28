@@ -37,16 +37,20 @@ def _b64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("ascii")
 
 
-def _run_reply(name: str = "sb-vm", build_mode: str = "dev") -> dict:
-    return {
+def _run_reply(name: str = "sb-vm", build_mode: str = "dev", process: str | None = None) -> dict:
+    reply = {
         "machine": {"id": f"id-{name}", "name": name, "status": "running"},
         "plan_id": "plan-1",
         "build_mode": build_mode,
     }
+    if process is not None:
+        reply["process"] = process
+    return reply
 
 
 def _boot(hostlib, *, name: str = "sb-vm", build_mode: str = "dev", **kwargs) -> mvm.Sandbox:
-    hostlib.reply("machine.run", _run_reply(name, build_mode))
+    process = "boot-tok" if kwargs.get("command") is not None else None
+    hostlib.reply("machine.run", _run_reply(name, build_mode, process))
     kwargs.setdefault("image", "python:slim")
     return mvm.Sandbox.create(**kwargs)
 
@@ -113,13 +117,13 @@ def test_attached_build_mode_matches_by_name_and_fails_closed() -> None:
 # ── boot ─────────────────────────────────────────────────────────────
 
 
-def test_create_sends_one_transient_run_and_keeps_the_reply(hostlib) -> None:
+def test_create_sends_one_named_run_and_keeps_the_reply(hostlib) -> None:
     sb = _boot(hostlib, name="sb-test-vm", workload_id="testwid")
 
     assert hostlib.methods == ["machine.run"]
     request = hostlib.request("machine.run")
     assert request.pop("name").startswith("sdk-testwid-")
-    assert request == {"image": "python:slim", "mode": "transient", "ttl_seconds": 1800}
+    assert request == {"image": "python:slim", "mode": "persistent", "ttl_seconds": 1800}
     assert sb.id == "sb-test-vm"
     assert sb.info().build_mode == "dev"
 
@@ -184,10 +188,49 @@ def test_egress_ingress_and_command_are_lowered_into_the_run_request(hostlib) ->
     assert request["command"] == ["/app/serve", "--port", "80"]
 
 
+def test_the_launch_command_carries_its_env_and_its_process_is_the_sandboxs(hostlib) -> None:
+    sb = _boot(
+        hostlib,
+        command=["/app/serve"],
+        env={"MODE": "safe", "LEVEL": mvm.literal("3")},
+    )
+    request = hostlib.request("machine.run")
+    assert request["command"] == ["/app/serve"]
+    assert request["env"] == {"MODE": "safe", "LEVEL": "3"}
+    assert sb.process is not None and sb.process.token == "boot-tok"
+    hostlib.reply("guest.proc.stream.open", {"stream": 3})
+    hostlib.reply("guest.proc.stream.next", _done(0, _chunk("stdout", b"ok")))
+    assert sb.process.wait().stdout == b"ok"
+    sb.kill()
+
+
+def test_a_sandbox_without_a_launch_command_has_no_process(hostlib) -> None:
+    sb = _boot(hostlib)
+    assert sb.process is None
+    assert "env" not in hostlib.request("machine.run")
+    sb.kill()
+
+
+def test_a_secret_is_never_forwarded_as_launch_environment(hostlib) -> None:
+    with pytest.raises(mvm.SandboxLiveError, match="non-literal"):
+        mvm.Sandbox.create(
+            image="python:slim",
+            command=["/app/serve"],
+            env={"TOKEN": mvm.secret("api-key", type="bearer", hosts=["api.example.com"])},
+        )
+    assert hostlib.calls == []
+
+
+def test_a_launch_that_started_a_command_but_named_no_process_is_a_live_error(hostlib) -> None:
+    hostlib.reply("machine.run", _run_reply())
+    with pytest.raises(mvm.SandboxLiveError, match="named no process"):
+        mvm.Sandbox.create(image="python:slim", command=["/app/serve"])
+
+
 @pytest.mark.parametrize(
     "kwargs, match",
     [
-        ({"env": {"MODE": "safe"}}, "Sandbox.commands.start"),
+        ({"env": {"MODE": "safe"}}, "command="),
         ({"resources": {"cpu_cores": 1}}, "resources"),
         ({"include": ["src"]}, "include"),
         ({"tags": {"team": "a"}}, "tags"),
@@ -207,15 +250,39 @@ def test_options_live_mode_cannot_carry_are_refused_before_boot(hostlib, kwargs,
     assert hostlib.calls == []
 
 
-def test_a_template_cannot_be_booted_in_process(hostlib) -> None:
-    with pytest.raises(mvm.SandboxModeError, match="image="):
-        mvm.Sandbox.create("python-3.12")
-    assert hostlib.calls == []
+def test_a_template_boots_as_a_persistent_machine_that_kill_removes(hostlib) -> None:
+    hostlib.reply("machine.run", _run_reply("sb-tmpl"))
+    sb = mvm.Sandbox.create("python-3.12", workload_id="tmpl")
+    request = hostlib.request("machine.run")
+    assert request.pop("name").startswith("sdk-tmpl-")
+    assert request == {"template": "python-3.12", "mode": "persistent", "ttl_seconds": 1800}
+    sb.kill()
+    assert hostlib.methods[-2:] == ["machine.stop", "machine.rm"]
+    assert hostlib.request("machine.rm") == {"id": "sb-tmpl"}
+
+
+def test_a_template_nobody_built_is_the_librarys_refusal(hostlib) -> None:
+    hostlib.fail("machine.run", "INVALID_SPEC", 'template "chromium": no built image named')
+    with pytest.raises(mvm.MachineSpecError, match="no built image"):
+        mvm.Sandbox.create("chromium")
+
+
+def test_an_image_sandbox_is_removed_after_stopping(hostlib) -> None:
+    sb = _boot(hostlib, name="sb-img")
+    sb.kill()
+    assert hostlib.methods[-2:] == ["machine.stop", "machine.rm"]
+
+
+def test_a_connected_machine_is_stopped_but_not_removed(hostlib) -> None:
+    hostlib.reply("machine.inventory", [{"name": "shared", "build_mode": "dev"}])
+    sb = mvm.Sandbox.connect("shared")
+    sb.kill()
+    assert hostlib.methods == ["machine.inventory", "machine.stop"]
 
 
 def test_a_library_refusal_propagates_typed(hostlib) -> None:
-    hostlib.fail("machine.run", "INVALID_SPEC", "command overrides are not supported")
-    with pytest.raises(mvm.MachineSpecError, match="command overrides") as raised:
+    hostlib.fail("machine.run", "INVALID_SPEC", "variable LD_PRELOAD is denied")
+    with pytest.raises(mvm.MachineSpecError, match="LD_PRELOAD") as raised:
         mvm.Sandbox.create(image="python:slim", command=["/bin/true"])
     assert raised.value.code == "INVALID_SPEC"
     assert raised.value.retryable is False
@@ -791,7 +858,7 @@ def test_code_sandbox_run_script_copies_then_execs(hostlib, tmp_path: Path) -> N
 
 
 def test_obscura_uses_the_pinned_image_fixed_command_allowlist_and_cdp_port(hostlib) -> None:
-    hostlib.reply("machine.run", _run_reply("obscura"))
+    hostlib.reply("machine.run", _run_reply("obscura", process="cdp-tok"))
     browser = mvm.BrowserSandbox(
         "obscura",
         network={
@@ -824,7 +891,7 @@ def test_obscura_custom_host_port_and_refused_command_override(hostlib) -> None:
         mvm.BrowserSandbox("obscura", command=["/bin/sh"])
     assert hostlib.calls == []
 
-    hostlib.reply("machine.run", _run_reply())
+    hostlib.reply("machine.run", _run_reply(process="cdp-tok"))
     browser = mvm.BrowserSandbox("obscura", host_port=18222)
     try:
         assert browser.endpoint() == "http://localhost:18222"
@@ -833,10 +900,19 @@ def test_obscura_custom_host_port_and_refused_command_override(hostlib) -> None:
         browser.kill()
 
 
-def test_template_browsers_are_refused_in_live_mode(hostlib) -> None:
-    with pytest.raises(mvm.SandboxModeError, match="template 'chromium'"):
-        mvm.BrowserSandbox("chromium")
-    assert hostlib.calls == []
+@pytest.mark.parametrize("browser", ["chromium", "chrome"])
+def test_template_browsers_boot_their_built_template_with_cdp_ingress(hostlib, browser) -> None:
+    hostlib.reply("machine.run", _run_reply(browser))
+    sandbox = mvm.BrowserSandbox(browser)
+    try:
+        request = hostlib.request("machine.run")
+        assert request["template"] == browser
+        assert request["mode"] == "persistent"
+        assert request["ports"] == ["9222:9222"]
+        assert "command" not in request
+    finally:
+        sandbox.kill()
+    assert hostlib.methods[-2:] == ["machine.stop", "machine.rm"]
 
 
 def test_browser_sandbox_unknown_browser_raises() -> None:
@@ -862,7 +938,7 @@ def test_browser_readiness_validates_cdp_and_timeout_cleans_up(hostlib) -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = int(server.server_address[1])
-    hostlib.reply("machine.run", _run_reply("browser"))
+    hostlib.reply("machine.run", _run_reply("browser", process="cdp-tok"))
     browser = mvm.BrowserSandbox("obscura", host_port=port)
     try:
         assert browser.wait_until_ready(timeout=1) == "ws://127.0.0.1/devtools/browser/test"
@@ -871,7 +947,7 @@ def test_browser_readiness_validates_cdp_and_timeout_cleans_up(hostlib) -> None:
         server.shutdown()
         server.server_close()
 
-    hostlib.reply("machine.run", _run_reply("browser-2"))
+    hostlib.reply("machine.run", _run_reply("browser-2", process="cdp-tok"))
     failing = mvm.BrowserSandbox("obscura", host_port=port)
     with pytest.raises(mvm.BrowserReadyError):
         failing.wait_until_ready(timeout=0.02, retry_interval=0.002)

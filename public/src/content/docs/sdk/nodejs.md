@@ -9,7 +9,7 @@ The TypeScript SDK currently exposes both runtime and declarative surfaces.
 
 Current:
 
-- `Sandbox.create({ image }, options)` (live mode boots an image; a template source is record mode only)
+- `Sandbox.create({ image }, options)` or `Sandbox.create(template, options)` (live mode boots an image, or a template built on this host)
 - `sandbox.commands.start(argv, options)` — the only method on `commands`
 - `sandbox.exec(argv, options)` / `sandbox.shell(command, options)` — one-shot with a captured `ExecResult` (live mode only)
 - `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only

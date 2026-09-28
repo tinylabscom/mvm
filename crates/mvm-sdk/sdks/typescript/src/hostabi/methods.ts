@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 2;
+export const ABI_MINOR = 3;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -20,6 +20,12 @@ export interface HostAbiMethod {
 
 /** Reports what the backend can do. */
 export const BACKEND_CAPABILITIES = "backend.capabilities";
+
+/**
+ * Calls a workload's entrypoint in a transient microVM, admitted
+ * under a signed plan.
+ */
+export const ENTRYPOINT_CALL = "entrypoint.call";
 
 /** Persists a machine definition without booting it. */
 export const MACHINE_CREATE = "machine.create";
@@ -42,6 +48,18 @@ export const MACHINE_LOGS = "machine.logs";
 /** Removes a machine, stopping it first when needed. */
 export const MACHINE_RM = "machine.rm";
 
+/** Closes a captured-output stream. Idempotent. */
+export const MACHINE_LOGS_STREAM_CLOSE = "machine.logs.stream.close";
+
+/** Returns the captured output that has arrived. */
+export const MACHINE_LOGS_STREAM_NEXT = "machine.logs.stream.next";
+
+/**
+ * Opens a stream over a machine's captured output, replayed then
+ * followed.
+ */
+export const MACHINE_LOGS_STREAM_OPEN = "machine.logs.stream.open";
+
 /** Boots a machine through the admitted local launch. */
 export const MACHINE_RUN = "machine.run";
 
@@ -50,6 +68,18 @@ export const MACHINE_START = "machine.start";
 
 /** Stops a machine. Idempotent. */
 export const MACHINE_STOP = "machine.stop";
+
+/** Calls the entrypoint in a running session's microVM. */
+export const SESSION_CALL = "session.call";
+
+/** Reports a session's record. */
+export const SESSION_INFO = "session.info";
+
+/** Boots a warm session for a workload, admitted under a signed plan. */
+export const SESSION_START = "session.start";
+
+/** Stops a session and tears down its microVM. */
+export const SESSION_STOP = "session.stop";
 
 /** Copies a file between the host and the guest. */
 export const GUEST_CP = "guest.cp";
@@ -104,6 +134,7 @@ export const GUEST_PROC_WAIT = "guest.proc.wait";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
+  "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },
   "machine.create": { key: "machine_create", classification: "prod_safe", summary: "Persists a machine definition without booting it." },
   "machine.exec": { key: "machine_exec", classification: "prod_safe", summary: "Runs one non-interactive command in a machine." },
   "machine.inspect": { key: "machine_inspect", classification: "prod_safe", summary: "Inspects one machine." },
@@ -111,9 +142,16 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "machine.list": { key: "machine_list", classification: "prod_safe", summary: "Lists machines, optionally filtered." },
   "machine.logs": { key: "machine_logs", classification: "prod_safe", summary: "Returns captured console output, base64-encoded." },
   "machine.rm": { key: "machine_rm", classification: "prod_safe", summary: "Removes a machine, stopping it first when needed." },
+  "machine.logs.stream.close": { key: "machine_logs_stream_close", classification: "prod_safe", summary: "Closes a captured-output stream. Idempotent." },
+  "machine.logs.stream.next": { key: "machine_logs_stream_next", classification: "prod_safe", summary: "Returns the captured output that has arrived." },
+  "machine.logs.stream.open": { key: "machine_logs_stream_open", classification: "prod_safe", summary: "Opens a stream over a machine's captured output, replayed then followed." },
   "machine.run": { key: "machine_run", classification: "prod_safe", summary: "Boots a machine through the admitted local launch." },
   "machine.start": { key: "machine_start", classification: "prod_safe", summary: "Boots a persisted machine definition." },
   "machine.stop": { key: "machine_stop", classification: "prod_safe", summary: "Stops a machine. Idempotent." },
+  "session.call": { key: "session_call", classification: "prod_safe", summary: "Calls the entrypoint in a running session's microVM." },
+  "session.info": { key: "session_info", classification: "prod_safe", summary: "Reports a session's record." },
+  "session.start": { key: "session_start", classification: "prod_safe", summary: "Boots a warm session for a workload, admitted under a signed plan." },
+  "session.stop": { key: "session_stop", classification: "prod_safe", summary: "Stops a session and tears down its microVM." },
   "guest.cp": { key: "guest_cp", classification: "dev_only", summary: "Copies a file between the host and the guest." },
   "guest.fs.list": { key: "guest_fs_list", classification: "dev_only", summary: "Lists a directory in the guest." },
   "guest.fs.mkdir": { key: "guest_fs_mkdir", classification: "dev_only", summary: "Creates a directory in the guest." },

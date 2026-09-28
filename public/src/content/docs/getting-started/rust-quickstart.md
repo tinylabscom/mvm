@@ -46,10 +46,9 @@ Pipe the generated IR into the normal compile/build path used by the CLI.
 ## Runtime lifecycle
 
 `LaunchRequest` describes what to boot. Every field is validated when the
-request is built, and a field the in-process launcher cannot honour yet (a
-command override, guest environment variables) is refused there rather than
-dropped. Egress is a grant: it is signed into the plan the machine is admitted
-under, and the host egress gate reads it from there.
+request is built, and a field the launcher cannot honour is refused there
+rather than dropped. Egress is a grant: it is signed into the plan the machine
+is admitted under, and the host egress gate reads it from there.
 
 ```rust
 use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, MvmClient, RootfsSource};
@@ -58,7 +57,7 @@ use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, MvmClient, RootfsSo
 let client = LocalBackend::new();
 
 let image: RootfsSource = "docker.io/library/nginx:1.27".parse()?;
-let request = LaunchRequest::builder(LifecycleMode::Transient, image)
+let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
     .name("web")
     .cpus(2)
     .memory_mib(512)
@@ -71,6 +70,38 @@ let launched = client.launch(request).await?;
 println!("started {} under plan {}", launched.machine.name, launched.plan_id);
 
 client.stop_machine(&launched.machine.id).await?;
+client.remove_machine(&launched.machine.id).await?;
+```
+
+A persistent launch boots through the same start `mvmctl machine run -d` and
+`mvmctl machine start` use. A `LifecycleMode::Transient` launch admits through
+a separate local boot that does not yet attach the universal initramfs, so a
+runtime-lean OCI image does not boot on it; use a persistent launch until the
+two converge.
+
+A request can also start a command once the machine is up, and boot a
+template built on this host instead of an image. The command's environment
+passes the host's denylist when the request is built, and `launched.process`
+is the started process's token for `mvm_client::guest`. A template boots as a
+persistent machine, the same start `mvmctl machine run -d` uses; nothing is
+built on a launch.
+
+```rust
+use mvm_client::{LaunchRequest, LaunchSource, LifecycleMode, LocalBackend, MvmClient};
+
+let client = LocalBackend::new();
+let request = LaunchRequest::builder_for(
+    LifecycleMode::Persistent,
+    LaunchSource::from_template("chromium")?, // or LaunchSource::from_manifest("./mvm.toml")
+)
+.name("browser")
+.command(["/serve".to_string(), "--port".to_string(), "9222".to_string()])
+.env("MODE", "headless")
+.port("9222:9222")
+.build()?;
+
+let launched = client.launch(request).await?;
+println!("started process {:?}", launched.process);
 ```
 
 `client.create_machine(...)` and `client.start_machine(...)` persist a named
