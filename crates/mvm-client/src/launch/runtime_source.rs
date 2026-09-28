@@ -557,10 +557,11 @@ fn attach_universal_initramfs_with_resolver(
                         &workspace_root,
                     )
             {
-                let _ = mvm_build::initramfs::record_source_fingerprint(
+                let _ = mvm_build::initramfs::record_source_fingerprint_for_resolved(
                     &cache_root,
                     version,
                     arch,
+                    &artifact,
                     &fingerprint,
                 );
             }
