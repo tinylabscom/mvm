@@ -445,8 +445,19 @@ path = "trust audit provenance export"
 tier = "exec"
 
 [[command]]
+path = "trust audit publish-root"
+tier = "parse"
+reason = "publishes a host-signed root into the caller's audit history"
+
+[[command]]
+path = "trust audit sessions"
+tier = "parse"
+reason = "reports session history from the caller's audit chain, which an isolated home does not contain"
+
+[[command]]
 path = "trust audit show"
-tier = "exec"
+tier = "parse"
+reason = "names a session that only exists in the caller's audit history"
 
 [[command]]
 path = "trust audit tail"

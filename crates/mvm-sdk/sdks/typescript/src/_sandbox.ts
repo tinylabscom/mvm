@@ -47,6 +47,7 @@ import {
   GUEST_PROC_SIGNAL,
   GUEST_PROC_STDIN,
   MACHINE_INVENTORY,
+  MACHINE_RM,
   MACHINE_RUN,
   MACHINE_STOP,
 } from "./hostabi/methods.js";
@@ -378,11 +379,14 @@ export interface SandboxCreateOptions {
   ttl?: string | number | null;
   resources?: Resources;
   network?: Network;
-  /** Entrypoint used for this boot. */
+  /** Started once the machine is up, with `env` as its environment; in live
+   *  mode {@link Sandbox.process} is its handle. */
   command?: string[];
 }
 
-/** Typed boot source. A bare string remains a manifest for compatibility. */
+/** Typed boot source. A bare string, or `{ manifest }`, names a template: in
+ *  record mode a base image, in live mode a template built on this host,
+ *  found by the name its image was built under. */
 export type SandboxSource = string | { manifest: string } | { image: string };
 
 type BootSource = { kind: "manifest" | "image"; value: string };
@@ -431,14 +435,26 @@ function egressTarget(host: unknown, port: unknown): EgressTarget {
   return { host: bare, port: port as number };
 }
 
-/** Refuse what live mode cannot represent, and lower the egress allowlist. */
-function lowerLiveOptions(options: SandboxCreateOptions): EgressTarget[] {
+/** What live mode carries of the create options. */
+interface LiveOptions {
+  egress: EgressTarget[];
+  /** The launch command's environment; empty without a command. */
+  env: Record<string, string>;
+}
+
+/** Refuse what live mode cannot represent, and lower the rest. */
+function lowerLiveOptions(options: SandboxCreateOptions): LiveOptions {
   const egress: EgressTarget[] = [];
+  let env: Record<string, string> = {};
   if (options.env !== undefined && Object.keys(options.env).length > 0) {
-    rejectLiveOption(
-      "env",
-      "persistent creation cannot deliver environment; declare it in the image or pass env to Sandbox.commands.start",
-    );
+    if (options.command === undefined) {
+      rejectLiveOption(
+        "env",
+        "it is the environment of the launch command, and none was given; pass `command` with it, " +
+          "or pass env to Sandbox.commands.start",
+      );
+    }
+    env = literalEnv(options.env);
   }
   if (options.include && options.include.length > 0) {
     rejectLiveOption("include", "the in-process launch has no source-bundle equivalent");
@@ -450,7 +466,7 @@ function lowerLiveOptions(options: SandboxCreateOptions): EgressTarget[] {
     rejectLiveOption("resources", "rootfs_size_mb has no in-process launch equivalent, so partial lowering is refused");
   }
   const network = options.network;
-  if (network === undefined) return egress;
+  if (network === undefined) return { egress, env };
   const known = new Set(["mode", "egress", "ports", "peers", "dns"]);
   const unknown = Object.keys(network).filter((key) => !known.has(key));
   if (unknown.length > 0) rejectLiveOption("network", `unknown fields: ${unknown.join(", ")}`);
@@ -459,7 +475,7 @@ function lowerLiveOptions(options: SandboxCreateOptions): EgressTarget[] {
   }
   if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the in-process launch has no peer equivalent");
   if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the in-process launch has no DNS equivalent");
-  if (network.egress === undefined || network.egress === null) return egress;
+  if (network.egress === undefined || network.egress === null) return { egress, env };
   if (Object.keys(network.egress).some((key) => key !== "allowlist") || !Array.isArray(network.egress.allowlist)) {
     rejectLiveOption("network.egress", "expected only an allowlist");
   }
@@ -469,7 +485,7 @@ function lowerLiveOptions(options: SandboxCreateOptions): EgressTarget[] {
     }
     egress.push(egressTarget(entry.host, entry.port));
   }
-  return egress;
+  return { egress, env };
 }
 
 export interface SandboxCommandsStartOptions {
@@ -524,30 +540,36 @@ function requireRecording(): RuntimeRecordingWire {
 export class LiveTransport {
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
+  /** Whether the machine has a persisted definition, which `kill` removes
+   *  once the machine is stopped. */
+  readonly persistent: boolean;
+  /** The token of the process the launch command started, if any. */
+  readonly process: string | null;
   private killed = false;
   private readonly fail: ReplyFailure = (message) => new SandboxLiveError(message);
 
-  constructor(opts: { vmId: string; buildMode: "dev" | "prod" }) {
+  constructor(opts: {
+    vmId: string;
+    buildMode: "dev" | "prod";
+    persistent?: boolean;
+    process?: string | null;
+  }) {
     this.vmId = opts.vmId;
     this.buildMode = opts.buildMode;
+    this.persistent = opts.persistent ?? false;
+    this.process = opts.process ?? null;
   }
 
-  /** Boot a transient machine with `machine.run` and attach to it. */
+  /** Boot a named machine with `machine.run`, the way `mvmctl machine run -d`
+   *  does, and attach to it; `kill` stops and removes it. */
   static forSource(opts: {
     source: BootSource;
     workloadId: string;
     ttlSeconds: number;
-    egress: EgressTarget[];
+    options: LiveOptions;
     bootCommand: string[] | null;
     ports: PortForward[];
   }): LiveTransport {
-    if (opts.source.kind === "manifest") {
-      throw new SandboxModeError(
-        `Sandbox live mode boots an image, and ${JSON.stringify(opts.source.value)} names a ` +
-          "template: the in-process launch has no template source yet. Pass " +
-          "`{ image: <oci-ref | absolute path | flake:<ref>#<attr>> }` instead.",
-      );
-    }
     const profile = runProfile();
     const ports = opts.ports.map((port) => {
       if (
@@ -569,17 +591,29 @@ export class LiveTransport {
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
     const request: Record<string, unknown> = {
-      image: opts.source.value,
-      mode: "transient",
+      [opts.source.kind === "manifest" ? "template" : "image"]: opts.source.value,
+      mode: "persistent",
       name: `sdk-${slug}-${randomHex(4)}`,
       ttl_seconds: opts.ttlSeconds,
     };
     if (profile !== undefined) request.profile = profile;
     if (ports.length > 0) request.ports = ports;
-    if (opts.egress.length > 0) request.egress = opts.egress;
-    if (opts.bootCommand !== null) request.command = opts.bootCommand;
+    if (opts.options.egress.length > 0) request.egress = opts.options.egress;
+    if (opts.bootCommand !== null) {
+      request.command = opts.bootCommand;
+      if (Object.keys(opts.options.env).length > 0) request.env = opts.options.env;
+    }
     const reply = call(MACHINE_RUN, request);
-    return new LiveTransport(parseRunReply(reply));
+    const parsed = parseRunReply(reply);
+    const processToken = (reply as { process?: unknown }).process;
+    if (opts.bootCommand !== null && (typeof processToken !== "string" || processToken.length === 0)) {
+      throw new SandboxLiveError("machine.run started the launch command but named no process");
+    }
+    return new LiveTransport({
+      ...parsed,
+      persistent: true,
+      process: opts.bootCommand !== null ? (processToken as string) : null,
+    });
   }
 
   /** Attach to an already-running machine by name.
@@ -714,18 +748,31 @@ export class LiveTransport {
     call(GUEST_CP, { id: this.vmId, direction, host_path: hostPath, guest_path: guestPath });
   }
 
-  /** Stop the machine. Idempotent, and never throws: this is the cleanup
-   *  path, and a failure here usually means the TTL reaper got there first. */
+  /** Stop the machine, then remove a persistent machine's definition.
+   *  Idempotent, and never throws: this is the cleanup path, and a failure
+   *  here usually means the TTL reaper got there first. A definition is
+   *  removed only after its machine stopped, since removing a running one is
+   *  refused. */
   kill(): void {
     if (this.killed) return;
     this.killed = true;
+    const report = (verb: string, err: unknown): void => {
+      // eslint-disable-next-line no-console
+      console.error(
+        `mvm-sdk live: ${verb} ${JSON.stringify(this.vmId)} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    };
     try {
       call(MACHINE_STOP, { id: this.vmId });
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `mvm-sdk live: stopping ${JSON.stringify(this.vmId)} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      report("stopping", err);
+      return;
+    }
+    if (!this.persistent) return;
+    try {
+      call(MACHINE_RM, { id: this.vmId });
+    } catch (err) {
+      report("removing", err);
     }
   }
 }
@@ -852,6 +899,13 @@ export class Sandbox {
     this.files = new SandboxFiles(this);
   }
 
+  /** The process `Sandbox.create({ command })` started, or `null` when there
+   *  was none or the sandbox is not live. */
+  get process(): ProcessHandle | null {
+    if (this._live === null || this._live.process === null) return null;
+    return new ProcessHandle(this._live, this._live.process);
+  }
+
   /** Stable identifier: the live VM id when live, else the workload id. */
   get id(): string {
     return this._live !== null ? this._live.vmId : this.workloadId;
@@ -891,7 +945,7 @@ export class Sandbox {
         source,
         workloadId: wid,
         ttlSeconds,
-        egress: lowerLiveOptions(options),
+        options: lowerLiveOptions(options),
         bootCommand: command ? [...command] : null,
         ports: options.network?.ports ?? [],
       });

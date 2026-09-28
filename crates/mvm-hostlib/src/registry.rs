@@ -21,6 +21,11 @@ use crate::dispatch::{
     MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_RM,
     MACHINE_START, MACHINE_STOP, MachineRef, RemoveRequest as DispatchRemoveRequest, StopRequest,
 };
+use crate::entrypoint::{
+    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
+    SESSION_START, SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef,
+    SessionStartReply, SessionStartRequest,
+};
 use crate::guest::{
     AcceptedReply, CP, CopyRequest, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME,
     FS_STAT, FS_WRITE, ListReply, MachineRequest, MkdirRequest, PROC_KILL, PROC_LIST, PROC_SIGNAL,
@@ -30,8 +35,8 @@ use crate::guest::{
 };
 use crate::launch::{CreateRequest, MACHINE_CREATE, MACHINE_RUN, RunReply, RunRequest};
 use crate::stream::{
-    CloseRequest, Empty as StreamEmpty, NextReply, NextRequest, OpenReply, OpenRequest,
-    STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
+    CloseRequest, Empty as StreamEmpty, LOGS_CLOSE, LOGS_NEXT, LOGS_OPEN, LogsOpenRequest,
+    NextReply, NextRequest, OpenReply, OpenRequest, STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
 };
 
 /// How a method is classified for admission policy. `DevOnly` methods are
@@ -150,6 +155,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: any_json,
     },
     MethodDef {
+        name: ENTRYPOINT_CALL,
+        key: "entrypoint_call",
+        summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<EntrypointCallRequest>,
+        reply: schema_of::<EntrypointCallReply>,
+    },
+    MethodDef {
         name: MACHINE_CREATE,
         key: "machine_create",
         summary: "Persists a machine definition without booting it.",
@@ -206,6 +219,30 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
+        name: LOGS_CLOSE,
+        key: "machine_logs_stream_close",
+        summary: "Closes a captured-output stream. Idempotent.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<CloseRequest>,
+        reply: schema_of::<StreamEmpty>,
+    },
+    MethodDef {
+        name: LOGS_NEXT,
+        key: "machine_logs_stream_next",
+        summary: "Returns the captured output that has arrived.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<NextRequest>,
+        reply: schema_of::<NextReply>,
+    },
+    MethodDef {
+        name: LOGS_OPEN,
+        key: "machine_logs_stream_open",
+        summary: "Opens a stream over a machine's captured output, replayed then followed.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<LogsOpenRequest>,
+        reply: schema_of::<OpenReply>,
+    },
+    MethodDef {
         name: MACHINE_RUN,
         key: "machine_run",
         summary: "Boots a machine through the admitted local launch.",
@@ -227,6 +264,38 @@ pub const REGISTRY: &[MethodDef] = &[
         summary: "Stops a machine. Idempotent.",
         classification: Classification::ProdSafe,
         request: schema_of::<StopRequest>,
+        reply: schema_of::<crate::guest::Empty>,
+    },
+    MethodDef {
+        name: SESSION_CALL,
+        key: "session_call",
+        summary: "Calls the entrypoint in a running session's microVM.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionCallRequest>,
+        reply: schema_of::<EntrypointCallReply>,
+    },
+    MethodDef {
+        name: SESSION_INFO,
+        key: "session_info",
+        summary: "Reports a session's record.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionRef>,
+        reply: schema_of::<SessionInfoReply>,
+    },
+    MethodDef {
+        name: SESSION_START,
+        key: "session_start",
+        summary: "Boots a warm session for a workload, admitted under a signed plan.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionStartRequest>,
+        reply: schema_of::<SessionStartReply>,
+    },
+    MethodDef {
+        name: SESSION_STOP,
+        key: "session_stop",
+        summary: "Stops a session and tears down its microVM.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionRef>,
         reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
@@ -482,7 +551,9 @@ mod tests {
             .iter()
             .chain(crate::guest::METHODS.iter())
             .chain(crate::launch::METHODS.iter())
+            .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
+            .chain(crate::stream::LOG_METHODS.iter())
             .copied()
             .collect();
         runtime.sort_unstable();

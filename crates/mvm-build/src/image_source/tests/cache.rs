@@ -178,7 +178,8 @@ fn manifest_json(
         "mvm_source_commit": checkouts.mvm.commit,
         "compatibility": {
             "guest_agent_protocol": {"min": 2, "max": 2},
-            "builder_cache_contract": 1
+            "builder_cache_contract": 1,
+            "builder_boot_abi": 0
         },
         "nix_inputs": {
             "flake_locks": [{
@@ -459,7 +460,7 @@ fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
     let staged_dir = staged.dir().to_path_buf();
     std::fs::write(staged.dir().join(kernel_name(key.arch)), KERNEL).unwrap();
     let mut manifest = manifest_json(&fx.recorded(&key), key.arch, &kernel_name(key.arch), KERNEL);
-    manifest["compatibility"]["builder_boot_abi"] = serde_json::json!(1);
+    manifest["compatibility"]["a_field_no_build_knows"] = serde_json::json!(1);
     std::fs::write(
         staged.dir().join(LOCAL_SET_MANIFEST_NAME),
         serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -469,7 +470,7 @@ fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
     let err = fx.cache.publish(staged, &fx.ctx()).unwrap_err();
 
     let rendered = err.to_string();
-    assert!(rendered.contains("builder_boot_abi"), "{rendered}");
+    assert!(rendered.contains("a_field_no_build_knows"), "{rendered}");
     assert!(
         rendered.contains(&staged_dir.display().to_string()),
         "the refusal names the staged entry: {rendered}"

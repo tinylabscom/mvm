@@ -125,6 +125,28 @@ pub fn record_source_fingerprint(
     std::fs::write(dir.join(LOCAL_SOURCE_FINGERPRINT_FILE), fingerprint)
 }
 
+/// Record the source fingerprint for a resolved artifact, but only when the
+/// artifact is the version-keyed local build living in that directory.
+///
+/// A pinned-set member's provenance is the signed root, not the checkout, and
+/// its bytes live under `image-set/<root>/…`. Writing a fingerprint beside a
+/// directory the artifact does not live in creates a partial version-keyed
+/// entry (the fingerprint alone), which the resolver then reports as a
+/// missing artifact instead of a missing cache, and the next boot refuses.
+pub fn record_source_fingerprint_for_resolved(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    artifact: &mvm_fs::initramfs::InitramfsArtifact,
+    fingerprint: &str,
+) -> std::io::Result<()> {
+    let local_dir = cache_root.join(version).join(arch.to_string());
+    if !artifact.image_path.starts_with(&local_dir) {
+        return Ok(());
+    }
+    record_source_fingerprint(cache_root, version, arch, fingerprint)
+}
+
 /// Discard a cached artifact that a source checkout did not build.
 ///
 /// Removing rather than ignoring it, so the next resolve takes the build or
@@ -189,6 +211,23 @@ fn seed_from_default_cache(
     )
 }
 
+/// Whether a failed version-keyed resolve can be recovered by the
+/// build/download ladder.
+///
+/// An absent entry and a partial entry are both recoverable: the ladder ends
+/// in a fresh install, so either state just means "nothing usable here yet".
+/// A version or size disagreement is not recoverable here — those bytes exist
+/// and this cache cannot vouch for them, which is surfaced rather than hidden.
+fn is_recoverable_resolve_miss(error: &InitramfsBuildError) -> bool {
+    matches!(
+        error,
+        InitramfsBuildError::Resolve(
+            mvm_fs::initramfs::InitramfsError::Missing(_)
+                | mvm_fs::initramfs::InitramfsError::MissingEntry(_)
+        )
+    )
+}
+
 /// Resolve a cached universal initramfs, or return an error describing why it
 /// is unavailable. A cold contributor cache falls back to the deterministic
 /// Cargo build on every host; release distributions use the published
@@ -207,12 +246,19 @@ pub fn resolve_or_build_local_initramfs(
     version: &str,
     arch: GuestArch,
 ) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    match resolve_or_seed_from_default_cache(cache_root, version, arch) {
+    let initial = match resolve_or_seed_from_default_cache(cache_root, version, arch) {
         Ok(artifact) => return Ok(artifact),
-        Err(InitramfsBuildError::Resolve(mvm_fs::initramfs::InitramfsError::Missing(_))) => {
-            // Fall through to build attempt.
-        }
-        Err(e) => return Err(e),
+        Err(e) => e,
+    };
+    if !is_recoverable_resolve_miss(&initial) {
+        return Err(initial);
+    }
+    // A partial version-keyed dir (a lone recorded fingerprint, an
+    // interrupted install) shadows the ladder as a corrupt entry; remove it
+    // so the ladder's install is the only writer to that directory.
+    let versioned_dir = cache_root.join(version).join(arch.to_string());
+    if versioned_dir.is_dir() {
+        std::fs::remove_dir_all(&versioned_dir)?;
     }
 
     if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
@@ -912,6 +958,102 @@ mod tests {
         assert!(
             evicted,
             "an artifact of unknown provenance must not be reused"
+        );
+    }
+
+    /// The ladder's recoverable-miss predicate: an absent or partial
+    /// version-keyed entry recovers through build/download, while a version
+    /// or size disagreement is surfaced rather than silently reinstalled.
+    #[test]
+    fn recoverable_miss_classification() {
+        use mvm_fs::initramfs::InitramfsError;
+        let missing = InitramfsBuildError::Resolve(InitramfsError::Missing(
+            std::path::PathBuf::from("/tmp/none"),
+        ));
+        assert!(
+            is_recoverable_resolve_miss(&missing),
+            "an absent entry must fall through to the ladder"
+        );
+        let partial = InitramfsBuildError::Resolve(InitramfsError::MissingEntry(
+            std::path::PathBuf::from("/tmp/partial/initramfs.cpio.gz"),
+        ));
+        assert!(
+            is_recoverable_resolve_miss(&partial),
+            "a partial entry (fingerprint without an artifact) must fall through too"
+        );
+        let wrong_version = InitramfsBuildError::Resolve(InitramfsError::VersionMismatch {
+            expected: "0.18.1".into(),
+            got: Some("0.18.0".into()),
+        });
+        assert!(
+            !is_recoverable_resolve_miss(&wrong_version),
+            "bytes for another version must keep refusing"
+        );
+        let wrong_size = InitramfsBuildError::Resolve(InitramfsError::SizeMismatch {
+            expected: 1,
+            actual: 2,
+        });
+        assert!(
+            !is_recoverable_resolve_miss(&wrong_size),
+            "a size disagreement must keep refusing"
+        );
+    }
+
+    /// A fingerprint is recorded only when the resolved artifact actually
+    /// lives in the version-keyed directory. A pinned-set member resolves from
+    /// `image-set/<root>/…`; labeling the version-keyed dir beside it would
+    /// leave a partial entry the next resolve reports as a missing artifact.
+    #[test]
+    fn fingerprint_recording_skips_a_set_member_artifact() {
+        let cache = tempfile::tempdir().unwrap();
+        let local_dir = cache.path().join("0.18.1").join("aarch64");
+        std::fs::create_dir_all(&local_dir).unwrap();
+
+        let local = mvm_fs::initramfs::InitramfsArtifact {
+            image_path: local_dir.join("initramfs.cpio.gz"),
+            hash_path: local_dir.join("initramfs.hash"),
+            size_path: local_dir.join("initramfs.size"),
+            version: "0.18.1".into(),
+        };
+        record_source_fingerprint_for_resolved(
+            cache.path(),
+            "0.18.1",
+            GuestArch::Aarch64,
+            &local,
+            "local-fingerprint",
+        )
+        .unwrap();
+        assert!(
+            local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE).is_file(),
+            "a version-keyed local build is labeled with its fingerprint"
+        );
+
+        let member_dir = cache
+            .path()
+            .join("image-set")
+            .join("deadbeef")
+            .join("0.18.0-rc.2")
+            .join("aarch64");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let member = mvm_fs::initramfs::InitramfsArtifact {
+            image_path: member_dir.join("initramfs.cpio.gz"),
+            hash_path: member_dir.join("initramfs.hash"),
+            size_path: member_dir.join("initramfs.size"),
+            version: "0.18.0-rc.2".into(),
+        };
+        record_source_fingerprint_for_resolved(
+            cache.path(),
+            "0.18.1",
+            GuestArch::Aarch64,
+            &member,
+            "checkout-fingerprint",
+        )
+        .unwrap();
+        let recorded =
+            std::fs::read_to_string(local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE)).unwrap();
+        assert!(
+            recorded.contains("local-fingerprint"),
+            "a set member must not be recorded into the version-keyed dir: {recorded}"
         );
     }
 

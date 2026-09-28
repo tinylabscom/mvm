@@ -313,8 +313,12 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       The CLI's boot admission now lives in `mvm-client`
       (`crates/mvm-client/src/admission/`), and so does the persistent start
       path the SDK's invocations take (`crates/mvm-client/src/launch/`).
-      `mvm_client::launch` still admits through
-      `mvm_hostd::run::admit_and_boot_local` and moves onto it next.
+      A persistent `mvm_client::launch` now boots through the same
+      `start_machine_spec` admission the CLI's `machine run -d` and
+      `machine start` use (`launch::detached::boot_recorded`), so the two cannot
+      admit the same persisted definition under different plans. A transient
+      launch still admits through `mvm_hostd::run::admit_and_boot_local`,
+      because fleet-signed plans and assurance campaigns exist only there.
   - [x] Extract the lifecycle half of the CLI's `machine::lifecycle::start_machine`
         (spec reconcile, deployment/manifest/image to rootfs, network policy,
         memory, volume config, start) into `mvm-client`, leaving dry-run
@@ -333,6 +337,21 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
         there is one persistent machine lifecycle. Fold fleet-signed plans and
         assurance campaigns into the one admission rather than keeping
         `mvm_hostd::run::admit_and_boot_local` as a second path for them.
+        The boot half is done: spec reconcile (`detached::resolve_spec`),
+        persist-then-boot, the start record, TTL, and stopping a running
+        machine before a recreate moved out of the CLI into
+        `mvm_client::launch::detached`, and both callers use them; secret
+        references are validated against the caller's secret service inside
+        the one start. What remains is the create half and the transient
+        path.
+  - [ ] Converge the transient launch onto the same start. The local boot
+        `mvm_hostd::run::admit_and_boot_local` attaches the runtime overlay
+        but not the universal initramfs, nor the guest boot config the start
+        path attaches, so a runtime-lean OCI image boots to a kernel panic at
+        `/init` (ENOENT); observed on HVF (macOS 26.6.2, arm64) with
+        `docker.io/library/alpine:latest`. The SDKs boot every machine through
+        the persistent start and are unaffected; a Rust caller launching
+        `LifecycleMode::Transient` is not.
   - [ ] Witness: one request yields the same signed plan whether it enters
         through `mvmctl machine run` or through `mvm_client::launch`.
 - [x] Guest process and file operations have one implementation,

@@ -495,6 +495,8 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
+    // Lists sessions from a verified chain; writes nothing.
+    ("sessions", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
     ("verify-cert", AuditPosture::ReadOnly),
     ("publish-root", AuditPosture::ReadOnly),

@@ -110,21 +110,41 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15):
       `MVM_HOSTLIB_PATH` → packaged in the SDK → beside `mvmctl`; `mvmctl run
       --mode live` sets the variable to the library beside itself
-- [ ] the in-process launcher accepts a command override and guest
+- [x] the in-process launcher accepts a command override and guest
       environment, so `Machine.run(command=...)`, `Sandbox.create(command=...)`
       and the Obscura `BrowserSandbox` preset boot instead of refusing
-      (converge with the CLI's `machine run` front half; drive-plane plan WS2
-      "One admission path for every launcher")
-- [ ] template/manifest sources launch in-process, so a live `Sandbox.create`
+      — `LaunchRequest` carries `command`/`env`/`cwd`, validated against the
+      `env_hygiene` denylist when built; the command starts once the machine
+      is up and the launch returns its process token. A persistent launch
+      boots through the CLI's `start_machine_spec` admission, with the spec
+      reconcile, persist-then-boot, start record and TTL moved out of the CLI
+      into `mvm_client::launch::detached` for both callers. `Machine.run(image,
+      command)` again returns the command's result; `Machine.launch` returns a
+      handle
+- [x] template/manifest sources launch in-process, so a live `Sandbox.create`
       and the Chromium/Chrome `BrowserSandbox` presets can name a built
-      template rather than only an image
-- [ ] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
-      references) into a microVM through the library — today it raises a
-      typed transport error, and `MVM_NO_VM=1` dispatches in-language; the
-      invoke path has to move from the CLI into `mvm-client` first
-- [ ] `machine.logs` follow as a stream, like `guest.proc.stream.*`
-- [ ] a live-boot scenario driving an SDK through the real library against a
-      real guest (the BDD suite records calls in-process)
+      template rather than only an image — `LaunchSource::{from_template,
+      from_manifest}`: a template resolves by the name its image was built
+      under, through the same admission and signing as an image; nothing is
+      built on a launch
+- [x] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
+      references) into a microVM through the library — `entrypoint.call` and
+      `session.{start,call,stop,info}` over `mvm_client::entrypoint`, which
+      the CLI's `machine run --entrypoint` and `machine session` now call
+      too; one admission for transient calls and session starts. The host
+      runs the primary entrypoint only (the guest wire has no function
+      selector)
+- [x] `machine.logs` follow as a stream, like `guest.proc.stream.*` —
+      `machine.logs.stream.{open,next,close}` (ABI 1.3); `Machine.logs(follow=True)`
+- [x] a live-boot scenario driving an SDK through the real library against a
+      real guest (the BDD suite records calls in-process) — run on macOS
+      26.6.2 arm64 (HVF) against `docker.io/library/alpine:latest` and a built
+      slot: `Machine.run`, `Sandbox.create(image, command, env)` with exec,
+      files and logs, `Machine.launch(manifest=...)`, and an unbuilt
+      template's refusal, from Python; `Machine.run` and a sandbox from
+      TypeScript. Recorded in
+      `specs/sprint/delivery/3711-sdk-launcher-parity.md`; function dispatch
+      was not live-booted (no function workload is built on that host)
 
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
@@ -240,10 +260,19 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
-- [ ] per-session integrity summary (event count, chain head, Merkle root)
-- [ ] hash-chained session ledger (plan id, snapshot roots, image/kernel identity)
-- [ ] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
-- [ ] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
+- [x] per-session integrity summary (event count, chain head, Merkle root)
+      — a chain-signed `session.sealed` entry at exit, failed boot, and
+      persistent stop (`mvm_hostd::audit::session`)
+- [x] hash-chained session ledger (plan id, image/kernel identity) — derived
+      from the chain: each seal links the previous one, so there is no second
+      file or trust root
+- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
+      reserved and unset until PS-08 records snapshot lineage per session
+- [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
+      — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
+      `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`
+      and `NOT_FOUND`, each with its own exit status
+- [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
 - [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
@@ -351,7 +380,7 @@ client, CLI left with args + rendering.
 
 ## Execution log and handoff
 
-Snapshot as of 2026-09-27. This section is the pick-up point: it records what
+Snapshot as of 2026-09-27, updated after the agents were stopped. This section is the pick-up point: it records what
 landed, what is in flight, the decisions taken while executing, and the known
 defects found along the way. The workstream checkboxes above remain the
 per-item source of truth; `specs/REFACTOR-STATUS.md` is the rollup; tracking
@@ -386,10 +415,23 @@ issue #3731 carries the same status as a comment.
 | #3768 | PS-17 | task-runner surface reduced (opened by another session) |
 | mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
 
-In progress without a PR yet: PS-05 policy profiles (`feat/policy-profiles`);
-#3757 fix, then PS-02 leftovers, then approval parity; #3752 fix, then the
-PS-09 remainder; the no-network hint, then PS-08 undo/diff; the transient
-`LocalBackend::launch` initramfs fix.
+### Stopped mid-flight (2026-09-27)
+
+All program agents were stopped at the user's request on 2026-09-27. Their
+unfinished work is pushed as branches with no PR. Commits labelled `wip:` are
+formatted snapshots on which clippy and the test gates were **not** run;
+every branch needs a rebase onto main, the full gates, and a PR.
+
+| Branch | Workstream | State |
+|---|---|---|
+| `feat/policy-profiles` | PS-05 (#3715) | 8 commits, complete per its agent; PR body was being drafted |
+| `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
+| `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
+| `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
+| `feat/egress-injection-modes` | PS-02 (#3712) | `wip:` only (`query_param` / `url_path` / `basic_auth`) |
+| `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
+| `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
+| `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |
 
 ### Not started
 
@@ -440,10 +482,38 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
 
 ### How to resume
 
-1. Read this section, then `gh issue view 3731` for the latest status comment.
-2. For each open PR above: `gh pr checks N`; rebase onto main keeping both
-   sides of any conflict; fix root causes; enqueue through the merge queue.
+1. Read this section, the brief below, and `specs/research/host-kernel-agent-sandbox-comparison.md`, then `gh issue view 3731` for the latest status comment.
+2. For each open PR and each branch in "Stopped mid-flight": check CI
+   (`gh pr checks N`), rebase onto main keeping both sides of any conflict,
+   fix root causes, run the full gates, open or update the PR, and enqueue
+   it through the merge queue.
 3. Branches are named in the tables; their worktrees live under
    `.worktrees/` beside the repository and may be removed once merged.
 4. Next workstreams in priority order: PS-05 → PS-06 and PS-13 → PS-08 →
    PS-15 → PS-16 → PS-18.
+
+### Brief for whoever resumes
+
+Rules this program follows beyond CLAUDE.md and AGENTS.md:
+
+- **Never name the external tool** this plan was compared against — not in
+  code, comments, docs, commits, branches, PR titles or bodies, issues, or
+  even as a descriptor. Say "the reference tool" in conversation; write
+  around it in the tree. The comparison lives in
+  `specs/research/host-kernel-agent-sandbox-comparison.md`.
+- **Security wins every tie.** Keep the microVM, the NIC-less guest,
+  vsock-only egress through the one host endpoint, and the signed, audited
+  `ExecutionPlan`. Adopt the experience, never the weaker mechanism.
+- **The SDKs never run `mvmctl`**; everything goes through `mvm-hostlib`
+  over `mvm-client`, and `check-no-cli-shellout` holds it.
+- One worktree per slice under `.worktrees/` beside the repository, one PR
+  per coherent slice, pushed early so a stopped session loses nothing.
+- Commits and PRs carry no AI attribution and no co-author trailer.
+- Arm a green PR with `gh pr merge N --squash --auto` run twice (the second
+  run shows it entered the queue), then check the merge queue.
+- Tick the plan's boxes, `specs/REFACTOR-STATUS.md`, and a delivery note
+  in `specs/sprint/delivery/` in the same PR; update this execution log and
+  post a status comment on #3731 when PRs land.
+- Delete a worktree's `target/` once its PR is queued; disk is shared.
+- Agents may be stopped by an account rate limit. Before assuming work
+  landed, check the worktree and the branch on origin.

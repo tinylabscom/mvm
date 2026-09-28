@@ -16,7 +16,7 @@
 //!   errors this pump backs off on, so a wedged workload costs a bounded
 //!   amount of host memory and a sleeping thread — never the thread streaming
 //!   the workload's *output*, which is why the pump runs on its own thread and
-//!   is never joined. Joining it would make `mvmctl` wait on the caller's
+//!   is never joined. Joining it would make the call wait on the caller's
 //!   stdin to exit, which is precisely the stall the whole plane avoids.
 //!
 //! - **A frame the gate accepted is never offered again.** The route's errors
@@ -89,7 +89,7 @@ fn attend_period() -> Duration {
 /// process's [`StreamPlane`] and a test's is the same plane over a transport
 /// it can inspect — and because the pump's retry rules are defined in terms of
 /// which error came back, which is the part worth testing without a microVM.
-pub(in crate::commands::vm) trait WorkloadInput: Send + Sync {
+pub trait WorkloadInput: Send + Sync {
     /// Offer one frame. The gate may accept it and the transport still fail;
     /// the two outcomes are different [`InputRouteError`] variants and the
     /// pump treats them differently.
@@ -102,13 +102,13 @@ pub(in crate::commands::vm) trait WorkloadInput: Send + Sync {
 }
 
 /// The production destination: the route this process's plane holds for `vm`.
-pub(in crate::commands::vm) struct PlaneInput {
+pub struct PlaneInput {
     plane: Arc<StreamPlane>,
     vm: String,
 }
 
 impl PlaneInput {
-    pub(in crate::commands::vm) fn new(plane: Arc<StreamPlane>, vm: impl Into<String>) -> Self {
+    pub fn new(plane: Arc<StreamPlane>, vm: impl Into<String>) -> Self {
         Self {
             plane,
             vm: vm.into(),
@@ -132,7 +132,7 @@ impl WorkloadInput for PlaneInput {
 
 /// What the pump did, for the caller to report once the call is over.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(in crate::commands::vm) struct StreamedInputReport {
+pub struct StreamedInputReport {
     /// Frames the gate accepted.
     pub frames: u64,
     /// Bytes of the caller's stdin offered.
@@ -146,7 +146,7 @@ pub(in crate::commands::vm) struct StreamedInputReport {
 
 /// A live host→guest stdin stream: the reader thread, the idle attendant,
 /// and the flag that ends both.
-pub(in crate::commands::vm) struct StdinStream {
+pub struct StdinStream {
     stop: Arc<AtomicBool>,
     input: Arc<dyn WorkloadInput>,
     report: Arc<Mutex<StreamedInputReport>>,
@@ -159,7 +159,7 @@ impl StdinStream {
     /// The reader thread is deliberately not retained: see the module docs on
     /// why joining a thread parked in `read` would make the workload's exit
     /// wait on the caller's keyboard.
-    pub(in crate::commands::vm) fn start<R>(input: Arc<dyn WorkloadInput>, reader: R) -> Self
+    pub fn start<R>(input: Arc<dyn WorkloadInput>, reader: R) -> Self
     where
         R: Read + Send + 'static,
     {
@@ -196,7 +196,7 @@ impl StdinStream {
     /// Closes the workload's stdin if the pump has not already — a second
     /// close finds no session and is not an error, which is the whole reason
     /// both ends may call it.
-    pub(in crate::commands::vm) fn finish(mut self) -> StreamedInputReport {
+    pub fn finish(mut self) -> StreamedInputReport {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(attendant) = self.attendant.take() {
             let _ = attendant.join();

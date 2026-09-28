@@ -9,7 +9,7 @@ The Python SDK currently exposes both runtime and declarative surfaces.
 
 Current:
 
-- `mvm.Sandbox.create(image=..., ...)` (live mode boots an image; `template` is record mode only)
+- `mvm.Sandbox.create(image=..., ...)` or `mvm.Sandbox.create(template, ...)` (live mode boots an image, or a template built on this host)
 - `sandbox.commands.start(argv, env=...)` — the only method on `commands`
 - `sandbox.exec(*argv, ...)` / `sandbox.aexec(...)` / `sandbox.shell(...)` — one-shot with a captured `ExecResult` (live mode only)
 - `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only

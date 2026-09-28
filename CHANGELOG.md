@@ -2,6 +2,23 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.3] — 2026-09-28
+
+### Fixed
+- **hostlib**: The SDK run reply's build_mode answers the declared profile
+
+## [0.18.2] — 2026-09-28
+
+### Added
+- **image-set**: Accept builder_boot_abi in the compatibility section
+
+### Documentation
+- **plans**: Record the stopped branches, a resume brief, and the comparison research
+
+### Fixed
+- **initramfs**: Recover from a partial version-keyed cache dir on boot
+- **hostd**: Attach the universal initramfs on in-process local boots
+
 ## [0.18.1] — 2026-09-28
 
 ### Added
