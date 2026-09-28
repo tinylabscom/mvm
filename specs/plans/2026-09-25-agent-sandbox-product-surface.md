@@ -463,7 +463,10 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
   can expire before boot (`VerbNotAuthorized`).
 - #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
 - Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
-  attaches no universal initramfs and panics at `/init` for Rust callers.
+  attached no universal initramfs and panicked at `/init` for Rust callers.
+  Fixed by the `fix/transient-launch-initramfs` PR: the attach decision
+  lives in `mvm_runtime::universal_initramfs` and hostd attaches overlay +
+  initramfs together on the in-process boot.
 - #3753 open box: host-directory volumes attached as block devices
   (`machine volume mount --host DIR`) are never scanned for instruction files.
 - For review: a boot command override on a `prod` build slot is accepted, the
