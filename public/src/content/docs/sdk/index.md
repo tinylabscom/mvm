@@ -43,7 +43,7 @@ The SDK docs use conservative language until implementation and tests prove stro
 
 - [Runtime SDK](/sdk/runtime/) for lifecycle-oriented APIs.
 - [SDK security model](/sdk/security-model/) for host execution, guest execution, secrets, network, audit, and state-retention rules.
-- [Operations cookbook](/sdk/operations-cookbook/) for current SDK calls, target helpers, and CLI fallbacks.
+- [Operations cookbook](/sdk/operations-cookbook/) for current SDK calls, target helpers, and remaining CLI-only gaps.
 - [Decorator SDK](/sdk/decorator/) for workload declarations and static compile.
 - [Declaration cookbook](/sdk/declaration-cookbook/) for concrete decorator-style Python and TypeScript declarations.
 - [Sandbox types](/sdk/sandbox-types/) for product-level helper patterns.
