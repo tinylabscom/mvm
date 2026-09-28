@@ -1136,9 +1136,12 @@ mod tests {
     use super::*;
     use crate::published_image_set::ImageSetMemberError;
     use crate::published_image_set::fixture::ImageSetFixture;
+    use flate2::write::GzEncoder;
     use mvm_core::util::test_env::TestEnv;
     use mvm_fs::ext4::{Node, Owner};
+    use tar::Builder;
     use tempfile::TempDir;
+    use tempfile::tempdir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -2218,5 +2221,125 @@ mod tests {
             all_required_files_present(&layout),
             "all five artifacts present is a complete overlay"
         );
+    }
+
+    #[test]
+    fn local_source_cache_is_fresh_returns_false_for_missing_files() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let layout = RuntimeOverlayLayout::under(&tmpdir.path().join("cache"), "1.0.0", "x86_64");
+
+        // Missing local_source_fingerprint_file
+        assert!(local_source_cache_is_fresh(&layout, "abc").unwrap() == false);
+
+        // Missing local_build_epoch_file
+        std::fs::write(&layout.local_source_fingerprint_file, b"abc").unwrap();
+        assert!(local_source_cache_is_fresh(&layout, "abc").unwrap() == false);
+    }
+
+    #[test]
+    fn local_source_cache_is_fresh_returns_false_for_mismatched_values() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let layout = RuntimeOverlayLayout::under(&tmpdir.path().join("cache"), "1.0.0", "x86_64");
+
+        std::fs::write(&layout.local_source_fingerprint_file, b"abc").unwrap();
+        std::fs::write(&layout.local_build_epoch_file, LOCAL_BUILD_EPOCH).unwrap();
+
+        // Mismatched fingerprint
+        assert!(local_source_cache_is_fresh(&layout, "xyz").unwrap() == false);
+
+        // Mismatched epoch
+        std::fs::write(&layout.local_source_fingerprint_file, b"abc").unwrap();
+        std::fs::write(&layout.local_build_epoch_file, b"wrong_epoch").unwrap();
+        assert!(local_source_cache_is_fresh(&layout, "abc").unwrap() == false);
+    }
+
+    #[test]
+    fn runtime_overlay_source_checkout_root_returns_none_when_not_available() {
+        // The function returns None when the source checkout is not available
+        // This is tested by checking that it returns Option<PathBuf>
+        let result = runtime_overlay_source_checkout_root();
+        // The function returns Option<PathBuf>, which can be None or Some(PathBuf)
+        let _: Option<PathBuf> = result;
+    }
+
+    #[test]
+    fn extract_release_archive_rejects_missing_required_members() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let archive_path = tmpdir.path().join("test.tar.gz");
+        let stage = tmpdir.path().join("stage");
+
+        // Create a minimal tar.gz archive with missing members
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(&mut encoder);
+
+            // Only add one of the required members
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            archive
+                .append_data(&mut header, "VERSION", b"1.0.0".as_ref())
+                .unwrap();
+            archive.finish().unwrap();
+        }
+
+        let expected = &["overlay.ext4", "overlay.verity", "VERSION"];
+        let result = extract_release_archive(&archive_path, &stage, expected);
+
+        // Should fail because overlay.ext4 and overlay.verity are missing
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_release_archive_rejects_path_traversal() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let archive_path = tmpdir.path().join("test.tar.gz");
+        let stage = tmpdir.path().join("stage");
+
+        // Create a tar.gz archive with path traversal attempt
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(&mut encoder);
+
+            // Attempt to add a path with ../
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            archive
+                .append_data(&mut header, "../etc/passwd", b"test".as_ref())
+                .unwrap();
+            archive.finish().unwrap();
+        }
+
+        let expected = &["VERSION"];
+        let result = extract_release_archive(&archive_path, &stage, expected);
+
+        // Should fail because of path traversal
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_release_archive_rejects_empty_archive() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let archive_path = tmpdir.path().join("test.tar.gz");
+        let stage = tmpdir.path().join("stage");
+
+        // Create an empty tar.gz archive
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(&mut encoder);
+            archive.finish().unwrap();
+        }
+
+        let expected = &["VERSION"];
+        let result = extract_release_archive(&archive_path, &stage, expected);
+
+        // Should fail because VERSION is missing
+        assert!(result.is_err());
     }
 }

@@ -1004,4 +1004,130 @@ mod tests {
         let back: BaseImageScanReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(report, back);
     }
+
+    #[test]
+    fn severity_band_boundaries_are_correct() {
+        // Test boundary conditions for severity classification
+        assert_eq!(severity_band(0.0), "none");
+        assert_eq!(severity_band(0.1), "low");
+        assert_eq!(severity_band(3.9), "low");
+        assert_eq!(severity_band(4.0), "medium");
+        assert_eq!(severity_band(6.9), "medium");
+        assert_eq!(severity_band(7.0), "high");
+        assert_eq!(severity_band(8.9), "high");
+        assert_eq!(severity_band(9.0), "critical");
+        assert_eq!(severity_band(10.0), "critical");
+    }
+
+    #[test]
+    fn cvss3_base_score_rejects_boundary_vectors() {
+        // CVSS vectors that parse but have edge case values
+        // Note: CVSS vectors with zero impact metrics return 0.0
+        assert_eq!(
+            cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"),
+            Some(0.0)
+        );
+        // Vector with invalid characters
+        assert_eq!(
+            cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:!H/I:H/A:H"),
+            None
+        );
+    }
+
+    #[test]
+    fn cvss3_base_score_handles_edge_cases() {
+        // Test that malformed vectors return None
+        assert_eq!(cvss3_base_score(""), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/AV:"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/AV:N/AC:"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:"), None);
+        assert_eq!(cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:"), None);
+        assert_eq!(
+            cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:"),
+            None
+        );
+        assert_eq!(
+            cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:"),
+            None
+        );
+        assert_eq!(
+            cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:"),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_inventory_handles_empty_inventory() {
+        let client = MockOsv {
+            batch: BTreeMap::new(),
+            records: BTreeMap::new(),
+            batches_seen: RefCell::new(Vec::new()),
+        };
+        let inventory = OsInventory::default();
+        let report = scan_inventory(&inventory, &image(), &client).expect("scan");
+        assert_eq!(report.schema, CVE_SCHEMA);
+        assert!(report.findings.is_empty());
+        assert_eq!(report.components_scanned, 0);
+    }
+
+    #[test]
+    fn scan_inventory_handles_missing_cvss_vector() {
+        // Record with no severity and no CVSS vector
+        let mut batch = BTreeMap::new();
+        batch.insert("openssl".to_string(), vec!["CVE-1".to_string()]);
+        let mut records = BTreeMap::new();
+        records.insert(
+            "CVE-1".to_string(),
+            OsvVulnerability {
+                id: "CVE-1".to_string(),
+                aliases: vec![],
+                summary: Some("test".to_string()),
+                database_severity: None,
+                severity_vectors: vec![],
+                fixed_versions: vec![],
+            },
+        );
+        let client = MockOsv {
+            batch,
+            records,
+            batches_seen: RefCell::new(Vec::new()),
+        };
+        let inventory = inventory_with(vec![component("Debian", "openssl", "3.0.11")]);
+        let report = scan_inventory(&inventory, &image(), &client).expect("scan");
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, "unknown");
+    }
+
+    #[test]
+    fn render_cve_sidecar_rejects_empty_findings_with_high_critical_count() {
+        // Ensure high_critical_count() returns 0 when there are no findings
+        let report = BaseImageScanReport {
+            schema: CVE_SCHEMA.to_string(),
+            image: image(),
+            scanned_at: "2026-09-24T00:00:00Z".to_string(),
+            components_scanned: 0,
+            findings: vec![],
+            limitations: vec![],
+        };
+        assert_eq!(report.high_critical_count(), 0);
+        // Ensure the sidecar shape is not the app-deps stub
+        let value = render_cve_sidecar(&report);
+        let object = value.as_object().expect("object");
+        assert!(object.len() > 1);
+    }
+
+    #[test]
+    fn severity_rank_handles_unknown_severity() {
+        assert_eq!(severity_rank("critical"), 5);
+        assert_eq!(severity_rank("high"), 4);
+        assert_eq!(severity_rank("medium"), 3);
+        assert_eq!(severity_rank("moderate"), 3);
+        assert_eq!(severity_rank("low"), 2);
+        assert_eq!(severity_rank("none"), 1);
+        assert_eq!(severity_rank("unknown"), 0);
+        assert_eq!(severity_rank("invalid"), 0);
+    }
 }
