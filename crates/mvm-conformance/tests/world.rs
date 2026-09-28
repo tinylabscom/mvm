@@ -307,9 +307,12 @@ pub struct CliWorld {
     /// Per-scenario SDK-sidecar cache root, so a developer's populated cache
     /// can never satisfy a scenario for the wrong reason.
     pub sdk_sidecar_cache: Option<tempfile::TempDir>,
-    /// Per-scenario staged release directory the acquire scenarios fetch from,
-    /// so the download path runs against local bytes and never the network.
+    /// Per-scenario directory serving the image set the acquire scenarios
+    /// fetch from, so the download path runs against local bytes and never the
+    /// network.
     pub sdk_sidecar_release: Option<tempfile::TempDir>,
+    /// Where that set is served from, and the lock pinning its root.
+    pub sdk_sidecar_image_set: Option<mvm_build::published_image_set::ImageSetSource>,
     /// Host-service bindings the scenario's plan carries.
     pub sdk_sidecar_services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// Ordinary workload mounts assembled beside the reserved SDK sidecar.

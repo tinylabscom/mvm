@@ -31,17 +31,16 @@ mod launch_plan;
 mod mounts;
 use either::Either;
 use mounts::refuse_unloadable_sidecar;
-mod backend_select;
 mod session;
 mod sidecar_selection;
 mod transient;
 
 pub use launch_plan::load_launch_plan;
 
-pub(crate) use backend_select::{
+use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
+pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
-use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
 pub use session::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, SessionVmName, boot_session_vm,
@@ -747,6 +746,11 @@ fn run_inner(
 
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
+
+    // Answer the endpoint's `ask` decisions for as long as the run is in the
+    // foreground. The wasm tier has no network endpoint to ask.
+    let _approvals =
+        (backend.name() != "wasm").then(|| crate::approval::serve_for(&vm_name, req.pty));
 
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
@@ -1630,9 +1634,9 @@ mod tests {
         // The launch resolver validates $MVM_IMAGES_DIR even for a wasm module
         // (which uses none of its contents), and a concurrent doctor test
         // points it at a "missing" path to exercise the refusal. Hold the env
-        // guard and unset it: resolution then falls back to this checkout's
-        // in-tree image flakes, which is deterministic on any machine — and
-        // immune to an ambient MVM_IMAGES_DIR in the developer's shell.
+        // guard and unset it: resolution then selects a sibling checkout or the
+        // released set, neither of which a wasm module reads — and is immune
+        // to an ambient MVM_IMAGES_DIR in the developer's shell.
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         let module_path = "/tmp/dummy.wasm";

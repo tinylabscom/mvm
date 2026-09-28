@@ -14,11 +14,12 @@ How the agent reaches the guest depends on the image policy:
   overlay-resident agent from there instead of falling back to a baked rootfs
   copy.
 
-The runtime overlay is **version-matched** to the host `mvmctl` build and is
-treated as a boot-time dependency. A running VM keeps the agent/runtime version
-it booted with until restart; mvm does not hot-swap a different runtime overlay
-into a live guest. Stopped VMs pick up an updated version-matched overlay on
-their next boot.
+The runtime overlay is the one the host `mvmctl` build resolves: the member of
+the image set it pins, whose compatibility the signed root declares, or on a
+source build one built at the CLI's own version. It is treated as a boot-time
+dependency. A running VM keeps the agent/runtime version it booted with until
+restart; mvm does not hot-swap a different runtime overlay into a live guest.
+Stopped VMs pick up an updated overlay on their next boot.
 
 ## Capabilities
 

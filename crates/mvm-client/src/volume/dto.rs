@@ -12,6 +12,8 @@ use mvm_core::domain::volume::VolumeName;
 use mvm_runtime::image::RuntimeVolume;
 use serde::{Deserialize, Serialize};
 
+use crate::profile::RunProfile;
+
 /// How a guest sees an attachment: read-only (the default everywhere) or
 /// read-write (an explicit opt-in gated on the admitted profile).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,36 +42,76 @@ impl AccessMode {
     }
 }
 
-/// The admitted profile of the workload an attachment serves. Writable
-/// attachments are a dev-tier capability; a sealed workload only ever gets
-/// read-only volumes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AdmittedProfile {
-    /// Interactive dev-tier launch (`dev` / `permissive` machine profiles).
-    Dev,
-    /// Any non-dev launch. The safe default: writable attachments are refused.
-    #[default]
-    Sealed,
-}
+/// The machine profile a volume attachment is admitted under.
+///
+/// Whether the attachment may be read-write is the profile table's decision —
+/// [`ProfileGrants::writable_disk_images`](crate::profile::ProfileGrants), the
+/// same grant a `HOST.img:/GUEST:SIZE:rw` disk image is checked against. Every
+/// managed volume reaches the guest as its own ext4 block image: a managed
+/// block volume is one, and a registered host directory is snapshotted into a
+/// private image copy before it is attached. So a guest writing to a managed
+/// volume writes into that image, never into the host filesystem.
+///
+/// The default names no profile, and so does a name no profile answers to;
+/// both refuse a writable attachment rather than guessing at a preset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmittedProfile(Option<RunProfile>);
 
 impl AdmittedProfile {
-    /// Map a machine profile name onto the attachment tier. Mirrors the
-    /// launch-path rule that only `dev` / `permissive` profiles may take
-    /// writable host shares.
+    /// Admit under `profile`.
+    #[must_use]
+    pub const fn new(profile: RunProfile) -> Self {
+        Self(Some(profile))
+    }
+
+    /// Admit under the profile a launch request or stored machine spec
+    /// carries by name.
     #[must_use]
     pub fn from_profile_name(profile: &str) -> Self {
-        if matches!(profile, "dev" | "permissive") {
-            AdmittedProfile::Dev
-        } else {
-            AdmittedProfile::Sealed
-        }
+        Self(RunProfile::from_name(profile))
+    }
+
+    /// The admitted profile, when the name resolved to one.
+    #[must_use]
+    pub const fn profile(self) -> Option<RunProfile> {
+        self.0
     }
 
     /// `true` when this profile may attach a volume read-write.
     #[must_use]
     pub fn permits_read_write(self) -> bool {
-        matches!(self, AdmittedProfile::Dev)
+        self.0
+            .is_some_and(|profile| profile.grants().writable_disk_images)
+    }
+
+    /// Refuse a read-write `subject` unless this profile permits it. Every
+    /// writable-volume refusal is worded here, so registration and launch
+    /// say the same thing.
+    pub fn require_read_write(self, subject: &str) -> Result<()> {
+        if self.permits_read_write() {
+            return Ok(());
+        }
+        let granting = RunProfile::ALL
+            .into_iter()
+            .filter(|profile| profile.grants().writable_disk_images)
+            .map(RunProfile::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let admitted = match self.0 {
+            Some(profile) => format!("profile {:?}", profile.as_str()),
+            None => "no recognised profile".to_string(),
+        };
+        bail!(
+            "{subject} refused: {admitted} does not permit writable volumes (a writable \
+             managed volume is a disk image the guest writes into; profiles {granting} \
+             grant it)"
+        )
+    }
+}
+
+impl From<RunProfile> for AdmittedProfile {
+    fn from(profile: RunProfile) -> Self {
+        Self::new(profile)
     }
 }
 
@@ -226,13 +268,14 @@ impl AttachmentRequest {
             volume,
             guest_path: None,
             access: AccessMode::ReadOnly,
-            profile: AdmittedProfile::Sealed,
+            profile: AdmittedProfile::default(),
         })
     }
 }
 
-/// Builder for [`AttachmentRequest`]. Attachments default to read-only under
-/// the sealed profile; a writable attachment must name a dev-tier profile.
+/// Builder for [`AttachmentRequest`]. Attachments default to read-only with no
+/// admitted profile; a writable attachment must name a profile that grants
+/// writable disk images.
 #[derive(Debug, Clone)]
 pub struct AttachmentRequestBuilder {
     owner: String,
@@ -258,28 +301,28 @@ impl AttachmentRequestBuilder {
         self
     }
 
-    /// Admitted profile of the workload (defaults to sealed, which refuses
+    /// Admitted profile of the workload (defaults to none, which refuses
     /// read-write).
     #[must_use]
-    pub fn profile(mut self, profile: AdmittedProfile) -> Self {
-        self.profile = profile;
+    pub fn profile(mut self, profile: impl Into<AdmittedProfile>) -> Self {
+        self.profile = profile.into();
         self
     }
 
     /// Validate and build the request. Refuses guest paths outside the mount
-    /// allow-roots and read-write access outside a dev-tier profile.
+    /// allow-roots, and read-write access under a profile that does not grant
+    /// writable disk images.
     pub fn build(self) -> Result<AttachmentRequest> {
         let raw_guest = self
             .guest_path
             .context("attachment guest path is required")?;
         let guest_path = mvm_core::crypto::policy::validate_mount_path(&raw_guest)
             .with_context(|| format!("guest path {raw_guest:?} rejected by policy"))?;
-        if !self.access.is_read_only() && !self.profile.permits_read_write() {
-            bail!(
-                "read-write attachment of volume {:?} refused: the admitted profile does not \
-                 permit writable volumes (use a dev-tier profile)",
+        if !self.access.is_read_only() {
+            self.profile.require_read_write(&format!(
+                "read-write attachment of volume {:?}",
                 self.volume.as_str()
-            );
+            ))?;
         }
         Ok(AttachmentRequest {
             owner: self.owner,
@@ -364,7 +407,7 @@ impl LaunchLeaseRequest {
         Ok(LaunchLeaseRequestBuilder {
             owner: owner.to_string(),
             explicit: Vec::new(),
-            profile: AdmittedProfile::Sealed,
+            profile: AdmittedProfile::default(),
             unlock: UnlockPolicy::RequireUnlocked,
         })
     }
@@ -387,11 +430,11 @@ impl LaunchLeaseRequestBuilder {
         self
     }
 
-    /// Admitted profile of the launch (defaults to sealed, which refuses
+    /// Admitted profile of the launch (defaults to none, which refuses
     /// writable attachments).
     #[must_use]
-    pub fn profile(mut self, profile: AdmittedProfile) -> Self {
-        self.profile = profile;
+    pub fn profile(mut self, profile: impl Into<AdmittedProfile>) -> Self {
+        self.profile = profile.into();
         self
     }
 
@@ -444,23 +487,63 @@ mod tests {
         );
     }
 
+    /// The attachment gate reads the profile table's writable-disk grant:
+    /// every profile that grants `writable_disk_images` for a `--mount` disk
+    /// image grants a writable managed volume, and no other does.
     #[test]
-    fn admitted_profile_defaults_sealed_and_maps_names() {
-        assert_eq!(AdmittedProfile::default(), AdmittedProfile::Sealed);
-        assert!(!AdmittedProfile::Sealed.permits_read_write());
-        assert!(AdmittedProfile::Dev.permits_read_write());
-        assert_eq!(
-            AdmittedProfile::from_profile_name("dev"),
-            AdmittedProfile::Dev
+    fn admitted_profile_follows_the_writable_disk_grant() {
+        for profile in RunProfile::ALL {
+            let admitted = AdmittedProfile::from_profile_name(profile.as_str());
+            assert_eq!(admitted, AdmittedProfile::new(profile));
+            assert_eq!(admitted.profile(), Some(profile));
+            assert_eq!(
+                admitted.permits_read_write(),
+                profile.grants().writable_disk_images,
+                "{}",
+                profile.as_str()
+            );
+        }
+        assert!(AdmittedProfile::new(RunProfile::Standard).permits_read_write());
+        assert!(AdmittedProfile::new(RunProfile::Dev).permits_read_write());
+        assert!(AdmittedProfile::new(RunProfile::Permissive).permits_read_write());
+        assert!(!AdmittedProfile::new(RunProfile::Restrictive).permits_read_write());
+    }
+
+    /// No profile, and a name no profile answers to, refuse a writable
+    /// attachment rather than falling back to a preset.
+    #[test]
+    fn an_unrecognised_or_missing_profile_refuses_read_write() {
+        assert_eq!(AdmittedProfile::default().profile(), None);
+        assert!(!AdmittedProfile::default().permits_read_write());
+        for name in ["prod", "sealed", "dev-mode", ""] {
+            let admitted = AdmittedProfile::from_profile_name(name);
+            assert_eq!(admitted.profile(), None, "{name:?}");
+            let message = admitted
+                .require_read_write("attachment")
+                .expect_err("an unknown profile grants nothing writable")
+                .to_string();
+            assert!(message.contains("no recognised profile"), "{message}");
+        }
+    }
+
+    /// The refusal names the profile that refused and the profiles that
+    /// grant a writable disk image, read off the table.
+    #[test]
+    fn the_read_write_refusal_names_the_granting_profiles() {
+        let message = AdmittedProfile::new(RunProfile::Restrictive)
+            .require_read_write("read-write attachment of volume \"work\"")
+            .expect_err("restrictive grants no writable volume")
+            .to_string();
+        assert!(message.contains("does not permit writable"), "{message}");
+        assert!(message.contains("profile \"restrictive\""), "{message}");
+        assert!(message.contains("disk image"), "{message}");
+        assert!(
+            message.contains("profiles standard, dev, permissive grant it"),
+            "{message}"
         );
-        assert_eq!(
-            AdmittedProfile::from_profile_name("permissive"),
-            AdmittedProfile::Dev
-        );
-        assert_eq!(
-            AdmittedProfile::from_profile_name("standard"),
-            AdmittedProfile::Sealed
-        );
+        AdmittedProfile::new(RunProfile::Standard)
+            .require_read_write("attachment")
+            .expect("standard grants a writable disk image");
     }
 
     #[test]
@@ -511,25 +594,33 @@ mod tests {
     }
 
     #[test]
-    fn attachment_request_refuses_read_write_outside_dev_profile() {
-        let err = AttachmentRequest::builder("vm-1", "work")
-            .unwrap()
-            .guest_path("/data/work")
-            .access(AccessMode::ReadWrite)
-            .build()
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("does not permit writable"),
-            "got: {err}"
-        );
-        let ok = AttachmentRequest::builder("vm-1", "work")
-            .unwrap()
-            .guest_path("/data/work")
-            .access(AccessMode::ReadWrite)
-            .profile(AdmittedProfile::Dev)
-            .build()
-            .unwrap();
-        assert_eq!(ok.access, AccessMode::ReadWrite);
+    fn attachment_request_refuses_read_write_without_a_granting_profile() {
+        let writable = |profile: Option<RunProfile>| {
+            let builder = AttachmentRequest::builder("vm-1", "work")
+                .unwrap()
+                .guest_path("/data/work")
+                .access(AccessMode::ReadWrite);
+            match profile {
+                Some(profile) => builder.profile(profile).build(),
+                None => builder.build(),
+            }
+        };
+        for refused in [None, Some(RunProfile::Restrictive)] {
+            let err = writable(refused).unwrap_err();
+            assert!(
+                err.to_string().contains("does not permit writable"),
+                "{refused:?}: {err}"
+            );
+        }
+        for granted in [
+            RunProfile::Standard,
+            RunProfile::Dev,
+            RunProfile::Permissive,
+        ] {
+            let ok = writable(Some(granted)).unwrap();
+            assert_eq!(ok.access, AccessMode::ReadWrite);
+            assert_eq!(ok.profile, AdmittedProfile::new(granted));
+        }
     }
 
     #[test]
@@ -588,7 +679,8 @@ mod tests {
     #[test]
     fn launch_lease_request_defaults_fail_closed() {
         let request = LaunchLeaseRequest::builder("vm-1").unwrap().build();
-        assert_eq!(request.profile, AdmittedProfile::Sealed);
+        assert_eq!(request.profile, AdmittedProfile::default());
+        assert!(!request.profile.permits_read_write());
         assert_eq!(request.unlock, UnlockPolicy::RequireUnlocked);
         assert!(request.explicit.is_empty());
     }

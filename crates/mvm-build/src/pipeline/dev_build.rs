@@ -487,10 +487,9 @@ fn persistent_routing_allowed(
 ///
 /// Returns the workspace root only when **both** hold:
 ///   (a) mvmctl was compiled from a source checkout whose `nix/flake.nix`
-///       still exists on disk (walk up from the compile-time manifest dir,
-///       the same source-checkout signal the CLI's `find_builder_vm_flake`
-///       uses), or the user flake itself lives inside a source checkout
-///       whose `nix/flake.nix` can be discovered at runtime, and
+///       still exists on disk (walk up from the compile-time manifest dir),
+///       or the user flake itself lives inside a source checkout whose
+///       `nix/flake.nix` can be discovered at runtime, and
 ///   (b) the user flake pins `mvm` to GitHub — so `--override-input mvm`
 ///       has an input to replace and we're genuinely swapping a remote
 ///       fetch for the local checkout.

@@ -132,8 +132,8 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
-      host is terminated only on an explicit `intercept` grant; `ask` goes to the
-      `EgressApprover` seam, which refuses (`approval_unavailable`) until PS-07;
+      host is terminated only on an explicit `intercept` grant; `ask` is held and
+      answered through PS-07's approval supervisor;
       `--allow-endpoint` and `[[network.routes]]` (transient runs; persistent
       machines refuse routes for now)
 - [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
@@ -169,7 +169,10 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] `examples/claude-code` stops putting a raw key in the guest
 
 ### PS-04 — Denial feedback (#3714)
-- [ ] live, deduplicated egress denials on the host with the correct remedy per reason, plus an exit summary
+- [x] live, deduplicated egress denials on the host with the correct remedy per reason, plus an exit summary
+      (foreground `run` / `machine run` and `machine logs -f`; `run --json` carries
+      `egress_denials`; `mvmctl explain` lists a finished run's refusals. Read from
+      the chain the per-VM endpoint already writes, now attributed with `vm_name`)
 - [ ] denial → policy draft selector (Grant / Skip), never auto-granting
 - [ ] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
 
@@ -188,10 +191,33 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] agent packs: claude, codex, pi, opencode, goose; runtime packs: python, node, rust, go
 
 ### PS-07 — Runtime approval supervisor (#3717)
-- [ ] `ask` outcomes from PS-02/PS-13/secret use pause at the host and consult a backend
-- [ ] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
-- [ ] webhook and chain backends; SDK callback through hostlib
-- [ ] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
+- [x] `ask` outcomes from PS-02 routes and secret use pause at the host and consult a backend
+      — `mvm_hostd::supervisor::runtime_approval::ApprovalSupervisor` in the
+      per-VM endpoint holds the flow, records the request in the contract's
+      `ApprovalLedger`, and asks the broker the launching `mvmctl` binds on
+      the VM's `approval.sock`; a binding with `approve = ask`
+      (`mvmctl secret set --approve ask`) asks before its placeholder is
+      substituted; timeout, no broker or any error denies
+- [ ] PS-13 tool calls consult the same supervisor — the `tool_call`
+      subject exists; `tool_gate.rs` has no live caller to ask it
+- [x] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
+      — `/dev/tty`, never workload stdin; an `-it` run denies (`tty_busy`)
+      rather than race the workload; `PromptRenderer` is the seam PS-04's
+      live denials share
+- [x] webhook and chain backends — HTTPS or loopback only, no redirects,
+      4 KiB reply cap, timeout; `--approval-mode all|any`
+- [ ] SDK callback through hostlib — `CallbackBackend` is the callback type.
+      Remaining: a hostlib ABI entry that registers a callback, a broker bound
+      per machine hostlib launches, and the Python and TypeScript facades
+- [x] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
+      — session approvals live in the endpoint for 15 minutes; 10 prompts a
+      minute, the rest denied `rate_limited`; `approval.requested / granted /
+      denied / timed_out` chain-signed with the request id
+- [x] surface: `--approval tty|deny|webhook=URL` on `run` and `machine run`,
+      `[approval]` in `mvm.toml`; default tty for an operator at a terminal,
+      deny otherwise
+- [ ] a broker for detached and persistent machines — nobody answers today,
+      so their asks deny
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
 - [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
@@ -265,10 +291,203 @@ hints) were updated to the module-qualified names.
 - [ ] schema reference generated from PS-05; stale claims fixed
 
 ### PS-19 — Fewer feature flags (#3728)
-- [ ] inventory; delete, merge or move to runtime config; CI lanes updated
+- [x] inventory; delete, merge or move to runtime config; CI lanes updated
+
+Inventory of every `[features]` entry (crates with feature tables: mvm-core,
+mvm-contract, mvm-agentd, mvm-backends, mvm-build, mvm-runtime, mvm-vmm,
+mvm-fs, mvm-hostd, mvm-client, mvm-sdk, mvm-hostlib, mvm-cli, mvm-conformance,
+mvmctl root; `crates/deps/libkrun-sys` is vendored FFI and stays as-is):
+
+| Feature | Verdict |
+|---|---|
+| `mvm-runtime/apple-container` | **Deleted** — inert flag; the backend module is compiled unconditionally and nothing enabled or cfg-gated it. |
+| `mvm-build/interactive` | **Deleted** — zero enablers anywhere (the Cargo comment claiming "tests/dev enable it" was stale); its two `#[cfg]` blocks in `mvm-egress-proxy.rs` were unreachable. The env-override behaviour was deliberately compile-time (the proxy faces the guest; an env-tweakable allowlist is a security property), so it was deleted rather than moved to runtime config. |
+| `mvm-core/attestation-{sev-snp,tdx,apple-device}` | Keep, **owner decision** — dead as compile flags (stubs are always compiled, zero cfg gates) but SPRINT.md records them as documented future scaffolding pending a maintainer ratification call on deleting the stubs themselves. |
+| `mvm-agentd/flowmux-async` | Keep, **owner decision** — merge candidate into `addons` (strict subset minus tokio-vsock/hickory); benches and hostd dev-deps use the narrower surface. |
+| `mvm-cli/pure-mkfs`, `mvm-cli/builder-vm` | Keep, **owner decision** — near-always-on (only test builds opt out); folding into unconditional code changes what nix builds compile. |
+| Everything else (`hostd-transport`, `client`/`client-remote`, `manifest-verify`, `schema` family, `test-support` family, `bdd`, `embed-host-bins`, `contributor-bootstrap`, `release-channel`, `release-artifact-bootstrap`, `template-registry-s3`, `hvf-live-validation`, `trusted-apfs`, `wasm-backend`, `ebpf-telemetry`, `network-perf`, `custom-dns`, `dev-watch`, `tracing-bridge`, `remote`, `deploy-remote`, libkrun family, `attestation-tpm2`, mvmctl `host`/`user`/`dev`) | Keep — each has a live consumer, a CI lane, an xtask gate, or an mvmd-facing contract (mvmd needs `client`/`client-remote`, `hostd-transport`, `remote`, `release-channel`, `tracing-bridge`, the `mvm-contract` family, and the schema emitters). |
+
+CI lanes: no lane referenced the two deleted flags, so `lint-features`,
+`lint-features-test-support`, `lint-features-embed`, the release feature-set
+check, and the xtask gates (`check-two-surfaces`, `check-core-runtime-free`,
+`check-guest-agent-runtime-free`, `check-sdk-transport-free`,
+`check-closure-budget`, `check-feature-closure-budget`) are unchanged; the
+all-features closure shrinks, which the 488-crate budget ratchet absorbs.
+Follow-ups for the owner-decision rows above, plus re-examining
+`mvm-build/builder-libkrun` staying in `default`, are best done as their own
+small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
 - [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
-- [ ] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
+- [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
+
+Inventory of `mvm-cli` paths that reach past `mvm-client` (into
+`mvm-runtime`/`mvm-core`/`mvm-hostd`/`mvm-agentd` directly), classified by
+severity. `mvm-cli` still names `mvm-core` in 189 files — full elimination is
+a long refactor; this table is the tracking list.
+
+**Real bypasses, large (multi-day extractions — follow-up work, not this PR):**
+checkpoint state machine (`commands/vm/checkpoint*`, ~6.6k lines); transient-run
+core (`exec.rs` + `exec/{session,guest_run,launch_plan,mounts,transient}.rs`,
+~4.5k); warm pool (`commands/pool*`, ~2.9k); baked invoke
+(`commands/vm/invoke.rs`, 2.8k); agent sessions (`commands/agent_session.rs`,
+2.4k); builder-VM env (`commands/env/builder_vm/*`, ~6k, dev-env domain);
+image OCI cache (`commands/image/pull_core.rs`, `cache.rs`, ~3.3k); audit
+`DecisionStore` reads (`commands/ops/audit.rs` — half-moved, best medium
+follow-up).
+
+**Real bypasses, small — moved behind `mvm-client` in this change:**
+| Was | Now |
+|---|---|
+| `snapshot ls/rm` reaching `mvm_runtime::vm::instance_snapshot` + name-registry cleanup + audit | `mvm_client::snapshot::{list_instance_snapshots, remove_instance_snapshot}` (new module; same audit entry) |
+| `wait`/`boot-report` vsock `ReadinessStatus` round-trip | `mvm_client::readiness::fetch_live_readiness` |
+| transient-run backend selection + egress validation (`exec/backend_select.rs`) | `mvm_client::boot::{select_exec_backend, select_backend_name_for_egress, validate_backend_for_egress, validate_image_egress_backend, validate_image_egress_backend_name}` (tests moved with it) |
+
+**Legitimately CLI-side (not bypasses):** clap parsing, TTY/console plumbing,
+table/JSON rendering, install/self-update/packaging, doctor probes, and the
+build domain (`mvm_build`/`mvm_sdk` calls), which is a library in its own
+right. Pattern for future slices: `mvm_client::guest` (guest RPC verbs) and
+`mvm_client::volume::LocalVolumeService` — a service module + DTOs in the
+client, CLI left with args + rendering.
+
+## Execution log and handoff
+
+Snapshot as of 2026-09-27, updated after the agents were stopped. This section is the pick-up point: it records what
+landed, what is in flight, the decisions taken while executing, and the known
+defects found along the way. The workstream checkboxes above remain the
+per-item source of truth; `specs/REFACTOR-STATUS.md` is the rollup; tracking
+issue #3731 carries the same status as a comment.
+
+### Landed
+
+| PR | Workstream | What it delivered |
+|---|---|---|
+| #3733 | plan | this plan and its rollup entry |
+| #3739 | PS-12 (#3722, closed) | one env denylist for guest passthrough and 26 host helper spawn sites; `check-helper-env-hygiene` gate; launch-plan env keys validated as shell names |
+| #3742 | PS-03 | `--secret` on `run` / `machine run`; destinations signed into the plan; per-binding placeholders; host TLS termination only for plan-bound destinations |
+| #3745 | PS-03 (#3713, closed) | reflected-credential scrub on every terminated response path; `secret set --from env:// file:// keychain:// op:// bw://`; gitlab/gemini providers and declared headers; `[secrets]` in `mvm.toml` |
+| #3748 | PS-02 | one restricted-address classifier; private-range default deny; NAT64/6to4/Teredo embedded-address closure; DNS pinned for the forward leg; five claim-10 witnesses |
+| #3749 | PS-02 | endpoint routes (method + path rules) decided at the gate; explicit interception grant; `ask` seam; `--allow-endpoint`, `[[network.routes]]`; `fuzz_egress_routes` |
+| #3754 | PS-01 | SDKs call `libmvm_hostlib` in-process (ABI 1.2); subprocess transport deleted; `check-no-cli-shellout` gate; `mvm-client` re-exports the embedder surface |
+| #3755 | PS-04 | egress refusals shown on the host live and at exit with per-reason remedies; `explain` gains denials; shared audit follow reader (fixes a tail-after-rotation skip) |
+| #3756 | PS-07 | `ask` held at the endpoint, answered by a tty / webhook / chain broker from the launching `mvmctl`; fail-closed; chain-signed `approval.*` entries |
+| #3759 | PS-01 | homepage SDK samples follow the in-process READMEs |
+| #3770 | PS-21 (#3730, closed) | snapshot, live-readiness and backend selection moved behind `mvm-client`; bypass inventory above |
+| #3771 | PS-19 (#3728, closed) | never-enabled feature flags deleted; full inventory recorded |
+
+### Open or queued (at snapshot time)
+
+| PR | Workstream | State / next step |
+|---|---|---|
+| #3784 | PS-01 (closes #3711) | command/env/template sources, BrowserSandbox presets, in-VM dispatch via `mvm_client::entrypoint`, `machine.logs.stream.*` (ABI 1.3); armed for the merge queue |
+| #3751 | PS-09 | console reattach with 1 MiB scrollback, `~d` detach, `--list`, `--force` take-over, `machine detach`; CI red, being rebased and fixed |
+| #3753 | PS-11 | instruction-file trust policy, sidecar signatures, pre-boot admission scan, `trust instructions *`, signing workflow; conflicts with main, being rebased |
+| #3758 | PS-10 | `session.sealed` entries, derived session ledger, `trust audit sessions` / `show` / `verify <session>`; two claim-8 witnesses; CI being fixed |
+| #3767 | PS-20 | unreachable `up::Args` and stale references removed (opened by another session) |
+| #3768 | PS-17 | task-runner surface reduced (opened by another session) |
+| mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
+
+### Stopped mid-flight (2026-09-27)
+
+All program agents were stopped at the user's request on 2026-09-27. Their
+unfinished work is pushed as branches with no PR. Commits labelled `wip:` are
+formatted snapshots on which clippy and the test gates were **not** run;
+every branch needs a rebase onto main, the full gates, and a PR.
+
+| Branch | Workstream | State |
+|---|---|---|
+| `feat/policy-profiles` | PS-05 (#3715) | 8 commits, complete per its agent; PR body was being drafted |
+| `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
+| `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
+| `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
+| `feat/egress-injection-modes` | PS-02 (#3712) | `wip:` only (`query_param` / `url_path` / `basic_auth`) |
+| `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
+| `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
+| `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |
+
+### Not started
+
+PS-06 packs (needs PS-05), PS-13 tool privileges (needs PS-05), PS-15
+packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
+`mvm-templates` and define their own images with their own `mvm.toml` /
+`flake.nix`; `mvm-images` builds only the images `mvmctl` itself requires.
+
+### Decisions taken during execution
+
+- **Reflected credentials are scrubbed**, not merely documented: every
+  terminated response replaces a substituted value with its placeholder
+  (headers and body, across chunk boundaries); upstreams are asked for
+  identity encoding and a compressed response is refused
+  (`response_encoded_unscannable`). Values under 8 bytes and transformed
+  reflections (base64, split markup) are stated limits.
+- **Builder VM loses private-range reach** under its open egress policy
+  (#3748). Only a flake fetching from a literal private IP is affected; it now
+  needs an explicit grant.
+- **L7 rules never intercept silently**: an unbound host is terminated only
+  when its route grants `intercept`; otherwise `endpoint_rules_unenforceable`.
+- **No-network hint**: a run with no network grants that exits nonzero prints
+  one line naming `--allow-host`; nothing on exit 0; `"network": "none"` in
+  JSON.
+- **SDK machines are named and persistent**, stopped and removed by `kill()`,
+  because transient `LocalBackend::launch` boots without an initramfs (see
+  defects). Revisit once that is fixed.
+- **Audit durability**: fsync on authorizing and boundary entries (admission,
+  failure, exit, seal, segment events), not every entry. Measured cost per
+  fsync: 4-5 ms on macOS, 44-49 ms on the rotational KVM host.
+- **Approvals on detached machines deny** until a per-machine broker exists;
+  never approve silently.
+
+### Known defects found along the way
+
+- #3752: the run verb grant is minted before a cold guest-runtime build and
+  can expire before boot (`VerbNotAuthorized`).
+- #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
+- Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
+  attaches no universal initramfs and panics at `/init` for Rust callers.
+- #3753 open box: host-directory volumes attached as block devices
+  (`machine volume mount --host DIR`) are never scanned for instruction files.
+- For review: a boot command override on a `prod` build slot is accepted, the
+  same as `machine run -d -- cmd`.
+- CLAUDE.md claim-8 prose still says tail truncation is undetectable; after
+  #3758, truncation through a session seal is detectable (the ADR-001 table
+  carries the precise statement).
+
+### How to resume
+
+1. Read this section, the brief below, and `specs/research/host-kernel-agent-sandbox-comparison.md`, then `gh issue view 3731` for the latest status comment.
+2. For each open PR and each branch in "Stopped mid-flight": check CI
+   (`gh pr checks N`), rebase onto main keeping both sides of any conflict,
+   fix root causes, run the full gates, open or update the PR, and enqueue
+   it through the merge queue.
+3. Branches are named in the tables; their worktrees live under
+   `.worktrees/` beside the repository and may be removed once merged.
+4. Next workstreams in priority order: PS-05 → PS-06 and PS-13 → PS-08 →
+   PS-15 → PS-16 → PS-18.
+
+### Brief for whoever resumes
+
+Rules this program follows beyond CLAUDE.md and AGENTS.md:
+
+- **Never name the external tool** this plan was compared against — not in
+  code, comments, docs, commits, branches, PR titles or bodies, issues, or
+  even as a descriptor. Say "the reference tool" in conversation; write
+  around it in the tree. The comparison lives in
+  `specs/research/host-kernel-agent-sandbox-comparison.md`.
+- **Security wins every tie.** Keep the microVM, the NIC-less guest,
+  vsock-only egress through the one host endpoint, and the signed, audited
+  `ExecutionPlan`. Adopt the experience, never the weaker mechanism.
+- **The SDKs never run `mvmctl`**; everything goes through `mvm-hostlib`
+  over `mvm-client`, and `check-no-cli-shellout` holds it.
+- One worktree per slice under `.worktrees/` beside the repository, one PR
+  per coherent slice, pushed early so a stopped session loses nothing.
+- Commits and PRs carry no AI attribution and no co-author trailer.
+- Arm a green PR with `gh pr merge N --squash --auto` run twice (the second
+  run shows it entered the queue), then check the merge queue.
+- Tick the plan's boxes, `specs/REFACTOR-STATUS.md`, and a delivery note
+  in `specs/sprint/delivery/` in the same PR; update this execution log and
+  post a status comment on #3731 when PRs land.
+- Delete a worktree's `target/` once its PR is queued; disk is shared.
+- Agents may be stopped by an account rate limit. Before assuming work
+  landed, check the worktree and the branch on origin.

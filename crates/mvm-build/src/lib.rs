@@ -96,6 +96,9 @@ pub mod persistent_builder_transport;
 /// signed plan's `BuildProvenance`.
 pub mod provenance;
 pub mod provenance_mark;
+/// Acquire the signed image set this build pins and deliver its members, each
+/// held to the digest the verified root declares.
+pub mod published_image_set;
 /// OCI-unpacked tree to ext4 rootfs image. The host only allocates the
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
@@ -168,19 +171,20 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
-/// Host-side resolver for the mvm runtime overlay disk. Picks the right
-/// ext4 + verity sidecar + roothash for the running mvmctl version and
-/// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.
 pub mod release_signature;
+/// Host-side resolver for the mvm runtime overlay disk. Picks the right
+/// ext4 + verity sidecar + roothash for the host arch: the pinned image set's
+/// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
+/// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
-/// Fetches the per-arch release tarball, proves it against the release's
-/// checksum and its own manifest, and installs it under
-/// `~/.mvm/cache/sdk-sidecar/<version>/<arch>/` for
-/// [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
+/// Fetches the per-arch, per-libc member of the signed image set, proves it
+/// against the verified root and its own manifest, and installs it under
+/// `~/.mvm/cache/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`
+/// for [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
 pub mod sdk_sidecar;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.

@@ -80,8 +80,22 @@ ones — and each decision is recorded with the route and rule. A route never
 causes interception by itself: a destination no secret is bound to is
 terminated for its rules only when the route grants it (`intercept`), the
 per-VM certificate is minted over those hosts too, and an opaque flow to a
-destination whose rules cannot be enforced is refused. `ask` goes to an
-approver seam that refuses until an approval backend exists.
+destination whose rules cannot be enforced is refused.
+
+**An `ask` is held and answered in the endpoint, never in the guest.** The
+same endpoint that read the request holds the flow and puts the question —
+route, rule, destination, method, path — to an approval broker on a socket in
+the VM's socket directory, bound by the `mvmctl` that launched the run
+(`mvm_hostd::supervisor::runtime_approval`). A secret binding marked
+`approve = ask` raises the same question before its placeholder is
+substituted. The broker only answers; the endpoint records each request in
+the contract's `ApprovalLedger`, enforces the timeout, the per-VM prompt rate
+and the session-grant lifetime, and chain-signs `approval.requested`,
+`approval.granted`, `approval.denied` and `approval.timed_out`. Every failure —
+no broker, an unreachable socket, a malformed or late answer — is a denial,
+so the decision point stays single and fails closed. The endpoint's
+confinement grants the broker's socket by its directory, the VM's own socket
+directory, because the broker binds after the endpoint has confined itself.
 
 **Per-VM network provisioning goes through one trait.** Each backend's
 provider brings a VM up against an admitted network spec and reports the

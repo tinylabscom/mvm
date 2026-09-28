@@ -9,6 +9,7 @@
 
 pub mod action_budget;
 pub mod approval;
+pub mod approval_prompt;
 pub mod audit;
 pub mod bundle;
 /// Strict DNS answer filtering for SSRF and rebinding defense.

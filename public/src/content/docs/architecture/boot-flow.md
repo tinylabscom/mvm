@@ -26,12 +26,13 @@ deterministic cpio that contains exactly one file:
 It deliberately contains **no `/dev` nodes** (the build sandbox cannot create
 device nodes). The guest creates them at boot by mounting `devtmpfs`.
 
-The artifact is content-addressed and cached at
-`<MVM_HOME>/cache/initramfs/<version>/<arch>/` alongside `initramfs.hash`,
-`initramfs.size`, and `VERSION`. On a cache miss the CLI seeds from the shared
-default cache, builds it via `nix build` on Linux (through the builder-VM
-boundary, never a host nix binary), or downloads a published release artifact
-on macOS. Attaching the initramfs is non-fatal: a cold cache falls back to the
+The artifact is content-addressed and cached alongside `initramfs.hash`,
+`initramfs.size`, and `VERSION`: a local build at
+`<MVM_HOME>/cache/initramfs/<version>/<arch>/`, and the member of the pinned
+image set at `<MVM_HOME>/cache/initramfs/image-set/<root-sha256>/<member-version>/<arch>/`,
+keyed by the signed root rather than the CLI version. On a cache miss a source
+checkout builds it with cargo, and an installed binary fetches the pinned
+image set's member. Attaching the initramfs is non-fatal: a cold cache falls back to the
 legacy boot path rather than failing the run.
 
 ## Boot inputs and device layout

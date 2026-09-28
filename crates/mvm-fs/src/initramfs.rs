@@ -1,6 +1,6 @@
 //! Universal initramfs cache resolution.
 //!
-//! The content-addressed initramfs produced by `nix/images/initramfs/flake.nix`
+//! The content-addressed initramfs, built by mvm-images' initramfs flake,
 //! lives under `<cache_root>/<version>/<arch>/`. This module validates that a
 //! cached directory contains the expected files and version.
 

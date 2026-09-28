@@ -1,4 +1,4 @@
-use super::stage0_cache::{BUILDER_FLAKE_NIX_INPUTS, validate_builder_vm_stage0_artifacts};
+use super::stage0_cache::{validate_builder_vm_stage0_artifacts, write_builder_vm_cache_sidecars};
 use super::*;
 use std::io::Write;
 
@@ -89,57 +89,6 @@ fn incompatible_cached_kernel_is_fully_evicted_for_automatic_recovery() {
     ));
 }
 
-#[test]
-#[cfg(feature = "builder-vm")]
-fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let count = Arc::new(AtomicUsize::new(0));
-    let sink = Arc::clone(&count);
-    // Tight 10ms cadence into a counter (not stdout) so the test is fast and
-    // deterministic-ish; a generous window then asserts it ticked.
-    let hb = BuildHeartbeat::start_with(
-        "Test build",
-        std::time::Duration::from_millis(10),
-        move |_line| {
-            sink.fetch_add(1, Ordering::Relaxed);
-        },
-    );
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    let while_alive = count.load(Ordering::Relaxed);
-    assert!(while_alive >= 1, "heartbeat should tick while alive");
-
-    drop(hb); // joins the thread — no further emits after this returns
-    let after_drop = count.load(Ordering::Relaxed);
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    assert_eq!(
-        count.load(Ordering::Relaxed),
-        after_drop,
-        "no heartbeat ticks after drop joins the thread"
-    );
-}
-
-#[test]
-fn find_builder_vm_flake_resolves_to_in_repo_path() {
-    // From a source checkout, the helper must find the
-    // flake at <workspace>/nix/images/builder-vm/flake.nix.
-    // `env!("CARGO_MANIFEST_DIR")` is baked at compile time
-    // and points at the workspace's mvm-cli crate dir, so
-    // this assertion is robust across `cargo test` and
-    // `cargo nextest`.
-    let path = find_builder_vm_flake().expect("expected builder-vm flake present in repo");
-    assert!(
-        path.ends_with("nix/images/builder-vm"),
-        "unexpected flake path: {path}"
-    );
-    // The flake file itself must be readable.
-    assert!(
-        std::path::Path::new(&path).join("flake.nix").is_file(),
-        "flake.nix missing under {path}"
-    );
-}
-
 /// Per-arch artifact filenames must match what the release
 /// workflow's `builder-vm-image` job uploads. Pure function —
 /// asserts the contract between `builder_vm_artifact_names()`
@@ -161,75 +110,6 @@ fn builder_vm_artifact_names_match_release_workflow() {
     assert_eq!(n.cmdline, "builder-vm-x86_64.cmdline.txt");
     assert_eq!(n.manifest, "builder-vm-x86_64.manifest.json");
     assert_eq!(n.checksums, "builder-vm-x86_64-checksums-sha256.txt");
-}
-
-#[test]
-fn builder_vm_bootstrap_uses_cache_even_in_source_checkout() {
-    let action = resolve_builder_vm_bootstrap_action(
-        Ok("/repo/nix/images/builder-vm".to_string()),
-        true,
-        mvm_build::boot_image_select::BootImageAcquisition::Build,
-    )
-    .expect("cache hit should be usable in a source checkout");
-
-    assert_eq!(action, BuilderVmBootstrapAction::UseCached);
-}
-
-#[test]
-fn builder_vm_bootstrap_source_checkout_builds_from_source_on_cache_miss() {
-    let action = resolve_builder_vm_bootstrap_action(
-        Ok("/repo/nix/images/builder-vm".to_string()),
-        false,
-        mvm_build::boot_image_select::BootImageAcquisition::Build,
-    )
-    .expect("source checkout cache miss should route to local source build");
-
-    assert_eq!(
-        action,
-        BuilderVmBootstrapAction::BuildFromSource {
-            flake_dir: "/repo/nix/images/builder-vm".to_string()
-        }
-    );
-}
-
-#[test]
-fn builder_vm_bootstrap_installed_binary_may_download_on_cache_miss() {
-    let action = resolve_builder_vm_bootstrap_action(
-        Err(anyhow::anyhow!("no source flake")),
-        false,
-        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
-    )
-    .expect("installed binaries may use published prebuilts");
-
-    assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
-}
-
-#[test]
-fn builder_vm_bootstrap_fetch_override_bypasses_source_build() {
-    let action = resolve_builder_vm_bootstrap_action(
-        Ok("/repo/nix/images/builder-vm".to_string()),
-        false,
-        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
-    )
-    .expect("an explicit fetch in a source checkout must use the published image");
-
-    assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
-}
-
-#[test]
-fn builder_vm_bootstrap_build_override_needs_a_source_flake() {
-    let error = resolve_builder_vm_bootstrap_action(
-        Err(anyhow::anyhow!("no source flake")),
-        false,
-        mvm_build::boot_image_select::BootImageAcquisition::Build,
-    )
-    .expect_err("an installed binary cannot satisfy a forced local build");
-
-    assert!(
-        error
-            .to_string()
-            .contains("requires the in-repo builder VM flake")
-    );
 }
 
 #[cfg(feature = "builder-vm")]
@@ -288,70 +168,6 @@ fn stage0_build_conf_contents_emits_workspace_archive_offline_and_overrides() {
     assert!(!minimal.contains("MVM_STAGE0_OFFLINE="));
 }
 
-#[cfg(feature = "builder-vm")]
-#[test]
-fn stage0_locked_input_sources_read_builder_flake_lock() {
-    let flake_dir = find_builder_vm_flake().expect("builder flake path");
-    let inputs = bootstrap::stage0_locked_input_sources(&flake_dir).expect("parse flake.lock");
-    assert_eq!(inputs.len(), 3);
-    assert_eq!(inputs[0].0, "nixpkgs");
-    assert_eq!(inputs[1].0, "microvm");
-    assert_eq!(inputs[2].0, "microvm/spectrum");
-}
-
-/// Even when the resolver routes to `DownloadPublished`,
-/// a contributor build (no `release-artifact-bootstrap` feature) must
-/// refuse to invoke the download path and surface a clear structural
-/// error. This locks the AGENTS.md / CLAUDE.md "no prebuilt builder
-/// VM artifact" invariant into the type system rather than runtime
-/// branch order. The companion sibling under
-/// `#[cfg(feature = "release-artifact-bootstrap")]` would need a
-/// network mock; we cover the structural-failure side here because
-/// it's the one contributors hit.
-#[cfg(not(feature = "release-artifact-bootstrap"))]
-#[test]
-fn the_refusal_says_the_flake_is_present_when_it_is() {
-    // The message used to assert the in-repo flake was missing without ever
-    // looking for one, so a checkout that had it — and had merely been routed
-    // down the fetch path by `MVM_BOOT_IMAGE=fetch` — sent the reader hunting
-    // for a file in front of them. These tests run from a source checkout, so
-    // this is the branch a contributor actually hits.
-    let err = perform_builder_vm_download_published("aarch64", "/tmp/mvm-flake-present-test")
-        .expect_err("download must refuse without release-artifact-bootstrap");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("IS present"),
-        "a checkout with the flake must not be told the flake is missing: {msg}"
-    );
-    assert!(
-        msg.contains("MVM_BOOT_IMAGE"),
-        "the message must name the knob that routed it here: {msg}"
-    );
-}
-
-#[cfg(not(feature = "release-artifact-bootstrap"))]
-#[test]
-fn perform_builder_vm_download_published_bails_without_feature() {
-    let err = perform_builder_vm_download_published("aarch64", "/tmp/mvm-w4-test-out")
-        .expect_err("download must refuse without release-artifact-bootstrap");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("release-artifact-bootstrap"),
-        "error must name the feature flag: {msg}"
-    );
-    assert!(
-        msg.contains("nix/images/builder-vm/flake.nix"),
-        "error must point at the source-checkout remediation: {msg}"
-    );
-    // Critically: the bail must happen before any directory creation.
-    // Otherwise a contributor running on a shared host could pollute
-    // `/tmp/...` even when the gate is "closed".
-    assert!(
-        !std::path::Path::new("/tmp/mvm-w4-test-out").exists(),
-        "structural failure must not touch the filesystem"
-    );
-}
-
 fn write_valid_builder_vm_artifacts(dir: &std::path::Path) {
     const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
     std::fs::create_dir_all(dir).expect("mkdir artifact dir");
@@ -372,14 +188,6 @@ fn write_valid_builder_vm_artifacts(dir: &std::path::Path) {
     .expect("write manifest");
 }
 
-fn write_builder_vm_flake(dir: &std::path::Path, flake: &str, lock: Option<&str>) {
-    std::fs::create_dir_all(dir).expect("mkdir flake dir");
-    std::fs::write(dir.join("flake.nix"), flake).expect("write flake");
-    if let Some(lock) = lock {
-        std::fs::write(dir.join("flake.lock"), lock).expect("write lock");
-    }
-}
-
 fn write_builder_vm_source_cache_metadata(dir: &std::path::Path, fingerprint: &str) {
     write_builder_vm_source_fingerprint(dir, fingerprint).expect("write fingerprint");
     write_builder_vm_artifact_digest_manifest(dir).expect("write artifact digest manifest");
@@ -388,9 +196,9 @@ fn write_builder_vm_source_cache_metadata(dir: &std::path::Path, fingerprint: &s
 
 /// `acquire_stage0_lock` is an advisory `flock(2)`
 /// guard at `<cache_parent>/stage0.lock`. The first acquisition
-/// succeeds; a second concurrent attempt while the first guard is
-/// still in scope fails fast with a recognizable message; once the
-/// first guard drops, the lock becomes available again.
+/// succeeds; a second attempt with no wait budget (the test default)
+/// refuses with a message naming the subject, the live holder and the
+/// lock file; once the first guard drops, the lock becomes available again.
 #[test]
 fn stage0_lock_refuses_concurrent_acquisition() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -404,14 +212,22 @@ fn stage0_lock_refuses_concurrent_acquisition() {
         "stage0.lock should be created on first acquisition"
     );
 
-    let err = match acquire_stage0_lock(out_dir_str) {
+    let err = match acquire_stage0_lock(out_dir_str, "the builder VM image") {
         Err(e) => e,
         Ok(_) => panic!("second acquisition must refuse while first is held"),
     };
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("already bootstrapping the builder VM image"),
+        msg.contains("the builder VM image (") && msg.contains("is still held by"),
         "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains(&format!("pid {}", std::process::id())),
+        "error should name the live holder: {msg}"
+    );
+    assert!(
+        !msg.contains("delete the lock file"),
+        "a dead holder releases its flock; nobody should be told to delete it: {msg}"
     );
     assert!(
         msg.contains("stage0.lock"),
@@ -422,6 +238,35 @@ fn stage0_lock_refuses_concurrent_acquisition() {
 
     // Now reachable again — guards must not leak past their scope.
     let _second = acquire_stage0_lock_uncontended(out_dir_str);
+}
+
+/// A second caller queues behind a live holder instead of failing, and picks
+/// the lock up as soon as the holder is done with it.
+#[test]
+fn stage0_lock_waits_for_a_live_holder_then_proceeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp.path().join("aarch64");
+    let out_dir_str = out_dir.to_str().expect("utf-8 out_dir").to_string();
+
+    let first = acquire_stage0_lock_uncontended(&out_dir_str);
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(first);
+    });
+
+    let started = std::time::Instant::now();
+    let second = super::stage0_cache::acquire_stage0_lock_within(
+        &out_dir_str,
+        "the builder VM image",
+        mvm_build::builder_vm_runtime::LockWait::of(std::time::Duration::from_secs(30)),
+    )
+    .expect("the waiter must get the lock once the holder releases it");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(250),
+        "the waiter returned before the holder released"
+    );
+    releaser.join().expect("releaser thread");
+    drop(second);
 }
 
 /// Lock setup must not fail when the parent cache directory does
@@ -545,7 +390,7 @@ fn is_orphan_stage0_staging_dir_name_matches_known_shapes() {
 /// these — they want the real "held" outcome.
 fn acquire_stage0_lock_uncontended(out_dir: &str) -> super::stage0_cache::Stage0LockGuard {
     for attempt in 0..200u32 {
-        match acquire_stage0_lock(out_dir) {
+        match acquire_stage0_lock(out_dir, "the builder VM image") {
             Ok(guard) => return guard,
             Err(e) => {
                 assert!(
@@ -838,581 +683,6 @@ fn builder_vm_stage0_promotion_keeps_existing_valid_cache() {
     validate_builder_vm_stage0_artifacts(&final_dir).expect("existing cache should remain valid");
 }
 
-/// The `Cargo.lock` of the synthetic workspace, shaped like the real one:
-/// `mvm-setpriv` depends on `libc` alone, `mvm-agentd` on `mvm-setpriv` and
-/// `mvm-core`, `mvm-core` on `serde`, and the unrelated crate on `clap`.
-/// `tempfile` is only `mvm-setpriv`'s dev-dependency.
-fn synthetic_cargo_lock(libc: &str, clap: &str) -> String {
-    format!(
-        r#"version = 4
-
-[[package]]
-name = "mvm-setpriv"
-version = "0.1.0"
-dependencies = ["libc", "tempfile"]
-
-[[package]]
-name = "mvm-agentd"
-version = "0.1.0"
-dependencies = ["mvm-core", "mvm-setpriv"]
-
-[[package]]
-name = "mvm-core"
-version = "0.1.0"
-dependencies = ["serde"]
-
-[[package]]
-name = "mvm-unrelated"
-version = "0.1.0"
-dependencies = ["clap"]
-
-[[package]]
-name = "libc"
-version = "{libc}"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "libc-{libc}"
-
-[[package]]
-name = "serde"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "serde"
-
-[[package]]
-name = "clap"
-version = "{clap}"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "clap-{clap}"
-
-[[package]]
-name = "tempfile"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "tempfile"
-"#
-    )
-}
-
-fn write_synthetic_crate(tmp: &std::path::Path, name: &str, deps: &str) {
-    let dir = tmp.join("crates").join(name);
-    std::fs::create_dir_all(dir.join("src")).expect("mkdir crate src");
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n{deps}"),
-    )
-    .expect("write crate manifest");
-    std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").expect("write crate source");
-}
-
-/// Lay out a synthetic mvm workspace under `tmp` that the
-/// `builder_vm_source_fingerprint` will accept:
-///
-/// ```text
-/// tmp/
-///   Cargo.toml  Cargo.lock
-///   crates/{mvm-setpriv,mvm-agentd,mvm-core,mvm-unrelated}/{Cargo.toml,src/lib.rs}
-///   nix/lib/mkguest.nix
-///   nix/images/builder-vm/{flake.nix,flake.lock}
-/// ```
-///
-/// The crates are there for layer 4: the flake compiles `mvm-setpriv` from its
-/// own leaf package, so that package and `libc` are part of the key, and
-/// `mvm-agentd`, which depends on the leaf, is not. `nix/lib` is present because the flake imports it
-/// (layer 3) and the dir-walker skip tests exercise it.
-///
-/// Returns the path of the `nix/images/builder-vm/` dir — the
-/// argument the fingerprint function expects.
-fn write_builder_vm_workspace(tmp: &std::path::Path) -> std::path::PathBuf {
-    std::fs::write(
-        tmp.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n\
-         libc = \"0.2\"\nclap = \"4\"\n\n[profile.release]\nlto = true\n",
-    )
-    .expect("write root manifest");
-    std::fs::write(
-        tmp.join("Cargo.lock"),
-        synthetic_cargo_lock("0.2.0", "4.0.0"),
-    )
-    .expect("write Cargo.lock");
-    write_synthetic_crate(
-        tmp,
-        "mvm-setpriv",
-        "[dependencies]\nlibc.workspace = true\n\n[dev-dependencies]\ntempfile = \"3\"\n",
-    );
-    write_synthetic_crate(
-        tmp,
-        "mvm-agentd",
-        "[dependencies]\nmvm-setpriv = { path = \"../mvm-setpriv\" }\n\
-         mvm-core = { path = \"../mvm-core\" }\n",
-    );
-    write_synthetic_crate(tmp, "mvm-core", "[dependencies]\nserde = \"1\"\n");
-    write_synthetic_crate(
-        tmp,
-        "mvm-unrelated",
-        "[dependencies]\nclap.workspace = true\n",
-    );
-
-    let nix_lib = tmp.join("nix/lib");
-    std::fs::create_dir_all(&nix_lib).expect("mkdir nix/lib");
-    std::fs::write(nix_lib.join("mkguest.nix"), "{ }\n").expect("write nix/lib");
-
-    let flake = tmp.join("nix/images/builder-vm");
-    write_builder_vm_flake(&flake, "{ outputs = _: {}; }", Some("{\"nodes\":{}}"));
-    flake
-}
-
-/// A described edit to the synthetic workspace, applied at its root.
-type WorkspaceEdit = (&'static str, fn(&std::path::Path));
-
-/// The fingerprint of the synthetic workspace at `flake`, after `edit` has run
-/// against its root.
-fn fingerprint_after(flake: &std::path::Path, edit: impl FnOnce(&std::path::Path)) -> String {
-    let root = flake
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("workspace root above nix/images/builder-vm");
-    edit(root);
-    builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint")
-}
-
-/// `mvm-setpriv` is compiled by the flake from its own package, so an edit to
-/// that package, to a lock entry it resolves, or to the profile it builds under
-/// changes the image and must change the key.
-#[test]
-fn builder_vm_source_fingerprint_changes_with_setpriv_source() {
-    let edits: [WorkspaceEdit; 5] = [
-        ("an mvm-setpriv source edit", |root| {
-            std::fs::write(
-                root.join("crates/mvm-setpriv/src/lib.rs"),
-                "pub fn g() {}\n",
-            )
-            .expect("edit");
-        }),
-        ("a new file beside mvm-setpriv's src", |root| {
-            std::fs::create_dir_all(root.join("crates/mvm-setpriv/data")).expect("mkdir");
-            std::fs::write(root.join("crates/mvm-setpriv/data/table.txt"), "x").expect("write");
-        }),
-        ("a manifest edit to mvm-setpriv", |root| {
-            let manifest = root.join("crates/mvm-setpriv/Cargo.toml");
-            let text = std::fs::read_to_string(&manifest).expect("read");
-            std::fs::write(&manifest, format!("{text}\n[features]\nextra = []\n")).expect("edit");
-        }),
-        ("a bump of a locked crate mvm-setpriv reaches", |root| {
-            std::fs::write(
-                root.join("Cargo.lock"),
-                synthetic_cargo_lock("0.2.1", "4.0.0"),
-            )
-            .expect("edit");
-        }),
-        ("a release-profile change", |root| {
-            let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read");
-            std::fs::write(
-                root.join("Cargo.toml"),
-                manifest.replace("lto = true", "lto = false"),
-            )
-            .expect("edit");
-        }),
-    ];
-    for (what, edit) in edits {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        let after = fingerprint_after(&flake, edit);
-
-        assert_ne!(before, after, "{what} must change the builder cache key");
-    }
-}
-
-/// The reason the whole lockfile is not hashed: a bump or an edit outside the
-/// closure `mvm-setpriv` is built from cannot change the image. That includes
-/// `mvm-agentd` and `mvm-core`, which the helper was compiled from before it
-/// became a leaf.
-#[test]
-fn builder_vm_source_fingerprint_ignores_changes_outside_the_setpriv_closure() {
-    let edits: [WorkspaceEdit; 6] = [
-        ("an mvm-agentd source edit", |root| {
-            std::fs::write(root.join("crates/mvm-agentd/src/lib.rs"), "pub fn g() {}\n")
-                .expect("edit");
-        }),
-        ("an mvm-core source edit", |root| {
-            std::fs::write(root.join("crates/mvm-core/src/lib.rs"), "pub fn g() {}\n")
-                .expect("edit");
-        }),
-        ("a bump of a crate only mvm-unrelated uses", |root| {
-            std::fs::write(
-                root.join("Cargo.lock"),
-                synthetic_cargo_lock("0.2.0", "4.1.0"),
-            )
-            .expect("edit");
-        }),
-        ("an edit to a crate mvm-setpriv does not reach", |root| {
-            std::fs::write(
-                root.join("crates/mvm-unrelated/src/lib.rs"),
-                "pub fn g() {}\n",
-            )
-            .expect("edit");
-        }),
-        ("an mvm-setpriv integration test", |root| {
-            std::fs::create_dir_all(root.join("crates/mvm-setpriv/tests")).expect("mkdir");
-            std::fs::write(
-                root.join("crates/mvm-setpriv/tests/t.rs"),
-                "#[test] fn t() {}\n",
-            )
-            .expect("write");
-        }),
-        (
-            "a workspace dependency only mvm-unrelated declares",
-            |root| {
-                let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read");
-                std::fs::write(
-                    root.join("Cargo.toml"),
-                    manifest.replace("clap = \"4\"", "clap = \"4.1\""),
-                )
-                .expect("edit");
-            },
-        ),
-    ];
-    for (what, edit) in edits {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        let after = fingerprint_after(&flake, edit);
-
-        assert_eq!(
-            before, after,
-            "{what} must not change the builder cache key"
-        );
-    }
-}
-
-/// A tree without the crate the flake compiles `mvm-setpriv` from is not one
-/// the flake could build; the key refuses rather than silently hashing less.
-#[test]
-fn builder_vm_source_fingerprint_refuses_a_workspace_without_mvm_setpriv() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    std::fs::remove_dir_all(tmp.path().join("crates/mvm-setpriv")).expect("remove crate");
-
-    let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
-        .expect_err("a missing mvm-setpriv must not produce a key");
-
-    assert!(err.to_string().contains("mvm-setpriv"), "{err}");
-}
-
-#[test]
-fn builder_vm_source_fingerprint_changes_with_flake_inputs() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-    write_builder_vm_flake(
-        &flake,
-        "{ outputs = _: { changed = true; }; }",
-        Some("{\"nodes\":{}}"),
-    );
-    let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-    assert_ne!(first, second);
-}
-
-/// Every Nix source the builder flake reaches outside its own directory is part
-/// of the cache key: an edit to a kernel config, the runtime-overlay flake, a
-/// guest recipe or the top-level flake changes the image, so it must change the
-/// fingerprint too.
-#[test]
-fn builder_vm_source_fingerprint_changes_with_every_nix_input_it_imports() {
-    for input in [
-        "nix/flake.nix",
-        "nix/packages/mvm-setpriv.nix",
-        "nix/images/kernel/base.nix",
-        "nix/images/runtime-overlay/flake.nix",
-    ] {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let path = tmp.path().join(input);
-        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir input parent");
-        std::fs::write(&path, "{ }\n").expect("write input");
-        let before = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        std::fs::write(&path, "{ changed = true; }\n").expect("edit input");
-        let after = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        assert_ne!(
-            before, after,
-            "an edit to {input} must change the builder cache key"
-        );
-    }
-}
-
-/// The list of hashed inputs is only as good as its agreement with the flakes.
-/// Every `workspaceRoot + "/nix/…"` / `workspace + "/nix/…"` import in the
-/// shipped builder-vm flake, and in the runtime-overlay flake it imports, must
-/// sit under a listed input, and every listed input must exist.
-#[test]
-fn every_nix_import_of_the_shipped_builder_flake_is_fingerprinted() {
-    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root");
-    for input in BUILDER_FLAKE_NIX_INPUTS {
-        assert!(
-            workspace.join(input).exists(),
-            "{input} is fingerprinted but does not exist in the tree"
-        );
-    }
-
-    let mut imports = Vec::new();
-    for flake in [
-        "nix/images/builder-vm/flake.nix",
-        "nix/images/runtime-overlay/flake.nix",
-    ] {
-        let text = std::fs::read_to_string(workspace.join(flake)).expect("read shipped flake");
-        let mut rest = text.as_str();
-        while let Some(at) = rest.find("+ \"/nix/") {
-            let after = &rest[at + "+ \"/".len()..];
-            let end = after.find('"').expect("an import literal closes its quote");
-            imports.push((flake, after[..end].to_string()));
-            rest = &after[end..];
-        }
-    }
-    assert!(
-        !imports.is_empty(),
-        "the scan found no imports, so it would pass over anything"
-    );
-
-    for (flake, import) in imports {
-        if import.starts_with("nix/images/builder-vm/") {
-            continue;
-        }
-        assert!(
-            BUILDER_FLAKE_NIX_INPUTS
-                .iter()
-                .any(|input| import == *input || import.starts_with(&format!("{input}/"))),
-            "{flake} imports {import}, which the builder source fingerprint does not hash"
-        );
-    }
-}
-
-#[test]
-fn fold_embedded_binary_identity_distinguishes_inputs() {
-    // The new contract: in-VM binary identity rides on the embedded
-    // bytes, not a per-crate source walk. A rebuilt binary (changed
-    // name OR changed sha256) must fold to a different digest so the
-    // Stage 0 cache key busts.
-    let base = {
-        let mut h = Sha256::new();
-        fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "aa");
-        hex::encode(h.finalize())
-    };
-    let changed_hash = {
-        let mut h = Sha256::new();
-        fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "bb");
-        hex::encode(h.finalize())
-    };
-    let changed_name = {
-        let mut h = Sha256::new();
-        fold_embedded_binary_identity(&mut h, "mvm-builderd", "aa");
-        hex::encode(h.finalize())
-    };
-
-    assert_ne!(
-        base, changed_hash,
-        "a rebuilt binary (new sha256) must bust the cache key"
-    );
-    assert_ne!(
-        base, changed_name,
-        "a renamed embedded binary must bust the cache key"
-    );
-    // The `\0` separator prevents (name+hash) concatenation
-    // collisions, e.g. ("ab","") vs ("a","b").
-    let glued = {
-        let mut h = Sha256::new();
-        fold_embedded_binary_identity(&mut h, "mvm-host-vm-initaa", "");
-        hex::encode(h.finalize())
-    };
-    assert_ne!(base, glued, "name/hash boundary must be unambiguous");
-}
-
-/// Every binary the payload carries, each with the same stand-in digest: the
-/// baked host binaries, then the seed and bootstrap-support binaries.
-fn stand_in_payload() -> Vec<(&'static str, String)> {
-    use crate::host_binaries::manifest::{
-        BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, SEED_BINARIES,
-    };
-    HOST_BINARIES
-        .iter()
-        .map(|bin| bin.name)
-        .chain(SEED_BINARIES.iter().copied())
-        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name))
-        .map(|name| (name, "aa".to_string()))
-        .collect()
-}
-
-/// `payload` with `name`'s digest replaced, as a rebuild of that one binary
-/// leaves it.
-fn with_rebuilt(payload: &[(&'static str, String)], name: &str) -> Vec<(&'static str, String)> {
-    payload
-        .iter()
-        .map(|(bin, digest)| {
-            let digest = if *bin == name { "bb" } else { digest.as_str() };
-            (*bin, digest.to_string())
-        })
-        .collect()
-}
-
-fn as_identities<'a>(payload: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
-    payload
-        .iter()
-        .map(|(name, digest)| (*name, digest.as_str()))
-        .collect()
-}
-
-fn fingerprint_with(flake: &std::path::Path, payload: &[(&'static str, String)]) -> String {
-    fingerprint_builder_vm_sources(flake.to_str().unwrap(), &as_identities(payload))
-        .expect("fingerprint")
-}
-
-/// A seed or bootstrap-support binary drives Stage 0 but is never installed in
-/// the image it produces, so rebuilding one must not rebuild the image.
-#[test]
-fn builder_vm_source_fingerprint_ignores_seed_and_support_binary_digests() {
-    use crate::host_binaries::manifest::{BOOTSTRAP_SUPPORT_BINARIES, SEED_BINARIES};
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let payload = stand_in_payload();
-    let before = fingerprint_with(&flake, &payload);
-
-    let unbaked = SEED_BINARIES
-        .iter()
-        .copied()
-        .chain(BOOTSTRAP_SUPPORT_BINARIES.iter().map(|bin| bin.name));
-    for name in unbaked {
-        assert_eq!(
-            fingerprint_with(&flake, &with_rebuilt(&payload, name)),
-            before,
-            "a rebuilt {name} must not change the builder image's key"
-        );
-    }
-}
-
-/// A baked host binary is installed in the image, so rebuilding any one of
-/// them must change the key.
-#[test]
-fn builder_vm_source_fingerprint_changes_with_each_baked_binary_digest() {
-    use crate::host_binaries::manifest::HOST_BINARIES;
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let payload = stand_in_payload();
-    let before = fingerprint_with(&flake, &payload);
-
-    for bin in HOST_BINARIES {
-        assert_ne!(
-            fingerprint_with(&flake, &with_rebuilt(&payload, bin.name)),
-            before,
-            "a rebuilt {} must change the builder image's key",
-            bin.name
-        );
-    }
-}
-
-/// Layer 2 folds exactly the manifest's baked set: no payload binary outside
-/// `HOST_BINARIES` moves the key, and none inside it is left out.
-#[test]
-fn layer_two_folds_exactly_the_manifest_host_binaries() {
-    use crate::host_binaries::manifest::HOST_BINARIES;
-    let payload = stand_in_payload();
-    let fold = |payload: &[(&'static str, String)]| {
-        let mut h = Sha256::new();
-        fold_baked_binary_identities(&mut h, &as_identities(payload));
-        hex::encode(h.finalize())
-    };
-    let base = fold(&payload);
-
-    let mut folded: Vec<&str> = payload
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| fold(&with_rebuilt(&payload, name)) != base)
-        .collect();
-    folded.sort_unstable();
-    let mut baked: Vec<&str> = HOST_BINARIES.iter().map(|bin| bin.name).collect();
-    baked.sort_unstable();
-    assert_eq!(folded, baked);
-    assert!(
-        payload.len() > baked.len(),
-        "the stand-in payload must carry unbaked binaries for this to test anything"
-    );
-}
-
-#[test]
-fn builder_vm_source_fingerprint_is_deterministic_for_identical_workspace() {
-    let tmp1 = tempfile::tempdir().expect("tempdir 1");
-    let tmp2 = tempfile::tempdir().expect("tempdir 2");
-    let flake1 = write_builder_vm_workspace(tmp1.path());
-    let flake2 = write_builder_vm_workspace(tmp2.path());
-
-    let a = builder_vm_source_fingerprint(flake1.to_str().unwrap()).expect("fingerprint 1");
-    let b = builder_vm_source_fingerprint(flake2.to_str().unwrap()).expect("fingerprint 2");
-
-    // Same inputs → same fingerprint regardless of where they
-    // live on disk. (The hash discipline keys off relative
-    // paths, never absolute, so this must hold.)
-    assert_eq!(
-        a, b,
-        "identical workspace layouts must produce identical fingerprints"
-    );
-}
-
-#[test]
-fn builder_vm_source_fingerprint_ignores_target_dir() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let baseline =
-        builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("baseline fingerprint");
-
-    // The `nix/lib` walk (Layer 3) skips `target/`. Drop junk in a
-    // `target/` under the walked dir; the fingerprint must ignore it.
-    let lib_target = tmp.path().join("nix/lib/target/debug");
-    std::fs::create_dir_all(&lib_target).expect("mkdir nix/lib/target");
-    std::fs::write(lib_target.join("junk.rlib"), vec![0u8; 4096]).expect("write target garbage");
-
-    let after = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("after fingerprint");
-
-    assert_eq!(
-        baseline, after,
-        "target/ contents must not affect the builder-vm cache key"
-    );
-}
-
-#[test]
-fn builder_vm_source_fingerprint_ignores_hidden_files() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let flake = write_builder_vm_workspace(tmp.path());
-    let baseline =
-        builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("baseline fingerprint");
-
-    // `.git/HEAD`, editor swap files (`.swp`, `foo.rs.swp`),
-    // `.DS_Store`, etc. — none are flake inputs and editing them
-    // shouldn't bust the cache. Drop each inside the walked `nix/lib`
-    // dir, exercising the explicit skip in `walk_source_dir_sorted`.
-    for path in [
-        "nix/lib/.DS_Store",
-        "nix/lib/.swp",
-        "nix/lib/mkguest.nix.swp",
-    ] {
-        std::fs::write(tmp.path().join(path), b"junk").expect("write hidden");
-    }
-
-    let after = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("after fingerprint");
-
-    assert_eq!(
-        baseline, after,
-        "hidden entries / swap files must not affect the cache key"
-    );
-}
-
 #[test]
 fn builder_vm_source_cache_requires_matching_fingerprint() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1650,149 +920,5 @@ fn stage0_promotion_leaves_the_cached_workload_kernel_alone() {
         kernel.exists(),
         "promoting a new builder-VM image must not delete the cached workload kernel at {}",
         kernel.display()
-    );
-}
-
-// -------------------------------------------------------------------
-// Stage 0 audit-emit helpers.
-//
-// Tests below pin the *details* of the audit emits (which strings
-// the macro will write into `kind`, `detail`) so that the
-// downstream log shippers don't break on a typo, plus a structural
-// test for the failure-summary truncation rule.
-// -------------------------------------------------------------------
-
-#[test]
-fn stage0_fingerprint_prefix_truncates_to_eight_chars() {
-    let full = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let prefix = stage0_fingerprint_prefix(full);
-    assert_eq!(prefix, "01234567");
-    assert_eq!(prefix.len(), 8);
-}
-
-#[test]
-fn stage0_fingerprint_prefix_handles_short_input() {
-    // Defensive: source_fingerprint should always be 64 hex chars,
-    // but if a future caller hands us a short string the helper
-    // must not panic.
-    let prefix = stage0_fingerprint_prefix("abc");
-    assert_eq!(prefix, "abc");
-}
-
-#[test]
-fn stage0_failure_reason_summary_strips_newlines_and_caps_length() {
-    let err = anyhow::anyhow!("first line\nsecond line\twith tab");
-    let summary = stage0_failure_reason_summary(&err);
-    assert!(!summary.contains('\n'));
-    assert!(!summary.contains('\r'));
-    assert!(!summary.contains('\t'));
-
-    // 200-char input → 160-char output.
-    let long_err = anyhow::anyhow!("{}", "x".repeat(200));
-    let summary = stage0_failure_reason_summary(&long_err);
-    assert_eq!(summary.chars().count(), 160);
-}
-
-#[test]
-fn stage0_failure_reason_summary_escapes_equals() {
-    // The audit detail format is space-separated `key=value` pairs.
-    // A bare `=` in the reason text would confuse downstream
-    // parsers; the helper maps them to `~`.
-    let err = anyhow::anyhow!("expected x=1 got y=2");
-    let summary = stage0_failure_reason_summary(&err);
-    assert!(!summary.contains('='), "got {summary}");
-    assert!(summary.contains('~'));
-}
-
-#[test]
-fn stage0_failure_stage_wire_format_is_stable() {
-    // The `stage=` value lands in audit details that downstream
-    // dashboards filter on. Pinning the casing here keeps a future
-    // refactor from accidentally renaming the variant.
-    assert_eq!(Stage0FailureStage::Build.as_str(), "build");
-    assert_eq!(Stage0FailureStage::Validate.as_str(), "validate");
-    assert_eq!(format!("{}", Stage0FailureStage::Build), "build");
-}
-
-#[test]
-fn stage0_flavor_current_wire_format_is_stable() {
-    // The `flavor=` value emitted on every
-    // `Stage0Boot` / `Stage0CachePromoted` audit line. Today there
-    // is one variant (`"current"` — the nix-tarball seed); a future
-    // change may introduce additional variants. Pinning the current
-    // literal here so a rename surfaces immediately.
-    assert_eq!(STAGE0_FLAVOR_CURRENT, "current");
-}
-
-/// A non-ext4 blob (here: zeros, no valid superblock) must surface
-/// as an `Err` from the load, not a silent "init present / absent".
-/// Cross-platform — no `mke2fs` needed to produce a bad image.
-#[cfg(feature = "builder-vm")]
-#[test]
-fn verify_stage0_rootfs_has_init_rejects_non_ext4() {
-    let tmp = tempfile::tempdir().unwrap();
-    let rootfs = tmp.path().join("rootfs.ext4");
-    std::fs::write(&rootfs, vec![0u8; 1024 * 1024]).unwrap();
-    let err = verify_stage0_rootfs_has_init(&rootfs)
-        .expect_err("a zero-filled blob is not a loadable ext4");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("as ext4"),
-        "error names the load failure: {msg}"
-    );
-}
-
-/// Build a tiny real ext4 from `staged_dir` at `image`, returning
-/// `false` if `mke2fs` isn't installed (so the test skips rather than
-/// fails on a host without e2fsprogs). Mirrors the preallocate-then-
-/// `mke2fs -d` shape `mvm_fs::oci_to_rootfs::ext4` uses.
-#[cfg(all(feature = "builder-vm", target_os = "linux"))]
-fn mke2fs_from_dir(staged_dir: &std::path::Path, image: &std::path::Path) -> bool {
-    {
-        let f = std::fs::File::create(image).expect("create image file");
-        f.set_len(16 * 1024 * 1024).expect("preallocate image");
-    }
-    match std::process::Command::new("mke2fs")
-        .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
-        .arg(staged_dir)
-        .arg(image)
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => panic!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr)),
-        Err(_) => false, // e2fsprogs absent on this host — skip.
-    }
-}
-
-/// Real ext4 round-trip: an image carrying `/sbin/mvm-host-vm-init`
-/// passes; an otherwise-identical image without it fails. Linux-only
-/// because `mke2fs` is the only ext4 writer available (matches the
-/// `oci_to_rootfs` ext4 tests' gating).
-#[cfg(all(feature = "builder-vm", target_os = "linux"))]
-#[test]
-fn verify_stage0_rootfs_has_init_round_trips_real_ext4() {
-    let tmp = tempfile::tempdir().unwrap();
-
-    let with_dir = tmp.path().join("with/sbin");
-    std::fs::create_dir_all(&with_dir).unwrap();
-    std::fs::write(with_dir.join("mvm-host-vm-init"), b"#!/bin/true\n").unwrap();
-    let with_img = tmp.path().join("with.ext4");
-    if !mke2fs_from_dir(&tmp.path().join("with"), &with_img) {
-        eprintln!("skipping: mke2fs not installed");
-        return;
-    }
-    verify_stage0_rootfs_has_init(&with_img)
-        .expect("rootfs carrying /sbin/mvm-host-vm-init must validate");
-
-    let without_dir = tmp.path().join("without/sbin");
-    std::fs::create_dir_all(&without_dir).unwrap();
-    std::fs::write(without_dir.join("something-else"), b"x").unwrap();
-    let without_img = tmp.path().join("without.ext4");
-    assert!(mke2fs_from_dir(&tmp.path().join("without"), &without_img));
-    let err = verify_stage0_rootfs_has_init(&without_img)
-        .expect_err("rootfs missing the init binary must be rejected");
-    assert!(
-        format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
-        "error names the missing binary"
     );
 }

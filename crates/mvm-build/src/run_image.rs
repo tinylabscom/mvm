@@ -228,8 +228,14 @@ fn take_lock_with_wait(
         role,
         "another run is materializing this image; waiting for it"
     );
+    let waiting = mvm_vmm::host::ui::activity::start(format!(
+        "waiting for another process materializing the same image ({})",
+        path.display()
+    ));
     on_wait();
-    mvm_core::util::atomic_io::FileLock::acquire(key).with_context(context)
+    let held = mvm_core::util::atomic_io::FileLock::acquire(key).with_context(context);
+    drop(waiting);
+    held
 }
 
 /// The path [`mvm_core::util::atomic_io::FileLock`] turns into the lock file

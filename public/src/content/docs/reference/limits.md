@@ -41,7 +41,7 @@ mvmctl doctor
 ## Files and volumes
 
 Keep host mounts narrow. Use `mvmctl machine fs`, `mvmctl machine cp`, and declared volumes
-instead of broad writable host shares when running untrusted code.
+instead of broad host shares when running untrusted code.
 
 :::note[`machine fs` and `machine cp` are hidden verbs]
 Both are marked `hide = true` in the CLI, so they work as documented but do not
@@ -51,8 +51,10 @@ appear in `mvmctl machine --help`.
 Declared volumes are `--mount host:guest[:SIZE][:ro|rw]` (`--volume` is an alias;
 there is no `-v` short form — that is the global verbosity counter). The guest
 path must live under `/data` or `/work`, and every mount is **read-only unless
-you write `:rw`** — which itself needs `--profile dev` or `--profile permissive`.
-A transient run's share is read-only under every profile.
+you write `:rw`**. A writable disk image (`host.img:guest:SIZE:rw`) is accepted
+under every profile that allows volumes. No profile makes a host directory
+writable: a transient run's directory share is read-only, and a persistent
+machine refuses a directory volume outright.
 
 Snapshots and cold-mode artifacts may contain guest memory, generated files,
 and credentials present inside the guest. Treat them as sensitive state.

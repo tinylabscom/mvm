@@ -1193,27 +1193,17 @@ fn audit_tail_chain(tenant: &str, lines: usize, follow: bool) -> Result<()> {
         ));
         return Ok(());
     }
+    // Opened before the backlog is printed so nothing appended while it
+    // prints falls between the two.
+    let mut follower = super::super::vm::audit_follow::ChainFollower::from_end(path.clone());
     print_last_n_chain_lines(&path, lines)?;
     if !follow {
         return Ok(());
     }
-    let mut pos = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if !path.exists() {
-            continue;
-        }
-        let new_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        if new_len > pos {
-            use std::io::{BufRead, Seek, SeekFrom};
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(SeekFrom::Start(pos))?;
-            let reader = std::io::BufReader::new(&file);
-            for line in reader.lines() {
-                let line = line?;
-                print_chain_line(&line);
-            }
-            pos = new_len;
+        for line in follower.poll() {
+            print_chain_line(&line);
         }
     }
 }
@@ -1231,16 +1221,16 @@ fn print_last_n_chain_lines(path: &std::path::Path, n: usize) -> Result<()> {
 }
 
 fn print_chain_line(line: &str) {
-    match serde_json::from_str::<SignedEnvelope>(line) {
-        Ok(env) => {
+    use super::super::vm::audit_follow::{ChainLine, parse_chain_line};
+    match parse_chain_line(line) {
+        ChainLine::Entry(entry) => {
             // Render the inner PlanAuditEntry as a single human-readable
             // line. Operators who want the full envelope still have
             // the raw file at `~/.mvm/audit/<tenant>.jsonl`.
-            let labels = if env.entry.labels.is_empty() {
+            let labels = if entry.labels.is_empty() {
                 String::new()
             } else {
-                let pairs: Vec<String> = env
-                    .entry
+                let pairs: Vec<String> = entry
                     .labels
                     .iter()
                     .map(|(k, v)| format!("{k}={v}"))
@@ -1249,13 +1239,13 @@ fn print_chain_line(line: &str) {
             };
             println!(
                 "{ts}  {event}  plan={plan}  workload={workload}{labels}",
-                ts = env.entry.timestamp,
-                event = env.entry.event,
-                plan = env.entry.plan_id.0,
-                workload = env.entry.image_name,
+                ts = entry.timestamp,
+                event = entry.event,
+                plan = entry.plan_id.0,
+                workload = entry.image_name,
             );
         }
-        Err(_) => println!("{line}"),
+        ChainLine::Foreign(text) => println!("{text}"),
     }
 }
 

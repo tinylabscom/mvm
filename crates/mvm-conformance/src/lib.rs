@@ -438,8 +438,8 @@ impl ScenarioGate {
                  mvm-egress-client, mvm-oci-entrypoint)",
             ),
             Self::NeedsSdkSidecar => Some(
-                "need the SDK sidecar image in the mvm cache (build it with \
-                 `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`)",
+                "need the SDK sidecar image in the mvm cache (build it from an \
+                 mvm-images checkout with `mvmctl build sdk-sidecar build`)",
             ),
             Self::NeedsPerfBudgetHost => Some(
                 "need MVM_BDD_PERF_BUDGET=1 on a host that can hold the launch \

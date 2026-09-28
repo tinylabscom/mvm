@@ -35,8 +35,8 @@
 //!
 //! The scope is deliberately narrow. It covers the kernel that boots Stage 0
 //! and nothing else — the builder image and the workload kernel keep the
-//! local-build invariant unchanged, so a contributor editing
-//! `nix/images/builder-vm/flake.nix` still sees their change on the next boot.
+//! local-build invariant unchanged, so a contributor editing the builder flake
+//! in their selected mvm-images checkout still sees the change on the next boot.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -217,6 +217,10 @@ pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocol
         )
         .expect("the compiled guest-agent protocol range must be ordered"),
         builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+        // This mvmctl hands builders no boot payload, so it can boot only a
+        // builder image that bakes its own init; a set declaring anything
+        // else is refused before a byte of it is fetched.
+        builder_boot_abi: mvm_core::image_set::BuilderBootAbiRange::LEGACY_ONLY,
     }
 }
 
@@ -555,6 +559,7 @@ mod tests {
         let incompatible = mvm_core::image_set::ImageSetCompatibility {
             guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
             builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+            builder_boot_abi: None,
         };
         let fetcher = FakeFetcher::new(b"must not be fetched");
         let host = current_image_set_protocol_support();
@@ -577,6 +582,41 @@ mod tests {
             0,
             "protocol refusal must precede acquisition"
         );
+    }
+
+    /// This mvmctl hands builders no boot payload, so a locked set whose
+    /// builder image carries no init of its own (ABI 1) is refused before
+    /// anything is fetched; one that bakes it (ABI 0), or says nothing, is
+    /// accepted.
+    #[test]
+    fn a_set_whose_builder_needs_a_boot_payload_is_refused_before_fetching() {
+        use mvm_core::image_set::BuilderBootAbi;
+        let host = current_image_set_protocol_support();
+        let compatibility = |abi| mvm_core::image_set::ImageSetCompatibility {
+            guest_agent_protocol: host.guest_agent_protocol,
+            builder_cache_contract: host.builder_cache_contract,
+            builder_boot_abi: abi,
+        };
+        for abi in [None, Some(BuilderBootAbi::LEGACY)] {
+            mvm_core::image_set::check_declared_protocol_compatibility(&compatibility(abi), &host)
+                .unwrap_or_else(|e| panic!("{abi:?}: {e}"));
+        }
+        let fetcher = FakeFetcher::new(b"must not be fetched");
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_bootstrap_kernel_with_compatibility(
+            tmp.path(),
+            "aarch64",
+            &pin_for(b"must not be fetched"),
+            &fetcher,
+            &compatibility(Some(BuilderBootAbi::PAYLOAD)),
+            &host,
+        )
+        .expect_err("an ABI 1 builder needs a payload this mvmctl does not have");
+        assert!(matches!(
+            err,
+            Stage0KernelError::ProtocolIncompatible { .. }
+        ));
+        assert_eq!(fetcher.calls(), 0);
     }
 
     /// The classification this module exists for, unchanged by the move to a

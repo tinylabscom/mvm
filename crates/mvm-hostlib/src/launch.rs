@@ -141,8 +141,9 @@ pub(crate) struct RunReply {
     /// Content-addressed id of the admitted plan, for correlating with the
     /// chain-signed audit log.
     plan_id: String,
-    /// `dev` or `prod`, resolved fail-closed the way the machine inventory
-    /// resolves it. Only `dev` admits the DevOnly `guest.*` methods.
+    /// `dev` or `prod`, decided by the admitted profile's `dev_guest` grant,
+    /// the same declaration the guest agent's DevOnly refusal keys on. Only
+    /// `dev` admits the DevOnly `guest.*` methods.
     build_mode: String,
 }
 
@@ -201,6 +202,23 @@ impl From<CreateRequest> for LaunchFields {
             force: r.force,
         }
     }
+}
+
+/// The build_mode the SDK's DevOnly guard keys on.
+///
+/// The admitted profile's `dev_guest` grant decides, matching the guest
+/// agent's own DevOnly refusal: a launch that did not declare a dev profile
+/// is not a dev build even when the local boot is unsealed and
+/// host-accessible — accessibility and the guest's dev profile answer
+/// different questions, and conflating them let DevOnly verbs through on
+/// plain launches. Fail closed: no profile, or a name no profile answers
+/// to, resolves to `prod`.
+fn declared_build_mode(profile: Option<&str>) -> String {
+    match profile.and_then(mvm_client::profile::RunProfile::from_name) {
+        Some(profile) if profile.grants().dev_guest => "dev",
+        _ => "prod",
+    }
+    .to_string()
 }
 
 /// Parse a rootfs declaration, refusing one that names nothing as an invalid
@@ -264,15 +282,12 @@ async fn answer(backend: &LocalBackend, method: &str, request: &[u8]) -> Result<
     Ok(match method {
         MACHINE_RUN => {
             let r: RunRequest = parse(request)?;
+            let profile = r.profile.clone();
             let launched = backend.launch(launch_request(r.into())?).await?;
-            let build_mode =
-                mvm_client::inventory::resolve_workload_posture(None, &launched.machine.name)
-                    .label()
-                    .to_string();
             Outcome::ok(&RunReply {
                 machine: launched.machine,
                 plan_id: launched.plan_id,
-                build_mode,
+                build_mode: declared_build_mode(profile.as_deref()),
             })
         }
         MACHINE_CREATE => {
@@ -290,6 +305,21 @@ fn parse<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, Outcome> {
 
 #[cfg(test)]
 mod tests {
+    /// The DevOnly guard's label answers the declared profile, fail-closed:
+    /// only a profile whose grants carry the dev guest is `dev`; no profile
+    /// and unrecognised names are `prod` even though the local boot itself
+    /// is unsealed — accessibility and the guest's dev profile are different
+    /// questions.
+    #[test]
+    fn declared_build_mode_follows_the_dev_guest_grant() {
+        assert_eq!(declared_build_mode(Some("dev")), "dev");
+        assert_eq!(declared_build_mode(Some("permissive")), "dev");
+        assert_eq!(declared_build_mode(Some("standard")), "prod");
+        assert_eq!(declared_build_mode(Some("restrictive")), "prod");
+        assert_eq!(declared_build_mode(Some("no-such-profile")), "prod");
+        assert_eq!(declared_build_mode(None), "prod");
+    }
+
     use super::*;
     use crate::status::{MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_INVALID_SPEC, MVM_HOSTLIB_OK};
     use mvm_core::client::MvmClient;
@@ -367,7 +397,10 @@ mod tests {
         let reply = body(&outcome);
         assert_eq!(reply["machine"]["name"], "sdk-run");
         assert!(reply["plan_id"].as_str().is_some_and(|id| !id.is_empty()));
-        assert_eq!(reply["build_mode"], "prod", "no accessible runtime is dev");
+        assert_eq!(
+            reply["build_mode"], "prod",
+            "no profile declares a dev guest"
+        );
         assert!(
             home.audit_text().contains("plan.admitted"),
             "{}",

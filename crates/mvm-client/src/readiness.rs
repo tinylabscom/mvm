@@ -45,3 +45,30 @@ pub fn touch_activity(vm_name: &str) {
         let _ = reg.save(&path);
     }
 }
+
+/// A live `ReadinessReport` from a running machine's guest agent — the
+/// read counterpart to the registry milestones above. Drives the
+/// protocol-hello prelude and a single `ReadinessStatus` request through
+/// the machine's vsock transport, so Firecracker, libkrun, HVF, and the
+/// other backends all answer without per-backend code in the caller. It
+/// lives here so `mvmctl wait`/`boot-report` and the host library poll
+/// the guest through one implementation.
+pub use mvm_agentd::vsock::ReadinessReport;
+
+/// Fetch one live readiness report. Typed `RpcError`s cover agent
+/// `Error`, profile refusal, and off-contract frames, so the only `Ok`
+/// variant is the contracted report.
+pub fn fetch_live_readiness(vm_name: &str) -> anyhow::Result<ReadinessReport> {
+    use mvm_agentd::vsock::{
+        GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse, call_unary,
+        negotiate_protocol,
+    };
+    let transport: Box<dyn mvm_runtime::vsock_transport::VsockTransport> =
+        mvm_runtime::vsock_transport::for_vm(vm_name)?;
+    let mut stream = transport.connect(GUEST_AGENT_PORT)?;
+    let _ = negotiate_protocol(&mut stream, vec![GuestCapability::Readiness])?;
+    match call_unary(&mut stream, &GuestRequest::ReadinessStatus)? {
+        GuestResponse::ReadinessStatusReport(report) => Ok(report),
+        other => anyhow::bail!("unexpected response to ReadinessStatus: {other:?}"),
+    }
+}

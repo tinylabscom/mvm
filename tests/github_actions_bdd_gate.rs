@@ -148,22 +148,6 @@ fn runtime_release_publication_needs_bdd() {
 }
 
 #[test]
-fn kernel_release_asset_publication_needs_bdd() {
-    assert_reuses_bdd_gate("kernel-build.yml");
-    assert_job_contains(
-        "kernel-build.yml",
-        "bdd",
-        "startsWith(github.ref, 'refs/tags/v')",
-    );
-    assert_job_needs_bdd("kernel-build.yml", "kernel");
-    assert_job_contains(
-        "kernel-build.yml",
-        "kernel",
-        "needs.bdd.result == 'success' || needs.bdd.result == 'skipped'",
-    );
-}
-
-#[test]
 fn sdk_registry_publication_needs_bdd() {
     assert_reuses_bdd_gate("publish-sdk.yml");
     assert_job_needs_bdd("publish-sdk.yml", "publish_pypi_release");

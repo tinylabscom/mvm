@@ -346,7 +346,7 @@ need an owner in `mvm-images` first.
       with per-architecture `initramfs` members. `images.lock` pins it and
       `current_train()` now requires the role on both architectures, so a set
       without it is refused as incomplete.
-- [ ] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
+- [x] **Wave 0.5b — artifact source cutover.** The runtime overlay, SDK
       sidecar and initramfs are acquired as members of the locked set —
       digest- and size-checked against the verified root, through the one
       acquisition boundary moved from `mvm-cli` into `mvm-build` so
@@ -362,14 +362,24 @@ need an owner in `mvm-images` first.
       keep reading the assets attached to their own releases, which are
       never deleted. The first CLI release after Wave 3 — the re-measure
       release — is therefore the first to ship without a mirror.
-- [ ] **Waves 1+2 — `mvm-build` and `mvm-cli` together.** Remove
+      *Done 2026-09-26:* all three are fetched as members of the pinned
+      `image-set/v0.2.1`, whose members carry `VERSION` `0.18.0-rc.2`, the
+      version `main` builds; `PublishedImageSet` moved to `mvm-build`, and
+      mvm-build's `test-support` tests joined the targeted CI lane.
+- [x] **Waves 1+2 — `mvm-build` and `mvm-cli` together.** Remove
       `ImageSource::InTree`, `in_tree_overlay_checkout_root` and every in-tree
       build arm; keep pair builds from the sibling checkout. Re-point the
       source-checkout signal from the in-tree builder flake to
       `mvm_source_checkout`, and make a contributor build with no sibling
       fetch the published builder image. New refusal test: an in-tree image
       build fails with "image construction lives in mvm-images".
-- [ ] **Wave 3 — workflows.** Retire `release-boot-image.yml` and
+      *Done 2026-09-27:* `ImageSource::InTree` and every in-tree arm are gone;
+      `ImageConstructionRefused` refuses with that text for the builder image,
+      the kernel build, the dev default image and the SDK sidecar build, each
+      with a refusal test. Pair builds, their
+      consumed-input key and its `mvm-setpriv`, `source_closure`,
+      `workspace_graph` and `builder_image_inputs` dependencies stay.
+- [x] **Wave 3 — workflows.** Retire `release-boot-image.yml` and
       `kernel-build.yml`'s in-tree publication; strip `initramfs-image` and
       (after 0.5b ships) the W7.1 mirror from `release.yml`; drop the in-tree
       legs of `cache-warm.yml`, `ci.yml`, `ci-full.yml`, `security.yml` and
@@ -377,7 +387,16 @@ need an owner in `mvm-images` first.
       `mvm-images` checkout. `check_workflow_paths.rs`,
       `github_actions_aarch64_no_kvm.rs` and
       `scripts/local-aarch64-no-kvm-smoke.sh` move in the same PR.
-- [ ] **Wave 4 — tree and stragglers.** Delete `nix/images/`; move
+      *Done 2026-09-27:* `release-boot-image.yml` and `kernel-build.yml` are
+      deleted, and `release.yml` neither builds, mirrors nor re-signs an
+      image. The verifier now checks each CLI archive against the signed
+      combined manifest. The re-pointed security lanes
+      (`verified-boot-artifacts`, the claim 3 witness, and both sealed-prod
+      lanes) and Extended CI's hosted no-KVM bootstrap passed when first run
+      on this branch (security run 36298381536, Extended CI run 36298382873).
+      The documented-surface suite's SDK sidecar step builds from an
+      `mvm-images` checkout taken at the pinned release tag.
+- [x] **Wave 4 — tree and stragglers.** Delete `nix/images/`; move
       `kernel/base.nix` for `nix/packages/qemu-wasm-smoke-image.nix` and the
       `examples/llm-agent` recipe out of it; retire
       `check-runtime-overlay-version` with the `_release-prep` bump and
@@ -385,8 +404,15 @@ need an owner in `mvm-images` first.
       `check-kernel-config-budget`; delete the dead `build-dev-image`;
       E-class edits and live docs (`CLAUDE.md`, `README.md`, contributor
       docs).
+      *Done 2026-09-27:* `nix/images/` and `nix/packages/qemu-wasm*` are gone;
+      the llm-agent recipe moved to `nix/examples/llm-agent`;
+      `check-runtime-overlay-version`, `check-kernel-config-budget` and
+      `build-dev-image` are retired; `check-guest-binary-lists` and
+      `check-kernel-pin-freshness` read what remains; ADR-030 item 4 now
+      names the selected `mvm-images` checkout; the live docs say image
+      construction lives in `mvm-images`.
 
-- [ ] **Release decoupling — set members are identified by the lock, not
+- [x] **Release decoupling — set members are identified by the lock, not
       the CLI version.** With the equality above, every CLI version bump
       needs an image set rebuilt at the new version and re-pinned before
       `release-tag`, because the release's end-to-end lanes run the new CLI
@@ -400,6 +426,14 @@ need an owner in `mvm-images` first.
       root; pair and source builds keep the version equality. Lands after
       Wave 4 and before the re-measure release, which is the first CLI
       release it serves. Found 2026-09-25 while sequencing the re-measure.
+      *Done 2026-09-27:* a member acquired from the set is identified
+      by the pinned root, not the CLI version. It is cached under
+      `image-set/<root-sha256>/` beside a provenance record naming the root,
+      role, target and the member's own `VERSION`, and the resolver expects
+      that recorded version; an entry from another root is not consulted.
+      Compatibility is the signed root's declared range, checked at
+      acquisition. Pair and source builds keep exact equality with the CLI
+      version.
 - [ ] **Re-measure.** Record release duration, release storage, download
       volume, and failure rate against the pre-W8 baseline; the release
       gate must be at least 25 minutes faster per the parent plan, and

@@ -383,42 +383,37 @@ fn builder_backend_check_for(
 
 /// Which arm will produce the default boot image, and why.
 ///
-/// A source checkout builds its own images and an installed binary fetches one.
-/// That is usually invisible, which is fine until the two disagree with what an
-/// operator expected — at which point "which arm ran" is the first question and
-/// there has been nowhere to read the answer. Reported in the same
+/// A selected image checkout builds its own images and anything else fetches
+/// one. That is usually invisible, which is fine until the two disagree with
+/// what an operator expected — at which point "which arm ran" is the first
+/// question and there has been nowhere to read the answer. Reported in the same
 /// `<choice> — <source> — <availability>` shape as the builder backend line, so
 /// the override path is observable rather than folklore.
 pub(super) fn boot_image_acquisition_check() -> Check {
     use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
 
     use crate::commands::env::builder_vm as builder_vm_mod;
-    let is_checkout = builder_vm_mod::find_builder_vm_flake_is_source_checkout();
     let pair_selected = builder_vm_mod::selected_local_checkout()
         .ok()
         .flatten()
         .map(|checkout| checkout.root().display().to_string());
     let resolved = resolve(None, builder_vm_mod::images_built_from_source());
 
-    // The arm can be chosen and still be unsatisfiable: `build` on an installed
-    // binary has no flake to build from. Say so here rather than letting
-    // the first image acquisition be where the operator finds out.
+    // The arm can be chosen and still be unsatisfiable: `build` without an
+    // image checkout has nothing to build from. Say so here rather than
+    // letting the first image acquisition be where the operator finds out.
     let availability = match (resolved.choice, &pair_selected) {
         (BootImageAcquisition::Build, Some(pair)) => {
             format!("building from the local image checkout at {pair}")
         }
-        (BootImageAcquisition::Build, None) if is_checkout => {
-            "in-repo image flake present".to_string()
-        }
         (BootImageAcquisition::Build, None) => {
-            "NO in-repo image flake — a forced local build will refuse".to_string()
-        }
-        (BootImageAcquisition::Fetch, Some(_)) => {
-            "a checkout is selected — fetching the published set is refused until the selector              is unset"
+            "NO image checkout selected; image construction lives in mvm-images, so a forced \
+             local build will refuse"
                 .to_string()
         }
-        (BootImageAcquisition::Fetch, None) if is_checkout => {
-            "fetching a prebuilt from a source checkout; the image will record itself as fetched"
+        (BootImageAcquisition::Fetch, Some(_)) => {
+            "a checkout is selected — fetching the published set is refused until the selector \
+             is unset"
                 .to_string()
         }
         (BootImageAcquisition::Fetch, None) => "published image".to_string(),
@@ -428,7 +423,7 @@ pub(super) fn boot_image_acquisition_check() -> Check {
         name: "boot image",
         category: "platform",
         // Informational: every combination is a legitimate operator choice.
-        // The forced-build-without-a-flake case is named in the text and
+        // The forced-build-without-a-checkout case is named in the text and
         // refuses at acquisition time, which is where it can say what to do.
         ok: true,
         info: format!(

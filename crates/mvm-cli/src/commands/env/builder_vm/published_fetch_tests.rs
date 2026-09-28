@@ -6,6 +6,8 @@
 //! can have — a pin map, or a refusal — so these tests pin down everything the
 //! fetch does with them.
 
+use sha2::{Digest, Sha256};
+
 use super::stage0_cache::{
     BuilderVmArtifactNames, BuilderVmImageRelease, BuilderVmReleaseSource, fetch_builder_vm_image,
     fetched_builder_vm_image_line, validate_builder_vm_stage0_artifacts,

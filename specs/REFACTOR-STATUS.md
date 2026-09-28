@@ -1,13 +1,15 @@
 # Refactor status
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27
 
 ## In progress
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
       microVM / vsock / signed-plan security core and close every
-      product-surface gap on top of it. One issue per workstream:
+      product-surface gap on top of it. Resume from the plan's "Execution
+      log and handoff" section (landed PRs, open PRs, decisions, known
+      defects). One issue per workstream:
   - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
     - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
     - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
@@ -30,9 +32,15 @@ Last updated: 2026-09-26
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
+    - [ ] denial → policy draft selector (Grant / Skip)
+    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+    - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
+    - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
+    - [ ] tool calls (PS-13), SDK callback through hostlib (PS-01), a broker for detached machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
@@ -43,9 +51,9 @@ Last updated: 2026-09-26
   - [ ] PS-16 Nix developer experience — #3725
   - [x] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
-  - [ ] PS-19 fewer feature flags — #3728
+  - [x] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
-  - [ ] PS-21 CLI thin over `mvm-client` — #3730
+  - [x] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
@@ -3939,3 +3947,12 @@ resume` takes a `current_head` and refuses when it differs from the
                   1+2, 3, 4.
             - [x] Wave 0.5a: the initramfs is a required signed root
                   member; `images.lock` pins `image-set/v0.2.1`.
+            - [x] Wave 0.5b: runtime overlay, SDK sidecar and initramfs
+                  come from the pinned set, not the CLI's own release.
+            - [x] Waves 1+2: no mvm code path builds an image in-tree; an
+                  in-tree build refuses with "image construction lives in
+                  mvm-images".
+            - [x] Waves 3+4: no workflow builds, mirrors or re-signs an
+                  image; `nix/images/` is deleted.
+            - [x] Release decoupling: image-set members are cached by the
+                  pinned root, so a CLI version bump needs no image rebuild.

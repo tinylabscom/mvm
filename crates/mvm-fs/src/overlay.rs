@@ -32,7 +32,11 @@
 //! The `VERSION` file is what the resolver checks against the caller's
 //! expected version. Mismatched versions are an admission-time error (the
 //! agent's vsock protocol is versioned; a stale overlay paired with a newer
-//! host would silently misbehave).
+//! host would silently misbehave). The caller chooses what to expect: the
+//! running CLI's version for an overlay built at that version, and for a
+//! member of the pinned image set the member's own `VERSION` recorded when it
+//! was installed — that set's compatibility with the host is established from
+//! its signed root before the member is ever fetched.
 //!
 //! Arch is passed as the cache directory-name segment (`"aarch64"` /
 //! `"x86_64"`) rather than a typed enum so this crate stays free of

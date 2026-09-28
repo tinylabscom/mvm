@@ -154,8 +154,9 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
             .to_string(),
         ));
     }
-    let source_checkout =
-        crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
+    // Only an image checkout can build the kernel, and a selected one has
+    // answered above; without one the pin fetches the published kernel.
+    let source_checkout = crate::commands::env::builder_vm::images_built_from_source();
     Ok(Some(resolve_pinned_kernel(
         &cache_dir,
         arch,

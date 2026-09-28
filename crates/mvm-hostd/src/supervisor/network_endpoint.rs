@@ -267,6 +267,12 @@ pub struct EndpointConfig {
     /// `OpenHttp` flows. Absent on legacy endpoint configs.
     #[serde(default)]
     pub connector_uds_path: Option<std::path::PathBuf>,
+    /// Where the operator's approval broker listens, if one does: the
+    /// foreground `mvmctl` binds it for the life of the run. An `ask` is put
+    /// to it and held until it answers, times out, or turns out not to be
+    /// there — the last two are denials. Absent ⇒ every `ask` is denied.
+    #[serde(default)]
+    pub approval_socket: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -334,7 +340,10 @@ impl EndpointNetworkProjection {
         };
         Self {
             gate: Arc::new(gate),
-            recorder: build_audit_recorder(&cfg.tenant_id).map(Arc::new),
+            // Attributed to this VM: the endpoint records unbound, and every
+            // machine on the host shares the tenant's chain.
+            recorder: build_audit_recorder(&cfg.tenant_id)
+                .map(|recorder| Arc::new(recorder.with_vm_name(&cfg.instance_id))),
         }
     }
 
@@ -449,8 +458,29 @@ pub fn assemble_with_projection(
     if let Some(recorder) = projection.recorder.as_ref() {
         service = service.with_shared_recorder(Arc::clone(recorder));
     }
+    service = service.with_approver(approval_supervisor(cfg, projection.recorder.clone())?);
 
     Ok((Arc::new(service), handed))
+}
+
+/// The runtime approver for this endpoint: every `ask` recorded in the
+/// approval ledger and audited, and put to the approval socket when the
+/// config names one. Without one every `ask` is denied, still audited.
+fn approval_supervisor(
+    cfg: &EndpointConfig,
+    recorder: Option<Arc<crate::supervisor::audit_recorder::Recorder>>,
+) -> anyhow::Result<Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>> {
+    use crate::supervisor::runtime_approval::{ApprovalSupervisor, SocketBroker};
+    let instance = if cfg.instance_id.is_empty() {
+        cfg.tenant_id.as_str()
+    } else {
+        cfg.instance_id.as_str()
+    };
+    let mut builder = ApprovalSupervisor::builder(instance).recorder(recorder);
+    if let Some(socket) = &cfg.approval_socket {
+        builder = builder.broker(Arc::new(SocketBroker::new(socket.clone())));
+    }
+    Ok(Arc::new(builder.build()?))
 }
 
 /// Fingerprint every secret this endpoint can resolve, for the host→guest
@@ -586,6 +616,40 @@ mod tests {
         );
     }
 
+    /// The endpoint's refusals land in the tenant chain every machine on the
+    /// host shares, so each one must name the machine it refused for — or no
+    /// reader, live or after the fact, can say whose egress was blocked.
+    #[test]
+    fn the_endpoint_recorder_names_its_machine_on_every_entry() {
+        let dir = tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.instance_id = "denied-vm".into();
+
+        let projection = EndpointNetworkProjection::from_config(&cfg);
+        let recorder = projection.recorder().expect("signer key present");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(recorder.record_unbound(
+                crate::supervisor::audit_recorder::EventCategory::Host,
+                "host.flow.denied",
+                [("reason".to_string(), "policy_denied".to_string())],
+            ))
+            .unwrap();
+
+        let chain = std::fs::read_to_string(
+            mvm_core::config::mvm_audit_dir().join(format!("{}.jsonl", cfg.tenant_id)),
+        )
+        .unwrap();
+        assert!(chain.contains(r#""vm_name":"denied-vm""#), "{chain}");
+    }
+
     #[test]
     fn connector_service_uses_the_exact_endpoint_policy_and_audit_objects() {
         let dir = tempdir().unwrap();
@@ -663,6 +727,7 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
             connector_uds_path: None,
+            approval_socket: None,
         }
     }
 
@@ -784,6 +849,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -931,6 +997,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -988,6 +1055,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();
@@ -1017,6 +1085,7 @@ mod tests {
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     provider: None,
+                    approve: Default::default(),
                 },
             )
             .unwrap();

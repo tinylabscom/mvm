@@ -1,23 +1,18 @@
 ---
 title: "Releases & downloads"
-description: "How mvm's v* release tags publish binaries, kernels, and images — and how each install path consumes them."
+description: "How mvm's v* release tags publish the CLI, how boot images reach it from the pinned image set, and how each install path consumes them."
 ---
 
-Every `v*` git tag fires two GitHub Actions workflows that publish a single
-GitHub Release:
-
-- **`release.yml`** builds `mvmctl` for the currently published targets
-  (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
-  `aarch64-unknown-linux-gnu`), packages each as
-  `mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` +
-  man pages), generates `checksums-sha256.txt`, and cosign-signs every
-  tarball. It does not build boot images: it mirrors the image set pinned by
-  `crates/mvm-core/images.lock` from
-  [`mvm-images`](https://github.com/tinylabscom/mvm-images), as described in
-  [Image releases and the support window](#image-releases-and-the-support-window).
-- **`kernel-build.yml`** builds the slim builder + workload kernels on native
-  aarch64 and x86_64 runners and uploads `vmlinux-<arch>-<variant>` +
-  `kernel-<arch>-checksums-sha256.txt`.
+Every `v*` git tag fires **`release.yml`**, which builds `mvmctl` for the
+currently published targets (`aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`), packages each as
+`mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` + man
+pages), generates `checksums-sha256.txt`, cosign-signs the tarballs, the
+manifest and the SBOM, attests build provenance, and publishes one GitHub
+Release. It does not build, mirror or re-sign boot images: those come from the
+image set pinned by `crates/mvm-core/images.lock`, published by
+[`mvm-images`](https://github.com/tinylabscom/mvm-images), as described in
+[Image releases and the support window](#image-releases-and-the-support-window).
 
 ## Promotion: a release reaches users only after a fresh install boots
 
@@ -26,8 +21,16 @@ one until the `first-run-smoke` job has installed it the way a new user
 would — the tag's own `install.sh`, pinned to the tag, into a throwaway `HOME`,
 builder bootstrap included — and run the README's first command,
 `mvmctl machine run --image alpine -- echo <token>`, with stdin closed and a
-time budget. It runs on the self-hosted Apple Silicon runner (HVF) and on a
-hosted Linux runner with KVM (Firecracker). When every lane prints its token,
+time budget. It then boots twice more from the same `HOME`, each with its own
+token and budget. The second boot is the first to take the runtime overlay and
+initramfs from the cache rather than from the download it has just made, so it
+must print its token and must not replace any file the first boot cached. The
+third binds an SDK host service (`--host-service host.time.v1`), which downloads
+the published SDK sidecar, and the guest must find the SDK library under
+`/mvm/sdk`. A release binary refuses or fetches again any of these artifacts
+whose `VERSION` is not its own, and only the later boots reach that check. The
+smoke runs on the self-hosted Apple Silicon runner (HVF) and on a
+hosted Linux runner with KVM (Firecracker). When every lane prints its tokens,
 `promote-release` makes the tag a full release and GitHub's latest, and
 dispatches the site deployment that bakes it into `https://runmvm.com/install.sh`
 as the offline fallback. A release candidate runs the same smoke and stays a
@@ -40,6 +43,16 @@ leaves the tag staged; the fix ships as a new tag. The same check runs locally
 with `just e2e::smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
 alone.
 
+The lanes live in `.github/workflows/first-run-smoke.yml`, which `release.yml`
+calls. To prove them on the real runners before a tag depends on them,
+dispatch that workflow against a published tag:
+`gh workflow run first-run-smoke.yml --ref main -f tag=v0.18.0-rc.1`. The
+installer and the smoke script come from the dispatched ref; the binaries and
+artifacts come from the tag. That exercises the runners, the installer, and
+that tag's first run. It does not exercise code that has not been released yet:
+for that, tag a release candidate, which runs the same lanes and stays a
+prerelease.
+
 ## How each install path consumes a release
 
 | Path | What it pulls |
@@ -48,8 +61,8 @@ alone.
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl env update` | the tarball for the latest release, in-place swap |
-| `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
-| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` |
+| `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
+| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` |
 
 ## Image releases and the support window
 
@@ -58,9 +71,11 @@ workload and Stage 0 kernels, the runtime overlay and the SDK sidecars — are
 built and signed in [`tinylabscom/mvm-images`](https://github.com/tinylabscom/mvm-images)
 and published as `image-set/v*` releases. Each release carries one signed
 root, `image-set.json`, that names every member by digest and size. Image
-changes land in `mvm-images`; the `mvm` tree's own image flakes under
-`nix/images/` are scheduled for deletion, after which the `mvm` tree cannot
-build an image and says so rather than failing on a missing flake.
+changes land in `mvm-images`. The `mvm` tree's own image flakes under
+`nix/images/` were deleted, together with the `release-boot-image.yml` and
+`kernel-build.yml` workflows that published from them; the `mvm` tree cannot
+build an image, and a request for one says so rather than failing on a missing
+flake.
 
 Which URLs a CLI reads depends on its version:
 
@@ -68,20 +83,20 @@ Which URLs a CLI reads depends on its version:
 |---|---|---|
 | v0.17.0 and earlier | its own `v{version}` release on `tinylabscom/mvm` | its own `v{version}` release |
 | v0.18.0-rc.1 | `tinylabscom/mvm` release `boot-image/v0.1.5`, signed by `release-boot-image.yml` | its own `v{version}` release |
-| releases cut after 2026-09-24 | the `mvm-images` `image-set/v*` release pinned by the binary's `images.lock`, admitted only after the root verifies against that release's `release.yml` identity | its own `v{version}` release, whose copies `release.yml` mirrors from the same pinned set |
+| releases cut after 2026-09-24, before the in-tree images were deleted | the `mvm-images` `image-set/v*` release pinned by the binary's `images.lock`, admitted only after the root verifies against that release's `release.yml` identity | its own `v{version}` release, whose copies `release.yml` mirrored from the same pinned set |
+| every later release | the same pinned `image-set/v*` release | the same pinned `image-set/v*` release; the CLI's own release carries no image assets |
 
 Nothing in that table is deleted. `boot-image/v*` and every `v*` release stay
 published, so an older CLI keeps finding the bytes it was built against. What
 changes over time is what is published next:
 
-- **Mirroring.** Every CLI release attaches the pinned set's assets under the
-  names CLI releases have always carried. The release verifies the whole set
-  with the `mvmctl` it is about to ship, then refuses any mirrored file whose
-  digest the signed root does not account for, before anything is signed. A
-  CLI release keeps mirroring until the runtime overlay, SDK sidecar and
-  initramfs are fetched from the image set directly.
-- **Legacy producer retirement.** No new `boot-image/v*` release is published
-  after the in-tree image flakes are deleted. The `legacy` entry in
+- **Mirroring (ended).** CLI releases used to attach the pinned set's assets
+  under the names CLI releases had always carried, re-signed after the release
+  verified them against the signed root. Once the runtime overlay, SDK sidecar
+  and initramfs were fetched from the image set directly, the mirror was
+  removed; CLI releases from then on carry no image assets.
+- **Legacy producer retirement.** No new `boot-image/v*` release is published:
+  the producer was deleted with the in-tree image flakes. The `legacy` entry in
   `images.lock`, which records that producer's release and signing identity,
   stays until 2026-12-31 and is removed in the first release after that date.
   It is a record for the support window, not a fallback: no current CLI
@@ -96,25 +111,48 @@ changes over time is what is published next:
   to `boot-image/v*` is not possible: those releases publish no signed root for
   the lock to pin.
 
-## Runtime overlay release assets
+## Member identity
 
-Every release publishes the shared guest-runtime overlay alongside the CLI
-tarballs and the default images:
+The runtime overlay, the SDK sidecars and the initramfs that `mvmctl` fetches
+from the image set are identified by the signed root its `images.lock` pins,
+not by the CLI's own version. Each member carries the `VERSION` of the `mvm`
+workspace that `mvm-images` built it from, which is usually not the version of
+the CLI that later pins the set.
+
+`mvmctl` files each member under the digest of that root —
+`~/.mvm/cache/image-set/<root-sha256>/` for the runtime overlay and SDK
+sidecars, `~/.mvm/cache/initramfs/image-set/<root-sha256>/` for the
+initramfs — and records the member's own `VERSION`, read from the verified
+bytes, beside it. A later boot expects that recorded version and makes every
+other check unchanged. A cached member from a root the binary no longer pins is
+not used; the pinned root's member is fetched instead.
+
+Whether a host can run a set is decided by the compatibility the signed root
+declares — the guest-agent protocol range and the builder cache contract —
+which is checked before any member is fetched. A CLI version bump therefore
+does not need a new image set. A change to the declared compatibility does.
+
+Artifacts built from a selected `mvm-images` checkout, or from this source tree,
+are still checked against the running CLI's version.
+
+## Runtime overlay assets
+
+The shared guest-runtime overlay is a member of the image set:
 
 - `runtime-overlay-<arch>.tar.gz`
-- `runtime-overlay-<arch>.tar.gz.sha256`
 
-Those assets are the readonly, version-matched guest-runtime payload consumed by
-overlay-backed boots. They are not an optional side channel or a developer-only
-cache convenience; they are part of the shipped release surface for the
-backends that admit `RequiredOverlay`.
+It is the readonly guest-runtime payload consumed by
+overlay-backed boots — part of the shipped surface for the backends that admit
+`RequiredOverlay`, not an optional side channel or a developer-only cache
+convenience.
 
-The tarball itself is hash-verified before extraction. Inside it, the canonical
-payload is still per-file checked: `overlay.ext4`, `overlay.verity`,
-`overlay.roothash`, `VERSION`, and an inner `checksums-sha256.txt`. When
-`mvmctl` installs that payload into `~/.mvm/cache/runtime-overlay/<version>/<arch>/`,
-every required-overlay boot re-hashes those cached files before attach and
-refuses to mount the overlay if the cache entry has drifted.
+The tarball is verified against the signed root before extraction. Inside it,
+the canonical payload is still per-file checked: `overlay.ext4`,
+`overlay.verity`, `overlay.roothash`, `VERSION`, and an inner
+`checksums-sha256.txt`. When `mvmctl` installs that payload into
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, every required-overlay boot
+re-hashes those cached files before attach and refuses to mount the overlay if
+the cache entry has drifted.
 
 Only **guest-executed** runtime binaries belong in this artifact. Host-side
 helpers and supervisors still ship in the `mvmctl-<target>.tar.gz` bundle next
@@ -124,10 +162,10 @@ to `mvmctl`.
 
 Operationally, runtime-overlay updates are a **release + restart** story:
 
-- A fresh boot on an admitted backend resolves the runtime overlay for the
-  running `mvmctl` version, re-verifies the cached artifact checksums, and
-  mounts it read-only inside the guest.
-- A stopped VM picks up the newer version-matched overlay on its next
+- A fresh boot on an admitted backend resolves the runtime overlay of the image
+  set the running `mvmctl` pins, re-verifies the cached artifact checksums,
+  and mounts it read-only inside the guest.
+- A stopped VM picks up the overlay the host now resolves on its next
   `machine start` or `machine restart`.
 - A running VM keeps the overlay version it already booted with until restart.
 - mvm does **not** hot-remount or live-swap a different runtime overlay into an
@@ -135,19 +173,21 @@ Operationally, runtime-overlay updates are a **release + restart** story:
 
 That means the normal rollout path is:
 
-1. Publish the new `mvmctl` release and the matching runtime-overlay assets.
+1. Publish the new `mvmctl` release, pinning an image set whose declared
+   compatibility covers it.
 2. Update hosts to that release.
 3. Restart overlay-backed VMs when you want them to adopt the new runtime.
 
 ## Rollback / downgrade behavior
 
-Rollback follows the same version-matched rule:
+Rollback follows the same pinning rule:
 
 - If you downgrade `mvmctl` to an earlier release, the host resolves the
-  runtime overlay published for that earlier version.
+  runtime overlay that earlier release pins (or, for releases that predate the
+  image set, published on its own release).
 - Running VMs are unchanged until restart.
 - Restarted VMs come back on the downgraded version's overlay, assuming the
-  matching release assets are still available and verified.
+  matching assets are still available and verified.
 
 If a backend cannot safely consume the runtime overlay for a given boot shape,
 it must fail closed rather than silently falling back to a writable or

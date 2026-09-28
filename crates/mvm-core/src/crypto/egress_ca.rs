@@ -334,6 +334,7 @@ mod tests {
                         allowed_hosts: hosts,
                         sigv4: None,
                         provider: None,
+                        approve: Default::default(),
                     },
                 )
                 .expect("seed the binding store");

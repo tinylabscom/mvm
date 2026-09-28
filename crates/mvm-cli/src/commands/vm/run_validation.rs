@@ -72,19 +72,26 @@ pub(super) fn validate_run_profile(args: &RunArgs) -> Result<()> {
         // directory-specific rule to disks without revisiting it, and the
         // message it carried ("transient live shares are read-only") described
         // only the case it was written for.
-        let parsed = super::shared::parse_volume_spec(spec)?;
-        if matches!(
-            parsed,
+        //
+        // Whether a writable disk is granted at all is the profile table's
+        // answer, read here rather than restated.
+        match super::shared::parse_volume_spec(spec)? {
             super::shared::VolumeSpec::DirShare {
-                read_only: false,
-                ..
-            }
-        ) {
-            anyhow::bail!(
+                read_only: false, ..
+            } => anyhow::bail!(
                 "--mount '{spec}' requests rw, but a transient directory snapshot is read-only. \
                  Writes to the snapshot would not reach the host directory. Use a sized disk \
                  (`HOST:/GUEST:SIZE:rw`) or register a persistent machine volume."
-            );
+            ),
+            super::shared::VolumeSpec::Disk {
+                read_only: false, ..
+            } if !grants.writable_disk_images => anyhow::bail!(
+                "--mount '{spec}' requests a writable disk image, which --profile {name} does not grant"
+            ),
+            super::shared::VolumeSpec::DirShare {
+                read_only: true, ..
+            }
+            | super::shared::VolumeSpec::Disk { .. } => {}
         }
     }
 
@@ -143,6 +150,47 @@ mod tests {
             validate_prod_run(&args).is_ok(),
             "--prod with no command of its own is not refused here"
         );
+    }
+
+    const PINNED_IMAGE: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A production run can persist data: a writable disk image is the
+    /// guest's own ext4 file, so `--prod` accepts it under the default
+    /// profile without unsealing anything.
+    #[test]
+    fn prod_accepts_a_writable_disk_image() {
+        let mut args = run_args(RunProfile::Standard);
+        args.argv.clear();
+        args.prod = true;
+        args.image = Some(PINNED_IMAGE.to_string());
+        args.mounts.push("/h/state.img:/data:20G:rw".to_string());
+        validate_run_profile(&args).expect("--prod must accept a writable disk image");
+    }
+
+    /// What `--prod` gains is the disk, not the directory: a writable
+    /// directory share is refused exactly as it is without `--prod`.
+    #[test]
+    fn prod_still_refuses_a_writable_directory_share() {
+        let mut args = run_args(RunProfile::Standard);
+        args.argv.clear();
+        args.prod = true;
+        args.image = Some(PINNED_IMAGE.to_string());
+        args.mounts.push("/h/src:/work:rw".to_string());
+        let message = validate_run_profile(&args)
+            .expect_err("--prod must refuse a writable directory share")
+            .to_string();
+        assert!(message.contains("directory snapshot"), "{message}");
+    }
+
+    /// Restrictive refuses every `--mount`, a writable disk image included.
+    #[test]
+    fn restrictive_refuses_a_writable_disk_image() {
+        let mut args = run_args(RunProfile::Restrictive);
+        args.mounts.push("/h/state.img:/data:20G:rw".to_string());
+        let message = validate_run_profile(&args)
+            .expect_err("restrictive must refuse any mount")
+            .to_string();
+        assert!(message.contains("does not allow --mount"), "{message}");
     }
 
     #[test]

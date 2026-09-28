@@ -758,7 +758,8 @@ mod tests {
     #[derive(Default)]
     struct Routing {
         routes: Vec<mvm_contract::policy::routes::EgressRoute>,
-        approver: Option<Arc<dyn crate::supervisor::egress_approval::EgressApprover>>,
+        approver: Option<Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>>,
+        approval_required: std::collections::BTreeSet<String>,
     }
 
     /// [`assemble`] with the gate carrying `routing.routes`, and the egress
@@ -846,7 +847,8 @@ mod tests {
         let service = match routing.approver {
             Some(approver) => service.with_approver(approver),
             None => service,
-        };
+        }
+        .with_approval_required(routing.approval_required);
 
         Assembled {
             service: Arc::new(service),
@@ -885,29 +887,97 @@ mod tests {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
-            if let Some(end) = super::super::find_subslice(&buf, b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
-                if head.contains("transfer-encoding: chunked") {
-                    if buf.ends_with(b"0\r\n\r\n") {
-                        return buf;
-                    }
-                } else {
-                    let declared = head
-                        .split("\r\n")
-                        .filter_map(|line| line.split_once(':'))
-                        .find(|(name, _)| name.trim() == "content-length")
-                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if buf.len() >= end + 4 + declared {
-                        return buf;
-                    }
-                }
+            if message_complete(&buf) {
+                return buf;
             }
             match io.read(&mut chunk) {
                 Ok(0) | Err(_) => return buf,
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
+    }
+
+    /// Whether `buf` holds one whole HTTP/1.1 message, by the message's own
+    /// framing: a head, then either `Content-Length` bytes of body or a
+    /// chunked body walked chunk by chunk to its terminating chunk.
+    ///
+    /// Walking the chunks is the point. Asking whether the bytes so far end
+    /// in `0\r\n\r\n` also says yes to a head whose last header value ends in
+    /// `0` — `user-agent: mvm/0.18.0` is one — and to a chunk whose data ends
+    /// in `0\r\n`. A peer that decides it has the whole message there answers
+    /// and closes with the body still in flight, and the sender's next write
+    /// fails with a reset.
+    fn message_complete(buf: &[u8]) -> bool {
+        let Some(end) = super::super::find_subslice(buf, b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&buf[..end]);
+        let mut chunked = false;
+        let mut declared = 0_usize;
+        // The first line is the request or status line, and a request line
+        // in absolute form carries a `:` of its own.
+        for (name, value) in head
+            .split("\r\n")
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+        {
+            let (name, value) = (name.trim(), value.trim());
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                chunked = value.eq_ignore_ascii_case("chunked");
+            } else if name.eq_ignore_ascii_case("content-length") {
+                declared = value.parse().expect("content-length is a decimal length");
+            }
+        }
+        let mut body = &buf[end + 4..];
+        if !chunked {
+            return body.len() >= declared;
+        }
+        loop {
+            match mvm_http::parse::next_chunk(body).expect("the chunked body is well formed") {
+                mvm_http::parse::ChunkStep::Data { consumed, .. } => body = &body[consumed..],
+                mvm_http::parse::ChunkStep::End { .. } => return true,
+                mvm_http::parse::ChunkStep::Incomplete => return false,
+            }
+        }
+    }
+
+    /// The head the forward leg writes, byte for byte, when the build's
+    /// version ends in `0`: `user-agent` is the last header it sends.
+    const HEAD_ENDING_IN_ZERO: &[u8] = b"POST /v1/messages HTTP/1.1\r\nhost: api.bound.test\r\nconnection: close\r\naccept: */*\r\ntransfer-encoding: chunked\r\nauthorization: Bearer sk-live-real-value\r\naccept-encoding: identity\r\nuser-agent: mvm/0.18.0\r\n\r\n";
+
+    #[test]
+    fn a_chunked_head_ending_in_a_zero_is_not_a_whole_message() {
+        assert!(HEAD_ENDING_IN_ZERO.ends_with(b"0\r\n\r\n"));
+        assert!(
+            !message_complete(HEAD_ENDING_IN_ZERO),
+            "the head alone is not the message"
+        );
+        let with_body = [HEAD_ENDING_IN_ZERO, b"9\r\n{\"a\":\"b\"}\r\n"].concat();
+        assert!(!message_complete(&with_body), "no terminating chunk yet");
+        let whole = [with_body.as_slice(), b"0\r\n\r\n"].concat();
+        assert!(message_complete(&whole));
+    }
+
+    #[test]
+    fn a_chunk_whose_data_ends_in_a_zero_is_not_the_terminator() {
+        let head = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+        // One chunk of four bytes, `x0\r\n`, and nothing after it.
+        let partial = [head.as_slice(), b"4\r\nx0\r\n\r\n"].concat();
+        assert!(partial.ends_with(b"0\r\n\r\n"));
+        assert!(!message_complete(&partial));
+        let whole = [partial.as_slice(), b"0\r\n\r\n"].concat();
+        assert!(message_complete(&whole));
+    }
+
+    #[test]
+    fn a_content_length_message_is_whole_at_its_declared_length() {
+        let head = b"POST / HTTP/1.1\r\nHost: api.bound.test\r\nContent-Length: 9\r\n\r\n";
+        assert!(!message_complete(&head[..head.len() - 2]));
+        assert!(!message_complete(&[head.as_slice(), b"{\"a\""].concat()));
+        assert!(message_complete(
+            &[head.as_slice(), b"{\"a\":\"b\"}"].concat()
+        ));
+        assert!(message_complete(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n"));
     }
 
     /// Drive one request through a terminated TLS flow, exactly as an

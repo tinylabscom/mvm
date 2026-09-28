@@ -33,9 +33,9 @@ pub const FC_CI_ASSETS_VERSION: &str = "v1.15";
 /// boot into a 404; a copy left behind makes CI validate a different image from
 /// the one users receive, which is what `xtask check-image-lock` refuses.
 ///
-/// The build-time override stays because `nix/images/default-tenant/flake.nix`
-/// reads `MVM_BOOT_IMAGE_TAG`: a build can point at an unpublished tag without
-/// editing the lock, and the lock is what every unset build gets.
+/// The build-time override `MVM_BOOT_IMAGE_TAG` stays so a build can point at
+/// an unpublished tag without editing the lock; the lock is what every unset
+/// build gets.
 pub fn default_boot_image_tag() -> &'static str {
     match option_env!("MVM_BOOT_IMAGE_TAG") {
         Some(tag) => tag,
@@ -693,6 +693,21 @@ pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// Per-VM Unix-socket directory for a named VM.
 pub fn vm_socket_dir(name: &str) -> std::path::PathBuf {
     vm_socket_dir_at(&vm_state_dir(name))
+}
+
+/// File name of the runtime-approval socket in a VM's socket directory.
+pub const VM_APPROVAL_SOCKET: &str = "approval.sock";
+
+/// Where the operator's approval broker listens for a VM whose state lives at
+/// `state_dir`: the foreground `mvmctl` binds it, the VM's network endpoint
+/// connects to it when a decision is `ask`.
+pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
+}
+
+/// [`vm_approval_socket_at`] for a named VM.
+pub fn vm_approval_socket(name: &str) -> std::path::PathBuf {
+    vm_approval_socket_at(&vm_state_dir(name))
 }
 
 /// libkrun's per-port vsock listener socket: `<socket-dir>/vsock-<port>.sock`.
