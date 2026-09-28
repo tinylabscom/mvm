@@ -410,6 +410,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
                     sigv4: None,
+                    inject: Default::default(),
                     provider: provider.map(str::to_string),
                     approve: Default::default(),
                 },

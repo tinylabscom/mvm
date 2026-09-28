@@ -40,3 +40,10 @@ path = "fuzz_targets/fuzz_egress_routes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_substitution_positions"
+path = "fuzz_targets/fuzz_substitution_positions.rs"
+test = false
+doc = false
+bench = false

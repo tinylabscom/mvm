@@ -201,6 +201,7 @@ fn build_service(
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec![bound_host.to_string()],
                 sigv4: None,
+                inject: Default::default(),
                 provider: None,
                 approve: Default::default(),
             },

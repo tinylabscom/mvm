@@ -30,7 +30,9 @@ It follows the private-range default deny, which landed separately.
   - a parsed `--allow-endpoint` spec always builds a valid route.
 
   It ran for 60 s locally (3.1M executions) with no failure, and is wired into
-  `security.yml`.
+  `security.yml`. `fuzz_substitution_positions` additionally exercises the
+  four injection positions, malformed placeholders, position mismatches, and
+  the no-secret-on-error invariant; it is registered in the same workflow.
 - **Signed plan.** Routes ride on `NetworkPolicy` as `routes` in both
   variants, serialised only when present, so plans without routes are
   byte-identical. `EgressGate::from_network_policy` validates them and fails
@@ -56,9 +58,18 @@ It follows the private-range default deny, which landed separately.
 - **Manifest.** `[[network.routes]]` is read from the run's local manifest. A
   flag naming a destination the manifest already routes is refused, because
   composition only narrows.
-- **Not yet on persistent machines.** `machine run --name`/`-d` and
-  `machine create --manifest` refuse routes, because `MachineSpec` does not
-  record them yet.
+- **Persistent machines.** `machine run --name`/`-d` and
+  `machine create --manifest` store validated endpoint routes in
+  `MachineSpec`. Drift checks compare them, restart reconstructs the network
+  policy from them, and `machine inspect` renders them.
+- **Injection modes.** `secret set --inject` accepts `header`, `query_param`,
+  `url_path`, and `basic_auth`, records the selected mode in binding metadata,
+  and validates that it is compatible with the provider's authentication
+  type. Admission carries that mode into the signed plan and refuses tampered
+  or incompatible metadata. The host endpoint substitutes the placeholder
+  only in the selected request position, refuses missing, misplaced, or
+  repeated placeholders, and registers encoded wire forms with the reflected
+  credential scrubber.
 
 ## Live verification (macOS 26, HVF)
 
@@ -73,9 +84,11 @@ because the certificate covered the intercepted host.
 | `GET /headers` | 502 | refused |
 | `GET /get/%2e%2e/headers` | 502 | refused |
 
-## Not in this change
+## Validation
 
-- **Injection modes** (`query_param`, `url_path`, `basic_auth`). These change
-  the secret binding shape and the substitution path that #3713's open PR also
-  touches, so they follow once that merges.
-- **Routes on persistent machines.**
+- focused contract, binding, runtime persistence, client launch, CLI,
+  admission, proxy, and hostd suites;
+- workspace check and zero-warning workspace Clippy;
+- Linux- and feature-gated cross-checks plus `check-single-network-path`;
+- the host workspace suite split around two pre-existing builder-environment
+  tests that wait indefinitely when local libkrun prerequisites are absent.

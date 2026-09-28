@@ -10,6 +10,16 @@
 
 ## In progress
 
+- [x] **Complete the egress route model — issue #3712.** Secret bindings now
+      durably select `header`, `query_param`, `url_path`, or `basic_auth`;
+      admission validates the authentication pairing, and the host endpoint
+      substitutes only in the selected request position while extending
+      reflected-secret scrubbing to encoded wire forms. Persistent machines
+      store endpoint routes in `MachineSpec`, include them in drift checks,
+      reconstruct their policy on restart, and expose them through inspect.
+      Position fuzzing joins the existing route fuzzer in the security
+      workflow. See `specs/sprint/delivery/3712-egress-route-model.md`.
+
 - [x] **Composable policy files and authored profiles — issue #3715.**
       Rust-derived policy/profile schema, user and project discovery,
       `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower

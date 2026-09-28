@@ -150,16 +150,17 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
 - [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
-      — `SecretRef.inject` declares the mode; the position parser refuses a
-      placeholder outside its binding before anything forwards; basic_auth is
-      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
-      keyholder tests
+      — `secret set --inject` records the mode durably, admission validates the
+      mode/authentication pairing, and the host endpoint substitutes only in
+      the selected request position; response scrubbing covers every encoded
+      wire representation and `fuzz_substitution_positions` exercises the
+      position parser and fail-closed cases
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
       answered through PS-07's approval supervisor;
-      `--allow-endpoint` and `[[network.routes]]` (transient runs; persistent
-      machines refuse routes for now)
+      `--allow-endpoint` and `[[network.routes]]`; persistent runs record the
+      validated routes in `MachineSpec`
 - [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
       — one classifier (`mvm_contract::policy::restricted_address`) for every
       connect, datagram, DNS answer and forward-leg dial; metadata, loopback,
@@ -169,7 +170,9 @@ Security-bearing gaps first, then the foundations the UX needs:
       through the gate's recorded answer
 - [x] enforcement only in `EgressGate`; every decision audited with route id and rule
       — `host.route.decided { route, rule, outcome, destination, method }`
-- [ ] endpoint routes recorded on persistent machines (`MachineSpec`)
+- [x] endpoint routes recorded on persistent machines (`MachineSpec`)
+      — restart reconstructs the signed network policy from stored routes,
+      drift comparison includes them, and `machine inspect` renders them
 
 ### PS-03 — Credential injection UX (#3713)
 - [x] `--secret NAME[:HOST,...]` on `run` and `machine run` (finish #3333), fail-closed before boot
@@ -483,6 +486,12 @@ issue #3731 carries the same status as a comment.
 | #3798 | PS-05 (#3715) | composable policy groups/profiles and resolved manifests; security audit fixes added; focused checks, Clippy, and host workspace tests validated (one parallel image-lock race passed on serial rerun); Linux and required-feature gates pending CI |
 | mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
 
+### Resumed after the snapshot (2026-09-28)
+
+| Branch | Workstream | State |
+|---|---|---|
+| `feat/issue-3712-egress-routes` | PS-02 (#3712) | Completed durable injection modes and persistent-machine endpoint routes; focused suites, host workspace split, workspace check/Clippy, gated-target compilation, and the single-network-path invariant are green |
+
 ### Stopped mid-flight (2026-09-27)
 
 All program agents were stopped at the user's request on 2026-09-27. Their
@@ -495,7 +504,7 @@ every branch needs a rebase onto main, the full gates, and a PR.
 | `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
 | `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
 | `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
-| `feat/egress-injection-modes` | PS-02 (#3712) | `wip:` only (`query_param` / `url_path` / `basic_auth`) |
+| `feat/egress-injection-modes` | PS-02 (#3712) | WIP snapshot folded into `feat/issue-3712-egress-routes` and completed on 2026-09-28 |
 | `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
 | `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
 | `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |

@@ -482,6 +482,13 @@ pub fn validate_binding_meta(
              (e.g. `*.example.com`) instead"
         )));
     }
+    if !meta.inject.admits(meta.auth_type) {
+        return Err(invalid(&format!(
+            "injection mode {} is incompatible with authentication type {:?}",
+            meta.inject.label(),
+            meta.auth_type
+        )));
+    }
     match (meta.auth_type, &meta.sigv4) {
         (AuthType::Sigv4, None) => Err(invalid("sigv4 auth type requires sigv4 scope params")),
         (AuthType::Sigv4, Some(p))
@@ -541,6 +548,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
         }
@@ -1059,6 +1067,7 @@ mod tests {
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: None,
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
         };
@@ -1068,6 +1077,7 @@ mod tests {
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: Some(sigv4.clone()),
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
         };
@@ -1077,10 +1087,21 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.example.com".into()],
             sigv4: Some(sigv4),
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
         };
         assert!(validate_binding_meta("local", "k", &stray).is_err());
+
+        let incompatible = SecretBindingMeta {
+            auth_type: AuthType::Hmac,
+            allowed_hosts: vec!["api.example.com".into()],
+            sigv4: None,
+            inject: mvm_contract::ir::InjectionMode::QueryParam,
+            provider: None,
+            approve: Default::default(),
+        };
+        assert!(validate_binding_meta("local", "k", &incompatible).is_err());
     }
 
     // ── No-leak invariants across error surfaces ──────────────────────

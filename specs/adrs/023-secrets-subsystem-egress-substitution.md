@@ -93,7 +93,11 @@ limits, not holes the design closes.
 ### Where the destinations come from
 
 `mvmctl secret set` records a secret's destination allow-list and auth type in
-the host binding store. A run binds a stored secret with `--secret
+the host binding store. It also records one injection position selected with
+`--inject header|query_param|url_path|basic_auth`; `header` is the default for
+existing bindings. URL values are percent-encoded, Basic credentials are
+decoded/substituted/re-encoded, and a placeholder in any position other than
+the one its binding declares is refused before forwarding. A run binds a stored secret with `--secret
 NAME[:HOST,...]` on `mvmctl run` / `mvmctl machine run`, through a `[secrets]`
 table in the project's `mvm.toml` (names and destinations only; the schema has
 no field for a value), or through a Workload IR declaration. A flag naming a

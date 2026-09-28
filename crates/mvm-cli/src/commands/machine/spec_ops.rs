@@ -72,6 +72,31 @@ pub(super) fn enforced_cpu_line(
     ))
 }
 
+pub(super) fn endpoint_routes_line(
+    routes: &[mvm_contract::policy::routes::EgressRoute],
+) -> Option<String> {
+    (!routes.is_empty()).then(|| {
+        routes
+            .iter()
+            .map(|route| {
+                let rule_label = if route.rules.len() == 1 {
+                    "rule"
+                } else {
+                    "rules"
+                };
+                format!(
+                    "{}={}:{} ({} {rule_label})",
+                    route.id,
+                    route.host,
+                    route.port,
+                    route.rules.len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
 pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     let spec = load_machine_spec(&args.name)?;
     let enforced = mvm_client::enforced_grants_of(&spec.name);
@@ -99,6 +124,9 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         println!("health: {}", health_cell(readiness.as_ref()));
         println!("net: {}", spec.net);
         println!("allow-host: {}", spec.allow_host.join(","));
+        if let Some(routes) = endpoint_routes_line(&spec.routes) {
+            println!("endpoint-routes: {routes}");
+        }
         println!("cpus: {}", spec.cpus);
         println!("memory: {}", spec.memory);
         if let Some(mem_initial) = spec.mem_initial.as_deref() {

@@ -33,11 +33,11 @@ Last updated: 2026-09-29
     - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
     - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
     - [x] command override / guest env / template sources in the in-process launcher (persistent launch on the CLI's start); in-VM function dispatch (`entrypoint.call`, `session.*` over `mvm_client::entrypoint`); log follow (`machine.logs.stream.*`, ABI 1.3); live-boot SDK scenario on HVF
-  - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
+  - [x] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
     - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
     - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
-    - [ ] injection modes (`query_param`, `url_path`, `basic_auth`)
-    - [ ] endpoint routes on persistent machines
+    - [x] injection modes (`query_param`, `url_path`, `basic_auth`), with durable binding metadata, admission validation, fail-closed host substitution, response scrubbing, and position fuzzing
+    - [x] endpoint routes on persistent machines, including stored-spec drift, restart policy reconstruction, and inspect output
   - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
     - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
     - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding

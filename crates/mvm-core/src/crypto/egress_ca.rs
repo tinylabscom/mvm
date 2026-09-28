@@ -333,6 +333,7 @@ mod tests {
                         auth_type: mvm_contract::ir::AuthType::Bearer,
                         allowed_hosts: hosts,
                         sigv4: None,
+                        inject: Default::default(),
                         provider: None,
                         approve: Default::default(),
                     },
