@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import math
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from mvm import _hostlib
 from mvm._errors.types import HostLibraryError, MvmTransportError
@@ -22,6 +23,9 @@ from mvm._hostabi.methods import (
     GUEST_PROC_STREAM_CLOSE,
     GUEST_PROC_STREAM_NEXT,
     GUEST_PROC_STREAM_OPEN,
+    MACHINE_LOGS_STREAM_CLOSE,
+    MACHINE_LOGS_STREAM_NEXT,
+    MACHINE_LOGS_STREAM_OPEN,
 )
 
 #: Exit code reported for a process whose wait ran out of time. It matches
@@ -195,3 +199,75 @@ def stream_process(
                 # We are already unwinding with the error that matters; a
                 # failed close must not replace it.
                 pass
+
+
+#: How long one ``machine.logs.stream.next`` call waits for output before
+#: returning an empty batch, in milliseconds. Long enough that a quiet machine
+#: costs a handful of calls a minute, short enough that closing the iterator
+#: is not held up for long.
+_FOLLOW_WAIT_MS = 5000
+
+
+def _stream_id(opened: Any, error: ErrorFactory) -> int:
+    stream = opened.get("stream") if isinstance(opened, dict) else None
+    if not isinstance(stream, int) or isinstance(stream, bool):
+        raise error(f"host library opened a stream without an id: {opened!r}")
+    return stream
+
+
+def follow_output(
+    vm_id: str,
+    *,
+    tail_lines: int | None,
+    error: ErrorFactory,
+) -> Iterator[str]:
+    """A machine's console output as text, following it as it is written.
+
+    Opens the stream when iteration starts, not when this is called, so an
+    iterator nobody reads holds nothing open. Chunks are decoded
+    incrementally, so a character split across two chunks still decodes. The
+    stream is closed when the machine's output ends or the iterator is closed,
+    including by leaving a ``for`` loop early.
+    """
+    request: dict[str, Any] = {"id": vm_id, "follow": True, "streams": ["stdout", "stderr"]}
+    if tail_lines is not None:
+        request["tail_lines"] = tail_lines
+
+    def chunks() -> Iterator[str]:
+        stream = _stream_id(_hostlib.call(MACHINE_LOGS_STREAM_OPEN, request), error)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        finished = False
+        try:
+            while True:
+                batch = _hostlib.call(
+                    MACHINE_LOGS_STREAM_NEXT, {"stream": stream, "wait_ms": _FOLLOW_WAIT_MS}
+                )
+                events = batch.get("events") if isinstance(batch, dict) else None
+                done = batch.get("done") if isinstance(batch, dict) else None
+                if not isinstance(events, list) or not isinstance(done, bool):
+                    raise error(f"host library returned a malformed stream batch: {batch!r}")
+                for event in events:
+                    data = decode_bytes(
+                        event.get("data_b64") if isinstance(event, dict) else None,
+                        "data_b64",
+                        error,
+                    )
+                    text = decoder.decode(data)
+                    if text:
+                        yield text
+                if done:
+                    finished = True
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        yield tail
+                    return
+        finally:
+            if not finished:
+                try:
+                    _hostlib.call(MACHINE_LOGS_STREAM_CLOSE, {"stream": stream})
+                except (HostLibraryError, MvmTransportError):
+                    # Closing is cleanup; whatever ended the iteration is what
+                    # the caller needs to see.
+                    pass
+
+    return chunks()

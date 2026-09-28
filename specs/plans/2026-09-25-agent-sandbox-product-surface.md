@@ -110,21 +110,41 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15):
       `MVM_HOSTLIB_PATH` → packaged in the SDK → beside `mvmctl`; `mvmctl run
       --mode live` sets the variable to the library beside itself
-- [ ] the in-process launcher accepts a command override and guest
+- [x] the in-process launcher accepts a command override and guest
       environment, so `Machine.run(command=...)`, `Sandbox.create(command=...)`
       and the Obscura `BrowserSandbox` preset boot instead of refusing
-      (converge with the CLI's `machine run` front half; drive-plane plan WS2
-      "One admission path for every launcher")
-- [ ] template/manifest sources launch in-process, so a live `Sandbox.create`
+      — `LaunchRequest` carries `command`/`env`/`cwd`, validated against the
+      `env_hygiene` denylist when built; the command starts once the machine
+      is up and the launch returns its process token. A persistent launch
+      boots through the CLI's `start_machine_spec` admission, with the spec
+      reconcile, persist-then-boot, start record and TTL moved out of the CLI
+      into `mvm_client::launch::detached` for both callers. `Machine.run(image,
+      command)` again returns the command's result; `Machine.launch` returns a
+      handle
+- [x] template/manifest sources launch in-process, so a live `Sandbox.create`
       and the Chromium/Chrome `BrowserSandbox` presets can name a built
-      template rather than only an image
-- [ ] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
-      references) into a microVM through the library — today it raises a
-      typed transport error, and `MVM_NO_VM=1` dispatches in-language; the
-      invoke path has to move from the CLI into `mvm-client` first
-- [ ] `machine.logs` follow as a stream, like `guest.proc.stream.*`
-- [ ] a live-boot scenario driving an SDK through the real library against a
-      real guest (the BDD suite records calls in-process)
+      template rather than only an image — `LaunchSource::{from_template,
+      from_manifest}`: a template resolves by the name its image was built
+      under, through the same admission and signing as an image; nothing is
+      built on a launch
+- [x] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
+      references) into a microVM through the library — `entrypoint.call` and
+      `session.{start,call,stop,info}` over `mvm_client::entrypoint`, which
+      the CLI's `machine run --entrypoint` and `machine session` now call
+      too; one admission for transient calls and session starts. The host
+      runs the primary entrypoint only (the guest wire has no function
+      selector)
+- [x] `machine.logs` follow as a stream, like `guest.proc.stream.*` —
+      `machine.logs.stream.{open,next,close}` (ABI 1.3); `Machine.logs(follow=True)`
+- [x] a live-boot scenario driving an SDK through the real library against a
+      real guest (the BDD suite records calls in-process) — run on macOS
+      26.6.2 arm64 (HVF) against `docker.io/library/alpine:latest` and a built
+      slot: `Machine.run`, `Sandbox.create(image, command, env)` with exec,
+      files and logs, `Machine.launch(manifest=...)`, and an unbuilt
+      template's refusal, from Python; `Machine.run` and a sandbox from
+      TypeScript. Recorded in
+      `specs/sprint/delivery/3711-sdk-launcher-parity.md`; function dispatch
+      was not live-booted (no function workload is built on that host)
 
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
@@ -232,10 +252,19 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
-- [ ] per-session integrity summary (event count, chain head, Merkle root)
-- [ ] hash-chained session ledger (plan id, snapshot roots, image/kernel identity)
-- [ ] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
-- [ ] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
+- [x] per-session integrity summary (event count, chain head, Merkle root)
+      — a chain-signed `session.sealed` entry at exit, failed boot, and
+      persistent stop (`mvm_hostd::audit::session`)
+- [x] hash-chained session ledger (plan id, image/kernel identity) — derived
+      from the chain: each seal links the previous one, so there is no second
+      file or trust root
+- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
+      reserved and unset until PS-08 records snapshot lineage per session
+- [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
+      — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
+      `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`
+      and `NOT_FOUND`, each with its own exit status
+- [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
 - [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user

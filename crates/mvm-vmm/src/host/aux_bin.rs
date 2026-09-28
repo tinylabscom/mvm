@@ -24,8 +24,22 @@
 //! anything else (an installed layout, an exe-dir copy, an env override) is
 //! a hard error naming both sides and the exact command that fixes it. A
 //! stale helper is never returned.
+//!
+//! A contributor build goes one step further, because a root `cargo build`
+//! builds `mvmctl` and none of these helpers. Once `mvmctl` has declared
+//! [`allow_helper_builds_from_source`], a helper that belongs in the running
+//! binary's own `target/<profile>/` is built there with `cargo`, with an
+//! announcement, before it is spawned — when it is missing, and when any
+//! source cargo recorded for it is newer than it. The contract probe only
+//! catches a config shape that moved; this catches every other change, so a
+//! fix in a helper cannot be masked by a leftover binary. A helper that needs
+//! a macOS entitlement is signed right after the build. An official release, a
+//! library embedder, and any helper supplied from outside the checkout never
+//! reach `cargo`.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -33,17 +47,20 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
+use crate::host::codesign::{self, RequiredEntitlement, SignTarget};
 use crate::host::helper_contract;
+use source_build::{Built, SourceBuild};
 
 mod host_process;
+mod source_build;
 
 pub use host_process::{
-    CLI_BIN, CliSpawn, CliSpawnRefused, HostBinaryDirError, HostProcess, declare_host_binary_dir,
-    declare_library_embedder,
+    CLI_BIN, CliSpawn, CliSpawnRefused, HostBinaryDirError, HostProcess,
+    allow_helper_builds_from_source, declare_host_binary_dir, declare_library_embedder,
 };
 
-/// A per-VM helper binary, its path-override env var, and the cargo package
-/// that builds it (used when an automatic rebuild is required).
+/// A per-VM helper binary, its path-override env var, and how a source
+/// checkout builds it.
 pub struct AuxBin<'a> {
     /// Binary/file name, e.g. `mvm-hvf-supervisor`.
     pub bin: &'a str,
@@ -51,14 +68,91 @@ pub struct AuxBin<'a> {
     pub env_var: &'a str,
     /// Cargo package whose build produces this helper, e.g. `mvm-hostd`.
     pub rebuild_package: &'a str,
+    /// Features the `[[bin]]` lists under `required-features`. Cargo skips or
+    /// refuses the target without them.
+    pub required_features: &'a [&'a str],
+    /// The macOS entitlement the helper needs, applied as soon as this process
+    /// has built it.
+    pub entitlement: Option<RequiredEntitlement>,
+    /// Other `[[bin]]`s of the same package that the helper itself spawns
+    /// from its own directory. A source build builds them with it, since the
+    /// helper has no way to build them.
+    pub companions: &'a [&'a str],
+}
+
+impl<'a> AuxBin<'a> {
+    /// A helper that needs no features and no entitlement.
+    pub const fn new(bin: &'a str, env_var: &'a str, rebuild_package: &'a str) -> Self {
+        Self {
+            bin,
+            env_var,
+            rebuild_package,
+            required_features: &[],
+            entitlement: None,
+            companions: &[],
+        }
+    }
+
+    /// This helper, built with `features` enabled.
+    pub const fn requiring_features(mut self, features: &'a [&'a str]) -> Self {
+        self.required_features = features;
+        self
+    }
+
+    /// This helper, signed with `entitlement` after a build.
+    pub const fn signed_with(mut self, entitlement: RequiredEntitlement) -> Self {
+        self.entitlement = Some(entitlement);
+        self
+    }
+
+    /// This helper, built together with the `companions` it spawns.
+    pub const fn with_companions(mut self, companions: &'a [&'a str]) -> Self {
+        self.companions = companions;
+        self
+    }
 }
 
 /// Resolve `spec` to an on-disk binary. Never builds — a missing one is a
-/// hard error with a recovery hint. Availability probes (doctor, backend
-/// selection) use this; everything that is about to *spawn* the helper must
-/// use [`resolve_verified`].
+/// hard error with a recovery hint. Code that lists what is installed (the
+/// signing sweep) uses this; availability probes use [`available`], and
+/// everything that is about to *spawn* the helper must use
+/// [`resolve_verified`].
 pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
     resolve_for(spec, &HostProcess::current())
+}
+
+/// Whether `spec` can be spawned: it resolves now, or this process builds it
+/// from its checkout on first use. Backend selection and doctor ask this, so a
+/// contributor build does not report a backend unavailable for want of a
+/// helper it would build itself.
+pub fn available(spec: &AuxBin) -> bool {
+    let host = HostProcess::current();
+    let Ok(lookup) = lookup_for(spec, &host) else {
+        return false;
+    };
+    resolve_from(spec, &lookup).is_ok()
+        || SourceBuild::plan(spec, &lookup, &VerifyEnv::for_host(&host)).is_some()
+}
+
+/// Build `spec` from this process's checkout when this process may and the
+/// helper is missing or older than its sources; the built path, or `None` when
+/// nothing was built and ordinary resolution applies.
+///
+/// For helpers spawned without [`resolve_verified`] — the ones that do not
+/// answer the contract probe. [`resolve_verified`] does this itself.
+pub fn build_from_source_if_needed(spec: &AuxBin, host: &HostProcess) -> Result<Option<PathBuf>> {
+    let lookup = lookup_for(spec, host)?;
+    Ok(build_if_needed(spec, &lookup, &VerifyEnv::for_host(host))?.map(|built| built.path))
+}
+
+fn build_if_needed(spec: &AuxBin, lookup: &Lookup, env: &VerifyEnv) -> Result<Option<Built>> {
+    let Some(build) = SourceBuild::plan(spec, lookup, env) else {
+        return Ok(None);
+    };
+    let Some(reason) = build.needed() else {
+        return Ok(None);
+    };
+    build.run(spec, env, reason).map(Some)
 }
 
 /// [`resolve`] on behalf of an explicitly described process.
@@ -82,6 +176,16 @@ pub(crate) fn resolve_verified_in(
     lookup: &Lookup,
     env: &VerifyEnv,
 ) -> Result<PathBuf> {
+    if let Some(built) = build_if_needed(spec, lookup, env)? {
+        return match probe_built_helper(&built.path, env.probe_timeout) {
+            ProbeOutcome::Answered(version)
+                if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
+            {
+                Ok(built.path)
+            }
+            stale => Err(build_did_not_fix(spec, &built.path, &stale, &built.command)),
+        };
+    }
     let resolved = resolve_from(spec, lookup)?;
     match probe_contract(&resolved, env.probe_timeout) {
         ProbeOutcome::Answered(version)
@@ -190,16 +294,25 @@ fn stale_detail(stale: &ProbeOutcome) -> String {
 
 /// Everything [`resolve_verified_in`] reads from the process, gathered into
 /// one struct so the verification rules are testable without mutating
-/// process-global env or invoking a real cargo build.
+/// process-global env, invoking a real cargo build, or running `codesign`.
 pub(crate) struct VerifyEnv {
     /// Root of the source checkout this binary was built from, when that
     /// root still looks like a checkout (a workspace `Cargo.toml` present).
     workspace_root: Option<PathBuf>,
     /// Build profile of the running exe, when its path reveals one.
     exe_profile: Option<BuildProfile>,
-    /// `cargo` used for an automatic rebuild.
+    /// The directory this process's helpers belong in
+    /// ([`HostProcess::binary_dir`]); a source build writes there.
+    binary_dir: Option<PathBuf>,
+    /// Whether this process may build helpers from its checkout
+    /// ([`HostProcess::builds_helpers_from_source`]).
+    source_builds: bool,
+    /// `cargo` used for an automatic build.
     cargo: PathBuf,
     probe_timeout: Duration,
+    signer: Box<dyn HelperSigner>,
+    /// Where the line announcing a helper build goes.
+    notice: Box<dyn Fn(&str)>,
 }
 
 impl VerifyEnv {
@@ -209,8 +322,47 @@ impl VerifyEnv {
         Self {
             workspace_root,
             exe_profile: host.build_profile(),
-            cargo: PathBuf::from("cargo"),
+            binary_dir: host.binary_dir(),
+            source_builds: host.builds_helpers_from_source(),
+            // The cargo that launched `cargo run`, when that is how this
+            // process started, so the helper is built by the same toolchain.
+            cargo: std::env::var_os("CARGO")
+                .filter(|cargo| !cargo.is_empty())
+                .map_or_else(|| PathBuf::from("cargo"), PathBuf::from),
             probe_timeout: PROBE_TIMEOUT,
+            signer: Box::new(Codesign),
+            // Stderr, above any live status line, so neither a JSON verb's
+            // stdout nor the spinner of the phase that needed the helper is
+            // torn by it.
+            notice: Box::new(|line| {
+                crate::host::ui::activity::println_above(&format!("[mvm] {line}"));
+            }),
+        }
+    }
+}
+
+/// Applies a helper's macOS entitlement once this process has built it. A
+/// seam so tests can observe the call without running `codesign`.
+pub(crate) trait HelperSigner {
+    fn sign(&self, helper: &Path, entitlement: RequiredEntitlement) -> Result<()>;
+}
+
+/// Ad-hoc signing through [`crate::host::codesign`]; nothing to do off macOS.
+struct Codesign;
+
+impl HelperSigner for Codesign {
+    fn sign(&self, helper: &Path, entitlement: RequiredEntitlement) -> Result<()> {
+        let target = SignTarget {
+            path: helper.to_path_buf(),
+            required: entitlement,
+        };
+        match codesign::sign_targets(std::slice::from_ref(&target)).first() {
+            Some(report) if !report.entitlements_present => bail!(
+                "built {} but `codesign` did not give it the {entitlement:?} entitlement it \
+                 needs to run; check that `codesign` works on this host",
+                helper.display()
+            ),
+            _ => Ok(()),
         }
     }
 }
@@ -249,34 +401,52 @@ fn recover_stale_helper(
         detail = stale_detail(stale),
         command = plan.command_line(),
     ));
-    plan.run(env)?;
+    plan.run(env, &format!("Rebuilding {}", spec.bin))?;
     let rebuilt = resolve_from(spec, lookup)?;
-    let mut rebuilt_probe = probe_contract(&rebuilt, env.probe_timeout);
-    if matches!(rebuilt_probe, ProbeOutcome::TimedOut) {
-        // A freshly linked macOS executable can miss its first bounded launch
-        // deadline while the host validates it, then answer immediately on the
-        // next exec. Cargo already completed successfully, so give only this
-        // post-build timeout one retry; malformed and wrong-version answers
-        // still fail closed without retrying.
-        rebuilt_probe = probe_contract(&rebuilt, env.probe_timeout);
-    }
-    match rebuilt_probe {
+    match probe_built_helper(&rebuilt, env.probe_timeout) {
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
             Ok(rebuilt)
         }
-        still_stale => bail!(
-            "rebuilt {bin} at {path} {detail}; the rebuild did not produce a helper \
-             speaking contract version {required}. Run `{command}` yourself and check \
-             its output.",
-            bin = spec.bin,
-            path = rebuilt.display(),
-            detail = stale_detail(&still_stale),
-            required = helper_contract::HOST_HELPER_CONTRACT_VERSION,
-            command = plan.command_line(),
-        ),
+        still_stale => Err(build_did_not_fix(
+            spec,
+            &rebuilt,
+            &still_stale,
+            &plan.command_line(),
+        )),
     }
+}
+
+/// Probe a helper cargo has just produced.
+///
+/// A freshly linked macOS executable can miss its first bounded launch
+/// deadline while the host validates it, then answer immediately on the next
+/// exec. Cargo already completed successfully, so only this post-build timeout
+/// gets one retry; malformed and wrong-version answers still fail closed
+/// without retrying.
+fn probe_built_helper(helper: &Path, timeout: Duration) -> ProbeOutcome {
+    match probe_contract(helper, timeout) {
+        ProbeOutcome::TimedOut => probe_contract(helper, timeout),
+        answered => answered,
+    }
+}
+
+fn build_did_not_fix(
+    spec: &AuxBin,
+    helper: &Path,
+    stale: &ProbeOutcome,
+    command: &str,
+) -> anyhow::Error {
+    anyhow!(
+        "rebuilt {bin} at {path} {detail}; the rebuild did not produce a helper \
+         speaking contract version {required}. Run `{command}` yourself and check \
+         its output.",
+        bin = spec.bin,
+        path = helper.display(),
+        detail = stale_detail(stale),
+        required = helper_contract::HOST_HELPER_CONTRACT_VERSION,
+    )
 }
 
 /// The build command a person can run by hand: the package that produces the
@@ -289,11 +459,15 @@ fn manual_rebuild_command(spec: &AuxBin, exe_profile: Option<BuildProfile>) -> S
     format!("cargo build{flag} -p {} --bins", spec.rebuild_package)
 }
 
-/// One automatic rebuild of a stale helper.
+/// One automatic `cargo build` of a helper.
 #[derive(Debug, PartialEq, Eq)]
 struct RebuildPlan {
     root: PathBuf,
     args: Vec<String>,
+    /// The target directory cargo must write to, when that is fixed by where
+    /// the running binary lives rather than by whatever `CARGO_TARGET_DIR`
+    /// this process inherited.
+    target_dir: Option<PathBuf>,
 }
 
 impl RebuildPlan {
@@ -319,55 +493,109 @@ impl RebuildPlan {
         args.push("-p".to_string());
         args.push(spec.rebuild_package.to_string());
         args.push("--bins".to_string());
+        push_features(&mut args, spec.required_features);
         Some(Self {
             root: root.clone(),
             args,
+            target_dir: None,
         })
+    }
+
+    /// Build just `spec`'s binary, in `profile`, into the target directory
+    /// that holds `binary_dir`.
+    fn for_helper(spec: &AuxBin, root: &Path, binary_dir: &Path, profile: BuildProfile) -> Self {
+        let mut args = vec!["build".to_string()];
+        if profile == BuildProfile::Release {
+            args.push("--release".to_string());
+        }
+        args.extend(["-p".to_string(), spec.rebuild_package.to_string()]);
+        push_bins(&mut args, spec);
+        push_features(&mut args, spec.required_features);
+        Self {
+            root: root.to_path_buf(),
+            args,
+            target_dir: binary_dir.parent().map(Path::to_path_buf),
+        }
     }
 
     fn command_line(&self) -> String {
         format!("cargo {}", self.args.join(" "))
     }
 
-    fn run(&self, env: &VerifyEnv) -> Result<()> {
-        let output = Command::new(&env.cargo)
+    /// Run the build under a status line named `label`. The line appears
+    /// only once the build has run long enough to be noticed, so a cargo
+    /// freshness check that finds nothing to do leaves no trace; while it
+    /// runs, it shows cargo's latest progress line — including cargo waiting
+    /// on another build's lock, which would otherwise look like a hang.
+    fn run(&self, env: &VerifyEnv, label: &str) -> Result<()> {
+        let activity = crate::host::ui::activity::start(label);
+        let mut command = Command::new(&env.cargo);
+        command
             .args(&self.args)
             .current_dir(&self.root)
+            .env("CARGO_TERM_COLOR", "never")
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                anyhow!(
-                    "could not run `{}` ({e}); run it yourself from {}",
-                    self.command_line(),
-                    self.root.display(),
-                )
-            })?;
-        if output.status.success() {
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(dir) = &self.target_dir {
+            command.env("CARGO_TARGET_DIR", dir);
+        }
+        let mut child = command.spawn().map_err(|e| {
+            anyhow!(
+                "could not run `{}` ({e}); run it yourself from {}",
+                self.command_line(),
+                self.root.display(),
+            )
+        })?;
+        let mut tail = VecDeque::with_capacity(FAILURE_TAIL_LINES);
+        if let Some(stderr) = child.stderr.take() {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                activity.set_detail(line);
+                if tail.len() == FAILURE_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line.to_string());
+            }
+        }
+        let status = child.wait().map_err(|e| {
+            anyhow!(
+                "waiting on `{}` failed ({e}); run it yourself from {}",
+                self.command_line(),
+                self.root.display(),
+            )
+        })?;
+        if status.success() {
+            activity.finish();
             return Ok(());
         }
-        let tail = [output.stdout, output.stderr]
-            .iter()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-            .collect::<Vec<_>>()
-            .concat();
-        let tail = tail
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
+        drop(activity);
         bail!(
-            "`{}` failed ({}) with:\n{tail}\nrun it yourself from {} and fix the errors",
+            "`{}` failed ({status}) with:\n{}\nrun it yourself from {} and fix the errors",
             self.command_line(),
-            output.status,
+            Vec::from(tail).join("\n"),
             self.root.display(),
         )
+    }
+}
+
+/// How many of cargo's last output lines a failed build reports.
+const FAILURE_TAIL_LINES: usize = 5;
+
+/// `--bin` for the helper and for each companion it spawns.
+fn push_bins(args: &mut Vec<String>, spec: &AuxBin) {
+    for bin in std::iter::once(spec.bin).chain(spec.companions.iter().copied()) {
+        args.extend(["--bin".to_string(), bin.to_string()]);
+    }
+}
+
+fn push_features(args: &mut Vec<String>, features: &[&str]) {
+    if !features.is_empty() {
+        args.push("--features".to_string());
+        args.push(features.join(","));
     }
 }
 
@@ -413,13 +641,29 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
     }
     bail!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
-         a source checkout run `cargo build --bins` (or `just \
-         payload::supervisors`), or set {env}=<path>.{hint}",
+         a source checkout build it with `{command}` (add `--release` to match a \
+         release build, or use `just payload::supervisors`), or set {env}=<path>.{hint}",
         bin = spec.bin,
         pkg = spec.rebuild_package,
+        command = manual_build_command(spec),
         env = spec.env_var,
         hint = missing_hint(spec.bin),
     )
+}
+
+/// The command that builds just `spec`, for a person to run. A root
+/// `cargo build --bins` is not it: that builds the root package's binaries,
+/// and every helper belongs to another package.
+fn manual_build_command(spec: &AuxBin) -> String {
+    let mut args = vec![
+        "cargo".to_string(),
+        "build".to_string(),
+        "-p".to_string(),
+        spec.rebuild_package.to_string(),
+    ];
+    push_bins(&mut args, spec);
+    push_features(&mut args, spec.required_features);
+    args.join(" ")
 }
 
 /// Ordered directories to search for a helper: the `MVM_AUX_BIN_DIR` override,
@@ -436,6 +680,16 @@ fn assemble_candidate_dirs(
     dirs.extend(exe_dir);
     dirs.extend(target_dirs);
     dirs
+}
+
+/// Whether `dir` names the same directory as one of `dirs`. Compared through
+/// symlinks, because the running executable's path is whatever it was invoked
+/// by, and a relative or linked spelling must not turn a checkout binary into a
+/// stranger.
+fn is_one_of(dir: &Path, dirs: &[PathBuf]) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let dir = canonical(dir);
+    dirs.iter().any(|candidate| canonical(candidate) == dir)
 }
 
 fn first_existing_bin(bin: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -550,16 +804,23 @@ pub fn build_profile_of_dir(dir: &Path) -> Option<BuildProfile> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::os::unix::fs::PermissionsExt;
+    use std::rc::Rc;
 
     use super::*;
 
     fn hvf_spec() -> AuxBin<'static> {
-        AuxBin {
-            bin: "mvm-hvf-supervisor",
-            env_var: "MVM_HVF_SUPERVISOR_PATH",
-            rebuild_package: "mvm-hostd",
-        }
+        AuxBin::new("mvm-hvf-supervisor", "MVM_HVF_SUPERVISOR_PATH", "mvm-hostd")
+            .signed_with(RequiredEntitlement::Hypervisor)
+    }
+
+    fn endpoint_spec() -> AuxBin<'static> {
+        AuxBin::new(
+            "mvm-network-endpoint",
+            "MVM_SUBSTITUTION_ENDPOINT_PATH",
+            "mvm-hostd",
+        )
     }
 
     fn write_exe(path: &Path, body: &str) {
@@ -635,8 +896,100 @@ mod tests {
         VerifyEnv {
             workspace_root,
             exe_profile: None,
+            binary_dir: None,
+            source_builds: false,
             cargo: PathBuf::from("cargo"),
             probe_timeout: PROBE_TIMEOUT,
+            signer: Box::new(RecordingSigner::default()),
+            notice: Box::new(|_| {}),
+        }
+    }
+
+    /// Records every signing request instead of running `codesign`.
+    #[derive(Default, Clone)]
+    struct RecordingSigner(Rc<RefCell<Vec<(PathBuf, RequiredEntitlement)>>>);
+
+    impl HelperSigner for RecordingSigner {
+        fn sign(&self, helper: &Path, entitlement: RequiredEntitlement) -> Result<()> {
+            self.0
+                .borrow_mut()
+                .push((helper.to_path_buf(), entitlement));
+            Ok(())
+        }
+    }
+
+    /// A contributor `mvmctl` running from `root/target/<profile>`, with the
+    /// build, the announcement and the signer all observable.
+    struct SourceFixture {
+        env: VerifyEnv,
+        notices: Rc<RefCell<Vec<String>>>,
+        signed: RecordingSigner,
+        cargo_log: PathBuf,
+    }
+
+    fn source_fixture(tmp: &Path, root: &Path, profile: &str, cargo_body: &str) -> SourceFixture {
+        let cargo = tmp.join("cargo");
+        write_exe(&cargo, cargo_body);
+        let notices = Rc::new(RefCell::new(Vec::new()));
+        let signed = RecordingSigner::default();
+        let sink = Rc::clone(&notices);
+        let mut env = test_env(Some(root.to_path_buf()));
+        env.binary_dir = Some(root.join("target").join(profile));
+        env.exe_profile = build_profile_of_dir(&root.join("target").join(profile));
+        env.source_builds = true;
+        env.cargo = cargo;
+        env.signer = Box::new(signed.clone());
+        env.notice = Box::new(move |line| sink.borrow_mut().push(line.to_string()));
+        SourceFixture {
+            env,
+            notices,
+            signed,
+            cargo_log: tmp.join("cargo.log"),
+        }
+    }
+
+    /// A stand-in for `cargo` that logs its arguments and writes every named
+    /// `--bin` as a current-contract helper under `$CARGO_TARGET_DIR/<profile>`
+    /// — the directory a source build pins, never the process's inherited one.
+    fn building_cargo(log: &Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> '{log}'\n\
+             profile=debug\n\
+             bins=\n\
+             take_bin=\n\
+             for arg in \"$@\"; do\n\
+             \x20   if [ -n \"$take_bin\" ]; then bins=\"$bins $arg\"; take_bin=; fi\n\
+             \x20   if [ \"$arg\" = \"--release\" ]; then profile=release; fi\n\
+             \x20   if [ \"$arg\" = \"--bin\" ]; then take_bin=1; fi\n\
+             done\n\
+             mkdir -p \"$CARGO_TARGET_DIR/$profile\"\n\
+             for bin in $bins; do\n\
+             \x20   out=\"$CARGO_TARGET_DIR/$profile/$bin\"\n\
+             \x20   printf '#!/bin/sh\\necho \"%s contract-version={current}\"\\n' \"$bin\" > \"$out\"\n\
+             \x20   chmod +x \"$out\"\n\
+             done\n",
+            log = log.display(),
+            current = helper_contract::HOST_HELPER_CONTRACT_VERSION,
+        )
+    }
+
+    /// A stand-in for `cargo` that logs its arguments and changes nothing:
+    /// cargo finding every unit fresh.
+    fn fresh_cargo(log: &Path) -> String {
+        format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n", log.display())
+    }
+
+    fn cargo_invocations(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .map(|text| text.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    fn checkout_lookup(root: &Path) -> Lookup {
+        Lookup {
+            override_path: None,
+            dirs: vec![root.join("target/release"), root.join("target/debug")],
         }
     }
 
@@ -929,12 +1282,8 @@ mod tests {
         write_exe(&helper, "#!/bin/sh\n");
 
         for (exe_profile, expect_release) in [(Some(BuildProfile::Release), true), (None, false)] {
-            let env = VerifyEnv {
-                workspace_root: Some(root.clone()),
-                exe_profile,
-                cargo: PathBuf::from("cargo"),
-                probe_timeout: PROBE_TIMEOUT,
-            };
+            let mut env = test_env(Some(root.clone()));
+            env.exe_profile = exe_profile;
             let plan = RebuildPlan::new(&hvf_spec(), &helper, &env)
                 .unwrap_or_else(|| panic!("plan must exist for {exe_profile:?}"));
             assert_eq!(plan.args.contains(&"--release".to_string()), expect_release);
@@ -953,12 +1302,7 @@ mod tests {
     fn rebuild_plan_exists_only_for_checkout_target_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = scratch_checkout(tmp.path());
-        let env = VerifyEnv {
-            workspace_root: Some(root.clone()),
-            exe_profile: None,
-            cargo: PathBuf::from("cargo"),
-            probe_timeout: PROBE_TIMEOUT,
-        };
+        let env = test_env(Some(root.clone()));
 
         let in_checkout = root.join("target/release/mvm-hvf-supervisor");
         write_exe(&in_checkout, "#!/bin/sh\n");
@@ -969,10 +1313,7 @@ mod tests {
         write_exe(&elsewhere, "#!/bin/sh\n");
         assert_eq!(RebuildPlan::new(&hvf_spec(), &elsewhere, &env), None);
 
-        let no_root = VerifyEnv {
-            workspace_root: None,
-            ..env
-        };
+        let no_root = test_env(None);
         assert_eq!(RebuildPlan::new(&hvf_spec(), &in_checkout, &no_root), None);
     }
 
@@ -1094,7 +1435,8 @@ mod tests {
     }
 
     /// The recovery hint has to name a command that actually produces the
-    /// helper. Nothing builds it on demand, so a wrong hint is a dead end.
+    /// helper. Where nothing builds it on demand, a wrong hint is a dead end —
+    /// and a root `cargo build --bins` builds no helper at all.
     #[test]
     fn resolve_missing_helper_names_the_command_that_builds_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1107,7 +1449,11 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("cargo build --bins"), "{err}");
+        assert!(
+            err.contains("cargo build -p mvm-hostd --bin mvm-hvf-supervisor"),
+            "{err}"
+        );
+        assert!(!err.contains("cargo build --bins"), "{err}");
         assert!(err.contains("just payload::supervisors"), "{err}");
     }
 
@@ -1151,11 +1497,11 @@ mod tests {
     /// A helper name and override variable no real environment sets, so the
     /// lookup's answer depends only on the process description.
     fn declared_only_spec() -> AuxBin<'static> {
-        AuxBin {
-            bin: "mvm-declared-dir-probe-helper",
-            env_var: "MVM_DECLARED_DIR_PROBE_HELPER_PATH",
-            rebuild_package: "mvm-hostd",
-        }
+        AuxBin::new(
+            "mvm-declared-dir-probe-helper",
+            "MVM_DECLARED_DIR_PROBE_HELPER_PATH",
+            "mvm-hostd",
+        )
     }
 
     #[test]
@@ -1193,11 +1539,7 @@ mod tests {
 
     #[test]
     fn a_library_embedder_is_refused_mvmctl_as_a_helper() {
-        let spec = AuxBin {
-            bin: CLI_BIN,
-            env_var: "MVM_QEMU_BRIDGE_PATH",
-            rebuild_package: "mvmctl",
-        };
+        let spec = AuxBin::new(CLI_BIN, "MVM_QEMU_BRIDGE_PATH", "mvmctl");
         let host = HostProcess::undeclared().as_library_embedder();
 
         let err = lookup_for(&spec, &host)
@@ -1217,11 +1559,7 @@ mod tests {
 
     #[test]
     fn mvmctl_is_still_a_helper_for_mvmctl_and_other_helpers_for_an_embedder() {
-        let mvmctl = AuxBin {
-            bin: CLI_BIN,
-            env_var: "MVM_DECLARED_DIR_PROBE_CLI_PATH",
-            rebuild_package: "mvmctl",
-        };
+        let mvmctl = AuxBin::new(CLI_BIN, "MVM_DECLARED_DIR_PROBE_CLI_PATH", "mvmctl");
         assert!(lookup_for(&mvmctl, &HostProcess::undeclared()).is_ok());
         assert!(
             lookup_for(
@@ -1229,6 +1567,385 @@ mod tests {
                 &HostProcess::undeclared().as_library_embedder()
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_missing_helper_is_built_once_announced_signed_and_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "release", &building_cargo(&log));
+
+        let got = resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env).unwrap();
+
+        let built = root.join("target/release/mvm-hvf-supervisor");
+        assert_eq!(got, built);
+        assert_eq!(
+            cargo_invocations(&fixture.cargo_log),
+            vec!["build --release -p mvm-hostd --bin mvm-hvf-supervisor"]
+        );
+        let notices = fixture.notices.borrow();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("has not been built"), "{notices:?}");
+        assert!(
+            notices[0].contains("cargo build --release -p mvm-hostd --bin mvm-hvf-supervisor"),
+            "{notices:?}"
+        );
+        assert_eq!(
+            *fixture.signed.0.borrow(),
+            vec![(built, RequiredEntitlement::Hypervisor)]
+        );
+    }
+
+    /// Set `path`'s modification time `age` before now.
+    fn age(path: &Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
+    /// A current-contract helper under `root/target/<profile>/` whose dep-info
+    /// names one source file, with the source and lockfile an hour old.
+    fn helper_with_dep_info(root: &Path, profile: &str, bin: &str) -> (PathBuf, PathBuf) {
+        let helper = root.join("target").join(profile).join(bin);
+        write_exe(
+            &helper,
+            &answering_helper(bin, helper_contract::HOST_HELPER_CONTRACT_VERSION),
+        );
+        let source = root.join("crates/mvm-hostd/src/bin/helper main.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        std::fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+        let mut dep_info = helper.as_os_str().to_os_string();
+        dep_info.push(".d");
+        std::fs::write(
+            PathBuf::from(dep_info),
+            format!(
+                "{}: {}\n",
+                helper.display(),
+                source.display().to_string().replace(' ', "\\ ")
+            ),
+        )
+        .unwrap();
+        age(&source, Duration::from_secs(3600));
+        age(&root.join("Cargo.lock"), Duration::from_secs(3600));
+        (helper, source)
+    }
+
+    #[test]
+    fn a_helper_newer_than_its_sources_is_neither_built_nor_announced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let (helper, _) = helper_with_dep_info(&root, "debug", "mvm-hvf-supervisor");
+        let body = std::fs::read_to_string(&helper).unwrap();
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "debug", &fresh_cargo(&log));
+
+        let got = resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env).unwrap();
+
+        assert_eq!(got, helper);
+        assert_eq!(std::fs::read_to_string(&helper).unwrap(), body);
+        assert!(cargo_invocations(&fixture.cargo_log).is_empty());
+        assert!(fixture.notices.borrow().is_empty());
+        assert!(fixture.signed.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_helper_older_than_a_source_is_rebuilt_announced_and_signed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let (helper, source) = helper_with_dep_info(&root, "release", "mvm-hvf-supervisor");
+        age(&helper, Duration::from_secs(7200));
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "release", &building_cargo(&log));
+
+        let got = resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env).unwrap();
+
+        assert_eq!(got, helper);
+        assert_eq!(
+            cargo_invocations(&fixture.cargo_log),
+            vec!["build --release -p mvm-hostd --bin mvm-hvf-supervisor"]
+        );
+        let notices = fixture.notices.borrow();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("older than its sources"), "{notices:?}");
+        assert_eq!(
+            *fixture.signed.0.borrow(),
+            vec![(helper, RequiredEntitlement::Hypervisor)]
+        );
+        assert!(source.is_file());
+    }
+
+    #[test]
+    fn a_helper_cargo_left_no_record_for_is_handed_to_cargo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let helper = root.join("target/debug/mvm-network-endpoint");
+        write_exe(
+            &helper,
+            &answering_helper(
+                "mvm-network-endpoint",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            ),
+        );
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "debug", &fresh_cargo(&log));
+
+        let got =
+            resolve_verified_in(&endpoint_spec(), &checkout_lookup(&root), &fixture.env).unwrap();
+
+        assert_eq!(got, helper);
+        assert_eq!(
+            cargo_invocations(&fixture.cargo_log),
+            vec!["build -p mvm-hostd --bin mvm-network-endpoint"]
+        );
+        assert!(
+            fixture.signed.0.borrow().is_empty(),
+            "a helper needing no entitlement is never signed"
+        );
+    }
+
+    #[test]
+    fn a_changed_lockfile_makes_a_helper_out_of_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let (helper, _) = helper_with_dep_info(&root, "debug", "mvm-hvf-supervisor");
+        assert!(source_build::built_from_current_sources(&helper, &root));
+
+        std::fs::write(root.join("Cargo.lock"), "version = 4\n# bumped\n").unwrap();
+        age(&helper, Duration::from_secs(60));
+
+        assert!(!source_build::built_from_current_sources(&helper, &root));
+    }
+
+    #[test]
+    fn dep_info_inputs_read_every_prerequisite_and_unescape_spaces() {
+        let text = "/r/target/debug/h: /r/src/main.rs /r/My\\ Dir/lib.rs\n\n/r/src/main.rs:\n";
+        assert_eq!(
+            source_build::dep_info_inputs(text),
+            vec![
+                PathBuf::from("/r/src/main.rs"),
+                PathBuf::from("/r/My Dir/lib.rs"),
+            ]
+        );
+    }
+
+    fn host_agent_spec() -> AuxBin<'static> {
+        AuxBin::new("mvm-host-agent", "MVM_HOST_AGENT_PATH", "mvm-hostd")
+            .with_companions(&["mvm-signer-helper"])
+    }
+
+    #[test]
+    fn a_helper_is_built_together_with_the_companions_it_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "release", &building_cargo(&log));
+
+        let built = build_if_needed(&host_agent_spec(), &checkout_lookup(&root), &fixture.env)
+            .unwrap()
+            .expect("a missing helper is built");
+
+        assert_eq!(built.path, root.join("target/release/mvm-host-agent"));
+        assert!(root.join("target/release/mvm-signer-helper").is_file());
+        assert_eq!(
+            cargo_invocations(&fixture.cargo_log),
+            vec!["build --release -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper"]
+        );
+        assert_eq!(fixture.notices.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_missing_companion_is_reason_enough_to_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        helper_with_dep_info(&root, "debug", "mvm-host-agent");
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "debug", &building_cargo(&log));
+
+        assert!(
+            build_if_needed(&host_agent_spec(), &checkout_lookup(&root), &fixture.env)
+                .unwrap()
+                .is_some()
+        );
+        assert!(root.join("target/debug/mvm-signer-helper").is_file());
+    }
+
+    #[test]
+    fn nothing_is_built_for_a_process_without_source_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let marker = tmp.path().join("ran");
+        let mut fixture = source_fixture(tmp.path(), &root, "release", &marker_cargo(&marker));
+        fixture.env.source_builds = false;
+
+        assert!(
+            build_if_needed(&host_agent_spec(), &checkout_lookup(&root), &fixture.env)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_source_build_names_the_features_the_helper_requires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "debug", &building_cargo(&log));
+        let spec = AuxBin::new(
+            "mvm-libkrun-supervisor",
+            "MVM_LIBKRUN_SUPERVISOR_PATH",
+            "mvm-hostd",
+        )
+        .requiring_features(&["libkrun-sys"]);
+
+        resolve_verified_in(&spec, &checkout_lookup(&root), &fixture.env).unwrap();
+
+        assert_eq!(
+            cargo_invocations(&fixture.cargo_log),
+            vec!["build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys"]
+        );
+    }
+
+    #[test]
+    fn without_source_builds_a_missing_helper_gets_the_refusal_it_always_did() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let marker = tmp.path().join("ran");
+        let lookup = checkout_lookup(&root);
+        let expected = resolve_from(&hvf_spec(), &lookup).unwrap_err().to_string();
+
+        // A release build never declares source builds; a library embedder is
+        // refused them even when the declaration was made.
+        for host in [
+            HostProcess::undeclared(),
+            HostProcess::undeclared()
+                .allowing_helper_builds_from_source()
+                .as_library_embedder(),
+        ] {
+            let fixture = source_fixture(tmp.path(), &root, "release", &marker_cargo(&marker));
+            let env = VerifyEnv {
+                source_builds: host.builds_helpers_from_source(),
+                ..fixture.env
+            };
+
+            let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
+                .unwrap_err()
+                .to_string();
+
+            assert_eq!(err, expected);
+            assert!(err.contains("not found"), "{err}");
+            assert!(!marker.exists(), "no build may be attempted for {host:?}");
+            assert!(fixture.notices.borrow().is_empty());
+            assert!(fixture.signed.0.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_helper_supplied_from_outside_the_checkout_is_never_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let packaged = tmp.path().join("packaged");
+        std::fs::create_dir_all(&packaged).unwrap();
+        write_exe(
+            &packaged.join("mvm-hvf-supervisor"),
+            &answering_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            ),
+        );
+        let marker = tmp.path().join("ran");
+        let fixture = source_fixture(tmp.path(), &root, "release", &marker_cargo(&marker));
+        let lookup = Lookup {
+            override_path: None,
+            dirs: vec![packaged.clone(), root.join("target/release")],
+        };
+
+        let got = resolve_verified_in(&hvf_spec(), &lookup, &fixture.env).unwrap();
+
+        assert_eq!(got, packaged.join("mvm-hvf-supervisor"));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_binary_outside_its_checkout_target_never_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let marker = tmp.path().join("ran");
+        let mut fixture = source_fixture(tmp.path(), &root, "release", &marker_cargo(&marker));
+        fixture.env.binary_dir = Some(tmp.path().join("installed/bin"));
+
+        assert!(SourceBuild::plan(&hvf_spec(), &checkout_lookup(&root), &fixture.env).is_none());
+        assert!(resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env).is_err());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn mvmctl_itself_is_never_built_as_a_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let fixture = source_fixture(tmp.path(), &root, "release", "#!/bin/sh\nexit 1\n");
+        let spec = AuxBin::new(CLI_BIN, "MVM_QEMU_BRIDGE_PATH", "mvmctl");
+
+        assert!(SourceBuild::plan(&spec, &checkout_lookup(&root), &fixture.env).is_none());
+    }
+
+    #[test]
+    fn a_source_build_that_produces_nothing_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let fixture = source_fixture(tmp.path(), &root, "debug", &fresh_cargo(&log));
+
+        let err = resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("did not produce"), "{err}");
+        assert!(
+            err.contains("cargo build -p mvm-hostd --bin mvm-hvf-supervisor"),
+            "{err}"
+        );
+        assert!(fixture.signed.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_source_build_reports_cargo_output_and_signs_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let fixture = source_fixture(
+            tmp.path(),
+            &root,
+            "debug",
+            "#!/bin/sh\necho 'error: could not compile mvm-hostd' >&2\nexit 101\n",
+        );
+
+        let err = resolve_verified_in(&hvf_spec(), &checkout_lookup(&root), &fixture.env)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("could not compile mvm-hostd"), "{err}");
+        assert!(fixture.signed.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_source_build_writes_to_the_running_binarys_target_dir() {
+        let root = Path::new("/repo/mvm");
+        let plan = RebuildPlan::for_helper(
+            &hvf_spec(),
+            root,
+            &root.join("target/release"),
+            BuildProfile::Release,
+        );
+        assert_eq!(plan.target_dir, Some(root.join("target")));
+        assert_eq!(
+            plan.command_line(),
+            "cargo build --release -p mvm-hostd --bin mvm-hvf-supervisor"
         );
     }
 }

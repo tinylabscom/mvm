@@ -89,10 +89,12 @@ export function batch(
 }
 
 /** The `machine.run` reply for a booted machine. */
-export function runReply(name: string, buildMode: "dev" | "prod"): Record<string, unknown> {
-  return {
+export function runReply(name: string, buildMode: "dev" | "prod", process?: string): Record<string, unknown> {
+  const reply: Record<string, unknown> = {
     machine: { id: `id-${name}`, name, status: "running" },
     plan_id: "plan-0",
     build_mode: buildMode,
   };
+  if (process !== undefined) reply.process = process;
+  return reply;
 }

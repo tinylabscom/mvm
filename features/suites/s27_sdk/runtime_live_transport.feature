@@ -27,6 +27,22 @@ Feature: Runtime SDK live transport
     And I run the "TypeScript" SDK live-transport fixture
     Then the two recorded call traces are identical
 
+  Scenario Outline: a launch carries a built template, a command with its environment, and a followed log
+    When I run the "<language>" SDK launch fixture
+    Then the SDK fixture exits successfully
+    And the recorded host-library calls match the golden launch session
+    And every recorded call names a method the host library defines
+
+    Examples:
+      | language   |
+      | Python     |
+      | TypeScript |
+
+  Scenario: both languages launch identically
+    When I run the "Python" SDK launch fixture
+    And I run the "TypeScript" SDK launch fixture
+    Then the two recorded call traces are identical
+
   Scenario Outline: every recorded call names a method the host library defines
     When I run the "<language>" SDK live-transport fixture
     Then every recorded call names a method the host library defines

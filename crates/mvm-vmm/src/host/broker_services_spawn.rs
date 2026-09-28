@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 
-use crate::host::aux_bin::HostProcess;
+use crate::host::aux_bin::{self, AuxBin, HostProcess};
 
 /// Filename of the per-VM audit-signer UDS under the VM state dir (the broker
 /// connects here; the supervisor owns it).
@@ -181,7 +181,11 @@ fn spawn_audit_signer_with_timeout(
         state_dir,
     } = params;
 
-    let bin = resolve_subprocess_bin("mvm-audit-signer", "MVM_AUDIT_SIGNER_PATH")?;
+    let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
+        "mvm-audit-signer",
+        "MVM_AUDIT_SIGNER_PATH",
+        "mvm-hostd",
+    ))?;
     let uds_path = state_dir.join(AUDIT_SIGNER_SOCK);
     let audit_dir = mvm_core::config::mvm_audit_dir();
     // The audit-signer opens the JSONL with O_APPEND|create; its parent must
@@ -223,6 +227,18 @@ fn spawn_audit_signer_with_timeout(
 /// audit-signer + broker spawns so the lookup can't drift.
 pub fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
     resolve_subprocess_bin_for(bin, env_var, &HostProcess::current())
+}
+
+/// Locate `spec`'s binary in order to spawn it. A contributor `mvmctl`
+/// first builds it from its checkout when it is missing or older than its
+/// sources, since a root `cargo build` builds none of these; the lookup is
+/// then [`resolve_subprocess_bin`]'s.
+pub fn resolve_subprocess_bin_to_spawn(spec: &AuxBin) -> Result<PathBuf> {
+    let host = HostProcess::current();
+    if let Some(built) = aux_bin::build_from_source_if_needed(spec, &host)? {
+        return Ok(built);
+    }
+    resolve_subprocess_bin_for(spec.bin, spec.env_var, &host)
 }
 
 /// [`resolve_subprocess_bin`] on behalf of an explicitly described process.
@@ -480,7 +496,11 @@ fn spawn_broker_with_timeout(
         capability_bindings,
     } = params;
 
-    let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
+    let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
+        "mvm-broker",
+        "MVM_BROKER_PATH",
+        "mvm-hostd",
+    ))?;
     // The broker binds the backend-specific per-VM BROKER_PORT socket the VMM
     // forwards the guest's `connect_host_vsock(BROKER_PORT)` dial to (the caller
     // passes the right path — libkrun and hvf differ).

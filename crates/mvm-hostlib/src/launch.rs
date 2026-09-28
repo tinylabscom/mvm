@@ -4,15 +4,23 @@
 //! Both methods build an `mvm_client::LaunchRequest` and hand it to
 //! `LocalBackend`, the same admitted-boot seam every in-process launcher uses:
 //! the plan is synthesized, signed, verified, window- and replay-checked and
-//! chain-audited before a byte of launch config reaches the backend. Nothing
-//! here decides what a launch may do. The request builder validates every
-//! field, and a field the launcher cannot honour yet — a command override, a
-//! guest environment — is refused there with its own reason, so a binding
-//! hears the same refusal a Rust caller would rather than a second opinion.
+//! chain-audited before a byte of launch config reaches the backend. A
+//! persistent machine boots through the same start the CLI's `machine run -d`
+//! uses. Nothing here decides what a launch may do: the request builder
+//! validates every field and refuses what it cannot honour with its own
+//! reason, so a binding hears the same refusal a Rust caller would.
+//!
+//! A launch boots one of three sources: an `image`, a built `template` named
+//! by the name its image was built under, or a `manifest` (a path or a built
+//! slot's address). A `command` runs once the machine is up, with its `env`
+//! filtered by the host's environment denylist, and the reply names the
+//! process it started.
 
 use std::collections::BTreeMap;
 
-use mvm_client::{LaunchRequest, LaunchRequestBuilder, LifecycleMode, LocalBackend, MachineState};
+use mvm_client::{
+    LaunchRequest, LaunchRequestBuilder, LaunchSource, LifecycleMode, LocalBackend, MachineState,
+};
 use mvm_core::client::MvmError;
 use mvm_core::rootfs_source::RootfsSource;
 use serde::{Deserialize, Serialize};
@@ -65,25 +73,74 @@ pub(crate) struct EgressTarget {
     port: u16,
 }
 
+/// What a launch boots: the request's `image`, `template` and `manifest`
+/// fields, of which exactly one is set. They are fields of each request
+/// rather than a flattened struct because flattening would stop the request
+/// refusing a field it does not know.
+#[derive(Debug, Default)]
+struct SourceFields {
+    image: Option<String>,
+    template: Option<String>,
+    manifest: Option<String>,
+}
+
+impl SourceFields {
+    /// The one source these fields name, resolved to what the launcher boots.
+    fn resolve(self) -> Result<LaunchSource, Outcome> {
+        let invalid = |reason: String| Outcome::from(MvmError::InvalidSpec { reason });
+        match (self.image, self.template, self.manifest) {
+            (Some(image), None, None) => Ok(LaunchSource::Image(parse_image(&image)?)),
+            (None, Some(template), None) => {
+                LaunchSource::from_template(&template).map_err(Outcome::from)
+            }
+            (None, None, Some(manifest)) => {
+                LaunchSource::from_manifest(&manifest).map_err(Outcome::from)
+            }
+            (None, None, None) => Err(invalid(
+                "a launch needs a source: `image`, `template` or `manifest`".to_string(),
+            )),
+            _ => Err(invalid(
+                "a launch takes exactly one of `image`, `template` and `manifest`".to_string(),
+            )),
+        }
+    }
+}
+
 /// A `machine.run` request.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunRequest {
-    /// What to boot: an OCI reference (optionally `oci:`-prefixed), an
-    /// absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`.
-    image: String,
+    /// An OCI reference (optionally `oci:`-prefixed), an absolute or
+    /// `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of
+    /// `image`, `template` and `manifest` is set.
+    #[serde(default)]
+    image: Option<String>,
+    /// A template built on this host, named by the name its image was built
+    /// under. Boots as a persistent machine.
+    #[serde(default)]
+    template: Option<String>,
+    /// A manifest file, the directory holding one, or a built slot's
+    /// 64-character address. Boots as a persistent machine.
+    #[serde(default)]
+    manifest: Option<String>,
     #[serde(default)]
     mode: RunMode,
     /// Required for a persistent machine; generated for a transient one.
     #[serde(default)]
     name: Option<String>,
-    /// Command override. The in-process launcher refuses a non-empty one.
+    /// A command to start once the machine is up. The reply's `process` names
+    /// it. Starting it is a DevOnly guest operation, so a sealed image
+    /// refuses it.
     #[serde(default)]
     command: Vec<String>,
-    /// Guest environment. The in-process launcher refuses a non-empty one.
+    /// The command's environment. Requires a `command`; a loader, shell or
+    /// credential variable is refused.
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// The command's working directory. Requires a `command`.
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     cpus: Option<u32>,
     #[serde(default)]
@@ -112,11 +169,19 @@ pub(crate) struct RunRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateRequest {
     name: String,
-    image: String,
+    /// An OCI reference (optionally `oci:`-prefixed), an absolute or
+    /// `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of
+    /// `image`, `template` and `manifest` is set.
     #[serde(default)]
-    command: Vec<String>,
+    image: Option<String>,
+    /// A template built on this host, named by the name its image was built
+    /// under. Boots as a persistent machine.
     #[serde(default)]
-    env: BTreeMap<String, String>,
+    template: Option<String>,
+    /// A manifest file, the directory holding one, or a built slot's
+    /// 64-character address. Boots as a persistent machine.
+    #[serde(default)]
+    manifest: Option<String>,
     #[serde(default)]
     cpus: Option<u32>,
     #[serde(default)]
@@ -145,15 +210,20 @@ pub(crate) struct RunReply {
     /// the same declaration the guest agent's DevOnly refusal keys on. Only
     /// `dev` admits the DevOnly `guest.*` methods.
     build_mode: String,
+    /// The token of the process `command` started, for `guest.proc.*`; absent
+    /// when the request carried no command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process: Option<String>,
 }
 
 /// The fields both requests share, in the order the builder takes them.
 struct LaunchFields {
     mode: LifecycleMode,
-    image: String,
+    source: SourceFields,
     name: Option<String>,
     command: Vec<String>,
     env: BTreeMap<String, String>,
+    cwd: Option<String>,
     cpus: Option<u32>,
     memory_mib: Option<u32>,
     profile: Option<String>,
@@ -168,10 +238,15 @@ impl From<RunRequest> for LaunchFields {
     fn from(r: RunRequest) -> Self {
         Self {
             mode: r.mode.into(),
-            image: r.image,
+            source: SourceFields {
+                image: r.image,
+                template: r.template,
+                manifest: r.manifest,
+            },
             name: r.name,
             command: r.command,
             env: r.env,
+            cwd: r.cwd,
             cpus: r.cpus,
             memory_mib: r.memory_mib,
             profile: r.profile,
@@ -188,10 +263,15 @@ impl From<CreateRequest> for LaunchFields {
     fn from(r: CreateRequest) -> Self {
         Self {
             mode: LifecycleMode::Persistent,
-            image: r.image,
+            source: SourceFields {
+                image: r.image,
+                template: r.template,
+                manifest: r.manifest,
+            },
             name: Some(r.name),
-            command: r.command,
-            env: r.env,
+            command: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
             cpus: r.cpus,
             memory_mib: r.memory_mib,
             profile: r.profile,
@@ -233,7 +313,7 @@ fn parse_image(image: &str) -> Result<RootfsSource, Outcome> {
 
 /// Hand every field to the builder, which owns validation.
 fn builder_for(fields: LaunchFields) -> Result<LaunchRequestBuilder, Outcome> {
-    let mut builder = LaunchRequest::builder(fields.mode, parse_image(&fields.image)?)
+    let mut builder = LaunchRequest::builder_for(fields.mode, fields.source.resolve()?)
         .command(fields.command)
         .force(fields.force);
     if let Some(name) = fields.name {
@@ -241,6 +321,9 @@ fn builder_for(fields: LaunchFields) -> Result<LaunchRequestBuilder, Outcome> {
     }
     for (key, value) in fields.env {
         builder = builder.env(key, value);
+    }
+    if let Some(cwd) = fields.cwd {
+        builder = builder.cwd(cwd);
     }
     if let Some(cpus) = fields.cpus {
         builder = builder.cpus(cpus);
@@ -288,6 +371,7 @@ async fn answer(backend: &LocalBackend, method: &str, request: &[u8]) -> Result<
                 machine: launched.machine,
                 plan_id: launched.plan_id,
                 build_mode: declared_build_mode(profile.as_deref()),
+                process: launched.process,
             })
         }
         MACHINE_CREATE => {
@@ -428,10 +512,79 @@ mod tests {
         assert!(persisted.contains("api.example.com"), "{persisted}");
     }
 
-    /// The launcher's own refusals reach the binding as an invalid spec, with
-    /// the launcher's reason, and nothing boots.
+    /// Takes the command a launch starts, in place of the guest agent the
+    /// mock backend does not run.
+    #[derive(Default)]
+    struct Starter {
+        argv: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl mvm_client::launch::detached::CommandStarter for Starter {
+        fn start(
+            &self,
+            _name: &str,
+            command: mvm_client::launch::detached::BootCommand,
+        ) -> anyhow::Result<String> {
+            self.argv.lock().expect("lock").push(command.argv);
+            Ok("proc-7".to_string())
+        }
+    }
+
+    fn mock_starting(starter: &std::sync::Arc<Starter>) -> LocalBackend {
+        mock().with_command_starter(std::sync::Arc::clone(starter)
+            as std::sync::Arc<dyn mvm_client::launch::detached::CommandStarter>)
+    }
+
+    /// A command starts once the machine is up, and the reply names the
+    /// process so the binding can wait on it.
     #[test]
-    fn a_command_override_is_refused_by_the_launcher_itself() {
+    fn a_command_starts_after_boot_and_the_reply_names_its_process() {
+        let home = Home::new();
+        let starter = std::sync::Arc::new(Starter::default());
+        let outcome = call(
+            &mock_starting(&starter),
+            MACHINE_RUN,
+            serde_json::json!({
+                "image": home.rootfs(),
+                "name": "sdk-cmd",
+                "command": ["/obscura", "serve", "--port", "9222"],
+                "env": {"MODE": "headless"},
+                "cwd": "/",
+            }),
+        );
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert_eq!(body(&outcome)["process"], "proc-7");
+        assert_eq!(
+            *starter.argv.lock().unwrap(),
+            vec![vec![
+                "/obscura".to_string(),
+                "serve".into(),
+                "--port".into(),
+                "9222".into()
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_command_names_no_process() {
+        let home = Home::new();
+        let outcome = call(
+            &mock(),
+            MACHINE_RUN,
+            serde_json::json!({"image": home.rootfs(), "name": "sdk-nocmd"}),
+        );
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert!(
+            body(&outcome).get("process").is_none(),
+            "{}",
+            body(&outcome)
+        );
+    }
+
+    /// The host's environment denylist applies to a command's environment
+    /// before anything boots.
+    #[test]
+    fn a_denied_environment_variable_is_refused_and_nothing_boots() {
         let home = Home::new();
         let backend = mock();
         let outcome = call(
@@ -439,26 +592,31 @@ mod tests {
             MACHINE_RUN,
             serde_json::json!({
                 "image": home.rootfs(),
-                "name": "sdk-cmd",
+                "name": "sdk-denied",
                 "command": ["/bin/true"],
+                "env": {"LD_PRELOAD": "/tmp/x.so"},
             }),
         );
-        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_SPEC);
-        assert_eq!(body(&outcome)["code"], "INVALID_SPEC");
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_INVALID_SPEC,
+            "{}",
+            body(&outcome)
+        );
         assert!(
             body(&outcome)["message"]
                 .as_str()
                 .unwrap()
-                .contains("command/entrypoint override"),
+                .contains("LD_PRELOAD"),
             "{}",
             body(&outcome)
         );
         let listed = run(backend.list_machines(MachineFilter::all())).unwrap();
-        assert!(listed.iter().all(|m| m.name != "sdk-cmd"), "{listed:?}");
+        assert!(listed.iter().all(|m| m.name != "sdk-denied"), "{listed:?}");
     }
 
     #[test]
-    fn guest_environment_is_refused_rather_than_dropped() {
+    fn an_environment_without_a_command_is_refused_rather_than_dropped() {
         let home = Home::new();
         let outcome = call(
             &mock(),
@@ -468,12 +626,95 @@ mod tests {
                 "env": {"API_KEY": "value"},
             }),
         );
-        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_SPEC);
-        assert!(
-            body(&outcome)["message"]
-                .as_str()
-                .unwrap()
-                .contains("environment variables")
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_INVALID_SPEC,
+            "{}",
+            body(&outcome)
+        );
+    }
+
+    /// A template is looked up among the images built on this host; one that
+    /// was never built is refused with how to build it.
+    #[test]
+    fn a_template_nothing_was_built_as_is_an_invalid_spec() {
+        let _home = Home::new();
+        let outcome = call(
+            &mock(),
+            MACHINE_RUN,
+            serde_json::json!({"template": "chromium", "mode": "persistent", "name": "b"}),
+        );
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_INVALID_SPEC,
+            "{}",
+            body(&outcome)
+        );
+        let message = body(&outcome)["message"].as_str().unwrap().to_string();
+        assert!(message.contains("chromium"), "{message}");
+        assert!(message.contains("mvmctl machine build"), "{message}");
+    }
+
+    #[test]
+    fn a_manifest_that_does_not_exist_is_an_invalid_spec() {
+        let _home = Home::new();
+        let outcome = call(
+            &mock(),
+            MACHINE_RUN,
+            serde_json::json!({
+                "manifest": "/nonexistent/mvm.toml",
+                "mode": "persistent",
+                "name": "m",
+            }),
+        );
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_INVALID_SPEC,
+            "{}",
+            body(&outcome)
+        );
+    }
+
+    #[test]
+    fn a_launch_names_exactly_one_source() {
+        let home = Home::new();
+        for request in [
+            serde_json::json!({}),
+            serde_json::json!({"image": home.rootfs(), "template": "chromium"}),
+            serde_json::json!({"image": home.rootfs(), "manifest": "a".repeat(64)}),
+        ] {
+            let outcome = call(&mock(), MACHINE_RUN, request.clone());
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_SPEC, "{request}");
+            assert!(
+                body(&outcome)["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("`image`"),
+                "{}",
+                body(&outcome)
+            );
+        }
+    }
+
+    /// A definition only records what boots; a command has nowhere to live in
+    /// it, so `machine.create` does not take one.
+    #[test]
+    fn create_takes_no_command() {
+        let home = Home::new();
+        let outcome = call(
+            &mock(),
+            MACHINE_CREATE,
+            serde_json::json!({
+                "name": "sdk-create-cmd",
+                "image": home.rootfs(),
+                "command": ["/bin/true"],
+            }),
+        );
+        assert_eq!(
+            outcome.status,
+            MVM_HOSTLIB_INVALID_INPUT,
+            "{}",
+            body(&outcome)
         );
     }
 

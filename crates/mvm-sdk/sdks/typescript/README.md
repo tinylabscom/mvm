@@ -124,8 +124,13 @@ sb.kill();
 ```
 
 Live mode boots from `{ image }` (an OCI reference, an absolute path, or
-`flake:<ref>#<attr>`); a template source is recorded in record mode but
-refused in live mode, because the host library launches images only.
+`flake:<ref>#<attr>`) or from a template (a bare string, or `{ manifest }`), as
+a named machine started the way `mvmctl machine run -d` starts one; `kill()`
+stops and removes it. A template is one built on this host, found by the name
+its image was built under; one nobody built is refused with `MachineSpecError`
+saying how to build it. `command` starts once the machine is up, with `env` as its
+environment (literal values only, and the host's denylist refuses loader,
+shell and credential variables), and `sb.process` is its handle.
 `Sandbox.connect(name)` attaches to a machine that is already running.
 
 Live process handles support `wait`, streamed stdout/stderr callbacks,
@@ -148,8 +153,12 @@ the same code `mvmctl` runs; the SDK validates arguments and shapes requests.
 ```ts
 import { Machine } from "@runmvm/mvm";
 
-const vm = Machine.run("alpine:latest", { allowHosts: ["example.com:443"], ttlSeconds: 600 });
-console.log(vm.name, vm.inspect().status);
+// Boot, run one command, collect its output, stop and remove the machine. Dev builds only.
+const run = Machine.run("alpine:latest", ["uname", "-a"], { timeout: 60 });
+console.log(run.exitCode, run.stdout);
+
+const vm = Machine.launch({ image: "alpine:latest", allowHosts: ["example.com:443"], ttlSeconds: 600 });
+console.log(vm.name, vm.buildMode, vm.inspect().status);
 vm.stop();
 
 const devbox = Machine.create("devbox", "alpine:latest", { profile: "dev" });
@@ -157,6 +166,9 @@ devbox.start();
 const result = devbox.exec(["echo", "hello"]); // dev builds only
 console.log(result.exitCode, result.stdout);
 console.log(devbox.logs({ lines: 20 }));
+for (const chunk of devbox.logs({ follow: true })) {
+  process.stdout.write(chunk); // until the machine stops, or `break`
+}
 devbox.stop();
 devbox.rm();
 
@@ -185,12 +197,23 @@ A refusal from the library throws the typed error its code names —
 `MachineUnavailableError` (retryable), and so on, all subclasses of
 `HostLibraryError` carrying `code` and `retryable`.
 
-What the library cannot do yet, the SDK refuses rather than working around:
-the in-process launcher refuses a boot `command` or `env` override
-(`MachineSpecError`), and function dispatch into a microVM throws
-`MvmTransportError`. Set `MVM_NO_VM=1` to run decorated functions in the
-calling process through the same encode, size-check and decode path a
-microVM call takes; inside that mode `session(...)` is a local scope.
+Function dispatch goes through the library too. Calling a decorated function
+or a `workload_ref` runs the workload's entrypoint in a transient microVM
+through `entrypoint.call`, admitted under a signed plan and audited exactly as
+`mvmctl machine run --entrypoint` is; `session(...)` holds one warm microVM
+across calls (`session.start`, `session.call`, `session.stop`). The workload is
+found among the images built on this host by the name it was declared with;
+build it first (`mvmctl build compile`, then `mvmctl machine build --flake
+<dir>`). An error the function raised arrives as the generated `RemoteError`
+with its kind and id; a failure with no such envelope is `MvmTransportError`
+with the exit code and the end of stderr. A payload over one agent frame
+(62 KiB) travels on the streaming input plane for a transient call and is
+refused for a session call, never truncated. The host runs the workload's
+primary entrypoint: the guest protocol has no function selector, so a
+non-primary function of a multi-function workload is not reachable this way
+yet. Set `MVM_NO_VM=1` to run decorated functions in the calling process
+through the same encode, size-check and decode path a microVM call takes;
+inside that mode `session(...)` is a local scope.
 
 ## Experimental Obscura browser provider
 
@@ -216,11 +239,10 @@ not enable private-network access, stealth behavior, or unrestricted egress.
 Obscura is not a guaranteed drop-in replacement for every Playwright or
 Puppeteer flow.
 
-Neither preset boots in live mode yet. Chromium and Chrome are named
-templates, and the host library launches images only, so they are refused
-with `SandboxModeError`; Obscura's fixed command is refused by the in-process
-launcher with `MachineSpecError` until it supports command overrides. Both
-still record normally.
+Every preset boots in live mode. Obscura boots its pinned image and starts its
+fixed command once the machine is up. Chromium and Chrome boot the template
+built on this host under that name; with no such template the launch is refused with `MachineSpecError`
+saying how to build one. All of them still record normally.
 
 ## Local SDK development
 

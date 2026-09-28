@@ -1,46 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::BufRead;
 
-use super::{SignedEnvelope, audit_path_for_tenant, default_audit_dir, print_chain_line, ui};
-
-pub(super) fn audit_show(tenant: &str, plan_id: &str, json: bool) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let path = audit_path_for_tenant(&dir, tenant);
-    if !path.exists() {
-        if json {
-            crate::json_out::emit_json(&Vec::<SignedEnvelope>::new())?;
-        } else {
-            ui::info(&format!(
-                "No audit chain found for tenant '{tenant}' at {}.",
-                path.display()
-            ));
-        }
-        return Ok(());
-    }
-    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let mut matched = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if let Ok(env) = serde_json::from_str::<SignedEnvelope>(&line)
-            && env.entry.plan_id.0 == plan_id
-        {
-            if json {
-                matched.push(env);
-            } else {
-                print_chain_line(&line);
-            }
-        }
-    }
-    if json {
-        crate::json_out::emit_json(&matched)?;
-    } else if matched.is_empty() {
-        ui::info(&format!(
-            "No audit entries found for plan_id '{plan_id}' in tenant '{tenant}'."
-        ));
-    }
-    Ok(())
-}
+use super::ui;
 
 pub(super) fn audit_tail(lines: usize, follow: bool) -> Result<()> {
     let log_path = mvm_core::audit::default_audit_log();

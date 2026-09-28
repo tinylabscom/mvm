@@ -303,7 +303,8 @@ Typical message:
 **Fix**:
 
 - If you set `MVM_HVF_SUPERVISOR_PATH`, point it at a real `mvm-hvf-supervisor` binary.
-- In a source checkout, ensure the workspace can build the helper binary.
+- In a source checkout, `mvmctl` run from `target/<profile>/` builds the helper
+  itself on first use; if that build fails, the error carries cargo's output.
 - On release installs, make sure `mvm-hvf-supervisor` is present alongside `mvmctl`.
 
 This path is intentionally fail-closed: `--allow-host` on OCI images never

@@ -25,8 +25,8 @@ use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig
 use mvm_vmm::hvf_handoff::{HANDOFF_ACCEPTED, HANDOFF_RESPONSE_MAX_BYTES, HvfHandoffRequest};
 
 use crate::driver::hvf_process::{
-    self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
-    resolve_supervisor_path_verified,
+    self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path_verified,
+    supervisor_available,
 };
 use mvm_contract::grants::CpuGrant;
 use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
@@ -439,7 +439,7 @@ impl VmmDriver for HvfDriver {
     fn is_available(&self) -> Result<bool> {
         // Selection/doctor probe: the detached supervisor must exist and the
         // host must report a runnable HVF path.
-        Ok(resolve_supervisor_path().is_ok() && hvf_backend::hvf_workload_support_available())
+        Ok(supervisor_available() && hvf_backend::hvf_workload_support_available())
     }
 
     fn capabilities(&self) -> VmCapabilities {

@@ -180,7 +180,7 @@ pub(super) fn machine_start_receipt_input(
         shared::resolve_run_network_policy(spec.net, &spec.allow_host)?.with_ai(spec.ai.clone());
     crate::exec::validate_image_egress_backend_name(
         backend,
-        spec.image.is_some(),
+        shared::launch_uses_oci_image(spec.image.as_deref(), spec.manifest.as_deref())?,
         &network_policy,
     )?;
     let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
