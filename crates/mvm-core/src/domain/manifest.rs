@@ -743,7 +743,7 @@ impl ManifestGrants {
 /// The `[policy]` table: which authored policy profile the project's workload
 /// runs under, and extra groups on top of it. Names resolve in the user's
 /// policy directory and then among the built-ins; paths resolve against the
-/// manifest's directory. Resolution lives in `mvm_client::profiles`.
+/// manifest's directory. Resolution lives in `mvm_client::policy_profiles`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestPolicy {

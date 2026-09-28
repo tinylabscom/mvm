@@ -1085,7 +1085,7 @@ struct MachineSpecInputs<'a> {
     /// `--policy NAME|PATH`.
     policy: Option<&'a str>,
     /// The manifest's contribution to the policy, when sourced from one.
-    project: Option<&'a mvm_client::profiles::ProjectPolicy>,
+    project: Option<&'a mvm_client::policy_profiles::ProjectPolicy>,
 }
 
 fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {

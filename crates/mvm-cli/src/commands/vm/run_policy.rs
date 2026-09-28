@@ -1,7 +1,7 @@
 //! `--policy`, `--plan`, and the project's `[policy]`: folding an authored
 //! policy into a launch's own flags before anything else reads them.
 //!
-//! Resolution and the merge rules live in `mvm_client::profiles`. What this
+//! Resolution and the merge rules live in `mvm_client::policy_profiles`. What this
 //! does is pick the source (`--plan`; otherwise `--policy` and the project
 //! manifest the run names — its `[policy]` table and `[network] allow_hosts`),
 //! resolve it on this host and the backend the run will use, and write the
@@ -12,7 +12,7 @@
 //! equivalent flags produce the same signed plan.
 
 use anyhow::{Context, Result};
-use mvm_client::profiles::{
+use mvm_client::policy_profiles::{
     LaunchFlags, Platform, PolicySelection, PolicyStore, ProjectPolicy, ResolvedManifest, fold,
     resolve,
 };
@@ -23,7 +23,7 @@ use crate::ui;
 /// The authored policy a launch runs under, if it names one.
 struct Selected {
     label: String,
-    policy: mvm_client::profiles::PolicyBody,
+    policy: mvm_client::policy_profiles::PolicyBody,
     notes: Vec<String>,
 }
 

@@ -510,7 +510,7 @@ jobs:
       # and the emitter bin exist only under `schema`.
       - name: policy schema drift (mvm-client schema)
         run: |
-          cargo nextest run -p mvm-client --features schema -E 'test(/profiles::/)'
+          cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
           cargo check -p mvm-client --features schema --bins
 
       # `addons` is off by default so the sealed agent's request path stays

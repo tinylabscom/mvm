@@ -198,7 +198,7 @@ Security-bearing gaps first, then the foundations the UX needs:
 
 ### PS-05 — Policy files, profiles, resolved manifest (#3715)
 - [x] TOML policy groups and profiles (`extends`, `groups.include/exclude`, `when`, overrides)
-      — `mvm_client::profiles`; built-in groups (`registries`, `github`,
+      — `mvm_client::policy_profiles`; built-in groups (`registries`, `github`,
       `llm-apis`, `offline`) and profiles (`default`, `dev-network`,
       `agent-apis`, `offline`) embedded and drift-tested against the network
       presets; `[tools]` is parsed and shown but not enforced (PS-13)

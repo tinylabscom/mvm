@@ -10,5 +10,8 @@
 //! closure.
 
 fn main() {
-    println!("{}", mvm_client::profiles::model::json_schema_pretty());
+    println!(
+        "{}",
+        mvm_client::policy_profiles::model::json_schema_pretty()
+    );
 }

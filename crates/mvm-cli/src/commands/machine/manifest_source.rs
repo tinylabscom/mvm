@@ -13,7 +13,7 @@ pub(super) struct MachineManifestSource {
     pub(super) workflow: ManifestMachineWorkflow,
     pub(super) base_dir: PathBuf,
     /// The manifest's `[policy]` and `[network] allow_hosts`.
-    pub(super) project: mvm_client::profiles::ProjectPolicy,
+    pub(super) project: mvm_client::policy_profiles::ProjectPolicy,
 }
 
 pub(super) fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
@@ -37,7 +37,8 @@ pub(super) fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifest
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    let project = mvm_client::profiles::ProjectPolicy::from_manifest(&manifest_path, &manifest);
+    let project =
+        mvm_client::policy_profiles::ProjectPolicy::from_manifest(&manifest_path, &manifest);
     Ok(MachineManifestSource {
         workflow,
         base_dir,

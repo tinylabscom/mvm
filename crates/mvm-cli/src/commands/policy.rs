@@ -4,17 +4,17 @@
 //! This is the workload's own policy — profiles and groups a user or project
 //! writes, resolved on this host. Tenant policy bundles and their rollout are
 //! a control-plane concern and are not here. Everything below is a thin shell
-//! over `mvm_client::profiles`.
+//! over `mvm_client::policy_profiles`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use mvm_client::profiles::builtin;
-use mvm_client::profiles::model::{GroupFile, ProfileFile};
-use mvm_client::profiles::resolve::resolve_file;
-use mvm_client::profiles::{
+use mvm_client::policy_profiles::builtin;
+use mvm_client::policy_profiles::model::{GroupFile, ProfileFile};
+use mvm_client::policy_profiles::resolve::resolve_file;
+use mvm_client::policy_profiles::{
     Platform, PolicyBody, PolicySelection, PolicyStore, ProjectPolicy, ResolvedManifest,
     ResolvedPolicy, resolve,
 };
@@ -211,7 +211,7 @@ fn show(args: ShowArgs) -> Result<()> {
         ShowFormat::Json => crate::json_out::emit_json(&resolved)?,
         ShowFormat::Plan => {
             let config = mvm_core::user_config::load(None);
-            let preview = mvm_client::profiles::preview::preview(&resolved.policy, &config)?;
+            let preview = mvm_client::policy_profiles::preview::preview(&resolved.policy, &config)?;
             crate::json_out::emit_json(&preview)?;
         }
     }
@@ -529,7 +529,7 @@ fn groups(args: GroupsArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_client::profiles::model::{NetworkSection, ResourcesSection};
+    use mvm_client::policy_profiles::model::{NetworkSection, ResourcesSection};
 
     #[test]
     fn backends_parse_by_their_snake_or_kebab_name() {

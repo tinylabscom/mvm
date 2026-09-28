@@ -2,7 +2,7 @@
 
 What a workload may do was spread across `mvm.toml`, `--grants-file`, workload
 IR and flags, and the one resolved artifact — the signed `ExecutionPlan` — could
-be neither printed nor supplied. `mvm_client::profiles` adds three layers,
+be neither printed nor supplied. `mvm_client::policy_profiles` adds three layers,
 library-first, so the CLI and the host library share one implementation.
 
 **Groups** are named TOML fragments covering network (allow, deny, block,

@@ -11,7 +11,7 @@
 //! applied: a restart would lose what the spec cannot hold.
 
 use anyhow::{Context, Result, bail};
-use mvm_client::profiles::{
+use mvm_client::policy_profiles::{
     LaunchFlags, Platform, PolicyBody, PolicySelection, PolicyStore, ProjectPolicy, fold, resolve,
 };
 
