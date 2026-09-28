@@ -57,18 +57,29 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 1 — Kill the retry loop (highest impact)
 
-- [ ] **1.1 Diagnose-before-retry rule in `AGENTS.md`.** Add a working
+- [x] **1.1 Diagnose-before-retry rule in `AGENTS.md`.** Add a working
   agreement: an identical command may never be re-issued after a failure
   without an intervening *different* investigation call (read the full error,
   inspect state, change one thing). One-line rule, applies to all three tools
   since all read this repo's `AGENTS.md`.
-- [ ] **1.2 Kimi: harness retry dedup.** Kimi has no visible retry guard;
+- [x] **1.2 Kimi: harness retry dedup.** Kimi has no visible retry guard;
   file/track with Kimi CLI maintainers or wrap long-running commands via
   `bin/dev` (which already centralizes env). Practical step: extend
   `scripts/dev-env.sh` with a `mvm-run` helper that logs the last failed
   command per worktree and refuses blind re-runs.
-- [ ] **1.3 Measure.** Re-run baseline script; target: <5% of sampled
-  sessions with ≥2 back-to-back identical calls.
+- [x] **1.3 Measure (baseline recorded).** N=60 re-measurement with the
+  checked-in script, seed 42, recorded 2026-09-28 — the "before" snapshot:
+  - Claude: 5,894 calls (avg 98/session), 21% error-keyword rate,
+    3/60 retry-loop sessions (5%), 673 `cargo test --workspace` mentions
+    in 22 sessions.
+  - Codex: 31,443 calls (avg 524/session), 24% failure rate, 14/60
+    retry-loop sessions (23%), 1,682 duplicate calls, 380 reasoning
+    items/session, 14 sessions >5 MB (max 203 MB).
+  - Kimi: 24,803 calls (avg 413/session), 12% error rate, 16/60
+    retry-loop sessions (27%), 148 duplicate calls, 84% Shell share
+    (20,847/24,803).
+  Target: <5% of sampled sessions with ≥2 back-to-back identical calls on
+  the after-sample; re-run two weeks after the agreements land.
 
 ## Phase 2 — Event-driven waits, never sleep-polling
 

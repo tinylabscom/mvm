@@ -4801,3 +4801,21 @@ writes the plan:
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
 
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
+
+## 2026-09-28 Agent efficiency overhaul — Phase 1 (retry discipline)
+
+- [x] Quantified baseline from ~120 sampled transcripts across the three
+      agent stores (Claude 21% error-keyword rate and 5% retry-loop sessions
+      at N=60; Codex 18% failure rate and 18% retry-loop sessions; Kimi 11%
+      error rate, 30% retry-loop sessions, 83% Shell share).
+- [x] `scripts/agent-transcript-analysis.py` — reproducible cross-agent
+      transcript baseline/re-measurement script (was throwaway in /tmp).
+- [x] `AGENTS.md` "Retry Discipline" working agreement: never re-issue an
+      identical failed command; read full error → hypothesis → one change →
+      scoped re-run.
+- [x] `scripts/dev-env.sh` `mvm-run` blind-retry guard: records the failing
+      command in `.mvm-test/last-failed-cmd` and refuses an immediate
+      identical re-run; cleared by a successful different command or `rm`.
+- [x] `scripts/dev-run-guard.test.sh` gate tests for the guard (6 checks).
+- [x] Plan: `specs/plans/2026-09-28-agent-efficiency-overhaul.md`, Phase 1
+      checkboxes ticked with N=60 baseline numbers recorded.

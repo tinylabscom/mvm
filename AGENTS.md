@@ -586,3 +586,26 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Retry Discipline
+
+Never re-issue an identical command that just failed. Transcript analysis
+(2026-09-28) shows retry loops are the single largest agent inefficiency:
+30% of Kimi and 18% of Codex sessions re-ran the *same* failing command
+back-to-back, in one case 16 times in a row — every re-run has a
+predictable outcome and burns the session's time and context.
+
+The recovery sequence after any tool failure is:
+
+1. **Read the full error output.** Not the first line — the whole thing.
+2. **Form a root-cause hypothesis.** What changed? What does the error
+   actually say?
+3. **Change exactly one thing.** A fix, a flag, a scope reduction — one.
+4. **Re-run a scoped version of the command**, not the original blast radius
+   (see "Scoped test runs" in the plan of the day if one is active).
+
+For `mvmctl`/cargo one-offs, use `mvm-run <cmd>` (defined by
+`scripts/dev-env.sh`): it records the failing command in
+`.mvm-test/last-failed-cmd` and refuses an immediate identical re-run. After
+genuinely diagnosing, clear the marker (`rm .mvm-test/last-failed-cmd`) or
+run the changed command, which clears it automatically on success.
