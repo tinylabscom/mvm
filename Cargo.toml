@@ -755,7 +755,6 @@ nextest-min = "0.9.143"
 # installs this version, and the gate refuses both a different installed
 # mutator and outcomes recorded by one.
 cargo-mutants = "27.1.0"
-
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the
 # local builder/Stage 0 VM is always same-arch as the host). Plan 164.
