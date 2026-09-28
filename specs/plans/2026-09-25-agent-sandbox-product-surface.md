@@ -343,7 +343,7 @@ client, CLI left with args + rendering.
 
 ## Execution log and handoff
 
-Snapshot as of 2026-09-27. This section is the pick-up point: it records what
+Snapshot as of 2026-09-27, updated after the agents were stopped. This section is the pick-up point: it records what
 landed, what is in flight, the decisions taken while executing, and the known
 defects found along the way. The workstream checkboxes above remain the
 per-item source of truth; `specs/REFACTOR-STATUS.md` is the rollup; tracking
@@ -378,10 +378,23 @@ issue #3731 carries the same status as a comment.
 | #3768 | PS-17 | task-runner surface reduced (opened by another session) |
 | mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
 
-In progress without a PR yet: PS-05 policy profiles (`feat/policy-profiles`);
-#3757 fix, then PS-02 leftovers, then approval parity; #3752 fix, then the
-PS-09 remainder; the no-network hint, then PS-08 undo/diff; the transient
-`LocalBackend::launch` initramfs fix.
+### Stopped mid-flight (2026-09-27)
+
+All program agents were stopped at the user's request on 2026-09-27. Their
+unfinished work is pushed as branches with no PR. Commits labelled `wip:` are
+formatted snapshots on which clippy and the test gates were **not** run;
+every branch needs a rebase onto main, the full gates, and a PR.
+
+| Branch | Workstream | State |
+|---|---|---|
+| `feat/policy-profiles` | PS-05 (#3715) | 8 commits, complete per its agent; PR body was being drafted |
+| `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
+| `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
+| `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
+| `feat/egress-injection-modes` | PS-02 (#3712) | `wip:` only (`query_param` / `url_path` / `basic_auth`) |
+| `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
+| `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
+| `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |
 
 ### Not started
 
@@ -432,10 +445,38 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
 
 ### How to resume
 
-1. Read this section, then `gh issue view 3731` for the latest status comment.
-2. For each open PR above: `gh pr checks N`; rebase onto main keeping both
-   sides of any conflict; fix root causes; enqueue through the merge queue.
+1. Read this section, the brief below, and `specs/research/host-kernel-agent-sandbox-comparison.md`, then `gh issue view 3731` for the latest status comment.
+2. For each open PR and each branch in "Stopped mid-flight": check CI
+   (`gh pr checks N`), rebase onto main keeping both sides of any conflict,
+   fix root causes, run the full gates, open or update the PR, and enqueue
+   it through the merge queue.
 3. Branches are named in the tables; their worktrees live under
    `.worktrees/` beside the repository and may be removed once merged.
 4. Next workstreams in priority order: PS-05 → PS-06 and PS-13 → PS-08 →
    PS-15 → PS-16 → PS-18.
+
+### Brief for whoever resumes
+
+Rules this program follows beyond CLAUDE.md and AGENTS.md:
+
+- **Never name the external tool** this plan was compared against — not in
+  code, comments, docs, commits, branches, PR titles or bodies, issues, or
+  even as a descriptor. Say "the reference tool" in conversation; write
+  around it in the tree. The comparison lives in
+  `specs/research/host-kernel-agent-sandbox-comparison.md`.
+- **Security wins every tie.** Keep the microVM, the NIC-less guest,
+  vsock-only egress through the one host endpoint, and the signed, audited
+  `ExecutionPlan`. Adopt the experience, never the weaker mechanism.
+- **The SDKs never run `mvmctl`**; everything goes through `mvm-hostlib`
+  over `mvm-client`, and `check-no-cli-shellout` holds it.
+- One worktree per slice under `.worktrees/` beside the repository, one PR
+  per coherent slice, pushed early so a stopped session loses nothing.
+- Commits and PRs carry no AI attribution and no co-author trailer.
+- Arm a green PR with `gh pr merge N --squash --auto` run twice (the second
+  run confirms it is queued), then check the merge queue.
+- Tick the plan's boxes, `specs/REFACTOR-STATUS.md`, and a delivery note
+  in `specs/sprint/delivery/` in the same PR; update this execution log and
+  post a status comment on #3731 when PRs land.
+- Delete a worktree's `target/` once its PR is queued; disk is shared.
+- Agents may be stopped by an account rate limit. Before assuming work
+  landed, check the worktree and the branch on origin.
