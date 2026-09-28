@@ -33,15 +33,17 @@ regardless of what the host happens to have installed.
    enforces this mechanically in CI. Every Nix evaluation runs inside
    the builder VM (selected per ADR-007's `BuilderVm` ladder) that
    `mvmctl` itself launches.
-4. **A source checkout builds images locally by default and never silently
-   substitutes a downloaded, mvm-published artifact.** Both the builder-VM image
-   (`nix/images/builder-vm/`) and every user-facing image build locally
-   from the in-repo flakes whenever `mvmctl` runs from a source
-   checkout. The explicit `MVM_BOOT_IMAGE=fetch` escape hatch may fetch the
-   published boot image for a source checkout; that choice is recorded as
-   `source: fetched` in the verified sidecar stamp. Without that explicit
-   opt-out, mvm-published GitHub-release prebuilts are an end-user,
-   non-source-checkout path only.
+4. **A source checkout with an image checkout selected builds images locally
+   by default and never silently substitutes a downloaded artifact.** Image
+   construction lives in mvm-images (the in-repo image flakes were deleted in
+   2026-09). When `mvmctl` runs from a source checkout and an mvm-images
+   checkout is selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), both
+   the builder-VM image and every user-facing image build locally from it.
+   Without one, the checkout fetches the signed image set `images.lock` pins
+   and verifies it against its root. The explicit `MVM_BOOT_IMAGE=fetch`
+   escape hatch may fetch the published boot image even with a checkout
+   selected; that choice is recorded as `source: fetched` in the verified
+   sidecar stamp.
 
 ## Consequences
 

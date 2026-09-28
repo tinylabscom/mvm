@@ -25,7 +25,9 @@ mvm-hostd.workspace = true
 # sees only ciphertext.
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
-mvm-client.workspace = true
+# `clap`: the `--profile` flag parses into `mvm_client::profile::RunProfile`,
+# the profile table the library launch paths read too.
+mvm-client = { workspace = true, features = ["clap"] }
 mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
@@ -148,13 +150,12 @@ libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Pure test/codegate marker — mvm-cli spawns the supervisor as a
 # subprocess and does not link libkrun itself.
 libkrun-live = []
-# Structural enforcement of the "no prebuilt builder VM artifact
-# until release" invariant (see AGENTS.md / CLAUDE.md). When off — the default
-# for every contributor build — `download_builder_vm_image` and its helpers
-# are entirely cfg'd out, so a cache miss with no in-repo flake hard-errors
-# at the source-checkout boundary rather than silently pulling a GitHub
-# release artifact. The feature is only intended to be enabled when cutting
-# an end-user-binary release that legitimately wants the download fallback.
+# Release-only acceleration: let an installed binary place a signed builder
+# pack from its own `mvm` release ahead of the builder image the image lock
+# pins, and fetch published packs with `mvmctl pack`. The signed image set
+# itself is reachable from every build — image construction lives in
+# mvm-images, so without a selected image checkout it is the only source of a
+# builder image — and this feature no longer gates it.
 release-artifact-bootstrap = []
 # Mark an official distribution separately from the builder-image bootstrap
 # capability. CI exercises the published-builder path from a source checkout;

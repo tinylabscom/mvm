@@ -372,21 +372,14 @@ e2e:
 e2e-docs:
     ./scripts/e2e-documented-surface.sh
 
-# The release lane fetches the signed builder image; this proves a checkout can
-# still build one from nothing. Needs an empty MVM_E2E_HOME, Linux with KVM, and
-# the time a cold Stage 0 takes — Extended CI runs it nightly.
-#
-
-# Bootstrap the builder image from source against a cold home
-e2e-source-bootstrap:
-    ./scripts/e2e-source-bootstrap.sh
-
 # What a new user gets: install a release into a throwaway HOME under /tmp with
 # this checkout's install.sh — builder bootstrap included — then run the
 # README's `machine run --image alpine` with stdin closed and require its output
-# within a time budget. The release workflow runs the same script before it
-# promotes a tag. Omit VERSION to test whatever the one-liner installs today.
-# Boots a real microVM; never touches your own ~/.mvm or ~/.local.
+# within a time budget. It boots again from the same HOME, which must reuse
+# what the first boot downloaded, and once more binding an SDK host service,
+# which must attach the SDK sidecar. The release workflow runs the same script
+# before it promotes a tag. Omit VERSION to test whatever the one-liner installs
+# today. Boots real microVMs; never touches your own ~/.mvm or ~/.local.
 #
 
 # Install a release as a new user would and run the first command
@@ -773,14 +766,6 @@ _release-prep VERSION:
         echo "WARN: install.sh's offline fallback is unchanged — see the reason above." >&2
     fi
     cargo update -w
-    # The runtime overlay, SDK sidecar and initramfs take their VERSION from
-    # one pin (check-runtime-overlay-version fails closed on a mismatch), so
-    # bump it alongside Cargo.toml. The mvmctl and SDK cdylib nix packages
-    # read their version from Cargo.toml and need no edit.
-    sed -i.bak -E "s/^\"[^\"]*\"$/\"$V\"/" nix/images/version.nix
-    rm nix/images/version.nix.bak
-    grep -qxF "\"$V\"" nix/images/version.nix
-    git add nix/images/version.nix
     # The cargo-fuzz crates are separate workspaces with their own lockfiles,
     # each pinning the internal `mvm-*` crates by version. Re-resolve each lock
     # so the release PR's locked fuzz checks see the bumped package versions.
@@ -841,25 +826,6 @@ deploy-guard:
 # Print workspace version
 @version:
     echo {{ version }}
-
-# Release the boot image train (`boot-image/v*`)
-# This creates and pushes a tag for the boot image release, which triggers
-# the release-boot-image.yml workflow to build and publish all microVM assets.
-# Usage: just release-image <version>
-#   version: The version tag (e.g., 1.2.3) - creates boot-image/v1.2.3
-release-image VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    V="{{ VERSION }}"
-    TAG="boot-image/v$V"
-    git fetch origin main --tags
-    if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "ERROR: tag $TAG already exists." >&2
-    exit 1
-    fi
-    git tag "$TAG" origin/main
-    git push origin "$TAG"
-    echo "==> Pushed tag $TAG from origin/main — the boot-image release pipeline will build + publish."
 
 # ── Documentation ────────────────────────────────────────────────────────
 

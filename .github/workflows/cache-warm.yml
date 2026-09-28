@@ -94,12 +94,6 @@ jobs:
           nix build --print-build-logs --no-link \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
             ./nix#checks.x86_64-linux.guest-rootfs-package-budget
-          nix build --print-build-logs --no-link \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image
-          nix build --print-build-logs --impure --no-link \
-            ./nix/images/default-tenant#packages.x86_64-linux.default
 
       # Stable is what the lint lanes use, so warm the exact compiler and
       # Clippy artifacts those required checks restore.

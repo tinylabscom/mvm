@@ -500,6 +500,7 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
     // A runtime-lean rootfs needs the guest agent from the overlay. The cache
     // resolver uses the current host package version, matching the fresh-run path.
     crate::run::attach_runtime_overlay_from_cache(&mut config, &params.material.backend_name)?;
+    crate::run::attach_universal_initramfs_from_cache(&mut config, &params.material.backend_name)?;
 
     Ok(config)
 }
@@ -922,6 +923,34 @@ mod tests {
             &InstallOptions { overwrite: true },
         )
         .expect("install runtime overlay fixture");
+
+        // A boot resume attaches the universal initramfs through the same
+        // version-keyed cache resolver the fresh-run path uses; seed a
+        // complete entry so the resolve is a pure cache read (a cold cache
+        // would run the real build/download ladder, which a unit test must
+        // not reach for).
+        let initramfs_dir = home
+            .path()
+            .join("cache")
+            .join("initramfs")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join(std::env::consts::ARCH);
+        std::fs::create_dir_all(&initramfs_dir).expect("create initramfs cache dir");
+        let image = b"session-resume-initramfs-stub";
+        std::fs::write(initramfs_dir.join("initramfs.cpio.gz"), image)
+            .expect("write initramfs image");
+        std::fs::write(initramfs_dir.join("initramfs.hash"), "ab".repeat(32))
+            .expect("write initramfs hash");
+        std::fs::write(
+            initramfs_dir.join("initramfs.size"),
+            format!("{}\n", image.len()),
+        )
+        .expect("write initramfs size");
+        std::fs::write(
+            initramfs_dir.join("VERSION"),
+            format!("{}\n", env!("CARGO_PKG_VERSION")),
+        )
+        .expect("write initramfs version");
         (env, home)
     }
 

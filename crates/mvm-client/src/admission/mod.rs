@@ -336,7 +336,12 @@ fn enforce_image_source_admission(
 }
 
 pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionContext> {
-    admit_plan_for_boot_with_ingress(p, Vec::new())
+    // Hashing a freshly built root filesystem for the plan reads every byte
+    // of it; later boots are served from the digest cache and stay silent.
+    let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
+    let admitted = admit_plan_for_boot_with_ingress(p, Vec::new())?;
+    phase.finish();
+    Ok(admitted)
 }
 
 pub fn admit_plan_for_boot_with_ingress(
@@ -1079,6 +1084,13 @@ pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
     let msg = format!("{err:#}");
     if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+    }
+    // A failed boot is the end of its session.
+    if let Err(e) = ctx.emitter.seal_session(
+        ctx.admitted.plan(),
+        mvm_hostd::audit::session::SealReason::Failed,
+    ) {
+        tracing::warn!(error = %format!("{e:#}"), "could not seal the failed session (non-fatal)");
     }
 }
 

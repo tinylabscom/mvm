@@ -2080,8 +2080,8 @@ fn locate_supervisor_in_target_roots(target_roots: &[PathBuf]) -> Option<PathBuf
 
 /// The mvm source checkout this binary was compiled from, when automatic
 /// builds are permitted. The supervisor auto-build keys on the checkout
-/// itself — not on the in-tree image flakes — so removing `nix/images` does
-/// not turn a contributor build into an installed one.
+/// itself — its workspace manifest — rather than on any image source, which
+/// lives in mvm-images.
 fn supervisor_source_checkout_root() -> Option<PathBuf> {
     crate::image_source::mvm_source_checkout(crate::artifact_acquisition::compiled_channel())
 }
@@ -4905,17 +4905,8 @@ mod tests {
         );
         assert_eq!(
             root,
-            builder_vm_source_checkout_root().expect("the image flakes are still in-tree today"),
-            "both probes agree while the flakes exist; the supervisor probe must not depend on them"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_checkout_root_detects_workspace() {
-        let root = builder_vm_source_checkout_root().expect("source checkout root");
-        assert!(
-            root.join("nix/images/builder-vm/flake.nix").is_file(),
-            "workspace root must contain the builder-vm flake"
+            builder_vm_source_checkout_root().expect("tests run from a source checkout"),
+            "the bootstrap helper and the supervisor build key on the same checkout"
         );
     }
 

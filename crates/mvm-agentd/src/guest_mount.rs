@@ -1244,7 +1244,7 @@ fn dm_control_open_error(e: std::io::Error) -> MountError {
             "/dev/mapper/control is absent, so this guest kernel has no device-mapper and \
              cannot bring up a dm-verity target. devtmpfs creates the node when device-mapper \
              registers, so this is the kernel's configuration (CONFIG_BLK_DEV_DM), not a \
-             missing mount. A kernel built by a user flake rather than by nix/images/kernel/ \
+             missing mount. A kernel built by a user flake rather than the mvm-images kernel \
              is the usual way to get here. ({e})"
         ));
     }

@@ -2,13 +2,13 @@
 //! a crate's sources.
 //!
 //! Two consumers need "every workspace crate this binary is built from":
-//! `mvm-cli`'s build script, which keys its content-addressed store of embedded
-//! binaries on that closure, and the builder image's cache keys (the Stage 0
-//! fingerprint and the local image cache key), which have to change when a
-//! binary the builder image compiles from workspace source changes. One copy,
-//! so they cannot disagree about what a closure is. The build script reaches
-//! this file through a `#[path]` include, since a build script cannot depend on
-//! a workspace crate.
+//! `mvm-cli`'s build script, and a payload-less `mvmctl` producing the same
+//! binaries in-process, key their content-addressed store of embedded binaries
+//! on that closure; and the local image cache key of a pair-built builder
+//! image has to change when a binary that image compiles from workspace source
+//! changes. One copy, so they cannot disagree about what a closure is. The
+//! build script reaches this file through a `#[path]` include, since a build
+//! script cannot depend on a workspace crate.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};

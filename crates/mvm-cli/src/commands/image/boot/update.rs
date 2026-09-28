@@ -62,9 +62,9 @@ fn refuse_in_source_checkout(force: bool) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "refusing to replace the boot image from a source checkout: the local build is \
-         authoritative here, and a prebuilt would silently disagree with the working tree. \
-         Pass --force if that is what you want."
+        "refusing to replace the boot image while a local image checkout is selected: the \
+         local build is authoritative here, and a prebuilt would silently disagree with the \
+         checkout. Pass --force if that is what you want."
     )
 }
 
@@ -93,8 +93,7 @@ fn fetch_into(dir: &Path, tag: &str) -> Result<()> {
         bail!("refusing unlocked image set {tag}; this build pins {locked}");
     }
     let arch = mvm_core::arch::GuestArch::host();
-    crate::commands::env::published_image_set::PublishedImageSet::acquire()?
-        .fetch_default_workload(arch, dir)
+    crate::commands::env::artifact_verify::acquire_image_set()?.fetch_default_workload(arch, dir)
 }
 
 /// A scratch directory beside the live entry, removed on drop unless it was

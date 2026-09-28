@@ -198,14 +198,35 @@ The builder VM keeps build state warm so repeated builds avoid re-fetching the w
 
 The first build is allowed to be slower because it may bootstrap the builder image and populate the Nix store. Later builds should be dominated by changed inputs.
 
-When `mvmctl` is running from this source checkout, the builder image is local-build only. A populated `~/.mvm/cache/builder-vm/<arch>/` cache can be reused only when its source fingerprint matches the current `nix/images/builder-vm/{flake.nix,flake.lock}` inputs, its recorded artifact digests still match the cached `vmlinux`, `rootfs.ext4`, and optional `cmdline.txt`, and its provenance summary matches the same source fingerprint and artifact filename set. On cache miss, fingerprint drift, artifact drift, or provenance drift, mvm uses a dev image that contains `/sbin/mvm-host-vm-init` as a Stage 0 bootstrap image to build `nix/images/builder-vm/` into a hidden staging directory, validates the kernel and rootfs, records the source fingerprint, artifact digests, and non-sensitive provenance summary, then promotes the staged output into the live cache. It prefers a local Stage 0 seed from `~/.mvm/dev/current/`, `~/.mvm/dev/prebuilt/v*/`, or `~/.mvm/dev/builds/*/`; if none of those images satisfies the Stage 0 contract, it may download the normal published dev image through the signed/hash-verified dev-image path and use it as the bootstrap seed only. It still refuses to download a published builder-VM image in a source checkout, so edits under `nix/images/builder-vm/` are built locally and are not masked by release artifacts. With `--verbose`, source-checkout cache decisions include a safe reason code such as `hit`, `missing_artifact`, `invalid_stage0_artifacts`, `missing_fingerprint`, `fingerprint_mismatch`, `missing_artifact_digest_manifest`, `artifact_digest_mismatch`, `missing_provenance`, or `provenance_mismatch`; these diagnostics do not print artifact contents, local paths, or raw digest metadata. `mvmctl doctor` reports the builder-cache readiness and the resolved builder backend without attempting a rebuild, and its `--json` output emits only sanitized labels for automation.
+The builder image is built in [mvm-images](https://github.com/tinylabscom/mvm-images).
+When `mvmctl` is running from this source checkout with an mvm-images checkout
+selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it builds the builder
+image from that checkout against this one; otherwise — an installed binary, or a
+checkout with no mvm-images beside it — it fetches the builder image from the
+signed image set `images.lock` pins and verifies it against that set's root. A
+populated `~/.mvm/cache/builder-vm/<arch>/` cache is reused only when its
+recorded fingerprint matches the selected source, its recorded artifact digests
+still match the cached `vmlinux`, `rootfs.ext4`, and optional `cmdline.txt`,
+and its provenance summary matches the same fingerprint and artifact filename
+set. On a miss or any drift, mvm rebuilds (or refetches) into a hidden staging
+directory, validates the kernel and rootfs, records the fingerprint, artifact
+digests and a non-sensitive provenance summary, then promotes the staged output
+into the live cache. With `--verbose`, cache decisions include a safe reason
+code such as `hit`, `missing_artifact`, `invalid_stage0_artifacts`,
+`missing_fingerprint`, `fingerprint_mismatch`, `missing_artifact_digest_manifest`,
+`artifact_digest_mismatch`, `missing_provenance`, or `provenance_mismatch`;
+these diagnostics do not print artifact contents, local paths, or raw digest
+metadata. `mvmctl doctor` reports the builder-cache readiness and the resolved
+builder backend without attempting a rebuild, and its `--json` output emits only
+sanitized labels for automation.
 
-Editing `nix/images/builder-vm/` or files under `nix/lib/` changes the builder-VM
-source fingerprint, so the next run from a source checkout invalidates the cached
-image and rebuilds it locally. That Stage 0 rebuild needs a host `mkfs.ext4`
-(`e2fsprogs` on Debian/Ubuntu, `brew install e2fsprogs` on macOS). If the rebuild
-fails with a missing `mkfs.ext4` error, install `e2fsprogs` and rerun; the cached
-Nix store and built artifacts remain warm.
+Editing the builder flake in the selected mvm-images checkout, or files under
+this checkout's `nix/lib/`, changes the builder image's source fingerprint, so
+the next run invalidates the cached image and rebuilds it locally. That Stage 0
+rebuild needs a host `mkfs.ext4` (`e2fsprogs` on Debian/Ubuntu,
+`brew install e2fsprogs` on macOS). If the rebuild fails with a missing
+`mkfs.ext4` error, install `e2fsprogs` and rerun; the cached Nix store and built
+artifacts remain warm.
 
 ## Benchmarking Runtime Boot
 

@@ -62,7 +62,9 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
         );
     }
 
-    let source_checkout = find_builder_vm_flake().is_ok();
+    // Only an image checkout can compile the kernel, and a selected one has
+    // answered above; without one the kernel the image lock pins is fetched.
+    let source_checkout = super::images_built_from_source();
     let mut resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
 
     if let KernelResolution::Cached(verified) = &resolved {
@@ -207,9 +209,7 @@ pub(super) fn default_workload_kernel_source_for(
 
 #[cfg(feature = "builder-vm")]
 fn build_local_workload_kernel() -> Result<String> {
-    ui::notice(
-        "Preparing the workload kernel using the Stage 0 builder. The first source build can take several minutes; the persistent Nix store and finished kernel are reused afterward.",
-    );
+    // `build_kernel_via_stage0` announces itself with a live status line.
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
         .context(
             "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
@@ -294,7 +294,12 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
 }
 
 fn download_workload_kernel(arch: &str, dest: &std::path::Path) -> Result<()> {
-    crate::update::download_kernel(arch, "workload", dest)
+    let phase = mvm_runtime::ui::activity::start(format!(
+        "Downloading the published workload kernel ({arch})"
+    ));
+    crate::update::download_kernel(arch, "workload", dest)?;
+    phase.finish();
+    Ok(())
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {
@@ -341,12 +346,12 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
         return Ok((kernel_path, rootfs_path));
     }
     // Which arm produces the image is a policy decision with an operator
-    // override, not a bare "is there a flake here" test. Auto-detect still
-    // answers exactly as before — a checkout builds, an installed binary
-    // fetches — so an operator who sets nothing sees no change.
+    // override. Auto-detect fetches here: a selected image checkout has
+    // already answered above, and without one there is nothing to build from,
+    // so a forced build is refused.
     let resolved = boot_image_select::resolve(None, source_checkout_available());
     match resolved.choice {
-        BootImageAcquisition::Build => build_prod_default_locally(cache_dir),
+        BootImageAcquisition::Build => Err(refuse_build_without_a_checkout()),
         BootImageAcquisition::Fetch => {
             let acquired = download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)?;
             // Record that these bytes were fetched, not built here. Without it a
@@ -364,8 +369,8 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     }
 }
 
-/// Whether this binary can build an image from source: the in-repo flake, or
-/// a local image checkout the selector names.
+/// Whether this binary can build an image from source: a local image
+/// checkout is selected.
 ///
 /// The same predicate the acquisition path has always used, named so the
 /// selector reads as policy applied to a fact rather than re-deriving the fact.
@@ -382,60 +387,59 @@ fn source_checkout_available() -> bool {
 /// A forced local build with nothing to build from is refused, not quietly
 /// downgraded to a fetch.
 ///
-/// `MVM_BOOT_IMAGE=build` on an installed binary is a request the host cannot
-/// satisfy. Falling back to a fetch would hand back exactly the image the
-/// operator asked not to have, and it would look like the knob had worked.
-fn refuse_build_without_a_flake() -> Result<()> {
-    if source_checkout_available() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "{env}=build asks for a locally built boot image, but this mvmctl has no \
-         in-repo image flake to build from — it is an installed binary, not a \
-         source checkout. Unset {env} to fetch the published image, or run from \
-         a checkout.",
-        env = boot_image_select::MVM_BOOT_IMAGE_ENV
-    )
+/// `MVM_BOOT_IMAGE=build` without an image checkout is a request the host
+/// cannot satisfy. Falling back to a fetch would hand back exactly the image
+/// the operator asked not to have, and it would look like the knob had worked.
+fn refuse_build_without_a_checkout() -> anyhow::Error {
+    mvm_build::image_source::ImageConstructionRefused::new(format!(
+        "the locally built default image {}=build asks for",
+        boot_image_select::MVM_BOOT_IMAGE_ENV
+    ))
+    .into()
 }
 
-#[cfg(feature = "builder-vm")]
-fn build_prod_default_locally(cache_dir: &str) -> Result<(String, String)> {
-    refuse_build_without_a_flake()?;
-    ui::info("Building the prod default microVM image locally (source checkout)...");
-    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn build_prod_default_locally(_cache_dir: &str) -> Result<(String, String)> {
-    // Without the feature there is never a flake, so the refusal always fires.
-    refuse_build_without_a_flake()?;
-    anyhow::bail!("this build of mvmctl cannot build a boot image locally")
-}
-
+/// The dev default image: the writable variant of the default image,
+/// built from the selected image checkout's `default-tenant.dev` target.
 #[cfg(feature = "builder-vm")]
 fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)> {
-    std::fs::create_dir_all(cache_dir)?;
+    dev_image_from(super::bootstrap::selected_local_checkout()?, cache_dir)
+}
+
+/// Build the dev image from `checkout`, or answer from a cache a previous
+/// build left. Without a checkout and without a cache there is nothing to
+/// build it from: the released set publishes the sealed image only.
+#[cfg(feature = "builder-vm")]
+fn dev_image_from(
+    checkout: Option<mvm_build::image_source::LocalImageCheckout>,
+    cache_dir: &str,
+) -> Result<(String, String)> {
+    if let Some(checkout) = checkout {
+        ui::info("Preparing the dev default microVM image from the selected image checkout...");
+        return ensure_pair_workload_image(
+            &checkout,
+            cache_dir,
+            DefaultMicrovmVariant::Dev,
+            WorkloadImageProfile::DefaultTenant,
+        );
+    }
     let kernel_path = format!("{cache_dir}/vmlinux");
     let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-    let meta_path = format!("{cache_dir}/mvm-meta.json");
-    if [&kernel_path, &rootfs_path, &meta_path]
+    if DefaultMicrovmVariant::Dev
+        .required_outputs()
         .iter()
-        .all(|p| std::path::Path::new(p).exists())
+        .all(|label| std::path::Path::new(&format!("{cache_dir}/{label}")).exists())
     {
         return Ok((kernel_path, rootfs_path));
     }
-    ui::info("Building the dev default microVM image locally (dev mode)...");
-    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
+    Err(mvm_build::image_source::ImageConstructionRefused::new("the dev default image").into())
 }
 
 /// Serve one profile-qualified workload image from the pair: install the
 /// verified set into the caller's profile-specific cache, stamp it with the
 /// pair identity, and answer an unchanged pair without a cache lookup.
 ///
-/// Only the prod variant has a pair contract: the sibling image repository
-/// publishes the `default` attribute, and the dev variant's writable image
-/// is an in-tree convenience with no counterpart there — it keeps building
-/// from the in-tree flake.
+/// The variant picks the checkout's attribute: `default` for the sealed
+/// image, `dev` for the writable one.
 #[cfg(feature = "builder-vm")]
 fn ensure_pair_workload_image(
     checkout: &mvm_build::image_source::LocalImageCheckout,
@@ -446,7 +450,8 @@ fn ensure_pair_workload_image(
     use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget};
     let target = ImageBuildTarget {
         role: ImageBuildRole::for_workload_profile(profile),
-        attr: FlakeAttr::new("default").expect("default is a valid flake attribute"),
+        attr: FlakeAttr::new(variant.attr())
+            .expect("a variant attribute is a valid flake attribute"),
     };
     let fingerprint = super::local_pair::pair_fingerprint(&super::local_pair::derive_pair_key(
         checkout, &target,
@@ -488,17 +493,8 @@ fn ensure_pair_workload_image(
             std::path::Path::new(&format!("{cache_dir}/{label}")),
         )?;
     }
-    // Cache entries are sealed read-only; the install owns its copies and
-    // the sidecar is about to be rewritten with the pair identity.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            format!("{cache_dir}/{}", mvm_build::builder_vm::SIDECAR_FILENAME),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .with_context(|| format!("lifting the sidecar permissions in {cache_dir}"))?;
-    }
+    // `copy_contract_file` left every output above owner-writable, the
+    // sidecar among them, so it can be rewritten with the pair identity.
     // The sidecar names the pair identity; the next run compares it before
     // deciding the install answers, so a changed pair reinstalls and a
     // fetched or in-tree image is never mistaken for a pair build.
@@ -568,98 +564,10 @@ impl DefaultMicrovmVariant {
 #[cfg(not(feature = "builder-vm"))]
 fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)> {
     anyhow::bail!(
-        "dev mode builds the default image locally via the builder VM, but this \
-         mvmctl was built without the `builder-vm` feature. Use `--prod` (downloads \
+        "dev mode builds the default image from an image checkout via the builder VM, but \
+         this mvmctl was built without the `builder-vm` feature. Use `--prod` (downloads \
          the published image), or pass a `--flake`."
     )
-}
-
-#[cfg(feature = "builder-vm")]
-fn build_default_microvm_via_libkrun(
-    out_dir: &str,
-    variant: DefaultMicrovmVariant,
-) -> Result<(String, String)> {
-    use mvm_build::builder_backend_select::{
-        resolve_choice, resolve_env_override, try_resolve_builder_backend_with_override,
-    };
-    use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
-
-    bootstrap_builder_vm_image()
-        .context("Stage 0 builder-VM image bootstrap (precondition for libkrun dispatch)")?;
-
-    let builder_flake = find_builder_vm_flake().context(
-        "builder-vm flake missing at nix/images/builder-vm/flake.nix; libkrun dispatch needs it",
-    )?;
-    let workspace_root = std::path::Path::new(&builder_flake)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake}"))?
-        .to_path_buf();
-
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_boot_host_binaries(
-        std::path::Path::new(&host_bins_cache),
-    )?
-    .dir;
-
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;
-
-    let job = BuilderJob::Flake {
-        flake_ref: "path:/work/nix/images/default-tenant".to_string(),
-        attr_path: format!("packages.{}.{}", host_system_linux(), variant.attr()),
-    };
-    let mounts = BuilderMounts {
-        flake_src: workspace_root,
-        host_nix_store: None,
-        artifact_out: std::path::PathBuf::from(out_dir),
-        host_bin_dir,
-        staged_user_flake: None,
-    };
-
-    let selected = resolve_choice();
-    let explicit_override = resolve_env_override().is_some();
-    let attempt_order = builder_backend_attempt_order(selected, explicit_override);
-    let mut last_error = None;
-    for (idx, choice) in attempt_order.iter().copied().enumerate() {
-        let backend = try_resolve_builder_backend_with_override(Some(choice));
-        let run_result = backend.and_then(|b| b.run_build(&job, &mounts));
-        match run_result {
-            Ok(_) => {
-                mvm_build::builder_health::note_attempt_outcome(choice, true);
-                last_error = None;
-                break;
-            }
-            Err(err) => {
-                if mvm_build::builder_backend_select::is_builder_vm_level_failure(&err) {
-                    mvm_build::builder_health::note_attempt_outcome(choice, false);
-                }
-                if idx + 1 < attempt_order.len() {
-                    ui::warn(&format!(
-                        "Auto-selected {} builder failed ({}); retrying with {}.",
-                        choice.name(),
-                        err,
-                        attempt_order[idx + 1].name(),
-                    ));
-                }
-                last_error = Some(anyhow::anyhow!("{} builder VM: {err}", choice.name()));
-            }
-        }
-    }
-    if let Some(err) = last_error {
-        return Err(err);
-    }
-
-    for label in variant.required_outputs() {
-        let p = format!("{out_dir}/{label}");
-        if !std::path::Path::new(&p).exists() {
-            anyhow::bail!("builder VM exited cleanly but did not produce {label} at {p}");
-        }
-    }
-    let kernel = format!("{out_dir}/vmlinux");
-    let rootfs = format!("{out_dir}/rootfs.ext4");
-    Ok((kernel, rootfs))
 }
 
 fn download_default_microvm_image(
@@ -673,7 +581,7 @@ fn download_default_microvm_image(
         "x86_64"
     };
     let guest_arch = arch.parse().context("parse host architecture")?;
-    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
     let tag = mvm_core::image_set::image_train_lock()
         .image_set
         .release_tag
@@ -868,6 +776,52 @@ mod pair_default_image_tests {
         assert!(
             !cache_dir.join("vmlinux").exists(),
             "a refusal must not produce image artifacts"
+        );
+    }
+
+    /// The released set publishes the sealed image only, so without an image
+    /// checkout the dev image has no source; the refusal names where image
+    /// sources live rather than a flake this repository no longer carries.
+    #[test]
+    fn the_dev_image_without_a_checkout_or_cache_is_refused() {
+        let cache_dir = tempfile::tempdir().unwrap();
+
+        let err = dev_image_from(None, &cache_dir.path().display().to_string())
+            .expect_err("nothing can build the dev image");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("the dev default image is built from an mvm-images checkout"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("image construction lives in mvm-images"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_dev_image_left_in_the_cache_still_answers_without_a_checkout() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        for label in DefaultMicrovmVariant::Dev.required_outputs() {
+            std::fs::write(cache_dir.path().join(label), b"x").unwrap();
+        }
+
+        let (kernel, rootfs) = dev_image_from(None, &cache_dir.path().display().to_string())
+            .expect("a cached dev image answers");
+
+        assert!(kernel.ends_with("vmlinux"), "{kernel}");
+        assert!(rootfs.ends_with("rootfs.ext4"), "{rootfs}");
+    }
+
+    #[test]
+    fn a_forced_local_build_without_a_checkout_names_the_knob_and_the_repository() {
+        let rendered = refuse_build_without_a_checkout().to_string();
+
+        assert!(rendered.contains("MVM_BOOT_IMAGE=build"), "{rendered}");
+        assert!(
+            rendered.contains("image construction lives in mvm-images"),
+            "{rendered}"
         );
     }
 }

@@ -187,6 +187,25 @@ const DEFAULT_TENANT: TargetContract = TargetContract {
     needs_host_binaries: false,
 };
 
+/// The default image's writable dev variant: the same kernel, an accessible
+/// rootfs, and no verity sidecars, because a dev image is not sealed.
+const DEFAULT_TENANT_DEV: TargetContract = TargetContract {
+    files: &[
+        kernel("vmlinux", "default_tenant_workload_kernel"),
+        file("rootfs.ext4", "default_tenant_workload_rootfs", "ext4"),
+        file("mvm-meta.json", "default_tenant_workload_rootfs", "json"),
+    ],
+    capabilities: &[
+        ("default_tenant_workload_kernel", "virtio_vsock"),
+        ("default_tenant_workload_rootfs", "virtio_blk"),
+    ],
+    set_roles: &[
+        ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+        ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+    ],
+    needs_host_binaries: false,
+};
+
 const ROOTLESS_TENANT: TargetContract = TargetContract {
     files: &[
         kernel("vmlinux", "rootless_tenant_workload_kernel"),
@@ -230,6 +249,7 @@ pub fn contract_for(
         (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image") => Ok(&SDK_SIDECAR_GLIBC),
         (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image-musl") => Ok(&SDK_SIDECAR_MUSL),
         (ImageBuildRole::DefaultTenant, "default") => Ok(&DEFAULT_TENANT),
+        (ImageBuildRole::DefaultTenant, "dev") => Ok(&DEFAULT_TENANT_DEV),
         (ImageBuildRole::RootlessTenant, "default") => Ok(&ROOTLESS_TENANT),
         (ImageBuildRole::Initramfs, _) => Err(unsupported(
             "the image-set schema has no initramfs role, so a built initramfs has no manifest \
@@ -243,7 +263,7 @@ pub fn contract_for(
             "no output contract for this attribute; known: builder-vm.default, \
              runtime-overlay.default, runtime-overlay.sdk-sidecar-image, \
              runtime-overlay.sdk-sidecar-image-musl, default-tenant.default, \
-             rootless-tenant.default",
+             default-tenant.dev, rootless-tenant.default",
         )),
     }
 }
@@ -574,8 +594,8 @@ pub struct PairBuild {
 ///
 /// `prepare_builder` must not itself route through this function for the
 /// builder-vm target: the image-set build runs *inside* a builder, so its
-/// builder image comes from the in-tree or published bootstrap, never from
-/// the pair being built.
+/// builder image comes from the published bootstrap, never from the pair
+/// being built.
 pub fn build_target_for_pair(
     checkout: &LocalImageCheckout,
     mvm_root: &Path,
@@ -761,6 +781,15 @@ mod tests {
                 false,
             ),
             (
+                ImageBuildRole::DefaultTenant,
+                "dev",
+                &[
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                    ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+                ][..],
+                false,
+            ),
+            (
                 ImageBuildRole::RootlessTenant,
                 "default",
                 &[
@@ -795,7 +824,7 @@ mod tests {
             (ImageBuildRole::Initramfs, "default", "no initramfs role"),
             (ImageBuildRole::Kernel, "workload-vmlinux", "default-tenant"),
             (ImageBuildRole::BuilderVm, "dev", "no output contract"),
-            (ImageBuildRole::DefaultTenant, "dev", "no output contract"),
+            (ImageBuildRole::RootlessTenant, "dev", "no output contract"),
         ] {
             let err = contract_for(&target(role, attr)).unwrap_err();
             assert!(err.to_string().contains(needle), "{role}.{attr}: {err}");

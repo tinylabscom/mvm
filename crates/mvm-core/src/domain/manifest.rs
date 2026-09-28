@@ -200,6 +200,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub secrets: std::collections::BTreeMap<String, ManifestSecret>,
 
+    /// Who answers a runtime approval (`[approval]`): an endpoint route rule
+    /// or a secret binding whose decision is `ask`. Empty means the launch
+    /// default — the terminal when the run is interactive, deny otherwise.
+    #[serde(default, skip_serializing_if = "ManifestApproval::is_empty")]
+    pub approval: ManifestApproval,
+
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
     pub data_disk: String,
@@ -581,6 +587,45 @@ impl ManifestNetwork {
     fn is_empty(&self) -> bool {
         self.allow_hosts.is_empty() && self.ai.is_none() && self.routes.is_empty()
     }
+}
+
+/// The `[approval]` table: which backends answer a runtime approval, and how
+/// several combine.
+///
+/// ```toml
+/// [approval]
+/// backends = ["tty", "webhook=https://approvals.example.com/mvm"]
+/// mode = "any"
+/// ```
+///
+/// A backend is `tty`, `deny`, or `webhook=URL`; the launch parses and
+/// validates them, and `--approval` on the command line replaces the list.
+/// Nothing is ever written back here: an approval lives in the running
+/// session and nowhere else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestApproval {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ApprovalChainMode>,
+}
+
+impl ManifestApproval {
+    fn is_empty(&self) -> bool {
+        self.backends.is_empty() && self.mode.is_none()
+    }
+}
+
+/// How several approval backends combine.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChainMode {
+    /// Every backend must approve.
+    #[default]
+    All,
+    /// One approving backend is enough.
+    Any,
 }
 
 /// The `[grants]` table: what this project's workload is permitted to consume
@@ -1131,6 +1176,34 @@ mod tests {
         ] {
             let text = format!("{}\n{body}", minimal_manifest_toml());
             assert!(Manifest::from_toml_str(&text).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn the_approval_table_parses_and_refuses_what_it_does_not_know() {
+        let text = format!(
+            "{}\n[approval]\nbackends = [\"tty\", \"webhook=https://a.example/hook\"]\nmode = \"any\"\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(
+            m.approval.backends,
+            ["tty", "webhook=https://a.example/hook"]
+        );
+        assert_eq!(m.approval.mode, Some(ApprovalChainMode::Any));
+        assert!(
+            Manifest::from_toml_str(minimal_manifest_toml())
+                .unwrap()
+                .approval
+                .is_empty()
+        );
+
+        for bad in [
+            "[approval]\nmode = \"most\"\n",
+            "[approval]\nremember = true\n",
+        ] {
+            let text = format!("{}\n{bad}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{bad}");
         }
     }
 

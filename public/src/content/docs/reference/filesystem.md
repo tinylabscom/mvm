@@ -69,8 +69,10 @@ overlay** that is mounted inside the guest at `/mvm/runtime`.
 - Before attach, mvm re-verifies the cached `overlay.ext4`, `overlay.verity`,
   `overlay.roothash`, and `VERSION` files against the recorded
   `checksums-sha256.txt` manifest and refuses the boot on any mismatch.
-- The artifact is shared across microVMs from the local cache under
-  `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
+- The artifact is shared across microVMs from the local cache: under
+  `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` when it came from the
+  pinned image set, or `~/.mvm/cache/runtime-overlay/<version>/<arch>/` when
+  it was built at this CLI's version.
 
 ### Runtime updates
 
@@ -124,8 +126,8 @@ secrets guide rather than shipping values in on this drive.
 There is no built-in data drive. Persistent storage is a user disk volume: a
 three-part `--mount` spec (`--volume` is an alias) whose third field is a size in
 MB. The host path is an **ext4 disk image file** mvm creates and attaches as
-virtio-blk — not a directory. A two-part spec is a live host-directory share over
-virtio-fs instead.
+virtio-blk — not a directory. A two-part spec is a host directory instead,
+snapshotted into a read-only ext4 image when a transient run boots.
 
 Volumes are **read-only unless you write `:rw`**, and the guest mount path must
 be under `/data` or `/work`:
@@ -135,8 +137,14 @@ be under `/data` or `/work`:
 mvmctl machine run --flake . --mount ./store.img:/data/store:1024:rw
 ```
 
-`:rw` requires `--profile dev` or `--profile permissive`. A *transient* run's
-share is read-only under every profile.
+A writable disk image is accepted under every profile that allows volumes —
+the default `standard` and `--prod` included — because the guest writes into
+its own ext4 image file, never into the host filesystem. A host *directory* is
+different: a *transient* run's directory share is read-only under every
+profile, and a persistent machine refuses a directory volume under every
+profile, because it cannot attach a live host directory. Register a snapshot
+with `mvmctl machine volume mount` to bring a directory into one.
+`--profile restrictive` accepts no volume at all.
 
 For managed encrypted local volumes and workspace cleanup policy, see
 [Persistent workspaces](/guides/persistent-workspaces/).
@@ -194,8 +202,10 @@ Every backend shares this one per-VM directory with disjoint file names, so the
 marker file (`fc.pid`, `libkrun.pid`, `qemu.pid`, `hvf.pid`) is what identifies
 which VMM owns a running VM.
 
-The shared guest-runtime overlay cache lives separately under
-`~/.mvm/cache/runtime-overlay/<version>/<arch>/` and contains the sealed
+The shared guest-runtime overlay cache lives separately — under
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` for the pinned image
+set's member, `~/.mvm/cache/runtime-overlay/<version>/<arch>/` for a source
+build — and contains the sealed
 `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
 `checksums-sha256.txt` metadata reused by every VM that boots that runtime
 version.

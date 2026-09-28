@@ -4,8 +4,8 @@
 //! the `builder-vm` target of that checkout pair: built once by the shared
 //! local-image-set build, served from the local image cache, and installed
 //! into the builder-VM cache layout with a provenance record naming the pair.
-//! The build that produces it runs inside the in-tree or published tool
-//! builder — never inside the image it is building, which would recurse.
+//! The build that produces it runs inside the published tool builder — never
+//! inside the image it is building, which would recurse.
 
 use std::path::Path;
 
@@ -55,9 +55,9 @@ pub(crate) fn derive_pair_key(
 /// Build `target` for the pair (answering a cache hit without booting
 /// anything) and return the entry and the key it answers.
 ///
-/// The builder the job runs in is the tool builder — the in-tree or published
-/// one — via the exempt bootstrap, so building the `builder-vm` target from a
-/// pair never routes through the image being built.
+/// The builder the job runs in is the published tool builder, via the exempt
+/// bootstrap, so building the `builder-vm` target from a pair never routes
+/// through the image being built.
 pub(crate) fn ensure_pair_built(
     checkout: &LocalImageCheckout,
     target: ImageBuildTarget,
@@ -70,7 +70,13 @@ pub(crate) fn ensure_pair_built(
     let cache = LocalImageCache::open_default();
     let arch = GuestArch::host();
     let target_label = target.to_string();
-    build_target_for_pair(
+    // Answered from the local image cache when the pair is unchanged, which is
+    // quick enough never to be announced; a changed pair builds in a builder
+    // VM, whose own line nests under this one.
+    let phase = mvm_runtime::ui::activity::start(format!(
+        "Preparing {target_label} from the local image checkout"
+    ));
+    let built = build_target_for_pair(
         checkout,
         &mvm_root,
         target,
@@ -88,7 +94,9 @@ pub(crate) fn ensure_pair_built(
             builder.run(job).map_err(|error| format!("{error:#}"))
         },
     )
-    .with_context(|| format!("building {target_label} from the local image checkout"))
+    .with_context(|| format!("building {target_label} from the local image checkout"))?;
+    phase.finish();
+    Ok(built)
 }
 
 /// Resolve the workload kernel from the pair's requested generic profile. The
@@ -125,21 +133,10 @@ pub(crate) fn ensure_pair_workload_kernel(
 /// Copy a sealed (read-only) entry file into a writable cache: the entry's
 /// files are sealed at 0444, and cache consumers (the HVF bake opens the
 /// builder rootfs read-write; the sidecar stamp rewrites the default
-/// image's) must not inherit that.
-#[cfg(unix)]
+/// image's) must not inherit that. A destination left read-only by an
+/// earlier install is replaced rather than refused.
 pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("making {} writable", to.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} into {}", from.display(), to.display()))?;
+    mvm_core::util::atomic_io::copy_writable(from, to)?;
     Ok(())
 }
 

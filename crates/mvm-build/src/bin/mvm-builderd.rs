@@ -41,7 +41,7 @@ fn main() -> ExitCode {
             "mvm-builderd is Linux-only (the resident builder-VM control \
              daemon). On a developer host this binary is a no-op; the \
              production binary is cross-compiled to \
-             aarch64-unknown-linux-musl from nix/images/builder-vm/."
+             aarch64-unknown-linux-musl and installed by the builder image."
         );
         ExitCode::FAILURE
     }

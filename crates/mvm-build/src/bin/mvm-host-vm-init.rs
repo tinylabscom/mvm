@@ -2983,8 +2983,8 @@ mod linux {
             t.nix_device_ready_ms = Some(BootTimings::ms_since(anchor))
         });
 
-        // The slim custom kernel under
-        // `nix/images/builder-vm/kernel/` builds overlay, vsock,
+        // The slim custom builder kernel (built in mvm-images) builds
+        // overlay, vsock,
         // fuse, virtiofs, and the iptables tables as `=y`. No
         // modprobe needed before `mount -t overlay` or `socket(AF_VSOCK)`
         // — the kernel comes up with the subsystems registered.
@@ -3668,7 +3668,7 @@ mod linux {
         // -eu <cmd>` and the unshare+setpriv wrapped form via
         // [`build_isolated_command`]. unshare + setpriv both
         // live in `util-linux`, which is in the builder VM's
-        // rootfs (`nix/images/builder-vm/flake.nix`, package list);
+        // rootfs (mvm-images' builder flake, package list);
         // PATH (`/sbin:/usr/sbin:/bin:/usr/bin`) finds them.
         let mut cmd = build_isolated_command(cmd_sh, isolation);
         cmd.stdout(Stdio::inherit()).stderr(Stdio::piped());

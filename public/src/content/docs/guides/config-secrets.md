@@ -50,9 +50,10 @@ mvmctl run --manifest my-app \
     --mount /tmp/my-config:/data/config:ro
 ```
 
-A persistent machine (`--name` plus `-d`) refuses directory shares outright —
-a live host-directory share can't be expressed. Register a snapshot-backed
-volume instead, or attach a sized disk image:
+A persistent machine (`-d`, or `--name` with `--port`) refuses directory
+shares outright under every profile — it cannot attach a live host directory,
+and `machine run` and `machine create` say so before anything boots. Register
+a snapshot-backed volume instead, or attach a sized disk image:
 
 ```bash
 # Snapshotted into an ext4 image before each machine start; host edits
@@ -62,7 +63,8 @@ mvmctl machine volume mount app --volume config \
 
 # Durable read-write disk image. The third field is a size, which is what
 # distinguishes a disk spec from a directory share's `:ro` mode field.
-mvmctl machine run --manifest my-app --name app -d --profile dev \
+# Any profile that allows volumes accepts it; `--profile dev` is not needed.
+mvmctl machine run --manifest my-app --name app -d \
     --mount app-data.img:/data/state:4G:rw
 ```
 
@@ -148,21 +150,27 @@ The pattern below works with any `mkGuest` flake that reads
 `mkGuest` API surface, or [Nix Flakes](/guides/nix-flakes) for a
 worked LLM-agent example showing the pattern end-to-end.
 
-### Running with host-mounted config and secrets
+### Running with host config and secrets directories
 
 ```bash
 mvmctl machine build --flake ./openclaw
-mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
-    --mount nix/examples/openclaw/config:/data/config \
-    --mount nix/examples/openclaw/secrets:/data/secrets
+mvmctl machine volume mount oc --volume config \
+    --host "$PWD/nix/examples/openclaw/config" --guest /data/config
+mvmctl machine volume mount oc --volume secrets \
+    --host "$PWD/nix/examples/openclaw/secrets" --guest /data/secrets
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
 ```
 
-Each `--mount` flag shares a host directory into the guest, read-only by
-default. Material placed on the *secrets drive* (`/mnt/secrets/`, mode 0440
+`--port` makes `oc` a persistent machine, and a persistent machine cannot
+attach a live host directory, so the directories are registered rather than
+passed with `--mount`. Each registration snapshots its directory into a
+read-only ext4 image at every start: host edits appear after the machine's
+next stop and start. `--host` must be absolute and on encrypted storage, and
+the registration can come before the machine exists. Material placed on the *secrets drive* (`/mnt/secrets/`, mode 0440
 root:mvm by the init script) is additionally re-staged to
 `/run/mvm-secrets/<svc>/` with mode 0400 owned by the per-service uid
 (ADR-001 claim 1) so sibling services on the same microVM can't cross-read.
-That re-staging applies to the drive, not to a `--mount` share.
+That re-staging applies to the drive, not to a registered directory.
 
 ### Custom config + API keys at runtime
 
@@ -179,9 +187,9 @@ cat > /tmp/my-secrets/secret-refs.env << 'EOF'
 ANTHROPIC_API_KEY_REF=anthropic-api-key
 EOF
 
-mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
-    --mount /tmp/oc-config:/data/config \
-    --mount /tmp/oc-secrets:/data/secrets
+mvmctl machine volume mount oc --volume config --host /tmp/my-config --guest /data/config
+mvmctl machine volume mount oc --volume secrets --host /tmp/my-secrets --guest /data/secrets
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
 ```
 
 A typical `mkGuest` service uses `preStart` to check for
@@ -198,12 +206,10 @@ and readiness boundary.
 
 ```bash
 mvmctl machine build --flake ./openclaw
-mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
-    --mount nix/examples/openclaw/config:/data/config \
-    --mount nix/examples/openclaw/secrets:/data/secrets
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
 ```
 
-When restoring from a snapshot with `--mount` shares, the guest agent
+When restoring from a snapshot with registered directory volumes, the guest agent
 automatically remounts config/secrets drives and restarts services
 with the fresh data.
 
@@ -226,21 +232,18 @@ keys:
 
 ```bash
 # Production gateway with prod Anthropic key
-mvmctl machine run --manifest openclaw --name oc-prod \
-    --port 3000:3000 \
-    --mount ./prod/config:/data/config \
-    --mount ./prod/secrets:/data/secrets
+mvmctl machine volume mount oc-prod --volume config --host "$PWD/prod/config" --guest /data/config
+mvmctl machine volume mount oc-prod --volume secrets --host "$PWD/prod/secrets" --guest /data/secrets
+mvmctl machine run --manifest openclaw --name oc-prod --port 3000:3000
 
 # Staging gateway with test key
-mvmctl machine run --manifest openclaw --name oc-staging \
-    --port 3001:3000 \
-    --mount ./staging/config:/data/config \
-    --mount ./staging/secrets:/data/secrets
+mvmctl machine volume mount oc-staging --volume config --host "$PWD/staging/config" --guest /data/config
+mvmctl machine volume mount oc-staging --volume secrets --host "$PWD/staging/secrets" --guest /data/secrets
+mvmctl machine run --manifest openclaw --name oc-staging --port 3001:3000
 
 # Dev gateway with no key (localhost-only testing)
-mvmctl machine run --manifest openclaw --name oc-dev \
-    --port 3002:3000 \
-    --mount ./dev/config:/data/config
+mvmctl machine volume mount oc-dev --volume config --host "$PWD/dev/config" --guest /data/config
+mvmctl machine run --manifest openclaw --name oc-dev --port 3002:3000
 ```
 
 All three restore from the same snapshot (1-2 second boot) but get

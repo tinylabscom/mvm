@@ -73,4 +73,7 @@ pub mod run;
 pub mod session_resume;
 pub mod stream;
 pub mod supervisor;
+/// The per-VM host telemetry collector worker: resolve → assert-current →
+/// authenticated receive, with bounded ingest and capped-backoff recovery.
+pub mod telemetry_collector;
 pub mod workload_env;

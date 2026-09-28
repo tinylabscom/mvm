@@ -1820,10 +1820,20 @@ mod tests {
             Duration::from_millis(200),
         );
         assert_eq!(out, None);
+        let elapsed = started.elapsed();
+        // The process should be killed AT its deadline (~200ms), not immediately.
+        // With the buggy `>=` -> `<` mutation, the process would be killed before
+        // the deadline (immediately on first check since now < deadline is always true).
+        // The test must fail if the process was killed before ~150ms.
         assert!(
-            started.elapsed() < Duration::from_secs(10),
+            elapsed >= Duration::from_millis(150),
+            "the query should wait until its deadline, elapsed {:?} (should be >= 150ms)",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
             "the query must be killed at its deadline, took {:?}",
-            started.elapsed()
+            elapsed
         );
     }
 

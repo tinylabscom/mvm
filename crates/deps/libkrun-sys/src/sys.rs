@@ -340,8 +340,8 @@ impl Drop for Context {
 // hard-coded addresses. On aarch64 the payload remains raw. The bundled kernel is the
 // only kernel where libkrun's TSI mode (Transparent Socket
 // Impersonation — the AF_INET-over-vsock path) is known to work
-// correctly. Stock nixpkgs kernels lack the patches; our in-repo
-// port of the libkrunfw patches (nix/images/builder-vm/kernel/)
+// correctly. Stock nixpkgs kernels lack the patches; a port of the
+// libkrunfw patches onto a nixpkgs kernel
 // kernel-oops's on socket close against nixpkgs 6.12.87.
 //
 // The bundled-kernel approach matches libkrun's own documented

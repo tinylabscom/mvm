@@ -740,7 +740,7 @@ request: RunRequest
  */
 export interface RunReply {
 /**
- * `dev` or `prod`, resolved fail-closed the way the machine inventory resolves it. Only `dev` admits the DevOnly `guest.*` methods.
+ * `dev` or `prod`, decided by the admitted profile's `dev_guest` grant, the same declaration the guest agent's DevOnly refusal keys on. Only `dev` admits the DevOnly `guest.*` methods.
  */
 build_mode: string
 machine: MachineState3

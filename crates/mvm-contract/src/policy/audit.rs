@@ -332,7 +332,7 @@ pub enum LocalAuditKind {
     /// where `seed` is the find_local_fallback_image label
     /// (`current`, `prebuilt/v0.14.0`, `builds/<hash>`, ...) and
     /// `fingerprint_prefix` is the leading 8 hex chars of the
-    /// SHA-256 of `nix/images/builder-vm/{flake.nix,flake.lock}`.
+    /// SHA-256 of the builder image flake's `{flake.nix,flake.lock}`.
     Stage0Boot,
     /// Stage 0 finished cleanly: the staging dir validated, was
     /// renamed into the live cache, and `cache_ready` re-validates.

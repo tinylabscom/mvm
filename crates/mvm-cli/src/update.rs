@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::http;
 use crate::ui;
+use mvm_build::published_image_set::github_download_base;
 use mvm_core::release_version::{ReleaseVersion, VersionSyntax};
 use mvm_runtime::shell::run_host;
 
@@ -62,20 +63,6 @@ fn github_api_base() -> String {
         return base.trim().trim_end_matches('/').to_string();
     }
     String::from("https://api.github.com")
-}
-
-/// Base URL for GitHub release-asset downloads.
-///
-/// Defaults to `https://github.com`. `MVM_UPDATE_DOWNLOAD_URL` overrides
-/// for hermetic tests — same shape as `MVM_UPDATE_API_URL`.
-fn github_download_base() -> String {
-    if let Ok(base) = std::env::var("MVM_UPDATE_DOWNLOAD_URL")
-        && !base.trim().is_empty()
-    {
-        eprintln!("[mvm] MVM_UPDATE_DOWNLOAD_URL set; using {base} (test path).");
-        return base.trim().trim_end_matches('/').to_string();
-    }
-    String::from("https://github.com")
 }
 
 /// Query the GitHub releases API for the latest release tag name.
@@ -144,15 +131,13 @@ pub(crate) fn boot_image_release() -> Result<(String, String)> {
     Ok((tag.to_string(), version.to_string()))
 }
 
-/// Asset and checksum-manifest names for a kernel variant on the boot image
-/// release.
+/// Asset and checksum-manifest names for a kernel variant in the image set.
 ///
-/// The two release trains name the same bytes differently: `kernel-build.yml`
-/// publishes `vmlinux-<arch>-<variant>`, while `release-boot-image.yml`
-/// publishes the kernel *inside* the image it belongs to. The workload kernel
-/// is `nix/images/default-tenant`'s, whose flake states it is "the single
-/// shared definition in `nix/images/kernel/`, identical to the one builder-vm
-/// builds" — so the mapping is a rename, not a substitution.
+/// The image set publishes each kernel *inside* the image it belongs to, so a
+/// variant maps to the image that carries it: the workload kernel is the
+/// default tenant's, the builder kernel the builder VM's. mvm-images builds
+/// both from one shared kernel definition, so the mapping is a rename, not a
+/// substitution.
 fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String)> {
     let image = match variant {
         "workload" => "default-microvm",
@@ -329,7 +314,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
             )
         })?
         .into_temp_path();
-    let image_set = crate::commands::env::published_image_set::PublishedImageSet::acquire()?;
+    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
     let artifact =
         image_set.artifact(role, mvm_core::image_set::MemberTarget::Arch(arch), &asset)?;
     let tag = mvm_core::image_set::image_train_lock()
@@ -850,17 +835,6 @@ pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) ->
     tags.filter_map(|tag| BootImageVersion::from_tag(tag).map(|v| (v, tag)))
         .max_by_key(|(v, _)| *v)
         .map(|(_, tag)| tag.to_string())
-}
-
-/// Release-asset base URL for the canonical image-set producer.
-pub(crate) fn image_set_asset_base_url(tag: &str) -> String {
-    let repository = mvm_core::image_set::image_train_lock().repository.as_str();
-    format!(
-        "{}/{}/releases/download/{}",
-        github_download_base(),
-        repository,
-        tag
-    )
 }
 
 /// Which install line `update` announces once `decide_update` has settled on

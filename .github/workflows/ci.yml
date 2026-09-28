@@ -38,7 +38,6 @@ jobs:
       code: ${{ steps.validate.outputs.code }}
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
-      kernel: ${{ steps.validate.outputs.kernel }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -56,7 +55,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code nix architecture kernel; do
+            for output in code nix architecture; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -108,8 +107,8 @@ jobs:
           # `nix/` is here whole, replacing a narrow
           # `nix/packaging/release/*.sh` entry, because the guest image
           # generator has Rust guards that only run under this flag and
-          # tests/nix_flake_structure.rs reads across lib/, images/,
-          # packages/ and profiles/. `mk_guest_init_shebang_lands_at_byte_zero`
+          # tests/nix_flake_structure.rs reads across lib/, packages/ and
+          # profiles/. `mk_guest_init_shebang_lands_at_byte_zero`
           # renders `initText` out of nix/lib/mk-guest.nix and asserts the
           # shebang lands on byte 0 — no Nix needed, well under a second. It
           # was written for the defect that shipped a rootfs the kernel could
@@ -134,23 +133,12 @@ jobs:
             echo "architecture=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # default-tenant and nix/lib/ join the kernel paths because the
-          # image flake imports both — nix/images/kernel/{base,workload}.nix
-          # for the vmlinux and lib.mkGuest for the rootfs — so a change to
-          # either alters what this lane builds.
-          if grep -zE '^(nix/images/kernel/|nix/images/default-tenant/|nix/lib/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/(ci|kernel-build)\.yml$)' "$CHANGED_FILE" >/dev/null; then
-            echo "kernel=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "kernel=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Validate classification
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
           NIX: ${{ steps.decide.outputs.nix }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
-          KERNEL: ${{ steps.decide.outputs.kernel }}
         run: |
           set -euo pipefail
           validate() {
@@ -163,7 +151,6 @@ jobs:
           validate code "$CODE"
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
-          validate kernel "$KERNEL"
 
   lint-core:
     name: Lint core (fmt + clippy)
@@ -607,7 +594,7 @@ jobs:
         run: |
           cargo nextest run --features test-support --lib \
             -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
-            -p mvm-fs
+            -p mvm-fs -p mvm-build
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
@@ -740,7 +727,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, guest-image-boot, kernel, nix-flake-check]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, guest-image-boot, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -755,8 +742,6 @@ jobs:
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
-          KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
-          KERNEL_RESULT: ${{ needs.kernel.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
           GUEST_IMAGE_RESULT: ${{ needs.guest-image-boot.result }}
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
@@ -781,20 +766,6 @@ jobs:
               exit 1
             fi
           done
-          # The kernel job carries no job-level `if:` — a skipped matrix job
-          # cannot expand its arch, so it would report a single check still
-          # carrying the un-expanded matrix placeholder in its name, matching
-          # neither required context and leaving every PR unmergeable. It
-          # therefore always runs and always reports `success`,
-          # skipping its steps individually when out of scope. So `success` is
-          # the required result in both scopes: an out-of-scope run skips its
-          # steps and succeeds, an in-scope run actually builds. Requiring
-          # `skipped` when out of scope — as this did before the job-level `if:`
-          # was removed — failed every PR that does not touch a kernel path.
-          if [ "$KERNEL_RESULT" != success ]; then
-            echo "Kernel validation did not succeed (scope $KERNEL_SCOPE): $KERNEL_RESULT"
-            exit 1
-          fi
           case "$EVENT_NAME" in
             pull_request) nix_required=skipped ;;
             merge_group|workflow_dispatch) nix_required=success ;;
@@ -1293,82 +1264,6 @@ jobs:
               fi
             done
           done
-  # Publish the existing required kernel contexts from the shared scope graph.
-  # The dedicated workflow remains responsible for release/manual artifact
-  # builds, but no longer allocates its own scope runner on every queue entry.
-  kernel:
-    name: Build kernels (${{ matrix.arch }})
-    needs: [scope]
-    # No job-level `if:`. A skipped matrix job cannot expand `matrix.arch`, so
-    # it reports one check literally named `Build kernels (${{ matrix.arch }})`
-    # — which matches neither required context, leaving every PR that does not
-    # touch kernel paths permanently unmergeable. Every step below carries the
-    # scope condition instead, so an out-of-scope run costs a few seconds and
-    # still reports both names.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Report scope
-        run: |
-          if [ "${{ needs.scope.outputs.kernel }}" = "true" ]; then
-            echo "Kernel inputs changed — building and enforcing the symbol budget."
-          else
-            echo "No kernel-relevant paths changed."
-          fi
-
-      - uses: actions/checkout@v6
-        if: needs.scope.outputs.kernel == 'true'
-
-      - name: Install Nix
-        if: needs.scope.outputs.kernel == 'true'
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      - name: Build builder and workload kernels
-        if: needs.scope.outputs.kernel == 'true'
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: bash scripts/build-kernel-artifacts.sh "$ARCH"
-
-      - name: Assert the lane built what its scope demanded
-        # Replaces what the `test` aggregate used to get from the job's own
-        # conclusion. Gating the steps rather than the job means a
-        # mis-gated step would leave the job green and empty, so the check
-        # has to look at the bytes.
-        if: needs.scope.outputs.kernel == 'true'
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          for f in "staging/vmlinux-${ARCH}-builder" "staging/vmlinux-${ARCH}-workload"; do
-            if [ ! -s "$f" ]; then
-              echo "::error::kernel scope is true but $f is missing or empty" >&2
-              exit 1
-            fi
-          done
-
-      - name: Upload kernel artifacts
-        if: ${{ always() && needs.scope.outputs.kernel == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: kernels-${{ matrix.arch }}
-          if-no-files-found: ignore
-          path: |
-            staging/vmlinux-${{ matrix.arch }}-builder
-            staging/vmlinux-${{ matrix.arch }}-workload
-            staging/kernel-${{ matrix.arch }}-checksums-sha256.txt
-            staging/kernel-${{ matrix.arch }}.json
-            staging/kernel-metrics-${{ matrix.arch }}.json
-            staging/workload-config-${{ matrix.arch }}
-            staging/workload-k8s-config-${{ matrix.arch }}
-            staging/kernel-k8s-metrics-${{ matrix.arch }}.json
-
   guest-image-boot:
     name: Guest image boots (mvm-images)
     # The image definitions live in tinylabscom/mvm-images; this witness
@@ -1388,14 +1283,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check out mvm-images
-        if: needs.scope.outputs.nix == 'true'
-        uses: actions/checkout@v6
-        with:
-          repository: tinylabscom/mvm-images
-          ref: main
-          path: mvm-images
-
       - uses: ./.github/actions/free-disk
         if: needs.scope.outputs.nix == 'true'
 
@@ -1411,6 +1298,26 @@ jobs:
         if: needs.scope.outputs.nix == 'true'
         with:
           packages: lld
+
+      # The commit that produced the image set images.lock pins, not
+      # mvm-images `main`: this job gates the merge queue, so it must not go
+      # red because the other repository moved. A change that needs newer image
+      # sources waits for them to be published in an image set and pinned; the
+      # pair's `main`s are compared by the non-blocking `image-pair.yml` canary.
+      - name: Resolve the mvm-images commit images.lock pins
+        if: needs.scope.outputs.nix == 'true'
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images
+        if: needs.scope.outputs.nix == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: mvm-images
 
       - name: Build the guest image from mvm-images
         if: needs.scope.outputs.nix == 'true'
@@ -1553,10 +1460,6 @@ jobs:
           use-flakehub: false
           diagnostic-endpoint: ""
 
-      - name: Install Rust toolchain
-        if: needs.scope.outputs.nix == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Eval-check every flake
         if: needs.scope.outputs.nix == 'true'
         run: |
@@ -1577,88 +1480,3 @@ jobs:
           nix build --print-build-logs \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
             ./nix#checks.x86_64-linux.guest-rootfs-package-budget
-
-      - name: Runtime overlay uses static-musl guest binaries
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          nix build --print-build-logs \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image
-
-      # Both directions, together, over the artifacts the step above already
-      # built — a closure query, not a second build of the same binaries.
-      #
-      # The overlay's ext4 is an opaque image with no store references, so
-      # querying the *image* would be vacuously empty; these query the
-      # executables staged into it, and the cdylib the sidecar ships. The greps
-      # are hash-anchored (`/nix/store/<hash>-glibc…`) so they match the glibc
-      # package's own store path, never a derivation whose name merely contains
-      # "glibc".
-      #
-      # The positive direction is what makes the split meaningful: without it, a
-      # change that deleted the SDK cdylib outright would satisfy every
-      # no-glibc assertion and read as a footprint win.
-      - name: Runtime overlay is glibc-free and the SDK closure moved to the sidecar
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          overlay=./nix/images/runtime-overlay
-          glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'
-
-          staged_closure=$(mktemp)
-          for binary in guest runner egressClient addonDns exitReport; do
-            path=$(nix eval --raw "$overlay#packages.x86_64-linux.default.passthru.$binary")
-            nix path-info -r "$path" >> "$staged_closure"
-          done
-          if grep -Eq -- "$glibc_re" "$staged_closure"; then
-            echo "glibc present in the runtime overlay's staged-executable closure:" >&2
-            grep -E -- "$glibc_re" "$staged_closure" >&2
-            exit 1
-          fi
-          echo "ok: runtime overlay staged executables carry no glibc"
-
-          hostsvc=$(nix eval --raw "$overlay#packages.x86_64-linux.sdk-sidecar.passthru.hostsvc")
-          if ! nix path-info -r "$hostsvc" | grep -Eq -- "$glibc_re"; then
-            echo "the SDK host-services cdylib no longer depends on glibc — the" >&2
-            echo "sidecar split is only meaningful while it does:" >&2
-            nix path-info -r "$hostsvc" >&2
-            exit 1
-          fi
-          sidecar=$(nix build --no-link --print-out-paths \
-            "$overlay#packages.x86_64-linux.sdk-sidecar")
-          for required in libmvm_host_services.so libc.so.6 libgcc_s.so.1; do
-            test -e "$sidecar/lib/$required" \
-              || { echo "SDK sidecar is missing $required" >&2; exit 1; }
-          done
-          echo "ok: the glibc SDK closure lives in the sidecar"
-
-
-      - name: Nix-built guest artifacts fit the 50 MB footprint
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          nix build --print-build-logs --impure --no-link --print-out-paths \
-            ./nix/images/default-tenant#packages.x86_64-linux.default \
-            > /tmp/default-tenant-path.txt
-          image_path=$(head -1 /tmp/default-tenant-path.txt)
-          nix build --print-build-logs --no-link --print-out-paths \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
-            > /tmp/runtime-overlay-path.txt
-          overlay_path=$(head -1 /tmp/runtime-overlay-path.txt)
-          # The optional SDK sidecar is measured against its own ceiling and
-          # reported on its own ledger line — never folded into the base total.
-          nix build --print-build-logs --no-link --print-out-paths \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image \
-            > /tmp/sdk-sidecar-path.txt
-          sidecar_path=$(head -1 /tmp/sdk-sidecar-path.txt)
-          cargo run -p xtask -- perf footprint \
-            --rootfs "$image_path/rootfs.ext4" \
-            --rootfs-verity "$image_path/rootfs.verity" \
-            --kernel "$image_path/vmlinux" \
-            --overlay "$overlay_path/overlay.ext4" \
-            --overlay-verity "$overlay_path/overlay.verity" \
-            --closure-paths "$image_path/rootfs-closure-paths" \
-            --sdk-sidecar "$sidecar_path/sdk.ext4" \
-            --json

@@ -1,5 +1,5 @@
-//! `mvmctl pack` - list, roll back, prune, and (for the builder pack)
-//! download/update the versioned attested-pack cache.
+//! `mvmctl pack` - list, roll back and prune the versioned attested-pack
+//! cache. `download`/`update` refuse: no pack class is published today.
 //!
 //! Mirrors `commands/image/`: a thin `Args`/`Subcommand` shell dispatching to
 //! one submodule per verb, each of which is a thin wrapper over the
@@ -61,9 +61,6 @@ pub(in crate::commands) enum PackAction {
     Download {
         /// Which pack class to fetch
         kind: PackKindArg,
-        /// Release version to fetch. Omit to fetch the latest.
-        #[arg(long)]
-        version: Option<String>,
     },
     /// Fetch the latest pack version and activate it
     Update {
@@ -113,7 +110,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             dry_run,
             json,
         } => prune::run(keep_recent, dry_run, json),
-        PackAction::Download { kind, version } => download::run(kind, version),
+        PackAction::Download { kind } => download::run(kind),
         PackAction::Update { kind } => update::run(kind),
     }
 }

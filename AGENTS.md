@@ -137,7 +137,7 @@ Four things are committed to make this convenient:
 - Users can source `scripts/dev-env.sh` once at the top of a shell, then run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, etc.
 - **`.envrc.example`** sources `scripts/dev-env.sh` for direnv users (`cp .envrc.example .envrc && direnv allow`).
 
-One-time per clone: run `just install-hooks` from the main checkout to point `core.hooksPath` at `.githooks/`. The committed pre-commit hook (`.githooks/pre-commit`) is intentionally light — it formats Rust code and checks Nix formatting, nothing else — so it doesn't block worktree workflows. Heavy gates (workspace clippy, full tests, supply-chain checks) run in CI.
+One-time per clone: run `just install-hooks` from the main checkout to point `core.hooksPath` at `.githooks/`. The committed pre-commit hook (`.githooks/pre-commit`) runs `cargo fmt --all` (auto-restaging), stable `cargo clippy -- -D warnings` (scoped to the staged leaf packages when nothing depends on them, otherwise a `--workspace` sweep plus a focused `--all-targets` pass — a few minutes on a cold cache, `MVM_SKIP_CLIPPY=1` to bypass), `nix fmt` for staged `.nix` files when the flake declares a formatter, and `actionlint` when workflows change — so it never runs the full test suite. Heavy gates (workspace clippy, full tests, supply-chain checks) run in CI.
 
 ### What still collides between worktrees
 

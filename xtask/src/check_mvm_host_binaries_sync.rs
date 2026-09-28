@@ -6,26 +6,22 @@
 //! entries and their install paths. Adding or renaming a binary
 //! requires updating both files in the same PR.
 //!
-//! A third mirror is checked here too: the workflow steps that
-//! cross-compile these binaries for the builder-VM image. The flake reads
-//! every manifest entry out of `$MVM_HOST_BIN_DIR`, so a binary added to
-//! the manifest but not to the `cargo zigbuild --bin` list makes the
-//! image build fail on a missing path — and that build only runs on tags
-//! and the nightly cron, so the gap is invisible on the PR that opens
-//! it.
-//!
-//! A fourth mirror is `BUILDER_HOST_BINARIES` in
+//! A third mirror is `BUILDER_HOST_BINARIES` in
 //! `crates/mvm-build/src/image_source/build.rs`: the names a local builder
 //! image build copies out of the image checkout's host-binary script. A name
 //! left there after it leaves the manifest makes every local image build
 //! refuse on a binary nothing builds any more.
+//!
+//! It also holds `.github/actions/install-zigbuild` to installing the Rust
+//! version the workspace metadata pins, the compiler `mvmctl`'s embedded
+//! copies are built with. The builder-VM image that installs these binaries
+//! is built in mvm-images, which reads the Nix attrset through its `mvm`
+//! input, so this repository has no image build step left to keep in step.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const PINNED_RUST_ZIGBUILD: &str =
-    r#"RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild"#;
 const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
 const IMAGE_SOURCE_BUILD: &str = "crates/mvm-build/src/image_source/build.rs";
 const BUILDER_HOST_BINARIES_DECL: &str = "pub const BUILDER_HOST_BINARIES";
@@ -58,30 +54,22 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
 
-    let steps = zigbuild_steps(workspace)?;
-    if steps.is_empty() {
-        bail!("no builder-VM host-binary cargo zigbuild steps found; the gate must fail closed");
-    }
-
-    let expected: Vec<&str> = rust_entries.keys().map(String::as_str).collect();
-    let mut violations = workflow_step_violations(&steps, &expected);
     let action_path = workspace.join(INSTALL_ACTION);
     let action = std::fs::read_to_string(&action_path)
         .with_context(|| format!("read {}", action_path.display()))?;
-    violations.extend(toolchain_action_violations(&action));
+    let violations = toolchain_action_violations(&action);
     if !violations.is_empty() {
         bail!(
-            "builder-VM host-binary workflow steps have drifted:\n  {}\n\n\
-             Fix: compile every manifest entry and select the Rust version exposed by \
-             .github/actions/install-zigbuild. The flake reads each manifest entry from \
-             $MVM_HOST_BIN_DIR, and the published image must use the same pinned compiler \
-             as mvmctl's embedded copies.",
+            "the zig toolchain action has drifted:\n  {}\n\n\
+             Fix: install the Rust version pinned in workspace.metadata.mvm.toolchain and \
+             expose it as rust_version, so mvmctl's embedded host binaries are built with \
+             the pinned compiler.",
             violations.join("\n  ")
         );
     }
 
     eprintln!(
-        "check-mvm-host-binaries-sync: manifests agree ({} entries), cross-compiled by every builder-VM workflow step",
+        "check-mvm-host-binaries-sync: manifests agree ({} entries); the zig toolchain action installs the pinned Rust",
         rust_entries.len()
     );
     Ok(())
@@ -110,73 +98,6 @@ fn toolchain_action_violations(source: &str) -> Vec<String> {
     .filter(|(required, _)| !source.contains(required))
     .map(|(_, reason)| format!("{INSTALL_ACTION}: {reason}"))
     .collect()
-}
-
-fn workflow_step_violations(steps: &[(String, String)], expected: &[&str]) -> Vec<String> {
-    let mut violations = Vec::new();
-    for (file, step_args) in steps {
-        for name in expected {
-            if !step_args.contains(&format!("--bin {name}")) {
-                violations.push(format!("{file}: cross-compile step omits --bin {name}"));
-            }
-        }
-        if !step_args.contains(PINNED_RUST_ZIGBUILD) {
-            violations.push(format!(
-                "{file}: cross-compile step does not select the workspace-pinned Rust toolchain"
-            ));
-        }
-    }
-    violations
-}
-
-/// `(workflow file name, joined step text)` for every `cargo zigbuild`
-/// invocation that builds `-p mvm-build` host binaries.
-fn zigbuild_steps(root: &Path) -> Result<Vec<(String, String)>> {
-    let dir = root.join(".github/workflows");
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-            continue;
-        }
-        let src =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        for step in split_zigbuild_steps(&src) {
-            out.push((name.clone(), step));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Collapse each `cargo zigbuild ... -p mvm-build ...` invocation — which
-/// wraps across backslash-continued lines — into one whitespace-normalized
-/// string.
-fn split_zigbuild_steps(src: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current: Option<String> = None;
-    for line in src.lines() {
-        let t = line.trim();
-        if t.contains("cargo zigbuild") {
-            current = Some(String::new());
-        }
-        if let Some(buf) = current.as_mut() {
-            buf.push(' ');
-            buf.push_str(t.trim_end_matches('\\').trim());
-            if !t.ends_with('\\') {
-                let done = buf.split_whitespace().collect::<Vec<_>>().join(" ");
-                if done.contains("-p mvm-build") {
-                    out.push(done);
-                }
-                current = None;
-            }
-        }
-    }
-    out
 }
 
 /// Parse `name:` / `install_path:` field pairs from the Rust struct literal
@@ -362,39 +283,6 @@ const OTHER: [&str; 1] = ["not-this"];
     fn run_passes_on_current_workspace() {
         let root = workspace_root();
         run(&root).expect("manifests should agree");
-    }
-
-    #[test]
-    fn workflow_steps_require_the_pinned_rust_output() {
-        let expected = ["mvm-host-vm-init", "mvm-builderd"];
-        let unpinned = vec![(
-            "release.yml".to_string(),
-            "cargo zigbuild -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd".to_string(),
-        )];
-        assert_eq!(
-            workflow_step_violations(&unpinned, &expected),
-            ["release.yml: cross-compile step does not select the workspace-pinned Rust toolchain"]
-        );
-
-        let pinned = vec![(
-            "release.yml".to_string(),
-            format!(
-                "{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd"
-            ),
-        )];
-        assert!(workflow_step_violations(&pinned, &expected).is_empty());
-    }
-
-    #[test]
-    fn workflow_steps_still_require_every_manifest_binary() {
-        let steps = vec![(
-            "release.yml".to_string(),
-            format!("{PINNED_RUST_ZIGBUILD} -p mvm-build --bin mvm-builderd"),
-        )];
-        assert_eq!(
-            workflow_step_violations(&steps, &["mvm-builderd", "mvm-host-vm-init"]),
-            ["release.yml: cross-compile step omits --bin mvm-host-vm-init"]
-        );
     }
 
     #[test]

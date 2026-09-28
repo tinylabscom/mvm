@@ -1,12 +1,8 @@
 # Single source of truth for filtering the host workspace tree into
-# the Nix store when building images. Used by:
-#
-#   nix/images/builder-vm/flake.nix
-#   nix/images/runtime-overlay/flake.nix
-#
-# Note: there is no longer a separate nix/images/builder/flake.nix.
-# The builder-vm flake now produces both the headless (default) and
-# interactive (dev) attrs — no separate builder/ flake is needed.
+# the Nix store when building from it. Used by `nix/flake.nix` for the
+# workspace source its packages and guest recipes build from, which is
+# also what mvm-images' image flakes build through when they take this
+# repository as their `mvm` input.
 #
 # ## Why this is an allow-list
 #

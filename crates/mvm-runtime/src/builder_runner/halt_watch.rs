@@ -32,6 +32,14 @@ pub(super) struct ConsoleHaltWatch {
     partial: String,
 }
 
+/// What one poll of the console found: the lines completed since the previous
+/// poll, and whether any of them was a halt banner.
+#[derive(Debug, Default)]
+pub(super) struct ConsolePoll {
+    pub(super) lines: Vec<String>,
+    pub(super) halted: bool,
+}
+
 impl ConsoleHaltWatch {
     pub(super) fn new(path: PathBuf) -> Self {
         Self {
@@ -41,21 +49,26 @@ impl ConsoleHaltWatch {
         }
     }
 
-    /// True once the console has shown a halt banner. A missing or unreadable
-    /// log reads as "not yet": the console appears after boot, and the process
-    /// exit check still bounds the wait.
-    pub(super) fn guest_halted(&mut self) -> bool {
+    /// Read what the guest appended. `halted` turns true once the console has
+    /// shown a halt banner. A missing or unreadable log reads as "nothing yet":
+    /// the console appears after boot, and the process exit check still bounds
+    /// the wait.
+    pub(super) fn poll(&mut self) -> ConsolePoll {
         let Some(appended) = self.read_appended() else {
-            return false;
+            return ConsolePoll::default();
         };
         self.partial.push_str(&appended);
-        let complete = match self.partial.rfind('\n') {
-            Some(end) => end + 1,
-            None => return false,
+        let Some(end) = self.partial.rfind('\n') else {
+            return ConsolePoll::default();
         };
-        let halted = self.partial[..complete].lines().any(is_halt_banner);
+        let complete = end + 1;
+        let lines: Vec<String> = self.partial[..complete]
+            .lines()
+            .map(str::to_string)
+            .collect();
         self.partial.drain(..complete);
-        halted
+        let halted = lines.iter().any(|line| is_halt_banner(line));
+        ConsolePoll { lines, halted }
     }
 
     fn read_appended(&mut self) -> Option<String> {
@@ -99,7 +112,7 @@ mod tests {
              [ 1023.955294] reboot: Power off not available: System halted instead\n",
         );
 
-        assert!(ConsoleHaltWatch::new(log).guest_halted());
+        assert!(ConsoleHaltWatch::new(log).poll().halted);
     }
 
     #[test]
@@ -108,7 +121,7 @@ mod tests {
         let log = dir.path().join("console.log");
         append(&log, "reboot: System halted\n");
 
-        assert!(ConsoleHaltWatch::new(log).guest_halted());
+        assert!(ConsoleHaltWatch::new(log).poll().halted);
     }
 
     #[test]
@@ -118,13 +131,17 @@ mod tests {
         let log = dir.path().join("console.log");
         append(&log, "[   12.000000] reboot: Power down\n");
 
-        assert!(!ConsoleHaltWatch::new(log).guest_halted());
+        assert!(!ConsoleHaltWatch::new(log).poll().halted);
     }
 
     #[test]
     fn a_missing_console_is_not_yet_a_halt() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!ConsoleHaltWatch::new(dir.path().join("console.log")).guest_halted());
+        assert!(
+            !ConsoleHaltWatch::new(dir.path().join("console.log"))
+                .poll()
+                .halted
+        );
     }
 
     #[test]
@@ -134,10 +151,10 @@ mod tests {
         let mut watch = ConsoleHaltWatch::new(log.clone());
 
         append(&log, "building...\n[ 9.1] reboot: Power off not av");
-        assert!(!watch.guest_halted(), "half a banner is not a halt");
+        assert!(!watch.poll().halted, "half a banner is not a halt");
 
         append(&log, "ailable: System halted instead\n");
-        assert!(watch.guest_halted());
+        assert!(watch.poll().halted);
     }
 
     #[test]
@@ -146,7 +163,24 @@ mod tests {
         let log = dir.path().join("console.log");
         append(&log, "grep 'reboot: System halted' kernel.log || true\n");
 
-        assert!(!ConsoleHaltWatch::new(log).guest_halted());
+        assert!(!ConsoleHaltWatch::new(log).poll().halted);
+    }
+
+    #[test]
+    fn completed_lines_are_handed_back_in_order_and_partials_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        let mut watch = ConsoleHaltWatch::new(log.clone());
+
+        append(&log, "one\ntwo\nthr");
+        assert_eq!(watch.poll().lines, vec!["one", "two"]);
+
+        append(&log, "ee\n");
+        assert_eq!(watch.poll().lines, vec!["three"]);
+        assert!(
+            watch.poll().lines.is_empty(),
+            "nothing new, nothing returned"
+        );
     }
 
     #[test]
@@ -156,10 +190,10 @@ mod tests {
         let mut watch = ConsoleHaltWatch::new(log.clone());
 
         append(&log, "boot line\n");
-        assert!(!watch.guest_halted());
+        assert!(!watch.poll().halted);
         assert_eq!(watch.offset, "boot line\n".len() as u64);
 
         append(&log, "reboot: System halted\n");
-        assert!(watch.guest_halted());
+        assert!(watch.poll().halted);
     }
 }

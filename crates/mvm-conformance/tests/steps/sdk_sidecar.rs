@@ -7,8 +7,11 @@
 
 use cucumber::{given, then, when};
 use mvm_build::guest_libc::GuestLibc;
+use mvm_build::published_image_set::PublishedImageSet;
+use mvm_build::published_image_set::fixture::ImageSetFixture;
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
+use mvm_core::image_set::{ImageSetRole, MemberTarget};
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_fs::sdk_sidecar::{
@@ -143,28 +146,29 @@ fn sidecar_release_archive() -> Vec<u8> {
         .expect("finish the gzip stream")
 }
 
-/// Stage the two assets a release publishes for this arch. `checksum_over`
-/// picks which bytes the `.sha256` sidecar commits to, so a scenario can make
-/// the recorded digest disagree with the shipped archive.
-fn stage_release(world: &mut CliWorld, checksum_over: &[u8]) {
-    let archive = sidecar_release_archive();
-    let base = world
+/// Serve an image set whose sidecar member for this arch declares
+/// `declared`, while the release archive is what is actually served — so a
+/// scenario can make the signed root disagree with the shipped archive.
+fn stage_release(world: &mut CliWorld, declared: &[u8]) {
+    let dir = world
         .sdk_sidecar_release
         .get_or_insert_with(|| tempfile::tempdir().expect("create the release dir"))
         .path()
         .to_path_buf();
-    let release_dir = base.join(format!("v{FIXTURE_VERSION}"));
-    std::fs::create_dir_all(&release_dir).expect("create the versioned release dir");
     let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
         &GuestArch::host().to_string(),
-        GuestLibc::Glibc,
+        SCENARIO_LIBC,
     );
-    std::fs::write(release_dir.join(&names.archive), &archive).expect("write the release archive");
-    std::fs::write(
-        release_dir.join(&names.archive_checksum),
-        format!("{}  {}\n", sha256_hex(checksum_over), names.archive),
-    )
-    .expect("write the release archive checksum");
+    let source = ImageSetFixture::complete()
+        .publish(
+            ImageSetRole::SdkSidecar(SCENARIO_LIBC),
+            MemberTarget::Arch(GuestArch::host()),
+            &names.archive,
+            declared.to_vec(),
+        )
+        .serve_instead(&names.archive, sidecar_release_archive())
+        .serve_from(&dir);
+    world.sdk_sidecar_image_set = Some(source);
 }
 
 #[given(expr = "a published SDK sidecar release artifact")]
@@ -177,49 +181,58 @@ fn published_release_artifact_with_drifted_checksum(world: &mut CliWorld) {
     stage_release(world, b"bytes the release never shipped");
 }
 
-/// Drive the acquire ladder an installed `mvmctl` runs on a cold cache: fetch
-/// and verify the published artifact, then resolve the attachment from the
-/// entry it installed. The release base URL is overridden to the staged fixture
-/// for the duration of this step, so no scenario reaches the network.
+/// Drive the acquire ladder an installed `mvmctl` runs on a cold cache: acquire
+/// the signed image set, fetch the sidecar member held to its root, then
+/// resolve the attachment from the entry it installed. The set is the staged
+/// fixture, so no scenario reaches the network.
 #[when(expr = "the launch path acquires the SDK sidecar from the published release")]
 fn acquire_sidecar_from_release(world: &mut CliWorld) {
     let cache = cache_root(world);
-    let base = world
-        .sdk_sidecar_release
-        .as_ref()
-        .expect("a prior step must stage the release")
-        .path()
-        .to_path_buf();
+    let source = world
+        .sdk_sidecar_image_set
+        .take()
+        .expect("a prior step must stage the release");
     let services = world.sdk_sidecar_services.clone();
 
     // `TestEnv` serializes process-wide env mutation and restores it on drop.
     // Nothing awaits inside this step, so the guard is held only for the
     // download and cannot stall a concurrently-running scenario.
     let mut env = mvm_core::util::test_env::TestEnv::new();
-    env.set("MVM_OVERLAY_BASE_URL", format!("file://{}", base.display()));
     // The scenario is the acquire-and-boot workflow; a valid Sigstore
     // signature cannot be minted offline, so the signature rung is exercised
-    // by `mvm_build::release_signature`'s own witnesses instead.
+    // by `mvm_build::published_image_set`'s own witnesses instead.
     env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
     world.sdk_sidecar_result = Some(
-        mvm_build::sdk_sidecar::download_sdk_sidecar(
-            FIXTURE_VERSION,
-            GuestArch::host(),
-            SCENARIO_LIBC,
-            &cache,
-        )
-        .map_err(|e| format!("{e:#}"))
-        .and_then(|_installed| {
-            let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
-            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
-                &services,
-                &resolver,
-                GuestArch::host(),
-                SCENARIO_LIBC,
-            )
+        PublishedImageSet::acquire_from(source)
             .map_err(|e| format!("{e:#}"))
-        }),
+            .and_then(|image_set| {
+                mvm_build::sdk_sidecar::download_sdk_sidecar_from(
+                    &image_set,
+                    GuestArch::host(),
+                    SCENARIO_LIBC,
+                    &cache,
+                )
+                .map_err(|e| format!("{e:#}"))?;
+                // The installed member is filed under the set's root and
+                // resolved expecting its own recorded VERSION.
+                mvm_build::sdk_sidecar::image_set_sidecar_resolver(
+                    &cache,
+                    &image_set.member_cache(),
+                    GuestArch::host(),
+                    SCENARIO_LIBC,
+                )
+                .map_err(|e| format!("{e:#}"))
+            })
+            .and_then(|resolver| {
+                mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                    &services,
+                    &resolver,
+                    GuestArch::host(),
+                    SCENARIO_LIBC,
+                )
+                .map_err(|e| format!("{e:#}"))
+            }),
     );
 }
 
@@ -235,6 +248,13 @@ fn launch_refused_cache_empty(world: &mut CliWorld) {
         !layout.artifact_dir.exists(),
         "a refused acquire must leave no artifact dir at {}",
         layout.artifact_dir.display()
+    );
+    let members =
+        cache_root(world).join(mvm_build::published_image_set::IMAGE_SET_MEMBER_CACHE_DIR);
+    assert!(
+        !members.exists(),
+        "a refused acquire must install no image-set member under {}",
+        members.display()
     );
 }
 

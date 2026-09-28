@@ -5,7 +5,7 @@
 //! to the per-port control socket a running builder VM forwards, sends one
 //! `BuildGuestImage` for an in-guest `<flake>#<attr>`, streams progress/log
 //! frames, and prints the terminal store path. It stages no source — `--flake`
-//! is a path *inside the builder VM* (e.g. `/work/nix/images/default-tenant`),
+//! is a path *inside the builder VM* (e.g. an mvm-images checkout staged at `/work`),
 //! so the caller is responsible for the flake already being reachable there.
 //!
 //! Used to prove the typed `BuildGuestImage` dispatch is artifact-equal to the

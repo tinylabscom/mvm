@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use mvm_vmm::host::ui::format_elapsed as format_duration;
+
 use super::LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES;
 use crate::builder_vm::BuilderVmError;
 
@@ -175,7 +177,8 @@ pub const LOCK_WAIT_ENV: &str = "MVM_BUILDER_LOCK_WAIT_SECS";
 /// wait costs nothing.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Gap between "still waiting" progress lines.
+/// How often a waiter re-reads the owner record, so the status line follows
+/// a hand-over to a different holder.
 const LOCK_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How long a caller is willing to queue for a contended sidecar lock.
@@ -276,6 +279,22 @@ impl LockOwner {
         }
     }
 
+    /// `pid 4242 (`mvmctl machine build`) since 14:02:11` — who a waiter is
+    /// queued behind, with the holder's acquisition time in local time.
+    fn waiting_phrase(&self) -> String {
+        let since = i64::try_from(self.acquired_unix_secs)
+            .ok()
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+            .map(|at| {
+                format!(
+                    " since {}",
+                    at.with_timezone(&chrono::Local).format("%H:%M:%S")
+                )
+            })
+            .unwrap_or_default();
+        format!("pid {} (`{}`){since}", self.pid, self.command)
+    }
+
     /// Human description for a contention message: the command, its
     /// pid, and how long it has held the lock.
     fn describe(&self, now_unix_secs: u64) -> String {
@@ -319,16 +338,6 @@ fn current_command_line() -> String {
     line
 }
 
-/// `1h02m`, `4m12s`, `9s` — compact enough for a progress line.
-fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
-        (0, 0, s) => format!("{s}s"),
-        (0, m, s) => format!("{m}m{s:02}s"),
-        (h, m, _) => format!("{h}h{m:02}m"),
-    }
-}
-
 /// `kill(pid, 0)` — does the process exist? Used to discard a stale
 /// owner record (holder died between writing it and releasing the
 /// lock, or the record predates the current holder).
@@ -356,16 +365,31 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Describe whoever currently holds `lock_path`, falling back to
-/// `"another mvm builder process"` when the record is missing,
-/// unreadable, or names a dead pid.
-fn describe_lock_holder(lock_path: &Path, now_unix_secs: u64) -> String {
+/// The owner record in `lock_path`, if it names a live process. A missing,
+/// unreadable, or stale record (a dead pid) reads as `None`.
+fn live_lock_owner(lock_path: &Path) -> Option<LockOwner> {
     std::fs::read_to_string(lock_path)
         .ok()
         .and_then(|raw| serde_json::from_str::<LockOwner>(&raw).ok())
         .filter(|owner| pid_alive(owner.pid))
+}
+
+/// Describe whoever currently holds `lock_path`, falling back to
+/// `"another mvm builder process"` when the record is missing,
+/// unreadable, or names a dead pid.
+fn describe_lock_holder(lock_path: &Path, now_unix_secs: u64) -> String {
+    live_lock_owner(lock_path)
         .map(|owner| owner.describe(now_unix_secs))
         .unwrap_or_else(|| "another mvm builder process".to_string())
+}
+
+/// The live status line shown while queued behind `lock_path`'s holder:
+/// `waiting for <what> — held by pid N (`cmd`) since HH:MM:SS`.
+fn waiting_label(subject: &LockSubject<'_>, lock_path: &Path) -> String {
+    let holder = live_lock_owner(lock_path)
+        .map(|owner| owner.waiting_phrase())
+        .unwrap_or_else(|| "another mvm process".to_string());
+    format!("waiting for {} — held by {holder}", subject.what)
 }
 
 /// Stamp the current process into the freshly acquired lock file.
@@ -399,18 +423,30 @@ fn current_unix_secs() -> u64 {
         .as_secs()
 }
 
+/// What a contended lock guards, for the waiting line and the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockSubject<'a> {
+    /// Names the guarded thing in a sentence: `the Stage 0 bootstrap`.
+    pub what: &'a str,
+    /// What an operator can do instead of waiting, completing the sentence
+    /// `Wait for it to finish, raise MVM_BUILDER_LOCK_WAIT_SECS (seconds), …`.
+    pub remedy: &'a str,
+}
+
+/// A builder VM's writable block image: the store every one-shot build
+/// mounts, and the user volumes attached beside it.
+const BUILDER_IMAGE_SUBJECT: LockSubject<'static> = LockSubject {
+    what: "a builder VM disk image",
+    remedy: "or start a persistent builder (`mvmctl persistent-builder start`) so \
+             concurrent builds share one builder VM instead of queueing for its store image",
+};
+
 /// Open (creating if needed) the sidecar lock file at `lock_path` and
 /// take an exclusive `flock`. The lock — never the image — is what
 /// serialises concurrent writers, so the image carries no host-side
 /// lock and the hypervisor can open it exclusively (required for
 /// HVF; harmless for libkrun). Returns the locked handle; dropping it
 /// releases the lock.
-///
-/// A contended lock **waits** rather than failing: a second
-/// `mvmctl build` queues behind the first (naming it on stderr) for up
-/// to [`LockWait::from_env`]. Failing fast here was a poor trade — the
-/// image is a genuinely exclusive resource, so the only thing a hard
-/// error bought the operator was the job of retrying by hand.
 ///
 /// `wait` is explicit rather than read from the environment here so
 /// the unit suite can exercise both the fail-fast ([`LockWait::none`])
@@ -420,6 +456,47 @@ pub(crate) fn acquire_sidecar_lock_within(
     lock_path: &Path,
     wait: LockWait,
 ) -> Result<std::fs::File, BuilderVmError> {
+    acquire_lock_waiting(lock_path, &BUILDER_IMAGE_SUBJECT, wait)
+        .map_err(|e| BuilderVmError::ExtractionFailed(e.to_string()))
+}
+
+/// Why [`acquire_lock_waiting`] returned without the lock.
+#[derive(Debug, thiserror::Error)]
+pub enum LockWaitError {
+    /// The lock file could not be opened or locked at all.
+    #[error("{0}")]
+    Unavailable(String),
+    /// Another process still held the lock when the wait budget ran out.
+    #[error("{0}")]
+    StillHeld(String),
+}
+
+/// Take an exclusive `flock` on `lock_path`, queueing behind a live holder.
+///
+/// Contention is expected rather than exceptional — a second `mvmctl` in
+/// another terminal wants the same artifact — so a held lock **waits**, for up
+/// to `wait`, with a live status line naming the holder (`waiting for <what> —
+/// held by pid N (`cmd`) since HH:MM:SS`). Failing fast was a poor trade: the
+/// only thing a hard error bought the operator was the job of retrying by
+/// hand.
+///
+/// A holder that dies releases the lock with it: `flock` belongs to the open
+/// file, and the kernel drops it when the last descriptor closes, so a crashed
+/// holder is reclaimed on the next retry with nothing to delete. The owner
+/// record left in the file is only a description, rewritten by the next
+/// holder and ignored when it names a dead pid.
+pub fn acquire_lock_waiting(
+    lock_path: &Path,
+    subject: &LockSubject<'_>,
+    wait: LockWait,
+) -> Result<std::fs::File, LockWaitError> {
+    use mvm_vmm::host::ui::activity;
+
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            LockWaitError::Unavailable(format!("creating lock directory {}: {e}", parent.display()))
+        })?;
+    }
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -427,21 +504,20 @@ pub(crate) fn acquire_sidecar_lock_within(
         .truncate(false)
         .open(lock_path)
         .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("open lock {}: {e}", lock_path.display()))
+            LockWaitError::Unavailable(format!("open lock {}: {e}", lock_path.display()))
         })?;
 
     let started = std::time::Instant::now();
-    let mut announced = false;
-    let mut last_progress = started;
+    let mut waiting: Option<activity::Activity> = None;
+    let mut last_refresh = started;
 
     loop {
         match file.try_lock() {
             Ok(()) => {
-                if announced {
-                    eprintln!(
-                        "[mvm] builder image lock acquired after {}",
-                        format_duration(started.elapsed())
-                    );
+                // A wait long enough to have been announced ends with a
+                // `done in …` line; a momentary one leaves nothing behind.
+                if let Some(line) = waiting.take() {
+                    line.finish();
                 }
                 record_lock_owner(&file, lock_path);
                 return Ok(file);
@@ -449,7 +525,7 @@ pub(crate) fn acquire_sidecar_lock_within(
             // Anything that isn't contention (a permission problem, a
             // filesystem without locking) is the caller's to see now.
             Err(std::fs::TryLockError::Error(e)) => {
-                return Err(BuilderVmError::ExtractionFailed(format!(
+                return Err(LockWaitError::Unavailable(format!(
                     "locking {}: {e}",
                     lock_path.display()
                 )));
@@ -459,24 +535,21 @@ pub(crate) fn acquire_sidecar_lock_within(
 
         let waited = started.elapsed();
         if waited >= wait.budget() {
-            return Err(contended_lock_error(lock_path, waited, wait));
+            return Err(contended_lock_error(lock_path, subject, waited, wait));
         }
 
-        if !announced {
-            eprintln!(
-                "[mvm] builder image {} is held by {}; waiting (Ctrl-C to abort, \
-                 or run builds concurrently with `mvmctl persistent-builder start`)",
-                lock_path.display(),
-                describe_lock_holder(lock_path, current_unix_secs())
-            );
-            announced = true;
-            last_progress = std::time::Instant::now();
-        } else if last_progress.elapsed() >= LOCK_PROGRESS_INTERVAL {
-            eprintln!(
-                "[mvm] still waiting for the builder image lock ({} elapsed)",
-                format_duration(waited)
-            );
-            last_progress = std::time::Instant::now();
+        match &waiting {
+            None => {
+                waiting = Some(activity::start(waiting_label(subject, lock_path)));
+                last_refresh = std::time::Instant::now();
+            }
+            // The holder can hand over to another queued process while this
+            // one waits; re-read the record so the line names the real one.
+            Some(line) if last_refresh.elapsed() >= LOCK_PROGRESS_INTERVAL => {
+                line.set_label(waiting_label(subject, lock_path));
+                last_refresh = std::time::Instant::now();
+            }
+            Some(_) => {}
         }
 
         std::thread::sleep(LOCK_POLL_INTERVAL.min(wait.budget().saturating_sub(waited)));
@@ -484,23 +557,27 @@ pub(crate) fn acquire_sidecar_lock_within(
 }
 
 /// The error raised once the wait budget is spent (or immediately,
-/// when the budget is zero). Names the holder and both escape
-/// hatches: a longer wait, or the persistent builder that lets
-/// concurrent builds share one VM instead of queueing.
-fn contended_lock_error(lock_path: &Path, waited: Duration, wait: LockWait) -> BuilderVmError {
+/// when the budget is zero). Names the holder and the escape hatches: a
+/// longer wait, or the subject's own remedy.
+fn contended_lock_error(
+    lock_path: &Path,
+    subject: &LockSubject<'_>,
+    waited: Duration,
+    wait: LockWait,
+) -> LockWaitError {
     let holder = describe_lock_holder(lock_path, current_unix_secs());
     let waited_for = if wait.is_none() {
         String::new()
     } else {
         format!(" after waiting {}", format_duration(waited))
     };
-    BuilderVmError::ExtractionFailed(format!(
-        "image {} is still held by {}{waited_for}. Wait for it to finish, raise \
-         {LOCK_WAIT_ENV} (seconds), or start a persistent builder \
-         (`mvmctl persistent-builder start`) so concurrent builds share one \
-         builder VM instead of queueing for its store image",
+    LockWaitError::StillHeld(format!(
+        "{} ({}) is still held by {}{waited_for}. Wait for it to finish, raise \
+         {LOCK_WAIT_ENV} (seconds), {}",
+        subject.what,
         lock_path.display(),
-        holder
+        holder,
+        subject.remedy,
     ))
 }
 
@@ -863,6 +940,71 @@ mod tests {
     }
 
     #[test]
+    fn the_waiting_line_names_a_live_holder_by_pid_command_and_start_time() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let lock_path = scratch.path().join("stage0.lock");
+        let subject = LockSubject {
+            what: "the Stage 0 bootstrap",
+            remedy: "or come back later",
+        };
+
+        let held = acquire_lock_waiting(&lock_path, &subject, LockWait::none()).expect("lock");
+        let label = waiting_label(&subject, &lock_path);
+        assert!(
+            label.starts_with(&format!(
+                "waiting for the Stage 0 bootstrap — held by pid {} (`",
+                std::process::id()
+            )),
+            "{label}"
+        );
+        assert!(label.contains(" since "), "{label}");
+        drop(held);
+    }
+
+    #[test]
+    fn a_stale_owner_record_does_not_name_a_dead_process_as_the_holder() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let lock_path = scratch.path().join("stage0.lock");
+        let stale = LockOwner {
+            pid: u32::MAX,
+            command: "mvmctl bootstrap".to_string(),
+            acquired_unix_secs: 0,
+        };
+        std::fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        assert_eq!(
+            waiting_label(&BUILDER_IMAGE_SUBJECT, &lock_path),
+            "waiting for a builder VM disk image — held by another mvm process"
+        );
+        // The record is only a description: with no live flock behind it the
+        // lock is simply free, and taking it rewrites the record.
+        let held = acquire_lock_waiting(&lock_path, &BUILDER_IMAGE_SUBJECT, LockWait::none())
+            .expect("a stale record must not block the lock");
+        let owner: LockOwner =
+            serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
+        assert_eq!(owner.pid, std::process::id());
+        drop(held);
+    }
+
+    #[test]
+    fn a_refusal_names_its_subject_and_remedy() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let lock_path = scratch.path().join("nested").join("stage0.lock");
+        let subject = LockSubject {
+            what: "the Stage 0 bootstrap",
+            remedy: "or come back later",
+        };
+        let held = acquire_lock_waiting(&lock_path, &subject, LockWait::none())
+            .expect("the lock's directory is created on demand");
+        let err = acquire_lock_waiting(&lock_path, &subject, LockWait::none()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.starts_with("the Stage 0 bootstrap ("), "{msg}");
+        assert!(msg.contains("is still held by"), "{msg}");
+        assert!(msg.ends_with("or come back later"), "{msg}");
+        drop(held);
+    }
+
+    #[test]
     fn lock_owner_record_survives_a_round_trip_through_the_lock_file() {
         let scratch = tempfile::TempDir::new().unwrap();
         let lock_path = scratch.path().join("nix-store.img.lock");
@@ -1070,13 +1212,6 @@ mod tests {
             LockWait::of(Duration::from_secs(60 * 60))
         );
         assert_ne!(LockWait::of(DEFAULT_LOCK_WAIT), LockWait::none());
-    }
-
-    #[test]
-    fn durations_format_compactly() {
-        assert_eq!(format_duration(Duration::from_secs(9)), "9s");
-        assert_eq!(format_duration(Duration::from_secs(252)), "4m12s");
-        assert_eq!(format_duration(Duration::from_secs(3720)), "1h02m");
     }
 
     #[test]

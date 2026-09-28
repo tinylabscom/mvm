@@ -15,7 +15,7 @@
       packages = eachSystem (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          agentRecipe = import "${mvm}/images/examples/llm-agent" { inherit pkgs; };
+          agentRecipe = import "${mvm}/examples/llm-agent" { inherit pkgs; };
           agent = agentRecipe.agent;
           idle = [ "/bin/sh" "-c" "while :; do /bin/busybox sleep 2147483647; done" ];
           entrypoint = pkgs.writeShellScript "agent-workload-entrypoint" ''

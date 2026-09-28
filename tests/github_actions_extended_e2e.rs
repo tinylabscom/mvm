@@ -71,7 +71,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release.yml must call the shared documented-surface workflow"
     );
     assert!(
-        workflow.contains("needs: [bdd, e2e-docs, build, initramfs-image]"),
+        workflow.contains("needs: [bdd, e2e-docs, build]"),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
@@ -90,7 +90,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         .lines()
         .find(|line| line.trim_start().starts_with("if: ${{ !cancelled()"))
         .expect("the release job must gate publication on an explicit condition");
-    for need in ["bdd", "e2e-docs", "build", "initramfs-image"] {
+    for need in ["bdd", "e2e-docs", "build"] {
         assert!(
             condition.contains(&format!("needs.{need}.result == 'success'")),
             "`{need}` is in the release job's `needs` but its result is not \
@@ -530,14 +530,6 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
     );
 }
 
-fn ci_full() -> String {
-    fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
-}
-
-fn source_bootstrap_script() -> String {
-    fs::read_to_string("scripts/e2e-source-bootstrap.sh").expect("read source bootstrap witness")
-}
-
 /// The release lane fetches the builder image the macOS lane already fetches.
 ///
 /// Building it from source put 37 minutes of Stage 0 ahead of 313 scenarios
@@ -591,184 +583,8 @@ fn linux_documented_surface_grants_nothing_stage0_needs() {
     }
 }
 
-/// The cold source path keeps a live witness of its own.
 #[test]
-fn extended_ci_runs_the_cold_source_bootstrap_witness() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("run: just e2e-source-bootstrap"),
-        "the nightly source bootstrap job must run the dedicated witness"
-    );
-    assert!(
-        job.contains("MVM_E2E_HOME: ${{ runner.temp }}/source-bootstrap-home"),
-        "the witness needs a cold home under the runner's temp directory"
-    );
-    assert!(
-        field_after(job, "MVM_BOOT_IMAGE:").is_none(),
-        "the source witness must not be pointed at the published image"
-    );
-    assert!(
-        justfile().contains("e2e-source-bootstrap:\n    ./scripts/e2e-source-bootstrap.sh"),
-        "the recipe must run the source bootstrap witness"
-    );
-}
-
-/// The job runs checkout-controlled Nix inputs on a KVM host; it gets a
-/// read-only token and runs only in the canonical repository.
-#[test]
-fn the_source_bootstrap_job_is_least_privilege() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("permissions:\n      contents: read\n"),
-        "the source bootstrap job must hold a read-only token and nothing else"
-    );
-    assert!(
-        job.contains("if: github.repository == 'tinylabscom/mvm'"),
-        "the source bootstrap job must not run on forks"
-    );
-}
-
-/// Stage 0's builder timeout is two hours; a job budget below that reports a
-/// hang as a cancellation instead of as the builder error that names it.
-#[test]
-fn the_source_bootstrap_budget_outlasts_the_stage0_builder_timeout() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-    let minutes: u64 = field_after(job, "timeout-minutes:")
-        .and_then(|value| value.parse().ok())
-        .expect("the source bootstrap job must declare a budget");
-
-    assert!(
-        minutes > 120 + 30,
-        "timeout-minutes {minutes} leaves no room for setup beyond a two-hour Stage 0"
-    );
-}
-
-/// A refusing Stage 0 guest explains itself only on its console.
-#[test]
-fn the_source_bootstrap_job_keeps_the_guest_consoles_of_a_failed_run() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("if: failure()")
-            && job.contains("uses: actions/upload-artifact@v7")
-            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log")
-            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/firecracker.log"),
-        "a failed source bootstrap must upload the guest consoles and the VMM log that \
-         name the cause; a Firecracker that refuses to start says why only in the latter"
-    );
-}
-
-/// The witness runs the backend a Linux/KVM host auto-detects, under a home
-/// deep enough that Firecracker's sockets must move to the short namespace.
-/// It was pinned to QEMU while that overflow made Firecracker exit before
-/// creating its API socket, which read as a hosted-runner limitation.
-#[test]
-fn the_source_bootstrap_job_bootstraps_through_firecracker() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert_eq!(
-        field_after(job, "MVM_BUILDER_BACKEND:").as_deref(),
-        Some("firecracker"),
-        "the cold source witness must bootstrap through the backend Linux/KVM auto-detects"
-    );
-    assert!(
-        job.contains("/usr/bin/firecracker --version"),
-        "the Firecracker Stage 0 needs the pinned Firecracker installed"
-    );
-}
-
-/// Firecracker brings its own vsock device and boots the downloaded kernel, so
-/// the grants a QEMU Stage 0 needed would only widen what the job can touch.
-#[test]
-fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    for qemu_only in [
-        "/dev/vhost-vsock",
-        "/boot/vmlinuz",
-        "qemu-system-x86",
-        "virtiofsd",
-    ] {
-        assert!(
-            !job.contains(qemu_only),
-            "the Firecracker source witness must not provision `{qemu_only}`"
-        );
-    }
-}
-
-/// Every step of the source witness is fatal, in the order the path runs.
-#[test]
-fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
-    let script = source_bootstrap_script();
-    let steps = [
-        "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
-        "\"$MVMCTL\" bootstrap",
-        "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
-    ];
-    let mut last = 0;
-    for step in steps {
-        let at = script
-            .find(step)
-            .unwrap_or_else(|| panic!("the source witness must run `{step}`"));
-        assert!(at > last, "`{step}` ran out of order");
-        last = at;
-    }
-    assert!(
-        script.contains("set -euo pipefail"),
-        "every step must be fatal"
-    );
-    assert!(
-        !script.contains("|| true") && !script.contains("if ! "),
-        "the source witness must not tolerate a failed step"
-    );
-}
-
-/// A witness that is told to fetch, or handed a warm home, would pass on an
-/// image it did not build. Both refusals happen before anything is compiled.
-#[cfg(unix)]
-#[test]
-fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
-    let warm = tempfile::tempdir().expect("create warm home fixture");
-    fs::write(warm.path().join("leftover"), b"x").expect("seed warm home");
-    let cold = tempfile::tempdir().expect("create cold home fixture");
-
-    let cases = [
-        ("a warm home", warm.path().to_path_buf(), None),
-        (
-            "MVM_BOOT_IMAGE=fetch",
-            cold.path().join("home"),
-            Some("fetch"),
-        ),
-    ];
-    for (case, home, boot_image) in cases {
-        let mut command = Command::new("bash");
-        command
-            .arg("scripts/e2e-source-bootstrap.sh")
-            .env("MVM_E2E_HOME", &home)
-            .env_remove("MVM_BOOT_IMAGE");
-        if let Some(value) = boot_image {
-            command.env("MVM_BOOT_IMAGE", value);
-        }
-        let output = command.output().expect("run the source bootstrap witness");
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{case} must be refused before any build: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
-fn both_live_harnesses_report_phase_timings() {
+fn the_documented_surface_reports_phase_timings() {
     let documented = documented_surface_script();
     for phase in [
         "build",
@@ -785,18 +601,6 @@ fn both_live_harnesses_report_phase_timings() {
     assert!(
         documented.contains("  e2e_phase_summary "),
         "the documented surface must print its timings on exit, including a failed or killed run"
-    );
-
-    let source = source_bootstrap_script();
-    for phase in ["build", "sdk-sidecar", "builder-image", "flake-build"] {
-        assert!(
-            source.contains(&format!("e2e_phase {phase}\n")),
-            "the source bootstrap witness must time its `{phase}` phase"
-        );
-    }
-    assert!(
-        source.contains("trap 'e2e_phase_summary "),
-        "the source bootstrap witness must print its timings on exit"
     );
 }
 
@@ -1193,6 +997,81 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
         script.contains("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"),
         "the live SDK scenarios must use a sidecar built from the checkout under test"
     );
+    assert!(
+        script.contains(
+            "MVM_IMAGES_DIR=\"$E2E_IMAGES_DIR\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"
+        ),
+        "the sidecar recipe lives in mvm-images, so the build must be handed a checkout of it"
+    );
+    assert!(
+        !script.contains("export MVM_IMAGES_DIR"),
+        "the image checkout is for the sidecar step alone; exporting it would move every image \
+         off the pinned set"
+    );
+}
+
+/// `mvmctl run` with no image boots the dev default image, which is built only
+/// from an image checkout; the Firecracker lane's rootfs byte-identity scenario
+/// boots it, so the suite warms it through the same one-step hand-off.
+#[test]
+fn documented_surface_warms_the_dev_default_image_through_the_image_checkout() {
+    let script = documented_surface_script();
+
+    let warm = "MVM_HOME=\"$E2E_HOME\" MVM_IMAGES_DIR=\"$E2E_IMAGES_DIR\" \"$MVMCTL\" run --no-detect -- /bin/true";
+    let at = script
+        .find(warm)
+        .expect("the dev default image must be warmed through the image checkout");
+    let sidecar = script
+        .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
+        .expect("the sidecar step");
+    assert!(
+        sidecar < at,
+        "the checkout is resolved before the dev image warm"
+    );
+    let guard = script[..at]
+        .rfind("if [[ \"$(uname -s)\" == Linux ]]; then")
+        .expect("only the Firecracker lane boots the dev default image");
+    assert!(
+        guard > sidecar,
+        "the Linux guard must wrap the dev image warm"
+    );
+}
+
+/// The sidecar step needs an mvm-images checkout, and it must not sit where an
+/// image checkout is discovered, or every scenario would build images from it.
+#[test]
+fn documented_surface_jobs_check_out_mvm_images_for_the_sidecar_only() {
+    let workflow = extended_ci();
+
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains("repository: tinylabscom/mvm-images"),
+            "{job} must check out the sidecar recipe"
+        );
+        assert!(
+            block.contains("path: .e2e-mvm-images"),
+            "{job} must keep the checkout inside the workspace, away from the sibling path"
+        );
+        assert!(
+            block.contains(r#"ref="$(cargo run -q -p xtask -- image-source-ref)""#)
+                && block.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
+            "{job} gates releases, so it must check out the mvm-images commit images.lock \
+             pins rather than a branch the other repository can move"
+        );
+        assert!(
+            !block.contains("ref: main"),
+            "{job} must not build against mvm-images main"
+        );
+        assert!(
+            block.contains("MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images"),
+            "{job} must hand the checkout to the sidecar step"
+        );
+        assert!(
+            !block.contains("MVM_IMAGES_DIR:"),
+            "{job} must not select the checkout for the whole suite"
+        );
+    }
 }
 
 #[test]
@@ -1289,5 +1168,27 @@ fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
     assert!(
         boot_trap < boot,
         "the boot log dump must be armed before the installed-bundle run"
+    );
+}
+
+/// The runtime-SDK scenarios load the host library the SDK finds beside
+/// `mvmctl`, and nothing else in the suite builds it.
+#[test]
+fn documented_surface_builds_the_sdk_host_library_beside_mvmctl() {
+    let script = documented_surface_script();
+
+    let hostlib = script
+        .find("cargo build -p mvm-hostlib")
+        .expect("the suite must build the SDK host library");
+    let embedded = script
+        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"")
+        .expect("the embedded mvmctl build");
+    assert!(
+        embedded < hostlib,
+        "the library is built into the same target directory after mvmctl"
+    );
+    assert!(
+        script.contains("-name libmvm_hostlib.so -o -name libmvm_hostlib.dylib"),
+        "a missing host library must fail the run before the suite starts"
     );
 }
