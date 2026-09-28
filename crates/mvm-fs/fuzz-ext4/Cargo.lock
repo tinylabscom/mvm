@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "base64",
  "chrono",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "base64",
  "bytes",
